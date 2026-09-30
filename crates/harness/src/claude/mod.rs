@@ -30,19 +30,25 @@
 //!   boundary.
 //! - Interrupt: cancelling [`RunControls::interrupt`] sends the protocol-level
 //!   interrupt control request, then escalates to SIGTERM and SIGKILL.
+//! - Live update (`crate::handoff`): a run freezes at a stdout line boundary
+//!   (between turns, mid-turn, or with an `AskUserQuestion` parked) and a
+//!   later image adopts the same child from its pipes, the reader's leftover
+//!   bytes and `ClaudeLoopState`. Interrupting and a held turn end refuse
+//!   (`Busy`); title runs never hand off.
 
 pub mod catalog;
 mod discovery;
 mod normalize;
 mod wire;
 
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -52,8 +58,13 @@ use zeron_proto::{
     SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
-use crate::process::{Child, ChildStdin, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use crate::handoff::{StderrDrain, WriteMsg, run_writer};
+use crate::line_reader::LineReader;
+use crate::process::{ChildStdin, ChildStdout, Command, Stdio};
+use crate::{
+    ChildHandle, FreezeRefusal, FreezeRequest, Harness, HarnessError, HarnessHandoff, RunControls,
+    Signal, SteerMessage, send_signal, shutdown_child,
+};
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
 use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
@@ -235,10 +246,13 @@ impl ClaudeHarness {
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
+        // Not killed on drop: a run frozen for a live update is held through
+        // an `execve` and its child must outlive the old image's handles.
+        // Every ending shuts the child down explicitly.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(false);
         cmd
     }
 
@@ -515,6 +529,95 @@ impl Harness for ClaudeHarness {
         request.auto_approve = false;
         self.run_with_mode(request, controls, true).await
     }
+
+    fn supports_adoption(&self) -> bool {
+        cfg!(unix)
+    }
+
+    /// Rebuild a run around a `claude` child a previous image froze: same
+    /// pipes (duplicated), same conversation, no `SessionStarted` and no
+    /// prompt written. A parked `AskUserQuestion` is re-attached under the
+    /// engine's existing request.
+    async fn adopt(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        #[cfg(unix)]
+        {
+            self.adopt_unix(handoff, controls, request)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (handoff, controls, request);
+            Err(HarnessError::Protocol(
+                "Claude runs cannot be adopted on this platform".into(),
+            ))
+        }
+    }
+}
+
+impl ClaudeHarness {
+    #[cfg(unix)]
+    fn adopt_unix(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        use crate::handoff::dup_inherited;
+        if handoff.state_version != STATE_VERSION {
+            return Err(HarnessError::Protocol(format!(
+                "claude handoff state version {} is not {STATE_VERSION}",
+                handoff.state_version
+            )));
+        }
+        let state: ClaudeLoopState = serde_json::from_value(handoff.state)
+            .map_err(|e| HarnessError::Protocol(format!("claude handoff state: {e}")))?;
+        let stdin = ChildStdin::from_std(std::process::ChildStdin::from(dup_inherited(
+            handoff.stdin_fd,
+        )?))?;
+        let stdout = ChildStdout::from_std(std::process::ChildStdout::from(dup_inherited(
+            handoff.stdout_fd,
+        )?))?;
+        let stderr = match handoff.stderr_fd {
+            Some(fd) => Some(tokio::process::ChildStderr::from_std(
+                std::process::ChildStderr::from(dup_inherited(fd)?),
+            )?),
+            None => None,
+        };
+        let child = ChildHandle::adopt(handoff.pid)?;
+        let stderr_tail = crate::StderrTail::seeded(handoff.stderr_tail);
+        let stderr = stderr.map(|s| StderrDrain::spawn(s, stderr_tail.clone(), "claude"));
+        // Parked questions answer under the engine's existing request: the
+        // bridge finds it by any of its question ids. No second prompt.
+        let answers = Answers::new();
+        for parked in &state.parked_questions {
+            let answer = match parked.questions.first() {
+                Some(question) => (controls.rebind_input)(question.id.clone()),
+                None => tokio::sync::oneshot::channel().1,
+            };
+            answers.push(await_answer(parked.control_request_id.clone(), answer));
+        }
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        tokio::spawn(run_session(Session {
+            title_only: false,
+            child,
+            reader: LineReader::with_leftover(stdout, handoff.stdout_leftover),
+            writer: spawn_writer(stdin),
+            stderr,
+            event_tx,
+            controls,
+            reasoning: request.reasoning,
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            stderr_tail,
+            state,
+            answers,
+        }));
+        Ok(event_stream(event_rx))
+    }
 }
 
 impl ClaudeHarness {
@@ -561,19 +664,11 @@ impl ClaudeHarness {
             .take()
             .ok_or_else(|| HarnessError::Protocol("claude child has no stdout".into()))?;
         let stderr_tail = crate::StderrTail::default();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = stderr_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::claude", "stderr: {line}");
-                    tail.push(&line);
-                }
-            });
-        }
-
-        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<StdinMsg>();
-        tokio::spawn(stdin_writer(stdin, stdin_rx));
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stderr| StderrDrain::spawn(stderr, stderr_tail.clone(), "claude"));
+        let writer = spawn_writer(stdin);
 
         // The initial prompt as the first stdin user line (streaming-input
         // mode). Ultrathink rides every user message — steers included.
@@ -586,34 +681,46 @@ impl ClaudeHarness {
             &apply_ultrathink(request.reasoning, &request.prompt),
             &images,
         );
-        let _ = stdin_tx.send(StdinMsg::Line(first));
+        let _ = writer.send(WriteMsg::Line(first));
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
-            child,
-            stdout_lines: BufReader::new(stdout).lines(),
-            stdin_tx,
+            child: ChildHandle::Owned(child),
+            reader: LineReader::new(stdout),
+            writer,
+            stderr,
             event_tx,
             controls,
             reasoning: request.reasoning,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
+            state: ClaudeLoopState::new(),
+            answers: Answers::new(),
         }));
-
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        })
-        .boxed())
+        Ok(event_stream(event_rx))
     }
 }
 
-enum StdinMsg {
-    Line(String),
-    /// Close stdin (end of steering input): the CLI finishes the current turn
-    /// and exits, which ends the run stream at stdout EOF.
-    Close,
+fn event_stream(
+    rx: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    futures::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+    )
+    .boxed()
+}
+
+/// The task that owns the child's stdin (see [`run_writer`]): whole lines
+/// only, and it can pause for a freeze. [`WriteMsg::Close`] ends the input —
+/// the CLI finishes the current turn and exits, which ends the run stream at
+/// stdout EOF.
+fn spawn_writer(stdin: ChildStdin) -> mpsc::UnboundedSender<WriteMsg> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_writer(stdin, rx, "claude"));
+    tx
 }
 
 /// Anthropic's API caps inline images at 5MB of raw bytes; larger files stay
@@ -689,35 +796,81 @@ async fn load_image_blocks(paths: &[String]) -> Vec<wire::ImageBlock> {
     blocks
 }
 
-/// Owns the child's stdin; a write failure (EPIPE after the child died) is
-/// tolerated and logged.
-async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<StdinMsg>) {
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            StdinMsg::Line(line) => {
-                let write = async {
-                    stdin.write_all(line.as_bytes()).await?;
-                    stdin.write_all(b"\n").await?;
-                    stdin.flush().await
-                };
-                if let Err(e) = write.await {
-                    tracing::debug!(target: "zeron_harness::claude", "stdin write failed (tolerated): {e}");
-                    return;
-                }
-            }
-            StdinMsg::Close => {
-                let _ = stdin.shutdown().await;
-                return;
-            }
+/// Schema version of [`ClaudeLoopState`] in a [`HarnessHandoff`]; an adopter
+/// refuses any other, and the engine falls back to crash recovery.
+#[cfg(unix)]
+pub(crate) const STATE_VERSION: u32 = 1;
+
+/// How long a freeze waits for the queued stdin lines to be written. A child
+/// that stops reading its input while we stop reading its output would
+/// otherwise wedge the freeze (and the run); the freeze answers `Busy`.
+#[cfg(unix)]
+const PAUSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// An `AskUserQuestion` waiting on the user, as a handoff carries it.
+#[derive(Clone, Serialize, Deserialize)]
+struct ParkedQuestion {
+    /// The CLI's `can_use_tool` control-request id; the answer goes back
+    /// under it.
+    control_request_id: String,
+    /// The tool input as the CLI sent it; the answers are merged into it.
+    raw_input: Value,
+    /// The questions as the engine knows them — their ids are random, minted
+    /// once, and the engine rebinds by them.
+    questions: Vec<UserInputQuestion>,
+}
+
+/// The run loop's protocol state: what a freeze exports and an adoption
+/// resumes from. Everything else the loop keeps is either derived from the
+/// pipes (exported beside this) or is a state a freeze refuses (interrupting,
+/// a held turn end).
+#[derive(Clone, Serialize, Deserialize)]
+struct ClaudeLoopState {
+    normalizer: Normalizer,
+    /// Steer uuids written to stdin and not yet confirmed by their replay.
+    pending_steers: VecDeque<String>,
+    /// Top-level tool calls in flight: a steer must not abort them (see
+    /// `wire::steer_message_line`).
+    open_tools: BTreeSet<String>,
+    steering_open: bool,
+    any_done: bool,
+    parked_questions: Vec<ParkedQuestion>,
+}
+
+impl ClaudeLoopState {
+    fn new() -> Self {
+        Self {
+            normalizer: Normalizer::new(),
+            pending_steers: VecDeque::new(),
+            open_tools: BTreeSet::new(),
+            steering_open: true,
+            any_done: false,
+            parked_questions: Vec::new(),
         }
     }
 }
 
+/// Answers for parked questions, keyed by control-request id. Kept in the
+/// loop (not a detached task) so a freeze can export what is still parked,
+/// and never dropped by a freeze: the engine resolves a question whose
+/// receiver goes away.
+type Answers = futures::stream::FuturesUnordered<
+    futures::future::BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)>,
+>;
+
+fn await_answer(
+    control_request_id: String,
+    answer: tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>,
+) -> futures::future::BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)> {
+    Box::pin(async move { (control_request_id, answer.await.ok()) })
+}
+
 struct Session {
     title_only: bool,
-    child: Child,
-    stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
-    stdin_tx: mpsc::UnboundedSender<StdinMsg>,
+    child: ChildHandle,
+    reader: LineReader<ChildStdout>,
+    writer: mpsc::UnboundedSender<WriteMsg>,
+    stderr: Option<StderrDrain>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     reasoning: Option<ReasoningLevel>,
@@ -725,40 +878,54 @@ struct Session {
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
     stderr_tail: crate::StderrTail,
+    state: ClaudeLoopState,
+    answers: Answers,
+}
+
+/// The next steer: those a thawed freeze put back first, then the mailbox.
+async fn next_steer(
+    held: &mut VecDeque<SteerMessage>,
+    steering: &mut mpsc::Receiver<SteerMessage>,
+) -> Option<SteerMessage> {
+    match held.pop_front() {
+        Some(steer) => Some(steer),
+        None => steering.recv().await,
+    }
 }
 
 /// The per-run event loop: one task multiplexing stdout frames, the steering
-/// mailbox, the interrupt token, and consumer liveness.
+/// mailbox, parked answers, the interrupt token, live-update freezes and
+/// consumer liveness.
 async fn run_session(session: Session) {
     let Session {
         title_only,
-        mut child,
-        mut stdout_lines,
-        stdin_tx,
+        child,
+        reader,
+        writer,
+        mut stderr,
         event_tx,
         controls,
         reasoning,
         interrupt_grace,
         kill_grace,
         stderr_tail,
+        mut state,
+        mut answers,
     } = session;
     let RunControls {
         execution_lease: _execution_lease,
         request_input,
         mut steering,
         interrupt,
+        mut freeze,
+        rebind_input: _rebind_input,
     } = controls;
-    let request_input = Arc::new(request_input);
+    // `None` only after a committed freeze handed them to a successor.
+    let mut child = Some(child);
+    let mut reader = Some(reader);
 
-    let mut norm = Normalizer::new();
-    let mut pending_steers = std::collections::VecDeque::new();
-    // Top-level tool calls in flight: a steer must not abort them (see
-    // `wire::steer_message_line`).
-    let mut open_tools = std::collections::HashSet::new();
-    let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
-    let mut any_done = false;
     // A turn end held back while steers wait for their replay. Rapid `now`
     // steers each interrupt the turn the previous one started, and the CLI
     // replays only the last (verified on 2.1.280; the earlier texts still
@@ -768,10 +935,104 @@ async fn run_session(session: Session) {
     let mut held_done: Option<(AgentEvent, tokio::time::Instant)> = None;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    // Steers a freeze drained from the mailbox and a thaw put back.
+    let mut held_steers: VecDeque<SteerMessage> = VecDeque::new();
+    // With no sender `freeze.recv()` is `None` at once and forever.
+    let mut freeze_open = true;
 
     'main: loop {
         tokio::select! {
-            line = stdout_lines.next_line() => match line {
+            // Biased: a freeze request is answered ahead of new input (the
+            // engine asks while nothing else should move), and the rare inputs
+            // (steers, answers) go ahead of a possibly continuous stdout.
+            biased;
+
+            _ = interrupt.cancelled(), if !interrupt_sent => {
+                interrupt_sent = true;
+                interrupted = true;
+                let _ = writer.send(WriteMsg::Line(wire::interrupt_request_line("int_1")));
+                // Escalate if the CLI doesn't wind down within the grace
+                // periods: SIGTERM (kills bash trees, runs SessionEnd hooks),
+                // then SIGKILL. Aborted once the child is reaped.
+                if let Some(pid) = child.as_ref().and_then(ChildHandle::signal_target) {
+                    escalation = Some(tokio::spawn(async move {
+                        tokio::time::sleep(interrupt_grace).await;
+                        send_signal(&pid, Signal::Term);
+                        tokio::time::sleep(kill_grace).await;
+                        send_signal(&pid, Signal::Kill);
+                    }));
+                }
+            },
+
+            request = freeze.recv(), if freeze_open => match request {
+                None => freeze_open = false,
+                Some(request) => {
+                    let refusal = if title_only {
+                        Some(FreezeRefusal::Unsupported)
+                    } else if interrupted {
+                        Some(FreezeRefusal::Busy("interrupting"))
+                    } else if held_done.is_some() {
+                        Some(FreezeRefusal::Busy("held done"))
+                    } else {
+                        None
+                    };
+                    if let Some(refusal) = refusal {
+                        let _ = request.reply.send(Err(refusal));
+                        continue;
+                    }
+                    // An answer the user already gave but the loop has not written
+                    // yet must go out BEFORE the pause: exported as "still
+                    // parked" it would be lost across the exec (the engine no
+                    // longer holds it) and the adopter would answer with nothing.
+                    while !answers.is_empty()
+                        && let Some(Some((request_id, answer))) =
+                            futures::FutureExt::now_or_never(answers.next())
+                    {
+                        write_answer(&mut state, &writer, &request_id, answer);
+                    }
+                    let outcome = freeze_run(request, Freezing {
+                        child: &mut child,
+                        reader: &mut reader,
+                        writer: &writer,
+                        stderr: &mut stderr,
+                        stderr_tail: &stderr_tail,
+                        state: &state,
+                        held_steers: &mut held_steers,
+                        steering: &mut steering,
+                    })
+                    .await;
+                    if let Frozen::Committed = outcome {
+                        // The successor owns the child and its pipes; ending
+                        // the stream (no Done) is the end the engine expects.
+                        return;
+                    }
+                }
+            },
+
+            steer = next_steer(&mut held_steers, &mut steering), if state.steering_open && !interrupted => match steer {
+                Some(msg) => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let line = wire::steer_message_line(
+                        &apply_ultrathink(reasoning, &msg.prompt),
+                        &id,
+                        state.open_tools.is_empty(),
+                    );
+                    state.pending_steers.push_back(id);
+                    if writer.send(WriteMsg::Line(line)).is_err() { break 'main; }
+                }
+                None => {
+                    // Mailbox closed: end the input so the run can finish
+                    // after the current turn.
+                    state.steering_open = false;
+                    let _ = writer.send(WriteMsg::Close);
+                }
+            },
+
+            Some((request_id, answer)) = answers.next(), if !answers.is_empty() => {
+                write_answer(&mut state, &writer, &request_id, answer);
+            },
+
+            line = reader.as_mut().expect("read until committed").next_line() => match line {
                 Ok(Some(line)) => {
                     let line = line.trim();
                     if line.is_empty() {
@@ -794,9 +1055,9 @@ async fn run_session(session: Session) {
                             let line = control_response_line(&req.request_id, serde_json::json!({
                                 "behavior": "deny", "message": "Tools are disabled for title generation"
                             }));
-                            let _ = stdin_tx.send(StdinMsg::Line(line));
+                            let _ = writer.send(WriteMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(req, &request_input, &writer, &mut state, &mut answers);
                         }
                         continue;
                     }
@@ -809,33 +1070,33 @@ async fn run_session(session: Session) {
                             && let Some(at) = user
                                 .uuid
                                 .as_ref()
-                                .and_then(|id| pending_steers.iter().position(|p| p == id))
+                                .and_then(|id| state.pending_steers.iter().position(|p| p == id))
                         {
                             for _ in 0..=at {
-                                pending_steers.pop_front();
-                                let (prev, next) = norm.rotate_for_steer();
+                                state.pending_steers.pop_front();
+                                let (prev, next) = state.normalizer.rotate_for_steer();
                                 if event_tx.send(Ok(AgentEvent::Steered {
                                     assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                                 })).await.is_err() { break 'main; }
                             }
                         }
                     }
-                    for ev in norm.normalize(frame, interrupted) {
+                    for ev in state.normalizer.normalize(frame, interrupted) {
                         match &ev {
                             AgentEvent::ToolCall { id, .. } => {
-                                open_tools.insert(id.clone());
+                                state.open_tools.insert(id.clone());
                             }
                             AgentEvent::ToolResult { id, .. } => {
-                                open_tools.remove(id);
+                                state.open_tools.remove(id);
                             }
-                            AgentEvent::Done { .. } => open_tools.clear(),
+                            AgentEvent::Done { .. } => state.open_tools.clear(),
                             _ => {}
                         }
                         let is_done = matches!(ev, AgentEvent::Done { .. });
                         // A `now` steer ends the turn it interrupts with a
                         // result frame; the steer continues the run, so that
                         // result is a steer boundary, not the end of the turn.
-                        if is_done && !interrupted && !pending_steers.is_empty() {
+                        if is_done && !interrupted && !state.pending_steers.is_empty() {
                             held_done =
                                 Some((ev, tokio::time::Instant::now() + HELD_DONE_SETTLE));
                             continue;
@@ -847,7 +1108,7 @@ async fn run_session(session: Session) {
                             break 'main; // consumer gone — reap below
                         }
                         if is_done {
-                            any_done = true;
+                            state.any_done = true;
                             if interrupted {
                                 done_after_interrupt = true;
                                 break 'main;
@@ -862,48 +1123,12 @@ async fn run_session(session: Session) {
                 }
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
-                Some(msg) => {
-                    let id = uuid::Uuid::new_v4().to_string();
-                    let line = wire::steer_message_line(
-                        &apply_ultrathink(reasoning, &msg.prompt),
-                        &id,
-                        open_tools.is_empty(),
-                    );
-                    pending_steers.push_back(id);
-                    if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
-                }
-                None => {
-                    // Mailbox closed: end the input so the run can finish
-                    // after the current turn.
-                    steering_open = false;
-                    let _ = stdin_tx.send(StdinMsg::Close);
-                }
-            },
-
-            _ = interrupt.cancelled(), if !interrupt_sent => {
-                interrupt_sent = true;
-                interrupted = true;
-                let _ = stdin_tx.send(StdinMsg::Line(wire::interrupt_request_line("int_1")));
-                // Escalate if the CLI doesn't wind down within the grace
-                // periods: SIGTERM (kills bash trees, runs SessionEnd hooks),
-                // then SIGKILL. Aborted once the child is reaped.
-                if let Some(pid) = crate::process::signal_target(&child) {
-                    escalation = Some(tokio::spawn(async move {
-                        tokio::time::sleep(interrupt_grace).await;
-                        send_signal(&pid, Signal::Term);
-                        tokio::time::sleep(kill_grace).await;
-                        send_signal(&pid, Signal::Kill);
-                    }));
-                }
-            },
-
             _ = tokio::time::sleep_until(
                 held_done.as_ref().map_or_else(tokio::time::Instant::now, |(_, d)| *d)
             ), if held_done.is_some() => {
                 // The steers were absorbed into the turn that just ended.
-                while pending_steers.pop_front().is_some() {
-                    let (prev, next) = norm.rotate_for_steer();
+                while state.pending_steers.pop_front().is_some() {
+                    let (prev, next) = state.normalizer.rotate_for_steer();
                     if event_tx.send(Ok(AgentEvent::Steered {
                         assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                     })).await.is_err() { break 'main; }
@@ -912,19 +1137,23 @@ async fn run_session(session: Session) {
                 if event_tx.send(Ok(done)).await.is_err() {
                     break 'main;
                 }
-                any_done = true;
+                state.any_done = true;
             },
 
             _ = event_tx.closed() => break 'main,
         }
     }
+    // (Only a commit takes the child, and a commit returns above.)
+    let Some(mut child) = child else {
+        return;
+    };
 
     // A turn end still held when the CLI exited is the run's real end.
     if let Some((done, _)) = held_done.take()
         && !event_tx.is_closed()
         && event_tx.send(Ok(done)).await.is_ok()
     {
-        any_done = true;
+        state.any_done = true;
     }
 
     // Terminal bookkeeping: never end the stream without a Done unless the
@@ -936,26 +1165,186 @@ async fn run_session(session: Session) {
                     status: DoneStatus::Interrupted,
                     result: None,
                     error: None,
-                    session_id: norm.session_id.clone(),
+                    session_id: state.normalizer.session_id.clone(),
                 }))
                 .await;
-        } else if !interrupted && !any_done {
-            let status = child.try_wait().ok().flatten();
+        } else if !interrupted && !state.any_done {
+            // Stdout EOF usually just precedes the exit (and the last stderr
+            // lines): give both a moment so the message says what happened.
+            stderr_tail.wait_closed().await;
+            let status = tokio::time::timeout(Duration::from_millis(500), child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|outcome| outcome.status());
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
                     error: Some(crate::crash_message("claude", status, &stderr_tail)),
-                    session_id: norm.session_id.clone(),
+                    session_id: state.normalizer.session_id.clone(),
                 }))
                 .await;
         }
     }
 
-    shutdown_child(&mut child, kill_grace).await;
+    child.shutdown(kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();
     }
+}
+
+/// How a freeze ended for the run loop.
+enum Frozen {
+    /// The engine let the run go (a failed exec, a refusal): carry on.
+    Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// A same-process successor took the child and pipes: end the stream.
+    Committed,
+}
+
+/// Answer a parked question: write the CLI's `control_response` with the
+/// user's answers under the original request and question ids. A dropped
+/// sender (the caller went away) degrades to empty answers so the agent is
+/// unblocked rather than wedged.
+fn write_answer(
+    state: &mut ClaudeLoopState,
+    writer: &mpsc::UnboundedSender<WriteMsg>,
+    request_id: &str,
+    answer: Option<Vec<UserInputAnswer>>,
+) {
+    let Some(at) = state
+        .parked_questions
+        .iter()
+        .position(|parked| parked.control_request_id == request_id)
+    else {
+        return;
+    };
+    let parked = state.parked_questions.remove(at);
+    let updated = updated_input_with_answers(
+        &parked.raw_input,
+        &parked.questions,
+        &answer.unwrap_or_default(),
+    );
+    let line = control_response_line(request_id, allow_response(updated));
+    let _ = writer.send(WriteMsg::Line(line));
+}
+
+/// What a freeze needs of the run loop.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Freezing<'a> {
+    child: &'a mut Option<ChildHandle>,
+    reader: &'a mut Option<LineReader<ChildStdout>>,
+    writer: &'a mpsc::UnboundedSender<WriteMsg>,
+    stderr: &'a mut Option<StderrDrain>,
+    stderr_tail: &'a crate::StderrTail,
+    state: &'a ClaudeLoopState,
+    held_steers: &'a mut VecDeque<SteerMessage>,
+    steering: &'a mut mpsc::Receiver<SteerMessage>,
+}
+
+/// Stop at this line boundary and offer the run to the engine; suspended
+/// until its verdict. Refusals the loop can see itself (interrupting, a held
+/// turn end) are answered before this is called.
+#[cfg(unix)]
+async fn freeze_run(request: FreezeRequest, run: Freezing<'_>) -> Frozen {
+    use crate::handoff::{PipeFd, drain_steering};
+    use crate::{FrozenRun, SteerRecord};
+    use std::os::fd::AsRawFd;
+    let busy = |reply: tokio::sync::oneshot::Sender<_>, reason| {
+        let _ = reply.send(Err(FreezeRefusal::Busy(reason)));
+        Frozen::Thawed
+    };
+    // The engine rebinds a parked question by one of its ids.
+    if run
+        .state
+        .parked_questions
+        .iter()
+        .any(|parked| parked.questions.is_empty())
+    {
+        return busy(request.reply, "a question without questions is pending");
+    }
+    let (Some(child), Some(reader)) = (run.child.as_ref(), run.reader.as_ref()) else {
+        return busy(request.reply, "the agent process has exited");
+    };
+    let Some(pid) = child.id() else {
+        return busy(request.reply, "the agent process has exited");
+    };
+    // An exit inside the freeze window must stay reapable by the next image.
+    if !child.hold_reaping() {
+        return busy(request.reply, "the agent process has exited");
+    }
+    // Queued stdin lines finish first; the writer then parks WITH its pipe
+    // and queue, so a thaw needs nothing rebuilt.
+    let (pause_tx, pause_rx) = tokio::sync::oneshot::channel();
+    let paused = match run.writer.send(WriteMsg::Pause(pause_tx)) {
+        Ok(()) => tokio::time::timeout(PAUSE_TIMEOUT, pause_rx)
+            .await
+            .ok()
+            .and_then(Result::ok),
+        Err(_) => None,
+    };
+    let Some(paused) = paused else {
+        child.release_reaping();
+        return busy(request.reply, "the agent is not taking its input");
+    };
+    let Some(stdin_fd) = paused.stdin_fd else {
+        child.release_reaping();
+        return busy(request.reply, "the agent's pipes are not exportable");
+    };
+    let stdout_fd = reader.get_ref().as_raw_fd();
+    crate::handoff::grow_pipe(stdout_fd);
+    // Steers a previous, thawed freeze put back come first, then the mailbox.
+    let mut undrained: Vec<SteerRecord> =
+        run.held_steers.drain(..).map(SteerRecord::from).collect();
+    undrained.extend(drain_steering(run.steering));
+    let handoff = HarnessHandoff {
+        harness: HarnessId::ClaudeCode,
+        state_version: STATE_VERSION,
+        pid: pid as i32,
+        stdin_fd,
+        stdout_fd,
+        stderr_fd: run.stderr.as_ref().and_then(StderrDrain::fd),
+        stdout_leftover: reader.leftover().to_vec(),
+        stderr_tail: run.stderr_tail.lines(),
+        state: serde_json::to_value(run.state).expect("claude loop state serializes"),
+        extra_fds: Vec::new(),
+        undrained_steers: undrained.clone(),
+    };
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    let sent = request.reply.send(Ok(FrozenRun {
+        handoff,
+        commit: commit_tx,
+    }));
+    if sent.is_ok() && commit_rx.await.is_ok() {
+        // A same-process successor owns the child and its pipes now (the
+        // exec path never gets here): give them up without closing, killing
+        // or reaping anything.
+        paused.abandon().await;
+        if let Some(stderr) = run.stderr.take() {
+            stderr.abandon().await;
+        }
+        if let Some(child) = run.child.take() {
+            let _ = child.release();
+        }
+        if let Some(reader) = run.reader.take() {
+            reader.into_parts().0.leak_pipe();
+        }
+        return Frozen::Committed;
+    }
+    // Thawed: dropping the guard resumes the writer, the reader kept its
+    // buffer, and the drained steers are read again, in order.
+    drop(paused);
+    child.release_reaping();
+    run.held_steers
+        .extend(undrained.into_iter().map(SteerMessage::from));
+    Frozen::Thawed
+}
+
+#[cfg(not(unix))]
+async fn freeze_run(request: FreezeRequest, _run: Freezing<'_>) -> Frozen {
+    let _ = request.reply.send(Err(FreezeRefusal::Unsupported));
+    Frozen::Thawed
 }
 
 type RequestInputFn = Box<
@@ -968,13 +1357,15 @@ type RequestInputFn = Box<
 /// (unattended parity — the CLI still blocks until SOME response arrives, so
 /// every request must be answered); `AskUserQuestion` is intercepted —
 /// surface the questions through the engine's input bridge (which owns the
-/// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
-/// (in a subtask so the frame loop keeps flowing), and hand them back keyed
-/// by question text, as the tool expects.
+/// `InputRequested`/`InputResolved` lifecycle) and park them until the
+/// answers arrive (the run loop keeps flowing meanwhile, and hands them back
+/// keyed by question text, as the tool expects).
 fn handle_control_request(
     req: ControlRequestFrame,
-    request_input: &Arc<RequestInputFn>,
-    stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+    request_input: &RequestInputFn,
+    writer: &mpsc::UnboundedSender<WriteMsg>,
+    state: &mut ClaudeLoopState,
+    answers: &mut Answers,
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
@@ -985,28 +1376,22 @@ fn handle_control_request(
     }
     if req.request.tool_name != "AskUserQuestion" {
         let line = control_response_line(&req.request_id, allow_response(req.request.input));
-        let _ = stdin_tx.send(StdinMsg::Line(line));
+        let _ = writer.send(WriteMsg::Line(line));
         return;
     }
-    let request_input = Arc::clone(request_input);
-    let stdin_tx = stdin_tx.clone();
-    tokio::spawn(async move {
-        let request_id = req.request_id;
-        let input = req.request.input;
-        let questions = parse_questions(&input);
-        // The engine's input bridge is the SOLE emitter of
-        // `InputRequested`/`InputResolved`: it mints the request id, parks the
-        // resolver for `respond_input`, and surfaces both events. Emitting our
-        // own copy here (keyed by Claude's control-request id) folded a SECOND
-        // input part into the doc whose id no resolver knew — the QuestionPanel
-        // answered that unanswerable twin and the run never resumed.
-        //
-        // A dropped sender (caller went away) degrades to empty answers so the
-        // agent is unblocked rather than wedged.
-        let answers = (request_input)(questions.clone()).await.unwrap_or_default();
-        let updated = updated_input_with_answers(&input, &questions, &answers);
-        let line = control_response_line(&request_id, allow_response(updated));
-        let _ = stdin_tx.send(StdinMsg::Line(line));
+    let questions = parse_questions(&req.request.input);
+    // The engine's input bridge is the SOLE emitter of
+    // `InputRequested`/`InputResolved`: it mints the request id, parks the
+    // resolver for `respond_input`, and surfaces both events. Emitting our
+    // own copy here (keyed by Claude's control-request id) folded a SECOND
+    // input part into the doc whose id no resolver knew — the QuestionPanel
+    // answered that unanswerable twin and the run never resumed.
+    let answer = (request_input)(questions.clone());
+    answers.push(await_answer(req.request_id.clone(), answer));
+    state.parked_questions.push(ParkedQuestion {
+        control_request_id: req.request_id,
+        raw_input: req.request.input,
+        questions,
     });
 }
 
@@ -1122,6 +1507,69 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+
+    fn frame(raw: &str) -> Frame {
+        wire::parse_frame(raw).unwrap()
+    }
+
+    #[test]
+    fn loop_state_round_trips_and_resumes_the_same_conversation() {
+        let mut state = ClaudeLoopState::new();
+        let started = state.normalizer.normalize(
+            frame(r#"{"type":"system","subtype":"init","model":"m","session_id":"s-1"}"#),
+            false,
+        );
+        let AgentEvent::SessionStarted {
+            assistant_message_id,
+            ..
+        } = &started[0]
+        else {
+            panic!("{started:?}");
+        };
+        let assistant_message_id = assistant_message_id.clone();
+        state.normalizer.normalize(
+            frame(
+                r#"{"type":"system","subtype":"task_started","task_id":"agent-1","tool_use_id":"toolu_spawn","subagent_type":"general"}"#,
+            ),
+            false,
+        );
+        state.pending_steers.push_back("steer-1".into());
+        state.open_tools.insert("toolu_open".into());
+        let input = json!({"questions": [{"question": "Pick one", "options": ["A", "B"]}]});
+        state.parked_questions.push(ParkedQuestion {
+            control_request_id: "cr-1".into(),
+            questions: parse_questions(&input),
+            raw_input: input,
+        });
+
+        let text = serde_json::to_value(&state).unwrap();
+        let mut back: ClaudeLoopState = serde_json::from_value(text.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), text, "lossless");
+        // The same conversation: no second SessionStarted, the same message
+        // id, and a background agent's pairing still settles its spawn.
+        let again = back.normalizer.normalize(
+            frame(r#"{"type":"system","subtype":"init","model":"m","session_id":"s-1"}"#),
+            false,
+        );
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(back.normalizer.session_id.as_deref(), Some("s-1"));
+        assert_eq!(back.normalizer.rotate_for_steer().0, assistant_message_id);
+        let settled = back.normalizer.normalize(
+            frame(
+                r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_spawn","status":"completed"}"#,
+            ),
+            false,
+        );
+        assert!(
+            matches!(&settled[..], [AgentEvent::Subagent { parent_tool_use_id, .. }] if parent_tool_use_id == "toolu_spawn"),
+            "{settled:?}"
+        );
+        assert_eq!(back.parked_questions[0].questions[0].question, "Pick one");
+        assert_eq!(
+            back.parked_questions[0].questions[0].id, state.parked_questions[0].questions[0].id,
+            "question ids survive: the engine rebinds by them"
+        );
     }
 }
 

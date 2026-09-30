@@ -11,6 +11,11 @@ use zeron_proto::{
 
 use crate::{Harness, HarnessError, RunControls};
 
+#[cfg(unix)]
+mod freezable;
+#[cfg(unix)]
+pub use freezable::FreezableMock;
+
 pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }

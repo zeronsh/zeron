@@ -15,13 +15,14 @@ use zeron_proto::{AgentEvent, DoneStatus};
 
 use super::normalize::map_update;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingSpawn {
     tool_call_id: String,
     title: String,
 }
 
-#[derive(Default)]
+/// Plain data, serialized into a live-update handoff as it is.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DevinTracker {
     pending: VecDeque<PendingSpawn>,
     /// Devin child agent id -> the parent's run_subagent tool-call id.

@@ -80,6 +80,8 @@ async fn real_pi_mock_lifecycle() {
                 .unwrap();
                 rx
             }),
+            freeze: RunControls::no_freeze(),
+            rebind_input: RunControls::no_rebind(),
         };
         let request = RunRequest {
             prompt: prompt.into(),
@@ -177,6 +179,8 @@ async fn real_pi_mock_lifecycle() {
         steering,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| oneshot::channel().1),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         prompt: "after loss".into(),
@@ -248,6 +252,8 @@ async fn real_pi_steering_bursts_share_the_next_model_call() {
         steering,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| oneshot::channel().1),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         prompt: "burst hold".into(),

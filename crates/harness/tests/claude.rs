@@ -75,6 +75,8 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     (controls, steer_tx, token)
 }
@@ -307,6 +309,8 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
 

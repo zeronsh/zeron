@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use zeron_doc::{
@@ -38,6 +38,13 @@ use crate::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
+
+mod freeze;
+#[cfg(unix)]
+pub(crate) mod handoff;
+
+use freeze::{AdoptSeed, EngineFreeze, RunFrozen, RunMode};
+pub use freeze::{FoldSnapshot, SubagentSnapshot, WrittenSegment};
 
 /// One journaled event: the durable seq plus the event, as broadcast to subscribers.
 #[derive(Debug, Clone)]
@@ -57,7 +64,25 @@ pub enum SteerOutcome {
     NotSteerable,
 }
 
-type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+/// A question set parked on the user: the resolver, and the questions (kept
+/// so a live update can carry the parked question across).
+// Only unix engines hand runs over (`handoff.rs` reads the handoff fields).
+#[cfg_attr(not(unix), allow(dead_code))]
+struct PendingInput {
+    tx: oneshot::Sender<Vec<UserInputAnswer>>,
+    questions: Vec<UserInputQuestion>,
+}
+
+type PendingInputs = Arc<Mutex<HashMap<String, PendingInput>>>;
+
+/// The error a start, steer-into-new-turn, interrupt or answer gets while the
+/// engine's runs are frozen for a live update. Retryable: the freeze either
+/// thaws within moments or the engine is replaced and the client reconnects.
+const HANDOFF_IN_PROGRESS: &str = "the engine is updating; try again in a moment";
+
+/// How long an engine-initiated dispatch (orphaned steer, startup retry)
+/// waits for a live-update freeze to lift before trying anyway.
+const THAW_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A harness-native session id plus the cwd it was created under. Harness
 /// session stores are cwd-scoped (claude keys conversations by project
@@ -73,8 +98,9 @@ struct HarnessSessionRef {
 /// carries prompt text, so routing a request whose model/effort/sandbox changed
 /// would silently run it with the old process configuration. Such requests
 /// must replace the runtime and resume its harness-native session instead.
-#[derive(Debug, Clone, PartialEq)]
-struct RuntimeConfig {
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConfig {
     harness_id: HarnessId,
     model: Option<String>,
     reasoning: Option<zeron_proto::ReasoningLevel>,
@@ -104,6 +130,7 @@ impl RuntimeConfig {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 struct RunHandle {
     run_id: String,
     steerable: bool,
@@ -126,11 +153,19 @@ struct RunHandle {
     /// This runtime's provider session holds the fork's copied history (a
     /// side chat's bootstrap went out on its run or on one of its steers).
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Live-update freeze requests for the run task (see `handoff.rs`).
+    freeze_tx: mpsc::UnboundedSender<EngineFreeze>,
+    /// The harness can hand this run over (`Harness::supports_adoption`).
+    adoptable: bool,
+    /// The run task reached its event loop (setup — lease, spawn,
+    /// adoption — is over). Before that a run cannot freeze.
+    started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
-#[derive(Debug, Clone)]
-struct RoutedSteer {
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutedSteer {
     prompt: String,
     message_id: String,
     /// The delivered text carried the fork's copied history: its delivery
@@ -171,6 +206,28 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Runs are frozen for a live update: nothing may start a run, route a
+    /// prompt into one, interrupt one or answer its question until the
+    /// freeze thaws (after a commit, never again in this image). Set and
+    /// checked under the `runs` lock (and each run's steer ledger lock), so
+    /// every run is either in the freeze's snapshot or refused.
+    frozen: std::sync::atomic::AtomicBool,
+    /// chat → why its run last refused to freeze (surfaced as a handoff
+    /// veto until the run moves on).
+    freeze_refusals: Mutex<HashMap<String, FreezeRefusalNote>>,
+    /// Serializes stale-run recovery: boot recovery and a failed adoption can
+    /// reach the same chat, which must be settled (and resumed) once.
+    recovery: Mutex<()>,
+    /// chat → the stop of an agent a failed adoption left behind; a recovery
+    /// resume waits for it, so two agents never share a harness session.
+    stopping_children: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+struct FreezeRefusalNote {
+    run_id: String,
+    reason: String,
+    at: std::time::Instant,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -208,6 +265,10 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                frozen: std::sync::atomic::AtomicBool::new(false),
+                freeze_refusals: Mutex::new(HashMap::new()),
+                recovery: Mutex::new(()),
+                stopping_children: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -419,6 +480,12 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        // A live update is freezing (or has handed off) the runs: a run
+        // started now would be killed by the exec or missed by the handoff.
+        // Checked again, authoritatively, where the run is registered.
+        if self.handoff_frozen() {
+            return Err(EngineError::Other(HANDOFF_IN_PROGRESS.into()));
+        }
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
@@ -461,18 +528,21 @@ impl SessionsEngine {
                     // Commit the reserved slot atomically with the update
                     // marker. An accepted update releases the slot instead, and
                     // the prompt takes the fresh-run path behind the update.
-                    self.inner
-                        .registry
-                        .while_update_clear(harness_id, || {
-                            let mut pending = lock(&ledger);
-                            pending.push_back(RoutedSteer {
-                                prompt: request.prompt.clone(),
-                                message_id: user_id.clone(),
-                                fork_history: bootstrap.is_some(),
-                            });
-                            permit.send(message);
-                        })
-                        .is_some()
+                    self.inner.registry.while_update_clear(harness_id, || {
+                        let mut pending = lock(&ledger);
+                        // Under the ledger lock: a freeze passes this
+                        // lock after raising the flag (see `freeze_runs`).
+                        if self.handoff_frozen() {
+                            return false;
+                        }
+                        pending.push_back(RoutedSteer {
+                            prompt: request.prompt.clone(),
+                            message_id: user_id.clone(),
+                            fork_history: bootstrap.is_some(),
+                        });
+                        permit.send(message);
+                        true
+                    }) == Some(true)
                 } else {
                     false
                 }
@@ -550,59 +620,47 @@ impl SessionsEngine {
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
 
-        // Input bridge: the harness asks questions; we mint the request id, park the
-        // resolver for `respond_input`, and surface the event through the run pipeline.
-        let request_input = {
-            let pending = pending_inputs.clone();
-            let engine_tx = engine_tx.clone();
-            Box::new(move |questions: Vec<UserInputQuestion>| {
-                let (mut tx, rx) = oneshot::channel();
-                let (answer_tx, answer_rx) = oneshot::channel();
-                let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), answer_tx);
-                let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id: request_id.clone(),
-                    questions,
-                });
-                let pending = pending.clone();
-                let engine_tx = engine_tx.clone();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        // A dropped resolver stays an error for the harness, as before.
-                        answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
-                        _ = tx.closed() => {
-                            lock(&pending).remove(&request_id);
-                            let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
-                        }
-                    }
-                });
-                rx
-            })
-        };
+        let request_input = input_bridge(pending_inputs.clone(), engine_tx.clone());
         let interrupt_token = CancellationToken::new();
         let fork_history_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let adoptable = harness.supports_adoption();
+        let (link, freeze_tx, harness_freeze) = FreezeLink::new(adoptable);
         let controls = RunControls {
             execution_lease: None,
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            freeze: harness_freeze,
+            rebind_input: RunControls::no_rebind(),
         };
 
-        lock(&self.inner.runs).insert(
-            chat_id.to_string(),
-            RunHandle {
-                run_id: run_id.clone(),
-                steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::from_request(harness_id, &request),
-                steer_tx,
-                interrupt_token,
-                cancel: cancel_tx,
-                engine_tx,
-                pending_inputs,
-                routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-                fork_history_sent: fork_history_sent.clone(),
-            },
-        );
+        {
+            let mut runs = lock(&self.inner.runs);
+            // The authoritative check: `freeze_runs` raises the flag under
+            // this lock, so this run is either in its snapshot or refused.
+            // (The user message above is keyed by id, so a retry dedupes.)
+            if self.handoff_frozen() {
+                return Err(EngineError::Other(HANDOFF_IN_PROGRESS.into()));
+            }
+            runs.insert(
+                chat_id.to_string(),
+                RunHandle {
+                    run_id: run_id.clone(),
+                    steerable: harness.supports_steering(),
+                    runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                    steer_tx,
+                    interrupt_token,
+                    cancel: cancel_tx,
+                    engine_tx,
+                    pending_inputs,
+                    routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                    fork_history_sent: fork_history_sent.clone(),
+                    freeze_tx,
+                    adoptable,
+                    started: link.started.clone(),
+                },
+            );
+        }
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -633,8 +691,28 @@ impl SessionsEngine {
                 startup_retry,
                 fork_history_sent,
             },
+            link,
+            RunMode::Start,
         ));
         Ok(run_id)
+    }
+
+    /// Runs are frozen for a live update (see [`Inner::frozen`]).
+    pub fn handoff_frozen(&self) -> bool {
+        self.inner.frozen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait up to `limit` for a live-update freeze to lift; `false` if the
+    /// runs are still frozen (after a commit they stay frozen for good).
+    async fn wait_for_thaw(&self, limit: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        while self.handoff_frozen() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        true
     }
 
     /// A warm send's prompt with the fork's copied history in front, when the
@@ -699,6 +777,11 @@ impl SessionsEngine {
         let Some((run_id, harness_id, steer_tx, ledger, history_sent)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        // Frozen for a live update: hold the prompt like an agent update
+        // does (the caller queues it; the queue drains after the handoff).
+        if self.handoff_frozen() {
+            return Ok(SteerOutcome::DeferredByUpdate);
+        }
         zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
             .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
@@ -723,14 +806,20 @@ impl SessionsEngine {
             // The update marker is checked in the same critical section, so an
             // accepted update releases the reserved slot instead.
             let mut pending = lock(&ledger);
+            // Under the ledger lock: a freeze passes this lock after raising
+            // the flag, so an accepted steer is always in its snapshot.
+            if self.handoff_frozen() {
+                return false;
+            }
             pending.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
                 fork_history: bootstrap.is_some(),
             });
             permit.send(message);
+            true
         });
-        if accepted.is_none() {
+        if accepted != Some(true) {
             return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
@@ -769,6 +858,17 @@ impl SessionsEngine {
     /// `Done{interrupted}` and its streaming entry stamped `aborted`; this waits
     /// (bounded) for that settlement so callers observe a consistent doc.
     pub async fn interrupt(&self, chat_id: &str) -> Result<bool, EngineError> {
+        // A frozen run's harness is parked mid-handoff and would not see
+        // the interrupt; the old image must not settle a run it handed over.
+        if self.handoff_frozen() {
+            return Err(EngineError::Other(HANDOFF_IN_PROGRESS.into()));
+        }
+        self.interrupt_run(chat_id).await
+    }
+
+    /// [`Self::interrupt`] without the freeze gate (a freeze retiring runs
+    /// it cannot carry).
+    async fn interrupt_run(&self, chat_id: &str) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -785,7 +885,7 @@ impl SessionsEngine {
         // classified as an error instead of an interrupted turn.
         let _ = cancel.send(true);
         // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, p)| p.tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
@@ -815,13 +915,26 @@ impl SessionsEngine {
         let Some((pending, engine_tx)) = target else {
             return Ok(false);
         };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
-        };
-        let _ = resolver.send(answers);
-        let _ = engine_tx.send(AgentEvent::InputResolved {
-            request_id: request_id.to_string(),
-        });
+        {
+            let mut pending = lock(&pending);
+            // The frozen run's pending questions are already in the handoff:
+            // an answer taken now would be lost with this image. Checked, taken
+            // and sent under the run's `pending` lock, which the freeze takes
+            // as a barrier: an answer that got past the check is with the run
+            // (and written to the agent) before the freeze goes on.
+            if self.handoff_frozen() {
+                return Err(EngineError::Other(HANDOFF_IN_PROGRESS.into()));
+            }
+            let Some(resolver) = pending.remove(request_id) else {
+                return Ok(false);
+            };
+            let _ = resolver.tx.send(answers);
+            // Inside the lock too: a freeze must not see the answer taken
+            // but the run still marked as awaiting input.
+            let _ = engine_tx.send(AgentEvent::InputResolved {
+                request_id: request_id.to_string(),
+            });
+        }
         Ok(true)
     }
 
@@ -833,131 +946,156 @@ impl SessionsEngine {
     /// the remembered harness session (zeron: "not just eulogized";
     /// `MAX_AUTO_RESUME` = 3 consecutive revivals, fresh = crashed < 12h ago).
     pub fn recover_stale(&self) -> Result<usize, EngineError> {
-        const MAX_AUTO_RESUME: u32 = 3;
-        const RESUME_FRESH_MS: i64 = 12 * 60 * 60 * 1000;
-
         let stale = self.inner.journal.stale_sessions()?;
         let mut recovered = 0usize;
         for chat_id in stale {
             if lock(&self.inner.runs).contains_key(&chat_id) {
                 continue; // a live run owns this journal
             }
-            let handle = self.doc_handle(&chat_id)?;
-            // Harness continuity first: the crashed run's session id may only
-            // exist in the journal (the debounced workspace-row write may
-            // never have landed) — remember it so the revived run resumes the
-            // same harness conversation (zeron recoverDraft, sessions.ts:538).
-            if let Some((session_id, cwd)) = self.inner.journal_harness_session(&chat_id) {
-                self.inner
-                    .remember_harness_session(&chat_id, &session_id, &cwd);
+            if self.recover_chat(chat_id)? {
+                recovered += 1;
             }
-            // The revival prompt: the last user message (idempotent re-dispatch
-            // under the SAME id — `write_user_message` dedupes by id, so the
-            // transcript never shows a duplicate).
-            let prompt = handle.doc().read_entries().ok().and_then(|entries| {
+        }
+        Ok(recovered)
+    }
+
+    /// Recover one chat whose run died mid-stream (see [`Self::recover_stale`]).
+    /// `false` when there was nothing to recover (any more): a live run owns
+    /// the chat, or its journal already ends in `Done` — checked under one
+    /// lock, so racing recoveries settle and resume a chat once.
+    fn recover_chat(&self, chat_id: String) -> Result<bool, EngineError> {
+        const MAX_AUTO_RESUME: u32 = 3;
+        const RESUME_FRESH_MS: i64 = 12 * 60 * 60 * 1000;
+        let _claim = lock(&self.inner.recovery);
+        if lock(&self.inner.runs).contains_key(&chat_id) {
+            return Ok(false);
+        }
+        if !matches!(
+            self.inner.journal.last_event(&chat_id)?,
+            Some((_, ref event)) if !matches!(event, AgentEvent::Done { .. })
+        ) {
+            return Ok(false);
+        }
+        let handle = self.doc_handle(&chat_id)?;
+        // Harness continuity first: the crashed run's session id may only
+        // exist in the journal (the debounced workspace-row write may
+        // never have landed) — remember it so the revived run resumes the
+        // same harness conversation (zeron recoverDraft, sessions.ts:538).
+        if let Some((session_id, cwd)) = self.inner.journal_harness_session(&chat_id) {
+            self.inner
+                .remember_harness_session(&chat_id, &session_id, &cwd);
+        }
+        // The revival prompt: the last user message (idempotent re-dispatch
+        // under the SAME id — `write_user_message` dedupes by id, so the
+        // transcript never shows a duplicate).
+        let prompt = handle.doc().read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| e.role == MessageRole::User)
+                .and_then(|e| {
+                    e.parts.iter().find_map(|p| match p {
+                        MessagePart::Text { text, .. } => Some((e.id.clone(), text.clone())),
+                        _ => None,
+                    })
+                })
+        });
+        let attempts = self.inner.journal.resume_attempts(&chat_id);
+        let fresh = handle
+            .doc()
+            .read_entries()
+            .ok()
+            .and_then(|entries| {
                 entries
                     .iter()
                     .rev()
-                    .find(|e| e.role == MessageRole::User)
-                    .and_then(|e| {
-                        e.parts.iter().find_map(|p| match p {
-                            MessagePart::Text { text, .. } => Some((e.id.clone(), text.clone())),
-                            _ => None,
-                        })
-                    })
-            });
-            let attempts = self.inner.journal.resume_attempts(&chat_id);
-            let fresh = handle
-                .doc()
-                .read_entries()
-                .ok()
-                .and_then(|entries| {
-                    entries
-                        .iter()
-                        .rev()
-                        .find(|e| e.status == Some(MessageStatus::Streaming))
-                        .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
-                })
-                .unwrap_or(false);
-            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+                    .find(|e| e.status == Some(MessageStatus::Streaming))
+                    .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
+            })
+            .unwrap_or(false);
+        let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
 
-            let note = if will_resume {
-                "Run interrupted by engine restart — resuming"
-            } else {
-                "Run interrupted by engine restart"
-            };
-            let done = AgentEvent::Done {
-                status: DoneStatus::Interrupted,
-                result: None,
-                error: Some(note.into()),
-                session_id: None,
-            };
-            self.inner.publish(&chat_id, &done);
-            let stamped = handle.mark_abandoned_streams(note)?.len();
-            self.set_status(&chat_id, SessionStatus::Idle, false);
-            tracing::info!(chat = %chat_id, stamped, will_resume, attempts, "recovered stale session journal");
-            recovered += 1;
+        let note = if will_resume {
+            "Run interrupted by engine restart — resuming"
+        } else {
+            "Run interrupted by engine restart"
+        };
+        let done = AgentEvent::Done {
+            status: DoneStatus::Interrupted,
+            result: None,
+            error: Some(note.into()),
+            session_id: None,
+        };
+        self.inner.publish(&chat_id, &done);
+        let stamped = handle.mark_abandoned_streams(note)?.len();
+        self.set_status(&chat_id, SessionStatus::Idle, false);
+        tracing::info!(chat = %chat_id, stamped, will_resume, attempts, "recovered stale session journal");
 
-            if !will_resume {
-                continue;
-            }
-            let attempt = self.inner.journal.note_resume_attempt(&chat_id);
-            let (user_id, prompt_text) = prompt.expect("gated by will_resume");
-            let sessions = self.clone();
-            tokio::spawn(async move {
-                let Some(host) = sessions.inner.doc_host() else {
-                    return;
-                };
-                let request = sessions
-                    .last_request(&chat_id)
-                    .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
-                    // Last resort: the journal's own cwd (zeron's draft config)
-                    // — a crash can predate the debounced workspace-row write.
-                    .or_else(|| {
-                        let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
-                        Some(RunRequest {
-                            mcp: None,
-                            prompt: String::new(),
-                            harness: None,
-                            model: None,
-                            reasoning: None,
-                            model_options: Default::default(),
-                            cwd,
-                            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                            auto_approve: false,
-                            attachments: Vec::new(),
-                            resume: None,
-                            worktree: None,
-                        })
-                    });
-                let Some(mut request) = request else {
-                    tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
-                    return;
-                };
-                request.prompt = prompt_text;
-                request.resume = None; // dispatch re-injects the remembered session
-                request.attachments = Vec::new();
-                let harness_id = host.harness_for_request(&chat_id, &request);
-                match host
-                    .dispatch_with_source_context(
-                        &sessions,
-                        &chat_id,
-                        harness_id,
-                        request,
-                        Some(user_id),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
-                    }
-                    Err(err) => {
-                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
-                    }
-                }
-            });
+        if !will_resume {
+            return Ok(true);
         }
-        Ok(recovered)
+        let attempt = self.inner.journal.note_resume_attempt(&chat_id);
+        let (user_id, prompt_text) = prompt.expect("gated by will_resume");
+        let sessions = self.clone();
+        let stopping = lock(&self.inner.stopping_children).remove(&chat_id);
+        tokio::spawn(async move {
+            // An agent a failed adoption left behind must be gone before a
+            // fresh one resumes its session (the stop itself is bounded).
+            if let Some(stopping) = stopping {
+                let _ = stopping.await;
+            }
+            let Some(host) = sessions.inner.doc_host() else {
+                return;
+            };
+            let request = sessions
+                .last_request(&chat_id)
+                .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
+                // Last resort: the journal's own cwd (zeron's draft config)
+                // — a crash can predate the debounced workspace-row write.
+                .or_else(|| {
+                    let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
+                    Some(RunRequest {
+                        mcp: None,
+                        prompt: String::new(),
+                        harness: None,
+                        model: None,
+                        reasoning: None,
+                        model_options: Default::default(),
+                        cwd,
+                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                        auto_approve: false,
+                        attachments: Vec::new(),
+                        resume: None,
+                        worktree: None,
+                    })
+                });
+            let Some(mut request) = request else {
+                tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
+                return;
+            };
+            request.prompt = prompt_text;
+            request.resume = None; // dispatch re-injects the remembered session
+            request.attachments = Vec::new();
+            let harness_id = host.harness_for_request(&chat_id, &request);
+            match host
+                .dispatch_with_source_context(
+                    &sessions,
+                    &chat_id,
+                    harness_id,
+                    request,
+                    Some(user_id),
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
+                }
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
+                }
+            }
+        });
+        Ok(true)
     }
 
     /// Graceful shutdown: interrupt every live run so streaming entries settle.
@@ -1320,6 +1458,19 @@ impl Inner {
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
         }
+        drop(runs);
+        self.clear_freeze_refusal(chat_id, run_id);
+    }
+
+    /// The run moved on (or ended): its last freeze refusal no longer holds.
+    fn clear_freeze_refusal(&self, chat_id: &str, run_id: &str) {
+        let mut refusals = lock(&self.freeze_refusals);
+        if refusals
+            .get(chat_id)
+            .is_some_and(|note| note.run_id == run_id)
+        {
+            refusals.remove(chat_id);
+        }
     }
 }
 
@@ -1438,6 +1589,89 @@ fn is_active(session: &Session) -> bool {
         session.status,
         SessionStatus::Working | SessionStatus::AwaitingInput
     )
+}
+
+/// The harness asks questions; the engine mints the request id, parks the
+/// resolver for `respond_input`, and surfaces the event through the run
+/// pipeline.
+fn input_bridge(
+    pending: PendingInputs,
+    engine_tx: mpsc::UnboundedSender<AgentEvent>,
+) -> Box<dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync> {
+    Box::new(move |questions: Vec<UserInputQuestion>| {
+        let (answer_tx, answer_rx) = oneshot::channel();
+        let request_id = new_id();
+        lock(&pending).insert(
+            request_id.clone(),
+            PendingInput {
+                tx: answer_tx,
+                questions: questions.clone(),
+            },
+        );
+        let _ = engine_tx.send(AgentEvent::InputRequested {
+            request_id: request_id.clone(),
+            questions,
+        });
+        forward_answer(pending.clone(), engine_tx.clone(), request_id, answer_rx)
+    })
+}
+
+/// The harness's end of a parked question: the answer when it comes, and a
+/// harness that stops waiting resolves the question (as before).
+fn forward_answer(
+    pending: PendingInputs,
+    engine_tx: mpsc::UnboundedSender<AgentEvent>,
+    request_id: String,
+    answer_rx: oneshot::Receiver<Vec<UserInputAnswer>>,
+) -> oneshot::Receiver<Vec<UserInputAnswer>> {
+    let (mut tx, rx) = oneshot::channel();
+    tokio::spawn(async move {
+        tokio::select! {
+            // A dropped resolver stays an error for the harness, as before.
+            answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+            _ = tx.closed() => {
+                lock(&pending).remove(&request_id);
+                let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+            }
+        }
+    });
+    rx
+}
+
+/// The run task's end of the live-update freeze channels.
+struct FreezeLink {
+    requests: mpsc::UnboundedReceiver<EngineFreeze>,
+    /// `RunControls.freeze`'s sender; `None` when the harness cannot hand off.
+    harness: Option<mpsc::Sender<zeron_harness::FreezeRequest>>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FreezeLink {
+    /// The link, the engine's sender, and the harness's `RunControls.freeze`.
+    fn new(
+        adoptable: bool,
+    ) -> (
+        Self,
+        mpsc::UnboundedSender<EngineFreeze>,
+        mpsc::Receiver<zeron_harness::FreezeRequest>,
+    ) {
+        let (freeze_tx, requests) = mpsc::unbounded_channel();
+        let (harness, harness_rx) = if adoptable {
+            let (tx, rx) = mpsc::channel(1);
+            (Some(tx), rx)
+        } else {
+            (None, RunControls::no_freeze())
+        };
+        (
+            Self {
+                requests,
+                harness,
+                started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            freeze_tx,
+            harness_rx,
+        )
+    }
 }
 
 // ── subagent docs ───────────────────────────────────────────────────────────
@@ -1782,6 +2016,62 @@ fn cursor_unstarted_history(
     ))
 }
 
+/// What one item off the harness stream means for the run loop.
+enum StreamItem {
+    Event(AgentEvent),
+    /// Ignore it.
+    Skip,
+    /// End the run with this status (nothing to settle).
+    End(SessionStatus),
+    /// The stream ended after a committed freeze: the run was handed over.
+    Frozen,
+}
+
+fn stream_item(
+    next: Option<Result<AgentEvent, zeron_harness::HarnessError>>,
+    interrupted: bool,
+    parked: bool,
+    committed: bool,
+    chat_id: &str,
+) -> StreamItem {
+    match next {
+        // Committed: the successor owns the run; nothing more is ours.
+        Some(_) if committed => StreamItem::Skip,
+        None if committed => StreamItem::Frozen,
+        Some(Ok(event)) => StreamItem::Event(event),
+        // A stream error while PARKED is a post-turn child death —
+        // the turn was already finalized, so the run ends clean
+        // instead of stamping a completed session Errored.
+        Some(Err(err)) if parked => {
+            tracing::warn!(chat = %chat_id, error = %err, "parked session child died; ending clean");
+            StreamItem::End(SessionStatus::Idle)
+        }
+        Some(Err(err)) => StreamItem::Event(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some(err.to_string()),
+            session_id: None,
+        }),
+        None if interrupted => StreamItem::Event(AgentEvent::Done {
+            status: DoneStatus::Interrupted,
+            result: None,
+            error: None,
+            session_id: None,
+        }),
+        // Stream end while PARKED idle: a per-turn adapter closing
+        // after its final Done — a clean end, not a crash (the turn
+        // was already finalized). Persistent adapters keep the
+        // stream open and never hit this.
+        None if parked => StreamItem::End(SessionStatus::Idle),
+        None => StreamItem::Event(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some("harness stream ended without Done".into()),
+            session_id: None,
+        }),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
@@ -1794,13 +2084,26 @@ async fn drive_run(
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
+    mut link: FreezeLink,
+    mode: RunMode,
 ) {
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
-    if request.resume.is_none() {
+    // An adopted run continues a predecessor image's run: its child, its
+    // prompt and its doc state already exist, so the start-of-run
+    // preparation below is skipped and the fold is seeded from the handoff.
+    let (mut adopt, seed, adopt_fds) = match mode {
+        RunMode::Start => (None, None, Vec::new()),
+        RunMode::Adopt(seed) => {
+            let AdoptSeed { harness, fold, fds } = *seed;
+            (Some(harness), Some(fold), fds)
+        }
+    };
+    let adopt_pid = adopt.as_ref().map(|handoff| handoff.pid);
+    if adopt.is_none() && request.resume.is_none() {
         let _ = doc.clear_context_usage();
     }
     // The host stamps its own MCP server onto every run it drives, so the
@@ -1808,6 +2111,9 @@ async fn drive_run(
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id);
     }
+    // What a freeze exports as the run's request (only adoptable runs pay
+    // for the copy).
+    let handoff_request = link.harness.as_ref().map(|_| request.clone());
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
     // the event loop) can take ownership.
@@ -1817,12 +2123,14 @@ async fn drive_run(
     });
     // A side chat owns a fresh provider session. Bootstrap it from the frozen
     // conversation, never resume (and mutate) the parent's provider session.
-    let mut carried_history = false;
+    let mut carried_history = seed.as_ref().is_some_and(|fold| fold.carried_history);
     let provider = match request.resume.as_deref() {
         None => ProviderSession::Fresh,
         resumed => ProviderSession::Continued(resumed),
     };
-    if let Some(prompt) = inner.fork_history_prompt(
+    if adopt.is_some() {
+        // The adopted child already has its prompt.
+    } else if let Some(prompt) = inner.fork_history_prompt(
         &chat_id,
         &doc,
         harness_id,
@@ -1839,7 +2147,7 @@ async fn drive_run(
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.
-    let prepared = if harness_id == HarnessId::Cursor {
+    let prepared = if harness_id == HarnessId::Cursor && adopt.is_none() {
         cursor_unstarted_history(
             &doc,
             &resume_state.user_message_id,
@@ -1865,16 +2173,37 @@ async fn drive_run(
             if let Some(lease) = lease {
                 _execution_lease = Some(lease.clone());
                 controls.execution_lease = Some(lease);
-                if let Some(listener) = inner.turn_listener.get() {
-                    listener(&chat_id, &request.cwd);
+                if let Some(handoff) = adopt.take() {
+                    let adopted = harness.adopt(handoff, controls, request).await;
+                    // The harness has its own duplicates now (or failed).
+                    drop(adopt_fds);
+                    adopted
+                } else {
+                    if let Some(listener) = inner.turn_listener.get() {
+                        listener(&chat_id, &request.cwd);
+                    }
+                    let mut wire_request = request;
+                    if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
+                        wire_request.prompt = zeron_proto::invocation::harness_prompt(
+                            &wire_request.prompt,
+                            harness_id,
+                        );
+                    }
+                    harness.run(wire_request, controls).await
                 }
-                let mut wire_request = request;
-                if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
-                    wire_request.prompt =
-                        zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
-                }
-                harness.run(wire_request, controls).await
             } else {
+                // Interrupted while waiting for the lease. For a handed-over
+                // run that is a Stop, not a crash: stop the agent nobody
+                // will drive and settle the run as interrupted (the seeded
+                // fold finalizes its open segment), with no auto-resume.
+                if let Some(handoff) = adopt.take() {
+                    #[cfg(unix)]
+                    if let Some(stop) = handoff::abandon_child(handoff.pid) {
+                        let _ = stop.await;
+                    }
+                    #[cfg(not(unix))]
+                    let _ = handoff;
+                }
                 Ok(futures::stream::once(async {
                     Ok(AgentEvent::Done {
                         status: DoneStatus::Interrupted,
@@ -1890,6 +2219,27 @@ async fn drive_run(
     };
     let mut stream = match started {
         Ok(stream) => stream,
+        Err(err) if adopt_pid.is_some() => {
+            // The handed-over run could not be taken over: fall back to
+            // today's crash path — the journal does not end in `Done`, so
+            // stale-run recovery settles it and resumes the conversation.
+            tracing::warn!(chat = %chat_id, error = %err, "could not adopt a handed-over run; recovering it");
+            // The recovery's resume waits for this stop (never two agents on
+            // one harness session). The run stays registered until here, so
+            // boot recovery skips the chat; `recover_chat` serializes the rest.
+            #[cfg(unix)]
+            if let Some(stop) = handoff::abandon_child(adopt_pid.unwrap_or(-1)) {
+                lock(&inner.stopping_children).insert(chat_id.clone(), stop);
+            }
+            inner.remove_run(&chat_id, &run_id);
+            let sessions = SessionsEngine {
+                inner: inner.clone(),
+            };
+            if let Err(err) = sessions.recover_chat(chat_id.clone()) {
+                tracing::error!(chat = %chat_id, error = %err, "recovering a run that could not be adopted failed");
+            }
+            return;
+        }
         Err(err) => {
             let message = err.to_string();
             inner.publish(
@@ -2045,14 +2395,205 @@ async fn drive_run(
     // measures from here as well as from the park.
     let mut last_subagent_activity: Option<tokio::time::Instant> = None;
 
+    // An adopted run picks its fold up where the predecessor froze it.
+    if let Some(fold) = seed {
+        folded = fold.folded;
+        entry_id = fold.entry_id;
+        segment_started = fold.segment_started;
+        writer = fold
+            .segment
+            .map(|segment| SegmentWriter::resume(doc_ref, segment.entry_index, segment.written));
+        seen_tools.extend(fold.seen_tools);
+        seen_images.extend(fold.seen_images);
+        settled_subagents.extend(fold.settled_subagents);
+        idle_since = freeze::instant_before(fold.parked_ms);
+        last_subagent_activity = freeze::instant_before(fold.subagent_quiet_ms);
+        saw_session_started = fold.saw_session_started;
+        self_continued_turn = fold.self_continued_turn;
+        for sink in fold.subagents {
+            let opened = inner.doc_host().and_then(|host| match host.open(&sink.doc_id) {
+                Ok(handle) => Some(handle.writer()),
+                Err(err) => {
+                    tracing::warn!(doc = %sink.doc_id, error = %err, "adopted subagent doc open failed (chip-only)");
+                    None
+                }
+            });
+            let Some(sub_doc) = opened else {
+                continue;
+            };
+            let (entry_index, written) = match sink.segment {
+                Some(segment) => (Some(segment.entry_index), segment.written),
+                None => (None, Vec::new()),
+            };
+            subagents.insert(
+                sink.parent_tool_use_id,
+                SubagentSink {
+                    doc_id: sink.doc_id,
+                    doc: sub_doc,
+                    entry_id: sink.entry_id,
+                    started_at: sink.started_at,
+                    entry_index,
+                    written,
+                    folded: sink.folded,
+                    dirty: false,
+                },
+            );
+        }
+    }
+
+    // Live-update freeze state (see `freeze.rs`). All of it stays empty for
+    // a run nobody freezes.
+    // The harness was asked to freeze and has not answered yet.
+    let mut freeze_asked: Option<
+        oneshot::Receiver<Result<zeron_harness::FrozenRun, zeron_harness::FreezeRefusal>>,
+    > = None;
+    let mut freeze_reply: Option<oneshot::Sender<Result<RunFrozen, String>>> = None;
+    // The harness froze: drain what it emitted before, then snapshot.
+    let mut freeze_draining: Option<zeron_harness::FrozenRun> = None;
+    // Frozen and reported: the engine's verdict (commit, or drop = thaw),
+    // and the harness's commit sender that verdict is relayed to.
+    let mut freeze_verdict: Option<oneshot::Receiver<()>> = None;
+    let mut harness_commit: Option<oneshot::Sender<()>> = None;
+    // Committed: the successor owns the run; the harness ends its stream.
+    let mut committed = false;
+    // The harness's last answer was Busy (a handoff veto until it moves on).
+    let mut refused_freeze = false;
+    let mut frozen_end = false;
+    link.started
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
     let mut final_completed_turn = None;
     let final_status = loop {
+        let frozen = freeze_draining.is_some() || freeze_verdict.is_some() || committed;
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
+        } else if let Some(frozen_run) = freeze_draining.take() {
+            // Draining: everything the harness emitted before it froze is
+            // already queued; take it without waiting. Nothing queued means
+            // the harness is quiet: flush, snapshot, report.
+            let queued = match engine_rx.try_recv() {
+                Ok(event) => Some(Some(Ok(event))),
+                Err(_) => stream.next().now_or_never(),
+            };
+            match queued {
+                Some(Some(Ok(event))) => {
+                    freeze_draining = Some(frozen_run);
+                    prepared_events.extend(
+                        inner
+                            .prepare_generated_image(&chat_id, event, &mut seen_images)
+                            .await,
+                    );
+                    continue;
+                }
+                Some(item) => {
+                    // The run ended (or failed) while freezing: refuse, let
+                    // the harness go (a thaw), and settle it as usual.
+                    if let Some(reply) = freeze_reply.take() {
+                        let _ = reply.send(Err("the run ended while freezing".into()));
+                    }
+                    drop(frozen_run);
+                    match stream_item(item, interrupted, idle_since.is_some(), committed, &chat_id)
+                    {
+                        StreamItem::Event(event) => event,
+                        StreamItem::Skip => continue,
+                        StreamItem::End(status) => break status,
+                        StreamItem::Frozen => {
+                            frozen_end = true;
+                            break SessionStatus::Idle;
+                        }
+                    }
+                }
+                None => {
+                    if dirty {
+                        if let Err(err) = sync_segment(
+                            doc_ref,
+                            &mut writer,
+                            &entry_id,
+                            &device_id,
+                            segment_started,
+                            &folded,
+                        ) {
+                            tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
+                        }
+                        dirty = false;
+                    }
+                    let segment = writer.take().map(|w| {
+                        let (entry_index, written) = w.into_state();
+                        WrittenSegment {
+                            entry_index,
+                            written,
+                        }
+                    });
+                    if let Some(segment) = &segment {
+                        writer = Some(SegmentWriter::resume(
+                            doc_ref,
+                            segment.entry_index,
+                            segment.written.clone(),
+                        ));
+                    }
+                    let mut sinks = Vec::new();
+                    for (parent, sink) in subagents.iter_mut() {
+                        sink.flush(&device_id);
+                        sinks.push(SubagentSnapshot {
+                            parent_tool_use_id: parent.clone(),
+                            doc_id: sink.doc_id.clone(),
+                            entry_id: sink.entry_id.clone(),
+                            started_at: sink.started_at,
+                            segment: sink.entry_index.map(|entry_index| WrittenSegment {
+                                entry_index,
+                                written: sink.written.clone(),
+                            }),
+                            folded: sink.folded.clone(),
+                        });
+                    }
+                    let sorted = |set: &std::collections::HashSet<String>| {
+                        let mut all: Vec<String> = set.iter().cloned().collect();
+                        all.sort();
+                        all
+                    };
+                    let fold = FoldSnapshot {
+                        folded: folded.clone(),
+                        entry_id: entry_id.clone(),
+                        segment_started,
+                        segment,
+                        seen_tools: sorted(&seen_tools),
+                        seen_images: sorted(&seen_images),
+                        settled_subagents: sorted(&settled_subagents),
+                        subagents: sinks,
+                        parked_ms: freeze::elapsed_ms(idle_since),
+                        subagent_quiet_ms: freeze::elapsed_ms(last_subagent_activity),
+                        saw_session_started,
+                        self_continued_turn,
+                        carried_history,
+                        user_message_id: resume_state.user_message_id.clone(),
+                        resume_injected: resume_state.resume_injected,
+                        startup_retry: resume_state.startup_retry,
+                    };
+                    let zeron_harness::FrozenRun { handoff, commit } = frozen_run;
+                    let (verdict_tx, verdict_rx) = oneshot::channel();
+                    let reported = freeze_reply.take().is_some_and(|reply| {
+                        reply
+                            .send(Ok(RunFrozen {
+                                harness: handoff,
+                                fold,
+                                request: handoff_request.clone().expect("an adoptable run"),
+                                verdict: verdict_tx,
+                            }))
+                            .is_ok()
+                    });
+                    if reported {
+                        freeze_verdict = Some(verdict_rx);
+                        harness_commit = Some(commit);
+                    }
+                    // Not reported (the engine gave up waiting): dropping
+                    // `commit` thaws the harness right away.
+                    continue;
+                }
+            }
         } else {
             let raw_event = tokio::select! {
                 biased;
-                changed = cancel_rx.changed(), if !interrupted => {
+                changed = cancel_rx.changed(), if !interrupted && !frozen => {
                     let _ = changed;
                     interrupted = true;
                     interrupt_deadline = Some(
@@ -2068,7 +2609,78 @@ async fn drive_run(
                     error: None,
                     session_id: None,
                 },
-                _ = live_heartbeat.tick() => {
+                // A freeze request from the engine (see `freeze_runs`).
+                Some(request) = link.requests.recv() => {
+                    let busy = if interrupted {
+                        Some("the run is being interrupted")
+                    } else if frozen || freeze_asked.is_some() {
+                        Some("the run is already freezing")
+                    } else if link.harness.is_none() {
+                        Some("this harness cannot hand a run over")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = busy {
+                        let _ = request.reply.send(Err(reason.into()));
+                        continue;
+                    }
+                    let (reply, answer) = oneshot::channel();
+                    let asked = link.harness.as_ref().is_some_and(|harness| {
+                        harness
+                            .try_send(zeron_harness::FreezeRequest { reply })
+                            .is_ok()
+                    });
+                    if asked {
+                        freeze_asked = Some(answer);
+                        freeze_reply = Some(request.reply);
+                    } else {
+                        let _ = request
+                            .reply
+                            .send(Err("the harness is not taking freeze requests".into()));
+                    }
+                    continue;
+                }
+                answer = freeze::recv_some(&mut freeze_asked) => {
+                    freeze_asked = None;
+                    let refusal = match answer {
+                        Ok(Ok(frozen_run)) => {
+                            freeze_draining = Some(frozen_run);
+                            continue;
+                        }
+                        Ok(Err(zeron_harness::FreezeRefusal::Busy(reason))) => reason.to_string(),
+                        Ok(Err(zeron_harness::FreezeRefusal::Unsupported)) => {
+                            "this run cannot be handed over".to_string()
+                        }
+                        Err(_) => "the harness dropped the freeze request".to_string(),
+                    };
+                    // A handoff veto until this run moves on (see
+                    // `unfreezable_runs`).
+                    refused_freeze = true;
+                    lock(&inner.freeze_refusals).insert(
+                        chat_id.clone(),
+                        FreezeRefusalNote {
+                            run_id: run_id.clone(),
+                            reason: refusal.clone(),
+                            at: std::time::Instant::now(),
+                        },
+                    );
+                    if let Some(reply) = freeze_reply.take() {
+                        let _ = reply.send(Err(refusal));
+                    }
+                    continue;
+                }
+                verdict = freeze::recv_some(&mut freeze_verdict) => {
+                    freeze_verdict = None;
+                    // Committed: relay it. Thawed (the verdict was dropped):
+                    // dropping the commit sender resumes the harness exactly
+                    // where it stopped.
+                    if let (Ok(()), Some(commit)) = (verdict, harness_commit.take()) {
+                        committed = true;
+                        let _ = commit.send(());
+                    }
+                    continue;
+                }
+                _ = live_heartbeat.tick(), if !committed => {
                     inner.touch_session(&chat_id);
                     continue;
                 }
@@ -2077,7 +2689,7 @@ async fn drive_run(
                 // already durable, so retire the parked process cleanly and let
                 // the queued exclusive lease proceed.
                 _ = tokio::time::sleep_until(tokio::time::Instant::now()),
-                    if idle_since.is_some() && inner.registry.update_pending(harness_id) =>
+                    if idle_since.is_some() && !frozen && inner.registry.update_pending(harness_id) =>
                 {
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -2101,7 +2713,7 @@ async fn drive_run(
                                 + if subagents.is_empty() { session_idle } else { subagent_silence }
                         })
                         .unwrap_or_else(tokio::time::Instant::now)
-                ), if idle_since.is_some() => {
+                ), if idle_since.is_some() && !frozen => {
                     tracing::info!(
                         chat = %chat_id,
                         live_subagents = subagents.len(),
@@ -2116,39 +2728,21 @@ async fn drive_run(
                     }
                     break SessionStatus::Idle;
                 }
-                Some(event) = engine_rx.recv() => event,
-                next = stream.next() => match next {
-                    Some(Ok(event)) => event,
-                    // A stream error while PARKED is a post-turn child death —
-                    // the turn was already finalized, so the run ends clean
-                    // instead of stamping a completed session Errored.
-                    Some(Err(err)) if idle_since.is_some() => {
-                        tracing::warn!(chat = %chat_id, error = %err, "parked session child died; ending clean");
+                // Frozen and reported, awaiting the verdict: hold everything
+                // the run might still produce (a harness task noticing its
+                // child die, a late bridge event) until then — a thaw
+                // processes it here as usual, a commit leaves it to the
+                // successor. Settling now would end a run the manifest
+                // already hands over (a second Done after the exec).
+                Some(event) = engine_rx.recv(), if !committed && freeze_verdict.is_none() => event,
+                next = stream.next(), if freeze_verdict.is_none() => match stream_item(next, interrupted, idle_since.is_some(), committed, &chat_id) {
+                    StreamItem::Event(event) => event,
+                    StreamItem::Skip => continue,
+                    StreamItem::End(status) => break status,
+                    StreamItem::Frozen => {
+                        frozen_end = true;
                         break SessionStatus::Idle;
                     }
-                    Some(Err(err)) => AgentEvent::Done {
-                        status: DoneStatus::Errored,
-                        result: None,
-                        error: Some(err.to_string()),
-                        session_id: None,
-                    },
-                    None if interrupted => AgentEvent::Done {
-                        status: DoneStatus::Interrupted,
-                        result: None,
-                        error: None,
-                        session_id: None,
-                    },
-                    // Stream end while PARKED idle: a per-turn adapter closing
-                    // after its final Done — a clean end, not a crash (the turn
-                    // was already finalized). Persistent adapters keep the
-                    // stream open and never hit this.
-                    None if idle_since.is_some() => break SessionStatus::Idle,
-                    None => AgentEvent::Done {
-                        status: DoneStatus::Errored,
-                        result: None,
-                        error: Some("harness stream ended without Done".into()),
-                        session_id: None,
-                    },
                 },
                 _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
                     #[cfg(test)]
@@ -2184,6 +2778,7 @@ async fn drive_run(
                     }
                     last_stream_activity + window
                 }), if quiesce_after.is_some()
+                    && !frozen
                     && (self_continued_turn || !authoritative_prompt_end)
                     && idle_since.is_none()
                     && !interrupted
@@ -2246,6 +2841,11 @@ async fn drive_run(
             };
             event
         };
+        // The run moved on, so its last freeze refusal may no longer hold.
+        if refused_freeze {
+            refused_freeze = false;
+            inner.clear_freeze_refusal(&chat_id, &run_id);
+        }
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
@@ -2517,8 +3117,8 @@ async fn drive_run(
                         let resolver = lock(&inner.runs)
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                        if let Some(tx) = resolver {
-                            let _ = tx.send(Vec::new());
+                        if let Some(resolver) = resolver {
+                            let _ = resolver.tx.send(Vec::new());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
                         continue;
@@ -2607,6 +3207,7 @@ async fn drive_run(
             let chat = chat_id.clone();
             let message_id = resume_state.user_message_id.clone();
             tokio::spawn(async move {
+                engine.wait_for_thaw(THAW_WAIT).await;
                 // The user entry write inside dispatch is idempotent by
                 // message id; `startup_retry` makes this attempt final.
                 if let Err(err) = engine
@@ -2728,8 +3329,8 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (_, tx) in lock(&pending).drain() {
-                    let _ = tx.send(Vec::new());
+                for (_, resolver) in lock(&pending).drain() {
+                    let _ = resolver.tx.send(Vec::new());
                 }
             }
             let message_status = match status {
@@ -2828,6 +3429,15 @@ async fn drive_run(
         }
     };
 
+    // Handed over: the successor image owns the run, its child, its doc
+    // entries, its subagents and its steer ledger. Nothing here may settle
+    // any of it — no Done, no aborted stamp, no failed chips, no orphan
+    // re-dispatch, no removal, no status change.
+    if frozen_end {
+        tracing::info!(chat = %chat_id, "run handed over to the successor engine");
+        return;
+    }
+
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
     for (parent_id, sink) in subagents.drain() {
@@ -2869,6 +3479,9 @@ async fn drive_run(
         };
         let chat = chat_id.clone();
         tokio::spawn(async move {
+            // A live-update freeze refuses new runs for its (sub-second)
+            // window: wait it out instead of failing the owed messages.
+            engine.wait_for_thaw(THAW_WAIT).await;
             for steer in orphans {
                 let Some(mut request) = engine.last_request(&chat) else {
                     tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");

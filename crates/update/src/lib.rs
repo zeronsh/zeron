@@ -981,11 +981,66 @@ impl UpdateStatus {
     }
 }
 
-/// `ZERON_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
-fn auto_update_enabled() -> bool {
-    std::env::var("ZERON_AUTO_UPDATE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+/// Whether an engine watches for a newer installed binary at all: the
+/// installed service always does (it can restart into it); any other engine
+/// only when it can hand itself over in place.
+fn watches_for_newer_install(is_installed_service: bool, can_hand_off: bool) -> bool {
+    is_installed_service || can_hand_off
+}
+
+/// Whether an engine applies updates itself. `ZERON_AUTO_UPDATE=1|true|yes`
+/// always opts in (an engine without a live handoff then restarts at a quiet
+/// moment, as before) and `0|false|no` keeps it report-only. Unset means on
+/// ONLY for an engine that can hand itself over in place (`can_hand_off`; see
+/// [`HandoffHook`]): there an update disturbs nothing, so it needs no opt-in.
+/// An engine without a hook (the desktop app's in-process engine) must never
+/// install and restart on its own by default. An engine host the desktop app
+/// started (`ZERON_ENGINE_HOST=app`) leaves downloading and installing to the app.
+pub fn engine_auto_update_enabled(can_hand_off: bool) -> bool {
+    engine_auto_update_from(
+        std::env::var("ZERON_AUTO_UPDATE").ok().as_deref(),
+        engine_host().as_deref(),
+        can_hand_off,
+    )
+}
+
+static ENGINE_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Read `ZERON_ENGINE_HOST` (set by an app that started this process as its
+/// engine host) into the process and REMOVE it from the environment, so the
+/// agents and terminals this process spawns never inherit it and mistake
+/// themselves for an app-hosted engine. `keep` says whether this process is
+/// such a host at all. Call once, first thing in `main`, while single-threaded.
+pub fn capture_engine_host_env(keep: bool) {
+    let value = std::env::var("ZERON_ENGINE_HOST").ok();
+    // SAFETY: the caller runs this before any thread exists.
+    unsafe { std::env::remove_var("ZERON_ENGINE_HOST") };
+    let _ = ENGINE_HOST.set(if keep { value } else { None });
+}
+
+/// The engine host role captured by [`capture_engine_host_env`] (`Some("app")`
+/// for an app's own host); the environment itself when nothing captured it
+/// (tests, embedders).
+pub fn engine_host() -> Option<String> {
+    match ENGINE_HOST.get() {
+        Some(value) => value.clone(),
+        None => std::env::var("ZERON_ENGINE_HOST").ok(),
+    }
+}
+
+fn engine_auto_update_from(
+    auto_update: Option<&str>,
+    engine_host: Option<&str>,
+    can_hand_off: bool,
+) -> bool {
+    if engine_host.is_some_and(|host| host.trim() == "app") {
+        return false;
+    }
+    match auto_update.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no") => false,
+        _ => can_hand_off,
+    }
 }
 
 /// `ZERON_AUTO_UPDATE=0|false|no` — the desktop app then only reports: no
@@ -994,6 +1049,41 @@ pub fn desktop_auto_update_enabled() -> bool {
     std::env::var("ZERON_AUTO_UPDATE")
         .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
         .unwrap_or(true)
+}
+
+/// What a handoff attempt reports when it did NOT happen (on success the
+/// engine's process image is replaced, so nothing comes back).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoffOutcome {
+    /// Something running cannot be carried across right now; try again later.
+    /// Nothing was touched.
+    Busy(String),
+    /// The handoff failed. The engine is unchanged and keeps running.
+    Failed(String),
+}
+
+/// Replaces the running engine, in place, with the binary at the given path
+/// (wired by the engine to `EngineCore::handoff`). With it set, an installed
+/// update is picked up by a handoff that keeps agents and terminals running,
+/// and the service is never restarted for it — the restart stays only as the
+/// fallback when a handoff itself fails.
+pub type HandoffHook =
+    Arc<dyn Fn(PathBuf) -> futures::future::BoxFuture<'static, HandoffOutcome> + Send + Sync>;
+
+/// The path to exec for the newest installed version of this binary: the
+/// `current` symlink of a managed install (so a later update is picked up),
+/// the executable inside the app bundle on macOS, otherwise this executable.
+pub fn stable_exe() -> anyhow::Result<PathBuf> {
+    let exe = std::env::current_exe().context("resolving the zeron executable path")?;
+    Ok(stable_exe_for(&detect_install(), &exe))
+}
+
+pub fn stable_exe_for(kind: &InstallKind, exe: &Path) -> PathBuf {
+    match kind {
+        InstallKind::Managed { app_root } => app_root.join("current").join("zeron"),
+        InstallKind::MacApp { bundle } => bundle.join("Contents/MacOS/zeron"),
+        _ => exe.to_path_buf(),
+    }
 }
 
 /// "Nothing would be interrupted by a restart right now" — wired by the engine
@@ -1025,9 +1115,15 @@ pub struct Updater {
     /// a fresh look at the wall clock.
     wake_tx: Arc<watch::Sender<u64>>,
     forced: Arc<AtomicBool>,
-    /// Set by `zeron headless`: this process is the installed service and may
-    /// restart itself into a newer installed binary.
+    /// Set by `zeron headless`: this process watches for a newer installed
+    /// binary and moves onto it when it can (by handoff, else — for the
+    /// installed service only — by restart at a quiet moment).
     service: Arc<AtomicBool>,
+    /// How to replace this engine in place; set by the engine once it can.
+    handoff: Arc<std::sync::OnceLock<HandoffHook>>,
+    /// An installed version this engine must not hand off to: a rollback
+    /// brought us back from it, so it cannot adopt this engine's state.
+    handoff_blocked: Arc<std::sync::OnceLock<String>>,
     /// Flips to true exactly once; the check loop selects against it so
     /// cancellation lands at any await point (no tokio-util in this crate).
     shutdown_tx: Arc<watch::Sender<bool>>,
@@ -1061,6 +1157,8 @@ impl Updater {
             wake_tx: Arc::new(wake_tx),
             forced: Arc::new(AtomicBool::new(false)),
             service: Arc::new(AtomicBool::new(false)),
+            handoff: Arc::new(std::sync::OnceLock::new()),
+            handoff_blocked: Arc::new(std::sync::OnceLock::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             check_task: Arc::new(std::sync::Mutex::new(None)),
         };
@@ -1108,12 +1206,30 @@ impl Updater {
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
-    /// Called by `zeron headless`: when this process is the installed engine
-    /// service and something else installs a newer binary, restart into it at
-    /// the next quiet moment. A hand-started `zeron headless` is left alone —
-    /// restarting the service unit would start a second engine beside it.
+    /// How this engine replaces itself in place (see [`HandoffHook`]). Set
+    /// once, before [`Self::restart_when_superseded`].
+    pub fn set_handoff(&self, hook: HandoffHook) {
+        let _ = self.handoff.set(hook);
+    }
+
+    /// Never hand off to `version` (a live handoff to it just failed and was
+    /// rolled back). A newer version, or an engine restart, is tried normally;
+    /// the restart fallback for the installed service still applies.
+    pub fn skip_handoff_for(&self, version: &str) {
+        let _ = self.handoff_blocked.set(version.to_owned());
+    }
+
+    /// Called by `zeron headless`: when something installs a newer binary
+    /// (the desktop app, `zeron update`, this checker itself), move onto it.
+    /// With a handoff hook that is a live handoff, retried each minute while
+    /// work in flight cannot be carried across, and it works for any engine
+    /// that can exec the installed binary. Without one, only the installed
+    /// engine service restarts into it at a quiet moment; a hand-started
+    /// `zeron headless` is left alone — restarting the service unit would
+    /// start a second engine beside it.
     pub fn restart_when_superseded(&self) {
-        if !running_as_installed_service() {
+        if !watches_for_newer_install(running_as_installed_service(), self.handoff.get().is_some())
+        {
             return;
         }
         self.service.store(true, Ordering::SeqCst);
@@ -1165,14 +1281,20 @@ impl Updater {
                         if ok
                             && self.status_tx.borrow().update_available
                             && matches!(*self.role, Role::Engine { .. })
-                            && auto_update_enabled()
+                            && engine_auto_update_enabled(self.handoff.get().is_some())
                             && let InstallKind::Managed { .. } = detect_install()
                         {
                             self.auto_apply_when_idle().await;
                         }
                     }
                     if self.service.load(Ordering::SeqCst) {
-                        superseded.poll(|| self.quiescent_now());
+                        superseded
+                            .poll(
+                                || self.quiescent_now(),
+                                self.handoff.get(),
+                                self.handoff_blocked.get().map(String::as_str),
+                            )
+                            .await;
                     }
                     let wait = schedule.wait(SystemTime::now());
                     tokio::select! {
@@ -1190,6 +1312,20 @@ impl Updater {
     /// lands on whatever is newest) and reuses the staged dir, keeping the
     /// idle→restart gap to well under a second.
     async fn auto_apply_when_idle(&self) {
+        if self.handoff.get().is_some() {
+            // With a live handoff an update needs no quiet window: staging and
+            // flipping the symlink disturb nothing, and the handoff that
+            // follows (driven by the superseded watch `apply_inner` wakes)
+            // carries running work across instead of waiting for it to end.
+            match self.apply_inner(false).await {
+                Ok(Some(version)) => {
+                    tracing::info!(%version, "auto-update installed; handing the engine over")
+                }
+                Ok(None) => {}
+                Err(err) => tracing::warn!(error = %err, "auto-update failed"),
+            }
+            return;
+        }
         if let InstallKind::Managed { app_root } = detect_install() {
             match fetch_latest(&self.edge_url).await {
                 Ok(manifest) if version_newer(&manifest.version, current_version()) => {
@@ -1300,12 +1436,19 @@ impl Updater {
             return Ok(None);
         }
         apply_headless(&app_root, &manifest.version)?;
-        tokio::spawn(async {
-            tokio::time::sleep(Duration::from_millis(800)).await;
-            if let Err(err) = restart_service() {
-                tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
-            }
-        });
+        if self.handoff.get().is_some() {
+            // Installed. The superseded watch, woken now, hands this engine
+            // over in place — no service restart, nothing running is touched.
+            self.service.store(true, Ordering::SeqCst);
+            self.poke();
+        } else {
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                if let Err(err) = restart_service() {
+                    tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
+                }
+            });
+        }
         Ok(Some(manifest.version))
     }
 }
@@ -1352,37 +1495,105 @@ impl Schedule {
     }
 }
 
-/// Restarts a service daemon into a newer binary that is already installed
-/// (the desktop app swapped the bundle, `zeron update` flipped the symlink).
-/// Waits for quiescence, and tries at most once per installed version so a
-/// broken service manager cannot turn into a restart loop.
+/// Moves a running engine onto a newer binary that is already installed (the
+/// desktop app swapped the bundle, `zeron update` flipped the symlink, the
+/// checker itself applied it).
+///
+/// With a handoff hook it hands the engine over in place; a `Busy` answer (a
+/// turn is running, a sign-in is open, …) is simply retried on the next poll,
+/// because work in flight can become carryable, or finish, without anyone
+/// restarting anything. A handoff that FAILS backs off, and only then does
+/// the older behaviour apply: the installed engine *service* restarts at a
+/// quiet moment, at most once per installed version so a broken service
+/// manager cannot turn into a restart loop. A hand-started engine is never
+/// restarted (that would start a second one beside it).
 #[derive(Debug, Default)]
 struct SupersededRestart {
     attempted: Option<String>,
-    deferred_logged: bool,
+    handoff_deferred_logged: bool,
+    restart_deferred_logged: bool,
+    /// The installed version the last failed handoff was for, and when to try
+    /// again. A NEWER install is a different build: it is tried at once.
+    handoff_failed_for: Option<String>,
+    handoff_retry_at: Option<std::time::Instant>,
 }
 
+/// After a failed handoff, wait this long before trying again.
+const HANDOFF_RETRY_AFTER_FAILURE: Duration = Duration::from_secs(10 * 60);
+
 impl SupersededRestart {
-    fn poll(&mut self, quiescent: impl Fn() -> bool) {
-        let Some(installed) = installed_version(&detect_install()) else {
+    async fn poll(
+        &mut self,
+        quiescent: impl Fn() -> bool,
+        handoff: Option<&HandoffHook>,
+        handoff_blocked: Option<&str>,
+    ) {
+        let kind = detect_install();
+        let Some(installed) = installed_version(&kind) else {
             return;
         };
-        self.poll_installed(&installed, current_version(), quiescent, restart_service);
+        let exe = stable_exe_for(&kind, &std::env::current_exe().unwrap_or_default());
+        self.poll_installed(
+            &installed,
+            current_version(),
+            &exe,
+            quiescent,
+            handoff,
+            handoff_blocked,
+            running_as_installed_service(),
+            restart_service,
+        )
+        .await;
     }
 
-    fn poll_installed(
+    #[allow(clippy::too_many_arguments)]
+    async fn poll_installed(
         &mut self,
         installed: &str,
         running: &str,
+        exe: &Path,
         quiescent: impl Fn() -> bool,
+        handoff: Option<&HandoffHook>,
+        handoff_blocked: Option<&str>,
+        may_restart: bool,
         restart: impl FnOnce() -> anyhow::Result<()>,
     ) {
-        if !version_newer(installed, running) || self.attempted.as_deref() == Some(installed) {
+        if !version_newer(installed, running) {
+            return;
+        }
+        if self.handoff_failed_for.as_deref() != Some(installed) {
+            self.handoff_failed_for = None;
+            self.handoff_retry_at = None;
+        }
+        if let Some(hook) = handoff
+            && handoff_blocked != Some(installed)
+            && self
+                .handoff_retry_at
+                .is_none_or(|at| std::time::Instant::now() >= at)
+        {
+            match hook(exe.to_path_buf()).await {
+                HandoffOutcome::Busy(reason) => {
+                    if !std::mem::replace(&mut self.handoff_deferred_logged, true) {
+                        tracing::info!(installed, running, %reason, "newer version installed; live handoff deferred");
+                    }
+                    return;
+                }
+                HandoffOutcome::Failed(reason) => {
+                    if self.handoff_failed_for.as_deref() != Some(installed) {
+                        tracing::warn!(installed, running, %reason, "live handoff failed; falling back to a restart at a quiet moment");
+                        self.handoff_failed_for = Some(installed.to_owned());
+                    }
+                    self.handoff_retry_at =
+                        Some(std::time::Instant::now() + HANDOFF_RETRY_AFTER_FAILURE);
+                }
+            }
+        }
+        if !may_restart || self.attempted.as_deref() == Some(installed) {
             return;
         }
         if !quiescent() {
-            if !self.deferred_logged {
-                self.deferred_logged = true;
+            if !self.restart_deferred_logged {
+                self.restart_deferred_logged = true;
                 tracing::info!(
                     installed,
                     running,
@@ -1804,27 +2015,282 @@ mod tests {
         assert_eq!(schedule.failures, 0);
     }
 
-    #[test]
-    fn superseded_service_restarts_once_when_quiet() {
-        let restarts = std::cell::Cell::new(0);
-        let restart = || {
-            restarts.set(restarts.get() + 1);
-            Ok(())
-        };
-        let mut superseded = SupersededRestart::default();
+    /// Drive `poll_installed` with the given knobs, counting restarts and hook calls.
+    struct Rig {
+        restarts: std::cell::Cell<u32>,
+        hook_calls: Arc<std::sync::atomic::AtomicU32>,
+        seen_exe: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            Self {
+                restarts: std::cell::Cell::new(0),
+                hook_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                seen_exe: Arc::default(),
+            }
+        }
+
+        fn hook(&self, outcome: HandoffOutcome) -> HandoffHook {
+            let calls = self.hook_calls.clone();
+            let seen = self.seen_exe.clone();
+            Arc::new(move |exe| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                seen.lock().unwrap().push(exe);
+                let outcome = outcome.clone();
+                Box::pin(async move { outcome })
+            })
+        }
+
+        fn calls(&self) -> u32 {
+            self.hook_calls.load(Ordering::SeqCst)
+        }
+
+        async fn poll(
+            &self,
+            state: &mut SupersededRestart,
+            installed: &str,
+            quiet: bool,
+            hook: Option<&HandoffHook>,
+            may_restart: bool,
+        ) {
+            self.poll_blocked(state, installed, quiet, hook, None, may_restart)
+                .await;
+        }
+
+        async fn poll_blocked(
+            &self,
+            state: &mut SupersededRestart,
+            installed: &str,
+            quiet: bool,
+            hook: Option<&HandoffHook>,
+            blocked: Option<&str>,
+            may_restart: bool,
+        ) {
+            state
+                .poll_installed(
+                    installed,
+                    "0.2.0",
+                    Path::new("/app/current/zeron"),
+                    || quiet,
+                    hook,
+                    blocked,
+                    may_restart,
+                    || {
+                        self.restarts.set(self.restarts.get() + 1);
+                        Ok(())
+                    },
+                )
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_hook_the_installed_service_restarts_once_when_quiet() {
+        let rig = Rig::new();
+        let mut state = SupersededRestart::default();
         // Same or older installed versions never restart.
-        superseded.poll_installed("0.2.0", "0.2.0", || true, restart);
-        superseded.poll_installed("0.1.9", "0.2.0", || true, restart);
-        assert_eq!(restarts.get(), 0);
+        rig.poll(&mut state, "0.2.0", true, None, true).await;
+        rig.poll(&mut state, "0.1.9", true, None, true).await;
+        assert_eq!(rig.restarts.get(), 0);
         // Busy: deferred, not attempted.
-        superseded.poll_installed("0.2.1", "0.2.0", || false, restart);
-        assert_eq!(restarts.get(), 0);
+        rig.poll(&mut state, "0.2.1", false, None, true).await;
+        assert_eq!(rig.restarts.get(), 0);
         // Quiet: exactly one attempt per installed version.
-        superseded.poll_installed("0.2.1", "0.2.0", || true, restart);
-        superseded.poll_installed("0.2.1", "0.2.0", || true, restart);
-        assert_eq!(restarts.get(), 1);
-        superseded.poll_installed("0.2.2", "0.2.0", || true, restart);
-        assert_eq!(restarts.get(), 2);
+        rig.poll(&mut state, "0.2.1", true, None, true).await;
+        rig.poll(&mut state, "0.2.1", true, None, true).await;
+        assert_eq!(rig.restarts.get(), 1);
+        rig.poll(&mut state, "0.2.2", true, None, true).await;
+        assert_eq!(rig.restarts.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_hand_started_engine_is_never_restarted() {
+        let rig = Rig::new();
+        let mut state = SupersededRestart::default();
+        rig.poll(&mut state, "0.2.1", true, None, false).await;
+        assert_eq!(
+            rig.restarts.get(),
+            0,
+            "a restart would start a second engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_busy_handoff_is_retried_every_poll_and_never_becomes_a_restart() {
+        let rig = Rig::new();
+        let hook = rig.hook(HandoffOutcome::Busy("an agent turn is running".into()));
+        let mut state = SupersededRestart::default();
+        for _ in 0..5 {
+            // Even at a "quiet" moment by the old definition: a restart would
+            // kill the very work the handoff is waiting to carry across.
+            rig.poll(&mut state, "0.2.1", true, Some(&hook), true).await;
+        }
+        assert_eq!(rig.calls(), 5, "retried on every poll");
+        assert_eq!(rig.restarts.get(), 0);
+        assert!(
+            rig.seen_exe
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|exe| exe == Path::new("/app/current/zeron")),
+            "the hook is told which binary to exec"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_handoff_backs_off_and_falls_back_to_a_restart_only_when_quiet() {
+        let rig = Rig::new();
+        let hook = rig.hook(HandoffOutcome::Failed("preflight failed".into()));
+        let mut state = SupersededRestart::default();
+        // Not quiet: the fallback defers (nothing is restarted under running work).
+        rig.poll(&mut state, "0.2.1", false, Some(&hook), true)
+            .await;
+        assert_eq!((rig.calls(), rig.restarts.get()), (1, 0));
+        // Quiet: one restart. The hook is not hammered again inside the backoff.
+        rig.poll(&mut state, "0.2.1", true, Some(&hook), true).await;
+        rig.poll(&mut state, "0.2.1", true, Some(&hook), true).await;
+        assert_eq!(rig.calls(), 1, "the failure backs off");
+        assert_eq!(
+            rig.restarts.get(),
+            1,
+            "at most one restart per installed version"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_handoff_is_retried_after_the_backoff_and_a_newer_install_at_once() {
+        let rig = Rig::new();
+        let hook = rig.hook(HandoffOutcome::Failed("boom".into()));
+        let mut state = SupersededRestart::default();
+        rig.poll(&mut state, "0.2.1", false, Some(&hook), false)
+            .await;
+        rig.poll(&mut state, "0.2.1", false, Some(&hook), false)
+            .await;
+        assert_eq!(rig.calls(), 1, "inside the backoff the hook is left alone");
+        // A newer build appearing mid-backoff is a different build: tried now.
+        rig.poll(&mut state, "0.2.2", false, Some(&hook), false)
+            .await;
+        assert_eq!(rig.calls(), 2);
+        // The backoff itself expires.
+        state.handoff_retry_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+        rig.poll(&mut state, "0.2.2", false, Some(&hook), false)
+            .await;
+        assert_eq!(rig.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn deferring_a_handoff_does_not_silence_the_restart_deferral_log() {
+        let rig = Rig::new();
+        let busy = rig.hook(HandoffOutcome::Busy("a turn".into()));
+        let mut state = SupersededRestart::default();
+        rig.poll(&mut state, "0.2.1", false, Some(&busy), true)
+            .await;
+        assert!(state.handoff_deferred_logged);
+        assert!(!state.restart_deferred_logged);
+    }
+
+    #[tokio::test]
+    async fn a_failed_handoff_never_restarts_an_engine_that_is_not_the_service() {
+        let rig = Rig::new();
+        let hook = rig.hook(HandoffOutcome::Failed("exec failed".into()));
+        let mut state = SupersededRestart::default();
+        rig.poll(&mut state, "0.2.1", true, Some(&hook), false)
+            .await;
+        assert_eq!((rig.calls(), rig.restarts.get()), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn a_version_that_failed_to_adopt_is_never_handed_off_to_again() {
+        let rig = Rig::new();
+        let hook = rig.hook(HandoffOutcome::Busy("never reached".into()));
+        let mut state = SupersededRestart::default();
+        // A rollback brought us back from 0.2.1: the same install is still
+        // newer than we are, but handing off to it would loop.
+        for _ in 0..3 {
+            rig.poll_blocked(&mut state, "0.2.1", true, Some(&hook), Some("0.2.1"), false)
+                .await;
+        }
+        assert_eq!(rig.calls(), 0, "the failed version is not tried again");
+        // A newer install is a different build and is handed off to normally.
+        rig.poll_blocked(&mut state, "0.2.2", true, Some(&hook), Some("0.2.1"), false)
+            .await;
+        assert_eq!(rig.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_blocked_version_still_gets_the_quiet_service_restart() {
+        let rig = Rig::new();
+        let hook = rig.hook(HandoffOutcome::Busy("never reached".into()));
+        let mut state = SupersededRestart::default();
+        rig.poll_blocked(&mut state, "0.2.1", false, Some(&hook), Some("0.2.1"), true)
+            .await;
+        assert_eq!(rig.restarts.get(), 0, "never under running work");
+        rig.poll_blocked(&mut state, "0.2.1", true, Some(&hook), Some("0.2.1"), true)
+            .await;
+        assert_eq!((rig.calls(), rig.restarts.get()), (0, 1));
+    }
+
+    #[test]
+    fn engines_apply_updates_by_default_only_when_they_can_hand_off() {
+        // Unset: on for an engine with a live handoff, off for one without
+        // (the desktop app's in-process engine must not install and restart).
+        assert!(engine_auto_update_from(None, None, true));
+        assert!(!engine_auto_update_from(None, None, false));
+        // An explicit opt-in still works for any engine (the old behaviour).
+        for on in ["1", "true", "yes", " YES "] {
+            assert!(engine_auto_update_from(Some(on), None, false), "{on}");
+            assert!(engine_auto_update_from(Some(on), None, true), "{on}");
+        }
+        for off in ["0", "false", "no", " NO ", "False"] {
+            assert!(!engine_auto_update_from(Some(off), None, true), "{off}");
+        }
+        // Unrecognised values are not an opt-in.
+        assert!(!engine_auto_update_from(Some("maybe"), None, false));
+        // The desktop app drives updates for the host it started.
+        assert!(!engine_auto_update_from(None, Some("app"), true));
+        assert!(!engine_auto_update_from(Some("1"), Some("app"), true));
+        assert!(engine_auto_update_from(None, Some("other"), true));
+    }
+
+    #[test]
+    fn the_stable_exe_is_the_current_symlink_or_the_bundle_binary() {
+        let exe = Path::new("/home/u/.zeron/app/0.2.0/zeron");
+        assert_eq!(
+            stable_exe_for(
+                &InstallKind::Managed {
+                    app_root: PathBuf::from("/home/u/.zeron/app")
+                },
+                exe
+            ),
+            Path::new("/home/u/.zeron/app/current/zeron")
+        );
+        assert_eq!(
+            stable_exe_for(
+                &InstallKind::MacApp {
+                    bundle: PathBuf::from("/Applications/Zeron.app")
+                },
+                exe
+            ),
+            Path::new("/Applications/Zeron.app/Contents/MacOS/zeron")
+        );
+        assert_eq!(stable_exe_for(&InstallKind::Unmanaged, exe), exe);
+    }
+
+    #[test]
+    fn a_handoff_hook_makes_any_engine_watch_for_a_newer_install() {
+        assert!(
+            watches_for_newer_install(true, false),
+            "the service always did"
+        );
+        assert!(
+            watches_for_newer_install(false, true),
+            "a hand-started engine with a hook"
+        );
+        assert!(
+            !watches_for_newer_install(false, false),
+            "left alone, as before"
+        );
     }
 
     #[test]

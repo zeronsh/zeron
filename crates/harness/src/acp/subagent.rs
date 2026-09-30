@@ -15,10 +15,20 @@
 //! tagged `Done` from `subagent_finished`. The on-disk format is
 //! vendor-private: every parse fails soft, degrading to chip + final output
 //! (from the wire's `subagent_finished`) rather than erroring the run.
+//!
+//! Across a live update the tracker's correlation state is plain data, and
+//! each live tail parks at a poll boundary and exports its file offset and
+//! partial line ([`SubagentTracker::freeze`]); the adopter re-spawns the tails
+//! from there ([`SubagentTracker::restore`]), so the child transcript is never
+//! emitted twice.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
@@ -59,20 +69,29 @@ fn done_status(status: &str) -> DoneStatus {
     }
 }
 
+/// How long a freeze waits for a tail to park (it may be sending events into
+/// a full channel the engine drains meanwhile).
+const PARK_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// A spawn chip (`spawn_subagent` tool call) not yet bound to a subagent id.
+#[derive(Clone, Serialize, Deserialize)]
 struct PendingSpawn {
     tool_call_id: String,
     description: String,
 }
 
-/// The `subagent_finished` payload handed to a live tail.
+/// The `subagent_finished` payload handed to a live tail. It counts as
+/// settling (see [`SubagentTracker::settling`]) until the tail has sent the
+/// chip's Done and drops it.
 struct TailFinish {
     status: DoneStatus,
     output: String,
+    _settling: Option<Settling>,
 }
 
 /// A `subagent_spawned` update that arrived before any chip could be bound
 /// (defensive: not an ordering grok exhibits today).
+#[derive(Clone, Serialize, Deserialize)]
 struct SpawnedUnbound {
     child_session_id: String,
 }
@@ -89,8 +108,73 @@ pub(crate) struct SubagentTracker {
     bound: HashMap<String, String>,
     /// `subagent_spawned` payloads that could not bind yet.
     spawned_unbound: HashMap<String, SpawnedUnbound>,
-    /// subagent_id → finished-signal for the live tail task.
-    tails: HashMap<String, oneshot::Sender<TailFinish>>,
+    /// subagent_id → the live tail task.
+    tails: HashMap<String, Tail>,
+    /// Tails (and chip settlements) past their subagent's finish, still
+    /// emitting: a hand-over waits for them (their Done would be lost).
+    settling: Arc<AtomicUsize>,
+}
+
+/// A live tail task's handles.
+struct Tail {
+    finished: oneshot::Sender<TailFinish>,
+    park: mpsc::UnboundedSender<oneshot::Sender<ParkedTail>>,
+}
+
+/// What a parked tail hands a freeze; dropping `resume` thaws it.
+struct ParkedTail {
+    state: TailState,
+    resume: oneshot::Sender<TailResume>,
+}
+
+enum TailResume {
+    /// A same-process successor tails the transcript now: stop, no Done.
+    Abandon,
+}
+
+/// One live tail as carried across a live update.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TailState {
+    subagent_id: String,
+    child_session_id: String,
+    parent_tool_use_id: String,
+    /// The transcript once located; the adopter locates it otherwise.
+    path: Option<PathBuf>,
+    /// Bytes of the transcript already read.
+    offset: u64,
+    /// A partial last line already read (raw bytes: a write may have been
+    /// cut inside a UTF-8 sequence).
+    carry: Vec<u8>,
+    /// Anything emitted yet (the wire's final output is the fallback text
+    /// only for a tail that never emitted).
+    emitted: bool,
+}
+
+/// The tracker's state in a live-update handoff.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct GrokSubagents {
+    pending: VecDeque<PendingSpawn>,
+    bound: HashMap<String, String>,
+    spawned_unbound: HashMap<String, SpawnedUnbound>,
+    tails: Vec<TailState>,
+}
+
+/// Tails parked by [`SubagentTracker::freeze`]. Dropping it thaws them: each
+/// carries on reading from where it stopped.
+pub(crate) struct FrozenTails {
+    states: Vec<TailState>,
+    resume: Vec<oneshot::Sender<TailResume>>,
+}
+
+impl FrozenTails {
+    /// A same-process successor took over: the parked tails stop without
+    /// settling their chips.
+    pub(crate) fn abandon(self) {
+        for resume in self.resume {
+            let _ = resume.send(TailResume::Abandon);
+        }
+    }
 }
 
 impl SubagentTracker {
@@ -107,7 +191,72 @@ impl SubagentTracker {
             bound: HashMap::new(),
             spawned_unbound: HashMap::new(),
             tails: HashMap::new(),
+            settling: Arc::default(),
         }
+    }
+
+    /// Park every live tail at a poll boundary for a live update. Refused
+    /// (with the reason) while a finished subagent's transcript is still
+    /// being settled, or when a tail does not park in time; a refusal leaves
+    /// every tail running.
+    pub(crate) async fn freeze(&self) -> Result<FrozenTails, &'static str> {
+        const SETTLING: &str = "a subagent transcript is settling";
+        if self.settling.load(Ordering::Acquire) > 0 {
+            return Err(SETTLING);
+        }
+        let mut frozen = FrozenTails {
+            states: Vec::new(),
+            resume: Vec::new(),
+        };
+        for tail in self.tails.values() {
+            let (reply, parked) = oneshot::channel();
+            if tail.park.send(reply).is_err() {
+                return Err(SETTLING);
+            }
+            match tokio::time::timeout(PARK_TIMEOUT, parked).await {
+                Ok(Ok(parked)) => {
+                    frozen.states.push(parked.state);
+                    frozen.resume.push(parked.resume);
+                }
+                _ => return Err("a subagent transcript tail is busy"),
+            }
+        }
+        // A tail that settled while the others parked has a Done to send.
+        if self.settling.load(Ordering::Acquire) > 0 {
+            return Err(SETTLING);
+        }
+        frozen
+            .states
+            .sort_by(|a, b| a.subagent_id.cmp(&b.subagent_id));
+        Ok(frozen)
+    }
+
+    /// The tracker's state, with the tails `frozen` parked.
+    pub(crate) fn export(&self, frozen: &FrozenTails) -> GrokSubagents {
+        GrokSubagents {
+            pending: self.pending.clone(),
+            bound: self.bound.clone(),
+            spawned_unbound: self.spawned_unbound.clone(),
+            tails: frozen.states.clone(),
+        }
+    }
+
+    /// Rebuild a tracker a previous image exported, re-spawning each tail
+    /// from its offset (nothing it already emitted is read again).
+    pub(crate) fn restore(
+        session_id: String,
+        event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+        sessions_root: Option<PathBuf>,
+        state: GrokSubagents,
+    ) -> Self {
+        let mut tracker = Self::new(session_id, event_tx, sessions_root);
+        tracker.pending = state.pending;
+        tracker.bound = state.bound;
+        tracker.spawned_unbound = state.spawned_unbound;
+        for tail in state.tails {
+            tracker.spawn_tail(tail);
+        }
+        tracker
     }
 
     /// Inspect one `session/update` payload's `update` object. Pure
@@ -233,10 +382,11 @@ impl SubagentTracker {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            _settling: Some(Settling::start(&self.settling)),
         };
         self.spawned_unbound.remove(sub_id);
-        if let Some(tx) = self.tails.remove(sub_id) {
-            let _ = tx.send(finish);
+        if let Some(tail) = self.tails.remove(sub_id) {
+            let _ = tail.finished.send(finish);
         } else if let Some(parent) = self.bound.get(sub_id).cloned() {
             // No tail ever started (the chip bound but `subagent_spawned`
             // never arrived, or the tail task failed to spawn): the wire's
@@ -275,15 +425,50 @@ impl SubagentTracker {
         if self.tails.contains_key(sub_id) {
             return;
         }
+        self.spawn_tail(TailState {
+            subagent_id: sub_id.to_owned(),
+            child_session_id: child_session_id.to_owned(),
+            parent_tool_use_id: parent,
+            path: None,
+            offset: 0,
+            carry: Vec::new(),
+            emitted: false,
+        });
+    }
+
+    fn spawn_tail(&mut self, state: TailState) {
         let (finished_tx, finished_rx) = oneshot::channel();
-        self.tails.insert(sub_id.to_owned(), finished_tx);
+        let (park_tx, park_rx) = mpsc::unbounded_channel();
+        self.tails.insert(
+            state.subagent_id.clone(),
+            Tail {
+                finished: finished_tx,
+                park: park_tx,
+            },
+        );
         tokio::spawn(tail_task(
             self.event_tx.clone(),
             self.sessions_root.clone(),
-            child_session_id.to_owned(),
-            parent,
+            state,
             finished_rx,
+            park_rx,
         ));
+    }
+}
+
+/// Holds one count in [`SubagentTracker::settling`] until dropped.
+struct Settling(Arc<AtomicUsize>);
+
+impl Settling {
+    fn start(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter.clone())
+    }
+}
+
+impl Drop for Settling {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -525,15 +710,33 @@ fn grok_tool_call(name: &str, args: &Value) -> ToolCall {
 /// drain briefly and settle the chip with a tagged Done. Holds its own
 /// `event_tx` clone, so the run's event stream stays open until the tail
 /// settles — an agent that dies mid-subagent still gets its chip closed.
+///
+/// Between polls it can be parked for a live update (`park`): it reports
+/// where it is and waits for the verdict, carrying on after a thaw and
+/// stopping without a Done when a successor took over.
 async fn tail_task(
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     root: PathBuf,
-    child_session_id: String,
-    parent_tool_use_id: String,
+    state: TailState,
     mut finished_rx: oneshot::Receiver<TailFinish>,
+    mut park: mpsc::UnboundedReceiver<oneshot::Sender<ParkedTail>>,
 ) {
-    let mut reader: Option<TailReader> = None;
-    let mut emitted = false;
+    let TailState {
+        subagent_id,
+        child_session_id,
+        parent_tool_use_id,
+        path,
+        offset,
+        carry,
+        emitted,
+    } = state;
+    let mut reader: Option<TailReader> = path.map(|path| TailReader {
+        path,
+        offset,
+        carry,
+    });
+    let mut emitted = emitted;
+    let mut parkable = true;
     let pump = |reader: &mut Option<TailReader>| -> Vec<AgentEvent> {
         if reader.is_none() {
             *reader = locate_history(&root, &child_session_id).map(TailReader::new);
@@ -569,8 +772,29 @@ async fn tail_task(
                 break fin.unwrap_or(TailFinish {
                     status: DoneStatus::Interrupted,
                     output: String::new(),
+                    _settling: None,
                 });
             }
+            request = park.recv(), if parkable => match request {
+                None => parkable = false,
+                Some(reply) => {
+                    let (resume, verdict) = oneshot::channel();
+                    let state = TailState {
+                        subagent_id: subagent_id.clone(),
+                        child_session_id: child_session_id.clone(),
+                        parent_tool_use_id: parent_tool_use_id.clone(),
+                        path: reader.as_ref().map(|r| r.path.clone()),
+                        offset: reader.as_ref().map_or(0, |r| r.offset),
+                        carry: reader.as_ref().map(|r| r.carry.clone()).unwrap_or_default(),
+                        emitted,
+                    };
+                    if reply.send(ParkedTail { state, resume }).is_ok()
+                        && let Ok(TailResume::Abandon) = verdict.await
+                    {
+                        return;
+                    }
+                }
+            },
             _ = tokio::time::sleep(TAIL_POLL) => {}
         }
     };

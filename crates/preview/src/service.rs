@@ -150,6 +150,10 @@ impl PreviewService {
         self.0.callback_tunnels.insert(login_id, forwarder);
         Ok(())
     }
+    /// A login callback tunnel is open (its forwarder lives in this process).
+    pub fn has_active_tunnels(&self) -> bool {
+        self.0.callback_tunnels.any()
+    }
     pub fn close_login_tunnel(&self, login_id: &str) {
         self.0.callback_tunnels.close(login_id);
     }

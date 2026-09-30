@@ -57,6 +57,10 @@ pub const TERMINAL_DEFAULT_HEIGHT: f32 = 280.0;
 
 /// Debounce for settings writes after a drag/toggle.
 pub const SAVE_DEBOUNCE_MS: u64 = 400;
+/// Longest a queued UI-state snapshot may wait while edits keep restarting the
+/// debounce. Unbounded, continuous typing would write nothing until a pause,
+/// and a crash mid-burst would lose the whole burst.
+pub const UI_SNAPSHOT_MAX_WAIT_MS: u64 = 2000;
 
 pub const FILES_AUTOSAVE_DELAY_DEFAULT_MS: u64 = 900;
 pub const FILES_AUTOSAVE_DELAY_MIN_MS: u64 = 100;
@@ -264,6 +268,20 @@ pub struct SettingsStore {
     /// changes, including a change back to its previous value.
     code_fences_generation: u64,
     save_task: Option<Task<()>>,
+    /// `ui-state.json` shares this store's debounce timer and quit flush (see
+    /// [`save_ui_snapshot`]) so there is a single scheduler for UI persistence.
+    ui_state: crate::ui_state::SnapshotStore,
+    /// Latest snapshot handed in, whether or not it has reached disk yet.
+    ui_snapshot_latest: Option<crate::ui_state::UiSnapshot>,
+    /// Handed in but not yet written; cleared on a successful write.
+    ui_snapshot_pending: Option<crate::ui_state::UiSnapshot>,
+    /// When the oldest unwritten snapshot was queued (executor clock, so the
+    /// fake test clock applies); bounds the debounce, see
+    /// [`UI_SNAPSHOT_MAX_WAIT_MS`].
+    ui_snapshot_queued_at: Option<std::time::Instant>,
+    /// Attachment copies to delete once the pending snapshot is safely on
+    /// disk: `(directory, attachment ids still in use)`.
+    ui_attachment_prune: Option<(PathBuf, std::collections::HashSet<String>)>,
 }
 
 impl Global for SettingsStore {}
@@ -294,14 +312,72 @@ impl SettingsStore {
 }
 
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
+    let data_dir = data_dir.into();
     cx.set_global(SettingsStore {
         current: settings,
-        data_dir: data_dir.into(),
+        ui_state: crate::ui_state::SnapshotStore::new(&data_dir),
+        data_dir,
         revision: 0,
         saved_revision: 0,
         code_fences_generation: 0,
         save_task: None,
+        ui_snapshot_latest: None,
+        ui_snapshot_pending: None,
+        ui_snapshot_queued_at: None,
+        ui_attachment_prune: None,
     });
+}
+
+/// The snapshot left by the previous window/process (default when there is
+/// none, or the settings store is not installed).
+pub fn load_ui_snapshot(cx: &App) -> crate::ui_state::UiSnapshot {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.ui_state.load())
+        .unwrap_or_default()
+}
+
+/// Where staged-attachment copies for drafts live, when persistence is on.
+pub fn ui_attachments_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.ui_state.attachments_dir())
+}
+
+/// Queue a UI-state snapshot for writing on the shared 400 ms debounce, capped
+/// at [`UI_SNAPSHOT_MAX_WAIT_MS`] under continuous edits; it is also written
+/// by [`flush`] (app quit). Identical to the last one queued is a no-op, so
+/// callers may report every change without churning the timer.
+///
+/// `prune` names attachment copies to delete, but only once a snapshot that no
+/// longer references them has reached disk — until then a crash still needs
+/// them to restore the previous snapshot's drafts.
+pub fn save_ui_snapshot(
+    snapshot: crate::ui_state::UiSnapshot,
+    prune: Option<(PathBuf, std::collections::HashSet<String>)>,
+    cx: &mut App,
+) {
+    let Some(store) = cx.try_global::<SettingsStore>() else {
+        return;
+    };
+    if store.ui_snapshot_latest.as_ref() == Some(&snapshot) {
+        if let Some((dir, keep)) = prune {
+            if store.ui_snapshot_pending.is_some() {
+                cx.global_mut::<SettingsStore>().ui_attachment_prune = Some((dir, keep));
+            } else {
+                // Already on disk: nothing left that needs the old copies.
+                crate::ui_state::prune_attachments(&dir, &keep);
+            }
+        }
+        return;
+    }
+    let now = cx.background_executor().now();
+    let store = cx.global_mut::<SettingsStore>();
+    store.ui_snapshot_latest = Some(snapshot.clone());
+    store.ui_snapshot_pending = Some(snapshot);
+    store.ui_snapshot_queued_at.get_or_insert(now);
+    if prune.is_some() {
+        store.ui_attachment_prune = prune;
+    }
+    schedule(SavePolicy::Debounced, cx);
 }
 
 /// Latest settings, including mutations still inside the debounce window.
@@ -535,10 +611,16 @@ fn schedule(policy: SavePolicy, cx: &mut App) {
     match policy {
         SavePolicy::Immediate => flush(cx),
         SavePolicy::Debounced => {
+            // Plain debounce, except that a queued UI snapshot never waits
+            // past its max-wait cap (settings-only saves are unchanged).
+            let now = cx.background_executor().now();
+            let mut delay = Duration::from_millis(SAVE_DEBOUNCE_MS);
+            if let Some(queued_at) = cx.global::<SettingsStore>().ui_snapshot_queued_at {
+                let cap = Duration::from_millis(UI_SNAPSHOT_MAX_WAIT_MS);
+                delay = delay.min(cap.saturating_sub(now.saturating_duration_since(queued_at)));
+            }
             let task = cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
-                    .await;
+                cx.background_executor().timer(delay).await;
                 cx.update(flush_latest);
             });
             cx.global_mut::<SettingsStore>().save_task = Some(task);
@@ -583,6 +665,7 @@ pub fn flush(cx: &mut App) {
 }
 
 fn flush_latest(cx: &mut App) {
+    flush_ui_snapshot(cx);
     let Some(store) = cx.try_global::<SettingsStore>() else {
         return;
     };
@@ -597,6 +680,31 @@ fn flush_latest(cx: &mut App) {
             debug_assert!(current, "foreground settings write cannot be overtaken");
         }
         Err(err) => tracing::warn!(error = %err, revision, "failed to persist ui settings"),
+    }
+}
+
+fn flush_ui_snapshot(cx: &mut App) {
+    if !cx.has_global::<SettingsStore>() {
+        return;
+    }
+    let store = cx.global_mut::<SettingsStore>();
+    let Some(snapshot) = store.ui_snapshot_pending.take() else {
+        return;
+    };
+    // A failed write must not leave the cap window open (it would retry with
+    // no delay on every later edit); the next edit or flush retries.
+    store.ui_snapshot_queued_at = None;
+    match store.ui_state.save_now(&snapshot) {
+        Ok(()) => {
+            if let Some((dir, keep)) = store.ui_attachment_prune.take() {
+                crate::ui_state::prune_attachments(&dir, &keep);
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to persist ui state");
+            // Keep it queued so the next flush (or quit) retries.
+            store.ui_snapshot_pending = Some(snapshot);
+        }
     }
 }
 
@@ -756,6 +864,10 @@ pub struct UiSettings {
     /// The sidebar's "Star on GitHub" banner was dismissed (its close button
     /// or following the link). Device-local; never shown again once set.
     pub github_star_banner_dismissed: bool,
+    /// Install updates without asking and swap the window when idle (default
+    /// on; `ZERON_AUTO_UPDATE=0` overrides it off). Off keeps the app
+    /// report-only: "restart to apply".
+    pub auto_update: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -921,6 +1033,7 @@ impl Default for UiSettings {
             sidebar_show_branch: true,
             sidebar_show_pull_request: true,
             github_star_banner_dismissed: false,
+            auto_update: true,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
@@ -2320,6 +2433,7 @@ mod tests {
             sidebar_show_branch: false,
             sidebar_show_pull_request: false,
             github_star_banner_dismissed: true,
+            auto_update: false,
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
                 "space-1".into(),
@@ -2452,6 +2566,11 @@ mod tests {
             saved_revision: 0,
             code_fences_generation: 0,
             save_task: None,
+            ui_state: crate::ui_state::SnapshotStore::new(dir.path()),
+            ui_snapshot_latest: None,
+            ui_snapshot_pending: None,
+            ui_snapshot_queued_at: None,
+            ui_attachment_prune: None,
         };
 
         store.current.sidebar_width = 300.0;
@@ -2510,6 +2629,11 @@ mod tests {
             saved_revision: 0,
             code_fences_generation: 0,
             save_task: None,
+            ui_state: crate::ui_state::SnapshotStore::new(dir.path()),
+            ui_snapshot_latest: None,
+            ui_snapshot_pending: None,
+            ui_snapshot_queued_at: None,
+            ui_attachment_prune: None,
         };
 
         assert!(store.update_current(|settings| settings.sidebar_width = 300.0));
@@ -3451,5 +3575,92 @@ mod tests {
             UiSettings::load(dir.path()).terminal_height,
             TERMINAL_ABS_MAX_HEIGHT
         );
+    }
+}
+
+#[cfg(test)]
+mod ui_snapshot_schedule_tests {
+    use super::*;
+    use crate::ui_state::{SnapshotStore, UiSnapshot};
+    use std::time::Duration;
+
+    fn snapshot(chat: &str) -> UiSnapshot {
+        UiSnapshot {
+            selected_chat: Some(chat.into()),
+            ..UiSnapshot::new()
+        }
+    }
+
+    fn setup(cx: &mut gpui::TestAppContext) -> (tempfile::TempDir, SnapshotStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        cx.update(|cx| init(UiSettings::default(), path, cx));
+        let store = SnapshotStore::new(dir.path());
+        (dir, store)
+    }
+
+    fn advance(cx: &mut gpui::TestAppContext, ms: u64) {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_single_snapshot_is_written_after_the_debounce(cx: &mut gpui::TestAppContext) {
+        let (_dir, store) = setup(cx);
+        cx.update(|cx| save_ui_snapshot(snapshot("a"), None, cx));
+        advance(cx, SAVE_DEBOUNCE_MS - 50);
+        assert!(!store.load().is_present(), "not before the debounce");
+        advance(cx, 100);
+        assert_eq!(store.load(), snapshot("a"));
+    }
+
+    #[gpui::test]
+    fn continuous_edits_still_reach_disk_by_the_max_wait(cx: &mut gpui::TestAppContext) {
+        let (_dir, store) = setup(cx);
+        // A save every 300 ms: each restarts the 400 ms debounce, so a plain
+        // debounce would write nothing until the typing stops.
+        let mut elapsed = 0;
+        let mut first_write = None;
+        for i in 0..12 {
+            cx.update(|cx| save_ui_snapshot(snapshot(&format!("c{i}")), None, cx));
+            advance(cx, 300);
+            elapsed += 300;
+            if first_write.is_none() && store.load().is_present() {
+                first_write = Some(elapsed);
+            }
+        }
+        let first_write = first_write.expect("a write while edits continued");
+        assert!(
+            (1800..=UI_SNAPSHOT_MAX_WAIT_MS + 300).contains(&first_write),
+            "first write at {first_write} ms"
+        );
+        // ...and the window restarts, so the burst keeps being written.
+        let seen = store.load().selected_chat.unwrap();
+        for i in 12..24 {
+            cx.update(|cx| save_ui_snapshot(snapshot(&format!("c{i}")), None, cx));
+            advance(cx, 300);
+        }
+        assert_ne!(store.load().selected_chat.unwrap(), seen);
+    }
+
+    #[gpui::test]
+    fn attachment_copies_are_pruned_only_after_the_snapshot_is_written(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, store) = setup(cx);
+        let root = store.attachments_dir();
+        let old = crate::ui_state::materialize_attachment(&root, "old", "a.png", b"o").unwrap();
+        let new = crate::ui_state::materialize_attachment(&root, "new", "a.png", b"n").unwrap();
+        let keep = ["new".to_string()].into_iter().collect();
+        cx.update(|cx| save_ui_snapshot(snapshot("a"), Some((root.clone(), keep)), cx));
+        advance(cx, SAVE_DEBOUNCE_MS - 50);
+        assert!(
+            old.exists() && new.exists(),
+            "old copies survive until the write"
+        );
+        advance(cx, 100);
+        assert_eq!(store.load(), snapshot("a"));
+        assert!(!old.exists());
+        assert!(new.exists());
     }
 }

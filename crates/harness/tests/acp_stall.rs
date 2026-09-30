@@ -45,6 +45,8 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         mcp: None,

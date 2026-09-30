@@ -38,8 +38,8 @@ pub(crate) fn delta_text(params: &Value) -> Option<String> {
 /// separators. Preserve those boundaries before the document folds deltas
 /// together; otherwise adjacent Markdown headings become `**one****two**`.
 /// One instance belongs to one thread, so child activity cannot split a
-/// parent's in-flight paragraph.
-#[derive(Default)]
+/// parent's in-flight paragraph. Serialized into a live-update handoff.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReasoningStream {
     last_part: Option<(String, bool, u64)>,
     announced_summary: Option<(String, u64)>,
@@ -470,7 +470,8 @@ pub(crate) fn user_message_text(item: &Value) -> Option<String> {
 /// Per-child stream state, retained across parent turns and follow-up tasks.
 /// Completion-only messages need the same text fallback as the root. Replayed
 /// user items must not reopen a finished document or duplicate a steering entry.
-#[derive(Default)]
+/// Serialized into a live-update handoff (its id memories are capped at 256).
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct ChildStream {
     reasoning: ReasoningStream,
     streamed_text: std::collections::HashSet<String>,

@@ -85,6 +85,8 @@ async fn main() {
                 }),
                 steering,
                 interrupt: interrupt.clone(),
+                freeze: RunControls::no_freeze(),
+                rebind_input: RunControls::no_rebind(),
             },
         )
         .await

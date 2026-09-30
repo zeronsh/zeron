@@ -13,7 +13,10 @@
 //!   multi-account auth in M6.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+#[cfg(windows)]
+use std::io::Read;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -22,9 +25,13 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use portable_pty::PtySize;
 #[cfg(not(windows))]
 use portable_pty::{CommandBuilder, native_pty_system};
+#[cfg(unix)]
+pub mod handoff;
+#[cfg(unix)]
+pub(crate) mod pty_unix;
 #[cfg(windows)]
 mod windows;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use zeron_doc::TERMINAL_OUTPUT_BATCH_MS;
 use zeron_proto::{TerminalEvent, TerminalSession};
@@ -37,14 +44,56 @@ const MAX_REPLAY_BYTES: usize = 1024 * 1024;
 const EXITED_TTL: Duration = Duration::from_secs(30 * 60);
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The pty master handle. On unix a dup we own (so a handoff can carry the fd
+/// across an `execve`); on Windows the ConPTY handle portable-pty gave us.
+#[cfg(unix)]
+type Master = pty_unix::PtyMaster;
+#[cfg(windows)]
+type Master = Box<dyn portable_pty::MasterPty + Send>;
+#[cfg(unix)]
+type PtyInput = pty_unix::PtyWriter;
+#[cfg(windows)]
+type PtyInput = Box<dyn Write + Send>;
+
+/// Control messages for a terminal's output pump (see [`pump_output`]).
+#[cfg_attr(windows, allow(dead_code))]
+enum PumpCmd {
+    /// The reader is stopped: emit everything read so far as a `Data` event,
+    /// acknowledge, then park until [`PumpCmd::Resume`] (or the sender drops).
+    FlushAndPause(oneshot::Sender<()>),
+    Resume,
+}
+
+/// A running pty reader thread and the handle that stops it. The thread hands
+/// back the raw-output sender when stopped (so a thaw can restart it) and
+/// drops it on EOF.
+#[cfg(unix)]
+struct ReaderHandle {
+    stop: pty_unix::ReaderStop,
+    thread: std::thread::JoinHandle<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+}
+
 struct LiveTerminal {
     // Keep the private action script alive until the shell exits or the tab is closed.
-    initial_script: Option<tempfile::NamedTempFile>,
+    initial_script: Option<tempfile::TempPath>,
     #[cfg(all(test, windows))]
     process_id: u32,
-    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
+    master: Option<Master>,
+    writer: Option<PtyInput>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    // Read only by the unix handoff snapshot.
+    #[cfg_attr(windows, allow(dead_code))]
+    cwd: String,
+    #[cfg_attr(windows, allow(dead_code))]
+    shell: String,
+    #[cfg_attr(windows, allow(dead_code))]
+    pump: mpsc::UnboundedSender<PumpCmd>,
+    #[cfg(unix)]
+    pid: libc::pid_t,
+    #[cfg(unix)]
+    reap_gate: Arc<pty_unix::ReapGate>,
+    #[cfg(unix)]
+    reader: Option<ReaderHandle>,
     #[cfg(windows)]
     reader_thread: Option<std::thread::JoinHandle<()>>,
     #[cfg(windows)]
@@ -63,18 +112,11 @@ impl LiveTerminal {
     /// attached stream ends after delivering the event.
     fn emit(&mut self, event: TerminalEvent) {
         self.last_active_at = std::time::Instant::now();
-        let bytes = match &event {
-            TerminalEvent::Data { data, .. } => data.len(),
-            TerminalEvent::Exit { .. } => 16,
-        };
+        self.replay_bytes += event_bytes(&event);
         self.replay.push_back(event.clone());
-        self.replay_bytes += bytes;
         while self.replay_bytes > MAX_REPLAY_BYTES && self.replay.len() > 1 {
             if let Some(dropped) = self.replay.pop_front() {
-                self.replay_bytes -= match &dropped {
-                    TerminalEvent::Data { data, .. } => data.len(),
-                    TerminalEvent::Exit { .. } => 16,
-                };
+                self.replay_bytes -= event_bytes(&dropped);
             }
         }
         self.subscribers.retain(|tx| tx.send(event.clone()).is_ok());
@@ -91,12 +133,30 @@ impl LiveTerminal {
     }
 }
 
+/// What an event costs against [`MAX_REPLAY_BYTES`].
+fn event_bytes(event: &TerminalEvent) -> usize {
+    match event {
+        TerminalEvent::Data { data, .. } => data.len(),
+        TerminalEvent::Exit { .. } => 16,
+    }
+}
+
 struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
+    /// Terminals adopted from a predecessor stay "unarmed" until the adoption
+    /// commits: dropping them must NOT hang the shells up (or delete their
+    /// action scripts), because a failed adoption boot hands the very same
+    /// shells back to the predecessor. See [`Terminals::arm`].
+    unarmed: AtomicBool,
+    /// Set while the terminals are frozen for an engine handoff: no terminal
+    /// may be opened (the exec would kill it) or closed (the successor would
+    /// resurrect it).
+    frozen: AtomicBool,
 }
 
 impl Drop for TerminalsInner {
     fn drop(&mut self) {
+        let unarmed = *self.unarmed.get_mut();
         let sessions = self
             .sessions
             .get_mut()
@@ -105,7 +165,13 @@ impl Drop for TerminalsInner {
             .map(|(_, session)| session)
             .collect::<Vec<_>>();
         for session in sessions {
-            dispose(&session, true);
+            if unarmed {
+                // An adoption that never committed (its boot failed and the
+                // predecessor is about to take the shells back): leave them
+                // running and keep their action scripts on disk.
+                keep_for_predecessor(&session);
+            }
+            dispose(&session, !unarmed);
         }
     }
 }
@@ -154,9 +220,15 @@ fn selected_shell() -> String {
 impl Terminals {
     /// Requires a tokio runtime (spawns the exited-session reaper).
     pub fn new() -> Self {
+        Self::from_sessions(HashMap::new())
+    }
+
+    fn from_sessions(sessions: HashMap<String, Arc<Mutex<LiveTerminal>>>) -> Self {
         let terminals = Self {
             inner: Arc::new(TerminalsInner {
-                sessions: Mutex::new(HashMap::new()),
+                sessions: Mutex::new(sessions),
+                unarmed: AtomicBool::new(false),
+                frozen: AtomicBool::new(false),
             }),
         };
         tokio::spawn(reaper_task(Arc::downgrade(&terminals.inner)));
@@ -226,6 +298,11 @@ impl Terminals {
         environment: &HashMap<String, String>,
         command: Option<&str>,
     ) -> Result<TerminalSession, EngineError> {
+        if self.inner.frozen.load(Ordering::SeqCst) {
+            return Err(EngineError::Other(
+                "Terminals are paused for an engine update; try again in a moment".into(),
+            ));
+        }
         if lock(&self.inner.sessions).len() >= MAX_TERMINALS {
             return Err(EngineError::Other(format!(
                 "Too many open terminals (maximum {MAX_TERMINALS})"
@@ -257,7 +334,9 @@ impl Terminals {
                 .tempfile()?;
             script.write_all(command.as_bytes())?;
             script.flush()?;
-            (Some(script), Some(source.to_string()))
+            // Same delete-on-drop lifetime, but a `TempPath` can be kept (not
+            // deleted) and re-wrapped by the next process image at a handoff.
+            (Some(script.into_temp_path()), Some(source.to_string()))
         } else {
             (None, None)
         };
@@ -267,15 +346,13 @@ impl Terminals {
             windows::open(&shell, cwd, clamp_size(cols, rows), environment)
                 .map_err(|e| EngineError::Other(format!("could not open Windows terminal: {e}")))?;
         #[cfg(not(windows))]
-        let (master, mut child) = {
+        let (master, pid) = {
             let pty = native_pty_system();
             let pair = pty
                 .openpty(clamp_size(cols, rows))
                 .map_err(|e| EngineError::Other(format!("could not open a pty: {e}")))?;
             let mut cmd = CommandBuilder::new(&shell);
-            if !cfg!(windows) {
-                cmd.arg("-l"); // login shell — the user's real PATH/profile
-            }
+            cmd.arg("-l"); // login shell — the user's real PATH/profile
             cmd.cwd(cwd);
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
@@ -284,24 +361,57 @@ impl Terminals {
                 cmd.env(name, value);
             }
             if let Some(script) = initial_script.as_ref() {
-                cmd.env("ZERON_ACTION_SCRIPT", script.path());
+                cmd.env("ZERON_ACTION_SCRIPT", &**script);
             }
             let child = pair
                 .slave
                 .spawn_command(cmd)
                 .map_err(|e| EngineError::Other(format!("could not spawn {shell_name}: {e}")))?;
             drop(pair.slave);
-            (pair.master, child)
+            let pid = child
+                .process_id()
+                .ok_or_else(|| EngineError::Other(format!("{shell_name} has no process id")))?
+                as libc::pid_t;
+            let raw = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| EngineError::Other("pty master has no fd".into()))?;
+            // From here on the pty is ours: a dup that can cross an exec.
+            // Dropping portable-pty's master afterwards is safe (the dup keeps
+            // the pty open) and its writer (which sends EOT on drop) is never
+            // created. Dropping the std child handle neither kills nor reaps.
+            let master = pty_unix::PtyMaster::from_raw_dup(raw)
+                .map_err(|e| EngineError::Other(format!("pty master: {e}")))?;
+            drop(pair.master);
+            drop(child);
+            (master, pid)
         };
+        #[cfg(windows)]
         let killer = child.clone_killer();
+        #[cfg(not(windows))]
+        let killer: Box<dyn portable_pty::ChildKiller + Send + Sync> =
+            Box::new(pty_unix::PidKiller(pid));
+        #[cfg(windows)]
         let reader = master
             .try_clone_reader()
             .map_err(|e| EngineError::Other(format!("pty reader: {e}")))?;
+        #[cfg(windows)]
         let writer = master
             .take_writer()
             .map_err(|e| EngineError::Other(format!("pty writer: {e}")))?;
+        #[cfg(not(windows))]
+        let (reader, reader_stop) = master
+            .reader()
+            .map_err(|e| EngineError::Other(format!("pty reader: {e}")))?;
+        #[cfg(not(windows))]
+        let writer = master
+            .writer()
+            .map_err(|e| EngineError::Other(format!("pty writer: {e}")))?;
 
         let id = new_id();
+        let (pump_tx, pump_rx) = mpsc::unbounded_channel();
+        #[cfg(unix)]
+        let reap_gate = pty_unix::ReapGate::new();
         let session = Arc::new(Mutex::new(LiveTerminal {
             initial_script,
             #[cfg(all(test, windows))]
@@ -309,6 +419,15 @@ impl Terminals {
             master: Some(master),
             writer: Some(writer),
             killer,
+            cwd: cwd.to_string(),
+            shell: shell_name.clone(),
+            pump: pump_tx,
+            #[cfg(unix)]
+            pid,
+            #[cfg(unix)]
+            reap_gate: reap_gate.clone(),
+            #[cfg(unix)]
+            reader: None,
             #[cfg(windows)]
             reader_thread: None,
             #[cfg(windows)]
@@ -320,29 +439,31 @@ impl Terminals {
             last_active_at: std::time::Instant::now(),
             exited: false,
         }));
-        lock(&self.inner.sessions).insert(id.clone(), session.clone());
-
         // Raw PTY bytes: blocking reader thread → batcher task (12ms windows).
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let reader_thread = std::thread::Builder::new()
-            .name(format!("pty-read-{id}"))
-            .spawn(move || read_pty(reader, raw_tx))
-            .map_err(|e| {
-                #[cfg(windows)]
-                {
-                    lock(&self.inner.sessions).remove(&id);
-                    dispose(&session, true);
-                }
-                EngineError::Other(format!("pty reader thread: {e}"))
-            })?;
         #[cfg(windows)]
         {
+            let reader_thread = std::thread::Builder::new()
+                .name(format!("pty-read-{id}"))
+                .spawn(move || read_pty(reader, raw_tx))
+                .map_err(|e| {
+                    lock(&self.inner.sessions).remove(&id);
+                    dispose(&session, true);
+                    EngineError::Other(format!("pty reader thread: {e}"))
+                })?;
             lock(&session).reader_thread = Some(reader_thread);
         }
         #[cfg(not(windows))]
-        drop(reader_thread);
+        {
+            let handle = spawn_reader(&id, reader, reader_stop, raw_tx).map_err(|e| {
+                lock(&self.inner.sessions).remove(&id);
+                dispose(&session, true);
+                EngineError::Other(format!("pty reader thread: {e}"))
+            })?;
+            lock(&session).reader = Some(handle);
+        }
         #[cfg(not(windows))]
-        let wait = tokio::task::spawn_blocking(move || child.wait());
+        let wait = tokio::task::spawn_blocking(move || pty_unix::wait_pid_gated(pid, &reap_gate));
         #[cfg(windows)]
         let wait = {
             // Shell lifetime must not consume workers needed by other Windows
@@ -360,7 +481,28 @@ impl Terminals {
                 })?;
             tokio::spawn(async move { rx.await.map_err(std::io::Error::other)? })
         };
-        tokio::spawn(pump_output(Arc::downgrade(&session), raw_rx, wait));
+        tokio::spawn(pump_output(Arc::downgrade(&session), raw_rx, wait, pump_rx));
+
+        // Publish the terminal only once it is fully running (reader, waiter
+        // and pump started), so a freeze can never snapshot a half-started
+        // one. The frozen check and the insert are one step under the
+        // sessions lock, as is `freeze`'s flag-and-copy: an open either lands
+        // before a freeze (and is frozen with the rest) or is refused, never
+        // inserted behind a snapshot that would miss it.
+        {
+            let mut sessions = lock(&self.inner.sessions);
+            if self.inner.frozen.load(Ordering::SeqCst) {
+                drop(sessions);
+                // Hanging the shell up winds the rest down by itself: the
+                // reader sees EOF, the waiter reaps it, and the pump ends when
+                // its weak handle no longer upgrades.
+                dispose(&session, true);
+                return Err(EngineError::Other(
+                    "Terminals are paused for an engine update; try again in a moment".into(),
+                ));
+            }
+            sessions.insert(id.clone(), session.clone());
+        }
 
         if let Some(bootstrap) = bootstrap
             && let Err(err) = self.write_bytes(&id, bootstrap.as_bytes())
@@ -457,9 +599,19 @@ impl Terminals {
 
     /// Kill the shell (if still running) and drop the session + replay buffer.
     pub fn close(&self, terminal_id: &str) -> Result<(), EngineError> {
-        let session = lock(&self.inner.sessions)
-            .remove(terminal_id)
-            .ok_or_else(|| EngineError::Other("Terminal not found".into()))?;
+        // Checked and removed under one lock (see `open_session`): a terminal
+        // a freeze already copied is never closed behind its snapshot.
+        let session = {
+            let mut sessions = lock(&self.inner.sessions);
+            if self.inner.frozen.load(Ordering::SeqCst) {
+                return Err(EngineError::Other(
+                    "Terminals are paused for an engine update; try again in a moment".into(),
+                ));
+            }
+            sessions
+                .remove(terminal_id)
+                .ok_or_else(|| EngineError::Other("Terminal not found".into()))?
+        };
         if dispose(&session, true) {
             Ok(())
         } else {
@@ -475,13 +627,39 @@ impl Terminals {
         !lock(&self.inner.sessions).is_empty()
     }
 
-    /// Engine shutdown: kill every live shell.
+    /// Any shell still running. Unlike [`Self::any_open`] this ignores exited
+    /// sessions awaiting their TTL, which a handoff carries across intact.
+    pub fn any_live(&self) -> bool {
+        lock(&self.inner.sessions)
+            .values()
+            .any(|session| !lock(session).exited)
+    }
+
+    /// Engine shutdown: kill every live shell. (Terminals adopted from a
+    /// predecessor stay untouched until the adoption commits — see `arm`.)
     pub fn shutdown(&self) {
+        let unarmed = self.inner.unarmed.load(Ordering::SeqCst);
         let sessions: Vec<_> = lock(&self.inner.sessions).drain().map(|(_, s)| s).collect();
         for session in sessions {
-            dispose(&session, true);
+            if unarmed {
+                keep_for_predecessor(&session);
+            }
+            dispose(&session, !unarmed);
         }
     }
+}
+
+/// An adoption that never committed lets go of a shell without touching it:
+/// keep its action script, and keep this graph's (still running) waiter from
+/// reaping it — a shell that exits before the predecessor takes it back must
+/// stay a zombie so the predecessor reports its real exit status.
+fn keep_for_predecessor(session: &Arc<Mutex<LiveTerminal>>) {
+    let mut session = lock(session);
+    if let Some(script) = session.initial_script.take() {
+        let _ = script.keep();
+    }
+    #[cfg(unix)]
+    session.reap_gate.hold();
 }
 
 fn dispose(session: &Arc<Mutex<LiveTerminal>>, kill: bool) -> bool {
@@ -506,8 +684,45 @@ fn dispose(session: &Arc<Mutex<LiveTerminal>>, kill: bool) -> bool {
     true
 }
 
+/// Start a unix pty reader thread.
+#[cfg(unix)]
+fn spawn_reader(
+    id: &str,
+    reader: pty_unix::PtyReader,
+    stop: pty_unix::ReaderStop,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+) -> std::io::Result<ReaderHandle> {
+    let thread = std::thread::Builder::new()
+        .name(format!("pty-read-{id}"))
+        .spawn(move || read_pty_unix(reader, tx))?;
+    Ok(ReaderHandle { stop, thread })
+}
+
+/// Unix PTY reader: forwards raw chunks until EOF or a stop request. On a stop
+/// the sender is handed back (a thaw restarts reading with it); on EOF it is
+/// dropped, which is how the output pump learns the shell's output is over.
+#[cfg(unix)]
+fn read_pty_unix(
+    mut reader: pty_unix::PtyReader,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read_chunk(&mut buf) {
+            Ok(pty_unix::ReadOutcome::Data(n)) => {
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    return None;
+                }
+            }
+            Ok(pty_unix::ReadOutcome::Stopped) => return Some(tx),
+            Ok(pty_unix::ReadOutcome::Eof) | Err(_) => return None,
+        }
+    }
+}
+
 /// Blocking PTY reader: forwards raw chunks until EOF. A closed PTY reads as an
 /// error on some platforms (EIO on Linux once the shell exits) — both end the loop.
+#[cfg(windows)]
 fn read_pty(mut reader: Box<dyn Read + Send>, tx: mpsc::UnboundedSender<Vec<u8>>) {
     let mut buf = [0u8; 8192];
     loop {
@@ -534,6 +749,7 @@ async fn pump_output(
     session: Weak<Mutex<LiveTerminal>>,
     mut raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut wait: tokio::task::JoinHandle<Result<portable_pty::ExitStatus, std::io::Error>>,
+    mut ctl: mpsc::UnboundedReceiver<PumpCmd>,
 ) {
     let batch = Duration::from_millis(TERMINAL_OUTPUT_BATCH_MS);
     let emit = |buffer: Vec<u8>| -> bool {
@@ -555,9 +771,35 @@ async fn pump_output(
     let mut buffer = Vec::new();
     let mut raw_open = true;
     let mut exit_code = None;
+    let mut ctl_open = true;
 
     while raw_open || exit_code.is_none() {
         tokio::select! {
+            cmd = ctl.recv(), if ctl_open => match cmd {
+                Some(PumpCmd::FlushAndPause(ack)) => {
+                    // The reader is stopped, so everything it read is already in
+                    // `raw_rx` or `buffer`: publish it (it gets a seq and lands
+                    // in the replay window), then park. `wait` is not polled
+                    // while parked, and its thread cannot reap a held shell.
+                    while let Ok(chunk) = raw_rx.try_recv() {
+                        buffer.extend_from_slice(&chunk);
+                    }
+                    if !buffer.is_empty() && !emit(std::mem::take(&mut buffer)) {
+                        return;
+                    }
+                    let _ = ack.send(());
+                    loop {
+                        match ctl.recv().await {
+                            Some(PumpCmd::Resume) | None => break,
+                            Some(PumpCmd::FlushAndPause(ack)) => {
+                                let _ = ack.send(());
+                            }
+                        }
+                    }
+                }
+                Some(PumpCmd::Resume) => {}
+                None => ctl_open = false,
+            },
             chunk = raw_rx.recv(), if raw_open => match chunk {
                 Some(chunk) => {
                     if buffer.is_empty() {
@@ -1120,7 +1362,6 @@ mod initial_command_tests {
                 .initial_script
                 .as_ref()
                 .unwrap()
-                .path()
                 .to_path_buf();
             assert_eq!(std::fs::read_to_string(&script).unwrap(), command);
             assert_eq!(
@@ -1165,7 +1406,6 @@ mod initial_command_tests {
             .initial_script
             .as_ref()
             .unwrap()
-            .path()
             .to_path_buf();
         let mut rx = terminals.subscribe(&session.id, None).unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {

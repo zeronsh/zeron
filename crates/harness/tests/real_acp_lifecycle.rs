@@ -22,6 +22,8 @@ async fn live_run(cancel: bool) {
             let _ = tx.send(Vec::new());
             rx
         }),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         mcp: None,

@@ -1,14 +1,16 @@
 //! `zeron update` — check for and apply a newer release, natively (the same
-//! flow `edge/src/install.sh` performs: download → verify → symlink swap →
-//! service restart). macOS app bundles swap the bundle instead; source builds
-//! are report-only.
+//! flow `edge/src/install.sh` performs: download → verify → symlink swap),
+//! then move the running engine onto it: by a live handoff that keeps agents
+//! and terminals running where the engine supports it, else by a service
+//! restart. macOS app bundles swap the bundle instead; source builds are
+//! report-only.
 
 use anyhow::bail;
 use zeron_update::{InstallKind, current_version, version_newer};
 
 /// `--check` prints the verdict and exits (nonzero when an update is available,
 /// so scripts can gate on it).
-pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
+pub async fn update(edge_url: &str, check_only: bool, ipc_port: u16) -> anyhow::Result<()> {
     let manifest = zeron_update::fetch_latest(edge_url).await?;
     let current = current_version();
     if !version_newer(&manifest.version, current) {
@@ -40,6 +42,32 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 app_root.join(&manifest.version).display(),
                 manifest.version
             );
+            // A running engine that can hand itself over does so without
+            // stopping anything; only one that cannot (or none) is restarted.
+            #[cfg(unix)]
+            match crate::handoff_cli::request(ipc_port, &zeron_update::stable_exe()?).await {
+                crate::handoff_cli::Outcome::HandedOff => {
+                    println!("engine handed off; nothing was restarted.");
+                    return Ok(());
+                }
+                crate::handoff_cli::Outcome::Deferred(reason) => {
+                    println!(
+                        "the engine will move onto {} by itself at the next quiet moment ({reason}).",
+                        manifest.version
+                    );
+                    return Ok(());
+                }
+                crate::handoff_cli::Outcome::Failed(reason) => {
+                    println!(
+                        "note: live handoff failed ({reason}). The engine keeps running the old version. An engine installed as a service restarts into the new one when idle; otherwise restart it yourself when convenient (`zeron daemon restart` restarts the service)."
+                    );
+                    return Ok(());
+                }
+                crate::handoff_cli::Outcome::Unsupported
+                | crate::handoff_cli::Outcome::NoEngine => {}
+            }
+            #[cfg(not(unix))]
+            let _ = ipc_port;
             match zeron_update::restart_service() {
                 Ok(()) => println!("engine service restarted."),
                 Err(err) => println!(

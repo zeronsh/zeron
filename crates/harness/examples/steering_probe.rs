@@ -64,6 +64,8 @@ async fn main() -> anyhow::Result<()> {
             let _ = tx.send(vec![]);
             rx
         }),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let mut stream =
         tokio::time::timeout(Duration::from_secs(90), harness.run(request, controls)).await??;

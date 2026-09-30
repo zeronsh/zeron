@@ -1,6 +1,7 @@
 //! Frame → [`AgentEvent`] normalization (init dedupe, subagent tagging, tool
 //! decoding, error-code mapping).
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeron_proto::{AgentEvent, DoneStatus, HarnessId, TodoItem, ToolCall};
 
@@ -183,6 +184,13 @@ fn is_synthetic_user_text(text: &str) -> bool {
 /// boundary (it resets accumulated parts), so one run ⇒ one `SessionStarted`;
 /// the wake turn's own frames flow through and the engine's parked-session
 /// resume turns them into the done→Working→done wake.
+///
+/// It is also the `normalizer` part of a live-update handoff's state (see
+/// `super::ClaudeLoopState`): all of it is small plain data, and none of it
+/// can be rebuilt from the wire (message ids are random, agent pairings were
+/// seen once). A field added here must keep old handoffs readable
+/// (`#[serde(default)]`) or bump `super::STATE_VERSION`.
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Normalizer {
     saw_init: bool,
     last_model: Option<String>,
@@ -190,7 +198,7 @@ pub(crate) struct Normalizer {
     /// tool_use id. `SendMessage` steers address the AGENT id; this map
     /// re-keys them onto the spawn chip's feed (the wire never echoes the
     /// steer on the child feed — live-verified 2.1.228).
-    agent_tasks: std::collections::HashMap<String, String>,
+    agent_tasks: std::collections::BTreeMap<String, String>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -198,7 +206,7 @@ pub(crate) struct Normalizer {
     /// subagent traffic stamped a spawn ref onto an ordinary Run chip —
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
-    agent_spawn_tools: std::collections::HashSet<String>,
+    agent_spawn_tools: std::collections::BTreeSet<String>,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
@@ -211,8 +219,8 @@ impl Normalizer {
         Self {
             saw_init: false,
             last_model: None,
-            agent_tasks: std::collections::HashMap::new(),
-            agent_spawn_tools: std::collections::HashSet::new(),
+            agent_tasks: std::collections::BTreeMap::new(),
+            agent_spawn_tools: std::collections::BTreeSet::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
         }

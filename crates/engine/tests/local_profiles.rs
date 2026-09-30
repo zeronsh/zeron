@@ -59,6 +59,23 @@ fn concurrent_engine_info(
         .collect()
 }
 
+#[test]
+fn engine_info_reports_the_build_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config(
+        dir.path(),
+        "http://127.0.0.1:1".into(),
+        Some("client_test"),
+        None,
+    );
+    let info = Engine::engine_info(&config, WorkspaceScope::Local).expect("engine info");
+    assert_eq!(
+        info.version.as_deref(),
+        Some(zeron_update::current_version()),
+        "viewports show which build answered"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_engine_info_and_runtime_share_one_device_identity() {
     let dir = tempfile::tempdir().expect("tempdir");

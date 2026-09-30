@@ -1,0 +1,11 @@
+Live update demo (real processes; the agent is a scripted stand-in for an LLM CLI)
+
+» engine pid 2868694 running /home/user/Documents/dev/zeron-live-update-me/target/debug/zeron
+» agent pid  2869079 (a child of the engine)
+» shell pid  2869197 (a child of the engine)
+» agent is parked on a question; handing the engine to a new binary...
+» engine pid 2868694 now running /tmp/.tmpRHXpf9/zeron-next
+» agent pid  2869079 / shell pid 2869197 — unchanged, still alive
+» connections refused during the handoff: 0
+» the parked question was answered after the handoff (the agent replied: answered: B)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 6.06s

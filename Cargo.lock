@@ -12104,6 +12104,7 @@ name = "zeron"
 version = "0.2.99"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "embed-resource",
  "libc",
@@ -12220,6 +12221,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "windows-sys 0.61.2",
  "zeron-proto",

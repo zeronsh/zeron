@@ -1612,6 +1612,13 @@ impl AgentAccounts {
         }
     }
 
+    /// An OAuth add-account flow is waiting on its browser callback or its
+    /// spawned CLI. Its state (and any live `codex login` child) is in memory
+    /// only, so an engine handoff must wait for it to finish.
+    pub fn login_in_flight(&self) -> bool {
+        !lock(&self.inner.flows).is_empty()
+    }
+
     /// Supersede — and reap — any pending spawned flow for `harness` (codex:
     /// `codex login` binds a fixed loopback OAuth port, so a lingering flow
     /// makes every retry exit on EADDRINUSE; cursor: one flow is simply the

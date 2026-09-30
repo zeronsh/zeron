@@ -363,11 +363,7 @@ impl HarnessesPage {
             return false;
         };
         self.target_device.as_deref().map_or_else(
-            || {
-                engine
-                    .engine_info()
-                    .supports(zeron_proto::capabilities::HARNESS_UPDATES_V1)
-            },
+            || engine.supports(zeron_proto::capabilities::HARNESS_UPDATES_V1),
             |device| state.device_supports(device, zeron_proto::capabilities::HARNESS_UPDATES_V1),
         )
     }

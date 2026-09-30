@@ -22,7 +22,10 @@ pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+#[cfg(unix)]
+pub mod handoff;
 pub mod harness_updates;
+pub mod host;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
@@ -125,6 +128,7 @@ pub struct EngineConfig {
 
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct EngineCore {
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
@@ -156,6 +160,24 @@ pub struct EngineCore {
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
+    /// The IPC listener's descriptor, recorded for a live handoff (`-1` until
+    /// something serves IPC). See [`handoff`].
+    handoff_listener_fd: std::sync::atomic::AtomicI32,
+    /// A handoff is running; a second one is refused.
+    handoff_running: std::sync::atomic::AtomicBool,
+    /// This engine's data directory.
+    data_dir: PathBuf,
+    /// Where a failed successor hands the handoff back to (see
+    /// [`handoff::rollback_exe`]); set at boot, before any update can swap the
+    /// binary on disk.
+    rollback_exe: std::sync::OnceLock<PathBuf>,
+}
+
+/// What a predecessor engine image handed over: the live terminals and runs.
+#[cfg(unix)]
+pub struct AdoptedState {
+    pub terminals: Vec<terminals::handoff::TerminalHandoff>,
+    pub runs: Vec<handoff::RunHandoff>,
 }
 
 impl EngineCore {
@@ -213,6 +235,56 @@ impl EngineCore {
         edge: Option<EdgeConfig>,
         lock: InstanceLock,
     ) -> Result<Self, EngineError> {
+        Self::assemble_inner(
+            profile,
+            registry,
+            default_harness,
+            edge,
+            lock,
+            #[cfg(unix)]
+            None,
+        )
+    }
+
+    /// Assemble as the successor of a live handoff: terminals (and, in time,
+    /// runs) the predecessor image handed over are adopted before anything
+    /// else can notice them missing.
+    #[cfg(unix)]
+    pub fn assemble_with_profile_adopting(
+        profile: EngineProfile,
+        registry: Arc<HarnessRegistry>,
+        default_harness: HarnessId,
+        edge: Option<EdgeConfig>,
+        lock: InstanceLock,
+        adopted: AdoptedState,
+    ) -> Result<Self, EngineError> {
+        Self::assemble_inner(
+            profile,
+            registry,
+            default_harness,
+            edge,
+            lock,
+            Some(adopted),
+        )
+    }
+
+    /// The adoption committed: the adopted instance lock and terminals now
+    /// belong to this engine and release like any other (until then, a failed
+    /// boot must leave them to the predecessor it hands back to).
+    #[cfg(unix)]
+    pub fn commit_adoption(&self) {
+        self._instance_lock.arm();
+        self.terminals.arm();
+    }
+
+    fn assemble_inner(
+        profile: EngineProfile,
+        registry: Arc<HarnessRegistry>,
+        default_harness: HarnessId,
+        edge: Option<EdgeConfig>,
+        lock: InstanceLock,
+        #[cfg(unix)] adopted: Option<AdoptedState>,
+    ) -> Result<Self, EngineError> {
         let data_dir = profile.device_root();
         std::fs::create_dir_all(data_dir)?;
         let legacy_uploads_root = profile.claim_legacy_uploads_root()?;
@@ -246,6 +318,12 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        // Runs a predecessor handed over must be registered before stale-run
+        // recovery inspects the journals (it skips chats with a live run).
+        #[cfg(unix)]
+        if let Some(adopted) = adopted.as_ref() {
+            sessions.adopt_runs(adopted.runs.clone());
+        }
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
@@ -257,6 +335,12 @@ impl EngineCore {
         let change_requests = CheckoutChangeRequests::start(repos.clone(), &device_id);
         let workspace_files =
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
+        #[cfg(unix)]
+        let terminals = match adopted {
+            Some(adopted) => Terminals::adopt(adopted.terminals)?,
+            None => Terminals::new(),
+        };
+        #[cfg(not(unix))]
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
@@ -342,6 +426,10 @@ impl EngineCore {
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             _instance_lock: lock,
+            handoff_listener_fd: std::sync::atomic::AtomicI32::new(-1),
+            handoff_running: std::sync::atomic::AtomicBool::new(false),
+            data_dir: data_dir.to_path_buf(),
+            rollback_exe: std::sync::OnceLock::new(),
         })
     }
 
@@ -552,16 +640,144 @@ pub struct EngineRuntime {
 }
 
 /// IPC-only lifecycle control owned by `zeron headless`. The regular
-/// [`EngineRpc`] deliberately does not expose this method, so a viewport
-/// attached to another headed process cannot shut down that process's engine.
+/// [`EngineRpc`] deliberately does not expose these methods, so a viewport
+/// attached to another headed process cannot shut down or replace that
+/// process's engine.
 struct HeadlessRpc {
     inner: Arc<dyn RpcService>,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    #[cfg(unix)]
+    handoff: HandoffControl,
+}
+
+/// What `HandoffEngine` needs: the runtime to hand off, and where to leave the
+/// outcome of a refused attempt for `HandoffStatus`.
+#[cfg(unix)]
+struct HandoffControl {
+    // Weak: this control lives in the IPC service, whose per-connection tasks
+    // can outlive `Engine::run`; it must not keep the runtime (lock, store,
+    // terminals) alive.
+    runtime: std::sync::Weak<EngineRuntime>,
+    state: Arc<std::sync::Mutex<HandoffState>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, serde::Serialize)]
+struct HandoffState {
+    state: &'static str,
+    message: Option<String>,
+    /// The handoff was deferred (work in flight), not broken: nothing was
+    /// touched and the engine retries by itself.
+    busy: bool,
+    /// The version of the binary answering: after a handoff it tells the
+    /// caller whether the NEW binary took over or the engine rolled back.
+    version: &'static str,
+}
+
+#[cfg(unix)]
+impl Default for HandoffState {
+    fn default() -> Self {
+        Self {
+            state: "idle",
+            message: None,
+            busy: false,
+            version: zeron_update::current_version(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl HeadlessRpc {
+    fn start_handoff(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            exe: PathBuf,
+        }
+        let Params { exe } =
+            serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))?;
+        {
+            let mut state = self
+                .handoff
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.state == "running" {
+                return Err(RpcError::Failed("a handoff is already running".into()));
+            }
+            *state = HandoffState {
+                state: "running",
+                message: None,
+                busy: false,
+                version: zeron_update::current_version(),
+            };
+        }
+        let runtime = self.handoff.runtime.clone();
+        let state = self.handoff.state.clone();
+        tokio::spawn(async move {
+            // Let the unary reply reach the client before the image is replaced.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let Some(runtime) = runtime.upgrade() else {
+                // The engine is going away; leave the state readable.
+                *state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = HandoffState::default();
+                return;
+            };
+            // Returns only on failure: on success this process image is gone.
+            let outcome = runtime.core().handoff(&exe).await;
+            tracing::warn!(error = %outcome, "live handoff did not happen; the engine keeps running");
+            *state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = HandoffState {
+                state: "failed",
+                message: Some(outcome.to_string()),
+                busy: matches!(outcome, handoff::HandoffError::Busy(_)),
+                version: zeron_update::current_version(),
+            };
+        });
+        RpcReply::value(&serde_json::json!({ "ok": true }))
+    }
 }
 
 #[async_trait]
 impl RpcService for HeadlessRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        #[cfg(unix)]
+        {
+            if method == methods::HANDOFF_ENGINE {
+                return self.start_handoff(params);
+            }
+            // Only the headless IPC owner can hand itself over, so only it
+            // advertises the capability (a headed app's embedded engine
+            // shares `EngineRpc` but cannot serve `HandoffEngine`).
+            if method == methods::ENGINE_INFO {
+                return match self.inner.handle(method, params).await? {
+                    RpcReply::Value(value) => {
+                        match serde_json::from_value::<EngineInfo>(value.clone()) {
+                            Ok(mut info) => {
+                                if !info.supports(zeron_proto::capabilities::HANDOFF_V1) {
+                                    info.capabilities
+                                        .push(zeron_proto::capabilities::HANDOFF_V1.to_string());
+                                }
+                                host::advertise_app_host(&mut info);
+                                RpcReply::value(&info)
+                            }
+                            Err(_) => Ok(RpcReply::Value(value)),
+                        }
+                    }
+                    other => Ok(other),
+                };
+            }
+            if method == methods::HANDOFF_STATUS {
+                let state = self
+                    .handoff
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                return RpcReply::value(&state);
+            }
+        }
         if method != methods::STOP_ENGINE {
             return self.inner.handle(method, params).await;
         }
@@ -710,6 +926,7 @@ impl Engine {
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
+            version: Some(zeron_update::current_version().to_string()),
         })
     }
 
@@ -721,7 +938,15 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, None).await
+        Self::assemble_runtime_inner(
+            config,
+            auth,
+            profile,
+            None,
+            #[cfg(unix)]
+            None,
+        )
+        .await
     }
 
     /// Like [`Self::assemble_runtime`], but against an [`InstanceLock`] the
@@ -733,7 +958,28 @@ impl Engine {
         profile: EngineProfile,
         lock: InstanceLock,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, Some(lock)).await
+        Self::assemble_runtime_inner(
+            config,
+            auth,
+            profile,
+            Some(lock),
+            #[cfg(unix)]
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::assemble_runtime_with_lock`], as the successor of a live
+    /// handoff (see [`handoff`]): adopts the inherited lock, terminals and runs.
+    #[cfg(unix)]
+    pub async fn assemble_runtime_adopting(
+        config: &EngineConfig,
+        auth: Auth,
+        profile: EngineProfile,
+        lock: InstanceLock,
+        adopted: AdoptedState,
+    ) -> anyhow::Result<EngineRuntime> {
+        Self::assemble_runtime_inner(config, auth, profile, Some(lock), Some(adopted)).await
     }
 
     async fn assemble_runtime_inner(
@@ -741,6 +987,7 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
         lock: Option<InstanceLock>,
+        #[cfg(unix)] adopted: Option<AdoptedState>,
     ) -> anyhow::Result<EngineRuntime> {
         let edge_enabled = match profile.scope() {
             WorkspaceScope::Local => false,
@@ -780,12 +1027,14 @@ impl Engine {
 
         let preview_org = profile.org_id().to_string();
         let core = match lock {
-            Some(lock) => EngineCore::assemble_with_profile_locked(
+            Some(lock) => EngineCore::assemble_inner(
                 profile,
                 Arc::new(default_registry()),
                 config.default_harness,
                 edge.clone(),
                 lock,
+                #[cfg(unix)]
+                adopted,
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
@@ -870,45 +1119,84 @@ impl Engine {
     /// executor, IPC server, and — when edge+auth are ready — the device-room host
     /// relay + peer link cache (targetDeviceId routing).
     pub async fn run(self) -> anyhow::Result<()> {
+        self.run_with(
+            #[cfg(unix)]
+            None,
+            false,
+        )
+        .await
+    }
+
+    /// [`Self::run`] as the engine host of a headed app (`zeron headless
+    /// --host`): a captured cloud profile that still needs its organization is
+    /// onboarded by the attached window over IPC instead of on a terminal that
+    /// does not exist.
+    pub async fn run_host(self) -> anyhow::Result<()> {
+        self.run_with(
+            #[cfg(unix)]
+            None,
+            true,
+        )
+        .await
+    }
+
+    /// [`Self::run_adopting`] for an engine host.
+    #[cfg(unix)]
+    pub async fn run_host_adopting(self, adoption: handoff::Adoption) -> anyhow::Result<()> {
+        self.run_with(Some(adoption), true).await
+    }
+
+    /// Run as the successor of a live handoff: adopt the predecessor's IPC
+    /// listener, instance lock, terminals and runs (see [`handoff`]), then
+    /// serve as usual. If this image cannot finish booting it hands back to
+    /// the predecessor, which adopts the same manifest.
+    #[cfg(unix)]
+    pub async fn run_adopting(self, adoption: handoff::Adoption) -> anyhow::Result<()> {
+        self.run_with(Some(adoption), false).await
+    }
+
+    async fn run_with(
+        self,
+        #[cfg(unix)] adoption: Option<handoff::Adoption>,
+        host: bool,
+    ) -> anyhow::Result<()> {
         let config = self.config;
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
-        std::fs::create_dir_all(&config.data_dir)?;
-        let auth = Self::build_auth(&config).await;
-        let mut auth_state = auth.watch_state();
-        let workspace_scope = Self::initial_workspace_scope(&auth);
-        let mut profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
-        let _refresh_loop = auth.spawn_refresh_loop();
-
-        // A captured cloud session without an organization must finish onboarding
-        // before its profile can open. A clean signed-out install is local and never
-        // enters the terminal sign-in flow.
-        if workspace_scope == WorkspaceScope::Synced && profile.is_none() {
-            terminal_sign_in(&auth).await?;
-            profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
+        let booted = match Self::boot(
+            &config,
+            #[cfg(unix)]
+            adoption.as_ref(),
+            host,
+        )
+        .await
+        {
+            Ok(booted) => booted,
+            Err(err) => {
+                #[cfg(unix)]
+                if let Some(adoption) = adoption {
+                    handoff::roll_back(adoption, &err);
+                }
+                return Err(err);
+            }
+        };
+        // Fully up: the predecessor's originals are no longer needed, and the
+        // adopted lock now releases like any other.
+        #[cfg(unix)]
+        if let Some(adoption) = adoption {
+            booted.runtime.core().commit_adoption();
+            handoff::prune_rollback_copies(&config.data_dir);
+            adoption.commit();
         }
-        let profile = profile
-            .ok_or_else(|| EngineError::Other("synced workspace profile is not ready".into()))?;
-
-        let runtime = Self::assemble_runtime(&config, auth, profile).await?;
-        // The desktop app or `zeron update` may install a newer binary under
-        // a running service; restart into it once no run or terminal is live.
-        if let Some(updater) = runtime.core().updater() {
-            updater.restart_when_superseded();
-        }
-
-        // A daemon exists to serve this port, so a bind failure is fatal here —
-        // unlike the headed app, which can still work over its in-process
-        // transport (see `serve_ipc`).
-        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
-        let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
-            inner: runtime.core().rpc_service(),
-            stop_tx,
-        });
-        let server = serve_ipc(config.ipc_port, service).await?;
-        // Only a port this process actually serves goes to agents: the
-        // injected MCP server must dial back into THIS engine.
-        runtime.core().sessions.set_ipc_port(config.ipc_port);
+        let _ = std::fs::remove_file(config.data_dir.join("engine-stopped"));
+        let Booted {
+            runtime,
+            server,
+            mut stop_rx,
+            mut auth_state,
+            workspace_scope,
+            _refresh_loop,
+        } = booted;
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -927,10 +1215,287 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        // Tell whoever supervises this engine that it went away on purpose.
+        let _ = std::fs::write(config.data_dir.join("engine-stopped"), b"");
         server.abort();
         runtime.shutdown().await;
         Ok(())
     }
+
+    /// Everything up to and including serving IPC. A failure here, in an
+    /// adopting image, is what a rollback covers.
+    async fn boot(
+        config: &EngineConfig,
+        #[cfg(unix)] adoption: Option<&handoff::Adoption>,
+        host: bool,
+    ) -> anyhow::Result<Booted> {
+        std::fs::create_dir_all(&config.data_dir)?;
+        // Nothing this image spawns may inherit what the predecessor handed
+        // over until the adoption commits.
+        #[cfg(unix)]
+        if let Some(adoption) = adoption {
+            adoption.secure_originals();
+        }
+        let auth = Self::build_auth(config).await;
+        let auth_state = auth.watch_state();
+        let workspace_scope = Self::initial_workspace_scope(&auth);
+        let mut profile = Self::resolve_profile(config, &auth, workspace_scope)?;
+        let refresh_loop = auth.spawn_refresh_loop();
+
+        // A captured cloud session without an organization must finish onboarding
+        // before its profile can open. A clean signed-out install is local and never
+        // enters the terminal sign-in flow.
+        //
+        // An engine host has no terminal: it serves identity and sign-in over
+        // IPC first (the attached window drives the onboarding) and keeps that
+        // very listener for the assembled service, so the window's connection
+        // and subscriptions never notice the switch.
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(unix)]
+        let mut front: Option<HostFront> = None;
+        if workspace_scope == WorkspaceScope::Synced && profile.is_none() {
+            #[cfg(unix)]
+            if host && adoption.is_none() {
+                let hosted =
+                    HostFront::serve(config, &auth, workspace_scope, stop_tx.clone()).await?;
+                wait_for_host_onboarding(&auth, &mut stop_rx).await?;
+                front = Some(hosted);
+            } else {
+                terminal_sign_in(&auth).await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = host;
+                terminal_sign_in(&auth).await?;
+            }
+            profile = Self::resolve_profile(config, &auth, workspace_scope)?;
+        }
+        let profile = profile
+            .ok_or_else(|| EngineError::Other("synced workspace profile is not ready".into()))?;
+
+        #[cfg(unix)]
+        let runtime = match adoption {
+            Some(adoption) => {
+                let lock = InstanceLock::adopt(adoption.manifest.lock_fd, &config.data_dir)?;
+                let adopted = AdoptedState {
+                    terminals: adoption.manifest.terminals.clone(),
+                    runs: adoption.manifest.runs.clone(),
+                };
+                Self::assemble_runtime_adopting(config, auth, profile, lock, adopted).await?
+            }
+            None => Self::assemble_runtime(config, auth, profile).await?,
+        };
+        #[cfg(not(unix))]
+        let runtime = Self::assemble_runtime(config, auth, profile).await?;
+        let runtime = Arc::new(runtime);
+        #[cfg(unix)]
+        {
+            let dir = config.data_dir.clone();
+            if let Ok(path) = tokio::task::spawn_blocking(move || handoff::rollback_exe(&dir)).await
+            {
+                let _ = runtime.core().rollback_exe.set(path);
+            }
+        }
+
+        // A daemon exists to serve this port, so a bind failure is fatal here —
+        // unlike the headed app, which can still work over its in-process
+        // transport (see `serve_ipc`).
+        let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
+            inner: runtime.core().rpc_service(),
+            stop_tx,
+            #[cfg(unix)]
+            handoff: HandoffControl {
+                runtime: Arc::downgrade(&runtime),
+                state: Arc::default(),
+            },
+        });
+        #[cfg(unix)]
+        let (server, port) = {
+            let (server, listener_fd, port) = match adoption {
+                _ if front.is_some() => {
+                    let mut front = front.take().expect("checked");
+                    let server = front.finish(service);
+                    (server, front.listener_fd, front.port)
+                }
+                Some(adoption) => {
+                    let listener = handoff::listener_from_inherited(adoption.manifest.listener_fd)?;
+                    let listener_fd = std::os::fd::AsRawFd::as_raw_fd(&listener);
+                    let port = listener.local_addr()?.port();
+                    if port != config.ipc_port {
+                        tracing::warn!(
+                            inherited = port,
+                            configured = config.ipc_port,
+                            "the inherited IPC listener is on a different port than configured; keeping it"
+                        );
+                    }
+                    (serve_ipc_on(listener, service), listener_fd, port)
+                }
+                None => {
+                    let (server, listener_fd) = serve_ipc_with_fd(config.ipc_port, service).await?;
+                    (server, listener_fd, config.ipc_port)
+                }
+            };
+            runtime.core().set_handoff_listener(listener_fd);
+            (server, port)
+        };
+        #[cfg(not(unix))]
+        let (server, port) = (serve_ipc(config.ipc_port, service).await?, config.ipc_port);
+        // Only a port this process actually serves goes to agents: the
+        // injected MCP server must dial back into THIS engine.
+        runtime.core().sessions.set_ipc_port(port);
+
+        // The desktop app, `zeron update` or the checker itself may install a
+        // newer binary under this engine. Move onto it: by a live handoff
+        // where that is possible (agents and terminals keep running), else —
+        // for the installed service only — by a restart at a quiet moment.
+        // Only now, with IPC served and the listener recorded: an earlier poll
+        // would find the engine unable to hand off and back off for minutes.
+        if let Some(updater) = runtime.core().updater() {
+            #[cfg(unix)]
+            {
+                // A rollback landed here because that version could not adopt
+                // this engine's state: never hand off to it again.
+                if let Some(version) = adoption.and_then(|a| a.rolled_back_from.as_deref()) {
+                    updater.skip_handoff_for(version);
+                }
+                let engine = Arc::downgrade(&runtime);
+                updater.set_handoff(Arc::new(move |exe| {
+                    let engine = engine.clone();
+                    Box::pin(async move {
+                        let Some(runtime) = engine.upgrade() else {
+                            return zeron_update::HandoffOutcome::Failed(
+                                "the engine is shutting down".into(),
+                            );
+                        };
+                        match runtime.core().handoff(&exe).await {
+                            // A component that could not freeze right now (a
+                            // terminal that is exiting) was thawed and lost
+                            // nothing: try again on the next poll.
+                            handoff::HandoffError::Busy(reason) => {
+                                zeron_update::HandoffOutcome::Busy(reason)
+                            }
+                            handoff::HandoffError::Freeze(reason) => {
+                                zeron_update::HandoffOutcome::Busy(reason)
+                            }
+                            other => zeron_update::HandoffOutcome::Failed(other.to_string()),
+                        }
+                    })
+                }));
+            }
+            updater.restart_when_superseded();
+        }
+
+        Ok(Booted {
+            runtime,
+            server,
+            stop_rx,
+            auth_state,
+            workspace_scope,
+            _refresh_loop: refresh_loop,
+        })
+    }
+}
+
+/// The IPC front of an engine host that is still waiting for the window to
+/// finish signing in: identity and sign-in are served now, everything else
+/// waits, and the SAME listener carries the assembled service afterwards.
+#[cfg(unix)]
+struct HostFront {
+    /// Taken by [`Self::finish`]; still here on a failed boot, when dropping
+    /// the front stops serving and tells waiting clients why.
+    server: Option<tokio::task::JoinHandle<()>>,
+    listener_fd: std::os::fd::RawFd,
+    port: u16,
+    cell: Arc<tokio::sync::OnceCell<Arc<dyn RpcService>>>,
+    state: tokio::sync::watch::Sender<host::DeferredEngineState>,
+}
+
+#[cfg(unix)]
+impl HostFront {
+    async fn serve(
+        config: &EngineConfig,
+        auth: &Auth,
+        scope: WorkspaceScope,
+        stop: tokio::sync::mpsc::UnboundedSender<()>,
+    ) -> anyhow::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let (state, state_rx) = tokio::sync::watch::channel(host::DeferredEngineState::Waiting);
+        let cell = Arc::new(tokio::sync::OnceCell::new());
+        let service = Arc::new(
+            host::DeferredEngineRpc::new(
+                rpc::AuthRpc::new(auth.clone()),
+                Engine::engine_info(config, scope)?,
+                state_rx,
+                cell.clone(),
+            )
+            .with_stop(stop),
+        );
+        // A host exists to serve this port: failing to bind is fatal.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.ipc_port)).await?;
+        let listener_fd = listener.as_raw_fd();
+        let port = listener.local_addr()?.port();
+        Ok(Self {
+            server: Some(serve_ipc_on(listener, service)),
+            listener_fd,
+            port,
+            cell,
+            state,
+        })
+    }
+
+    /// The engine is assembled: hand the waiting calls to its service and
+    /// give the running server to the caller.
+    fn finish(&mut self, service: Arc<dyn RpcService>) -> tokio::task::JoinHandle<()> {
+        let _ = self.cell.set(service);
+        self.state.send_replace(host::DeferredEngineState::Ready);
+        self.server.take().expect("finished once")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HostFront {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            self.state.send_replace(host::DeferredEngineState::Failed(
+                "the engine failed to start".into(),
+            ));
+            server.abort();
+        }
+    }
+}
+
+/// Wait for the window to finish sign-in and organization onboarding. A stop
+/// request ends the wait (the host exits instead of waiting forever).
+#[cfg(unix)]
+async fn wait_for_host_onboarding(
+    auth: &Auth,
+    stop: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) -> anyhow::Result<()> {
+    let mut state = auth.watch_state();
+    loop {
+        if state.borrow().is_signed_in() {
+            return Ok(());
+        }
+        tokio::select! {
+            changed = state.changed() => {
+                if changed.is_err() {
+                    anyhow::bail!("authentication state closed before workspace onboarding");
+                }
+            }
+            _ = stop.recv() => anyhow::bail!("stopped before sign-in finished"),
+        }
+    }
+}
+
+/// A headless engine that is assembled and serving.
+struct Booted {
+    runtime: Arc<EngineRuntime>,
+    server: tokio::task::JoinHandle<()>,
+    stop_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    auth_state: tokio::sync::watch::Receiver<AuthState>,
+    workspace_scope: WorkspaceScope,
+    _refresh_loop: tokio::task::JoinHandle<()>,
 }
 
 async fn wait_for_signed_out(state: &mut tokio::sync::watch::Receiver<AuthState>) {
@@ -978,10 +1543,33 @@ pub async fn serve_ipc(
     service: std::sync::Arc<dyn zeron_rpc::RpcService>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(zeron_rpc::serve_ws_listener(
-        listener, service,
-    )))
+    Ok(serve_ipc_on(listener, service))
+}
+
+/// Serve the typed RPC on an already-bound listener (a predecessor engine's,
+/// inherited across a live handoff).
+pub fn serve_ipc_on(
+    listener: tokio::net::TcpListener,
+    service: std::sync::Arc<dyn zeron_rpc::RpcService>,
+) -> tokio::task::JoinHandle<()> {
+    if let Ok(addr) = listener.local_addr() {
+        tracing::info!(port = addr.port(), "IPC server listening");
+    }
+    tokio::spawn(zeron_rpc::serve_ws_listener(listener, service))
+}
+
+/// [`serve_ipc`], also returning the listener's descriptor so a live handoff
+/// can pass the socket on: clients then queue in its backlog while the
+/// engine is replaced instead of being refused.
+#[cfg(unix)]
+pub async fn serve_ipc_with_fd(
+    port: u16,
+    service: std::sync::Arc<dyn zeron_rpc::RpcService>,
+) -> std::io::Result<(tokio::task::JoinHandle<()>, std::os::fd::RawFd)> {
+    use std::os::fd::AsRawFd;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let fd = listener.as_raw_fd();
+    Ok((serve_ipc_on(listener, service), fd))
 }
 
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the

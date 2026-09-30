@@ -20,12 +20,24 @@ use crate::EngineError;
 #[derive(Debug)]
 pub struct InstanceLock {
     _file: File,
+    /// An adopted lock (see [`InstanceLock::adopt`]) shares its open file
+    /// description with the descriptor its predecessor handed over, so an
+    /// explicit unlock on drop would release it for that original too. It
+    /// stays held until the adoption commits.
+    #[cfg(unix)]
+    unlock_on_drop: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(unix)]
 impl Drop for InstanceLock {
     fn drop(&mut self) {
         use std::os::unix::io::AsRawFd;
+        if !self
+            .unlock_on_drop
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         // A child between fork and exec can still own a duplicate descriptor.
         // Release the shared open-file-description lock explicitly instead of
         // waiting for every inherited descriptor to close.
@@ -117,7 +129,70 @@ impl InstanceLock {
             // considered only after the OS lock probe reports contention.
             let _ = std::fs::write(windows_pid_path(data_dir), std::process::id().to_string());
         }
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: file,
+            #[cfg(unix)]
+            unlock_on_drop: std::sync::atomic::AtomicBool::new(true),
+        })
+    }
+
+    /// The lock file's descriptor, so a handoff can carry it across `execve`.
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self._file.as_raw_fd()
+    }
+
+    /// Adopt the lock a predecessor engine image holds, without touching it.
+    ///
+    /// `flock` belongs to the open file description, which the inherited `fd`
+    /// and our dup share, so the lock is held throughout and a fresh
+    /// [`Self::acquire`] would (correctly) fail. Working on a dup leaves the
+    /// original open and inheritable so a failed adoption can hand back to the
+    /// predecessor; until [`Self::arm`] the adopted lock never unlocks on
+    /// drop. The fd must be the lock file of `data_dir` (same device and
+    /// inode), or a stale manifest could make us "hold" an unrelated file.
+    #[cfg(unix)]
+    pub fn adopt(fd: std::os::fd::RawFd, data_dir: &Path) -> Result<Self, EngineError> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::os::unix::fs::MetadataExt;
+        if fd < 3 {
+            return Err(EngineError::Other(format!(
+                "inherited lock descriptor {fd} is not valid"
+            )));
+        }
+        let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if dup < 0 {
+            return Err(EngineError::Io(std::io::Error::last_os_error()));
+        }
+        let file = File::from(unsafe { OwnedFd::from_raw_fd(dup) });
+        let path = data_dir.join("engine.lock");
+        let (held, expected) = (file.metadata()?, std::fs::metadata(&path)?);
+        if (held.dev(), held.ino()) != (expected.dev(), expected.ino()) {
+            return Err(EngineError::Other(format!(
+                "inherited descriptor {fd} is not {}",
+                path.display()
+            )));
+        }
+        // The dup shares its file offset with the predecessor's descriptor, so
+        // rewind before stamping or the pid lands after a hole of NULs.
+        let mut stamp = &file;
+        let _ = std::io::Seek::seek(&mut stamp, std::io::SeekFrom::Start(0));
+        let _ = stamp.set_len(0);
+        let _ = write!(stamp, "{}", std::process::id());
+        let _ = stamp.flush();
+        Ok(Self {
+            _file: file,
+            unlock_on_drop: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// The adoption committed: from here dropping this lock releases it, like
+    /// any other.
+    #[cfg(unix)]
+    pub fn arm(&self) {
+        self.unlock_on_drop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Best-effort liveness probe: the pid stamped by the engine currently holding
@@ -221,6 +296,56 @@ mod tests {
         assert!(InstanceLock::holder(dir.path()).is_some());
         drop(replacement);
         assert_eq!(InstanceLock::holder(dir.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_adopted_lock_stays_held_until_armed() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = InstanceLock::acquire(dir.path()).unwrap();
+        let fd = original.raw_fd();
+        let adopted = InstanceLock::adopt(fd, dir.path()).unwrap();
+        assert!(
+            InstanceLock::acquire(dir.path()).is_err(),
+            "still held after adoption"
+        );
+        assert_eq!(
+            InstanceLock::holder(dir.path()).as_deref(),
+            Some(std::process::id().to_string().as_str()),
+            "the adopter restamps its pid"
+        );
+        // Unarmed: dropping the adopted lock must not release the shared
+        // open file description (a failed adoption hands the original back).
+        drop(adopted);
+        assert!(
+            InstanceLock::acquire(dir.path()).is_err(),
+            "the original still holds it"
+        );
+        // Armed (the adoption committed): dropping releases it like any lock.
+        let adopted = InstanceLock::adopt(fd, dir.path()).unwrap();
+        adopted.arm();
+        drop(adopted);
+        drop(original);
+        assert_eq!(InstanceLock::holder(dir.path()), None);
+        InstanceLock::acquire(dir.path()).expect("free once released");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopt_rejects_descriptors_that_are_not_this_data_dirs_lock() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let _held = InstanceLock::acquire(dir.path()).unwrap();
+        let unrelated = std::fs::File::create(dir.path().join("other")).unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let elsewhere = InstanceLock::acquire(other_dir.path()).unwrap();
+        for fd in [0, 1, 2, -1, 9999, unrelated.as_raw_fd(), elsewhere.raw_fd()] {
+            assert!(InstanceLock::adopt(fd, dir.path()).is_err(), "fd {fd}");
+        }
+        assert!(
+            InstanceLock::acquire(dir.path()).is_err(),
+            "rejected adoptions must not have disturbed the lock"
+        );
     }
 
     #[test]

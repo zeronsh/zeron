@@ -1071,6 +1071,13 @@ impl HarnessUpdateCoordinator {
         });
     }
 
+    /// A vendor updater is mutating a harness CLI right now. An engine
+    /// handoff must not cut it off: the update holds leases that live only in
+    /// this process.
+    pub fn any_active(&self) -> bool {
+        !lock(&self.inner.cancellations).is_empty()
+    }
+
     pub async fn shutdown(&self) {
         self.inner.shutdown.cancel();
         for update in lock(&self.inner.cancellations).values() {

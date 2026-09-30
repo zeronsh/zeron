@@ -2147,6 +2147,12 @@ impl ComposerInput {
         cx.notify();
     }
 
+    /// An IME composition is in progress (unconfirmed marked text): the
+    /// window must not be swapped out from under it.
+    pub fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.content.is_empty()
     }
@@ -5407,6 +5413,11 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    /// An IME composition is in progress in the message box.
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
+    }
+
     pub(crate) fn set_dock_frame(
         &mut self,
         frame: crate::composer_dock::DockFrame,
@@ -5775,6 +5786,68 @@ impl Composer {
     /// the context ring (no checkout/ref footer, no plan usage).
     pub(crate) fn set_side_chat(&mut self, cx: &mut Context<Self>) {
         self.side_chat = true;
+        cx.notify();
+    }
+
+    /// Every chat key holding an unsent draft (text and/or staged images) for
+    /// UI-state persistence: `(key, text, attachments)`, the empty key being
+    /// the new-chat canvas. The live key's text sits in the input, not the
+    /// map — except while a question panel or a queued-message edit has
+    /// borrowed the input, when the real draft is the one set aside.
+    pub(crate) fn ui_state_drafts(&self, cx: &App) -> Vec<(String, String, Vec<StagedAttachment>)> {
+        let mut keys: std::collections::BTreeSet<&String> = self.drafts.keys().collect();
+        keys.extend(self.attachments.keys());
+        keys.insert(&self.current_key);
+        let mut out = Vec::new();
+        for key in keys {
+            let (text, staged) = if *key != self.current_key {
+                (
+                    self.drafts.get(key).cloned().unwrap_or_default(),
+                    self.attachments.get(key).cloned().unwrap_or_default(),
+                )
+            } else if let Some((text, staged, _)) = &self.queue_edit_draft {
+                (text.clone(), staged.clone())
+            } else {
+                let text = if self.wizard.is_some() {
+                    self.drafts.get(key).cloned().unwrap_or_default()
+                } else {
+                    self.input.read(cx).text().to_string()
+                };
+                (text, self.attachments.get(key).cloned().unwrap_or_default())
+            };
+            if !text.is_empty() || !staged.is_empty() {
+                out.push((key.clone(), text, staged));
+            }
+        }
+        out
+    }
+
+    /// Give back a draft saved by a previous window. Text the user has
+    /// already typed for `key` is never replaced (see
+    /// [`crate::ui_state::restored_draft_text`]); staged images only add.
+    pub(crate) fn restore_draft(
+        &mut self,
+        key: String,
+        text: String,
+        staged: Vec<StagedAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        let live =
+            key == self.current_key && self.wizard.is_none() && self.editing_queued.is_none();
+        if live {
+            let current = self.input.read(cx).text().to_string();
+            if let Some(text) = crate::ui_state::restored_draft_text(&current, &text) {
+                self.input.update(cx, |input, cx| input.set_text(text, cx));
+            }
+        } else {
+            let current = self.drafts.get(&key).map(String::as_str).unwrap_or("");
+            if let Some(text) = crate::ui_state::restored_draft_text(current, &text) {
+                self.drafts.insert(key.clone(), text);
+            }
+        }
+        if !staged.is_empty() {
+            self.attachments.entry(key).or_default().extend(staged);
+        }
         cx.notify();
     }
 
@@ -7677,7 +7750,7 @@ impl Composer {
             } else {
                 capabilities::MESSAGE_QUEUE_ATTACHMENTS_V1
             };
-            if !engine.engine_info().supports(capability)
+            if !engine.supports(capability)
                 || !self.state.read(cx).chat_host_supports(&chat_id, capability)
             {
                 self.failure =
@@ -7720,9 +7793,7 @@ impl Composer {
         // taking the draft, attachments, or review comments.
         let queue = queue && !is_new;
         let clean_queue_attachment_text = staged.is_empty()
-            || (engine
-                .engine_info()
-                .supports(capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1)
+            || (engine.supports(capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1)
                 && self.state.read(cx).chat_host_supports(
                     &chat_id,
                     capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,

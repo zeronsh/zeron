@@ -1312,8 +1312,8 @@ impl Composer {
                 return;
             };
             let capability = zeron_proto::capabilities::MESSAGE_QUEUE_EDIT_LEASE_V1;
-            let supported = engine.engine_info().supports(capability)
-                && state.chat_host_supports(&chat_id, capability);
+            let supported =
+                engine.supports(capability) && state.chat_host_supports(&chat_id, capability);
             (chat_id, host_device_id, supported)
         };
         if !supported {

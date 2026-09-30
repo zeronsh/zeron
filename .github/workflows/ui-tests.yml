@@ -7,6 +7,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
@@ -19,6 +20,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
@@ -84,6 +86,11 @@ jobs:
           cargo test --locked -p zeron-sync --lib
           cargo test --locked -p zeron-update --lib
           cargo test --locked -p zeron-engine --lib --test session_publication --test restart_resume --test codex_subagents --test local_profiles
+      - name: Live update handoff (real processes, fake agents)
+        run: |
+          cargo test --locked -p zeron-engine --test handoff_core --test local_first
+          cargo test --locked -p zeron-rpc --lib
+          cargo test --locked -p zeron-harness --test claude_handoff --test codex_handoff --test acp_handoff --test cursor_handoff --test opencode_handoff
 
   ui-tests:
     runs-on: ubuntu-24.04
@@ -104,6 +111,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: UI and headless layout regressions
         run: cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
+      - name: Live update end to end (real engine, shell and agent processes)
+        run: cargo test --locked -p zeron --test live_handoff
 
   macos-frame-recovery:
     runs-on: macos-latest

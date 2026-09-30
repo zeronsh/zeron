@@ -4,11 +4,7 @@
 //! parrots the whole block back as its own reply text (verified against
 //! agy_acp_server 1.1.1), which would otherwise land verbatim in the chat.
 
-use futures::StreamExt;
-use futures::stream::{self, BoxStream};
 use zeron_proto::AgentEvent;
-
-use crate::HarnessError;
 
 const OPEN_TAG: &str = "<SYSTEM_MESSAGE>";
 const CLOSE_TAG: &str = "</SYSTEM_MESSAGE>";
@@ -19,7 +15,7 @@ const WAKEUP_MARKER: &str = "[Message]";
 /// streaming stripper for one delta channel: blocks and their tags can be split
 /// across arbitrary chunk boundaries, so a possible tag prefix is held back
 /// until the next chunk decides it.
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct EchoStrip {
     pending: String,
     inside_block: bool,
@@ -80,7 +76,9 @@ fn partial_tag_suffix(text: &str, tag: &str) -> usize {
         .unwrap_or(0)
 }
 
-#[derive(Default)]
+/// Applied by the run loop to the events it sends (not by the consumer), so
+/// a live update can export the text it holds back.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SystemMessageEchoFilter {
     text: EchoStrip,
     reasoning: EchoStrip,
@@ -127,29 +125,6 @@ fn reasoning_delta(text: String) -> Vec<AgentEvent> {
     } else {
         vec![AgentEvent::ReasoningDelta { text }]
     }
-}
-
-pub(crate) fn strip_system_message_echoes(
-    events: BoxStream<'static, Result<AgentEvent, HarnessError>>,
-) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
-    let mut filter = SystemMessageEchoFilter::default();
-    events
-        .map(Some)
-        .chain(stream::once(async { None }))
-        .flat_map(move |item| {
-            let filtered: Vec<Result<AgentEvent, HarnessError>> = match item {
-                Some(Ok(event)) => filter.apply(event).into_iter().map(Ok).collect(),
-                Some(Err(error)) => filter
-                    .finish()
-                    .into_iter()
-                    .map(Ok)
-                    .chain([Err(error)])
-                    .collect(),
-                None => filter.finish().into_iter().map(Ok).collect(),
-            };
-            stream::iter(filtered)
-        })
-        .boxed()
 }
 
 #[cfg(test)]

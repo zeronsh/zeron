@@ -126,6 +126,12 @@ const RELAY_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(15 * 6
 /// Hosts below this stamped engine version don't serve `RelayCommand`.
 const RELAY_MIN_VERSION: (u64, u64, u64) = (0, 2, 12);
 
+/// The queues an engine handoff paused (see [`DocHost::pause_queues_for_handoff`]).
+#[derive(Debug, Default)]
+pub struct QueuePause {
+    chats: Vec<String>,
+}
+
 /// Edge connection config. The bearer is a **provider**, never a snapshot:
 /// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
 /// refreshes (~1h expiry) take effect without an engine restart. Dev bearers
@@ -409,9 +415,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -1029,6 +1033,36 @@ impl DocHost {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
             handle.queue_paused.store(true, Ordering::Release);
+        }
+    }
+
+    /// Pause every queue that is running, for an engine handoff, remembering
+    /// exactly which ones. Undo with [`Self::resume_queues_after_handoff`].
+    pub fn pause_queues_for_handoff(&self) -> QueuePause {
+        let handles: Vec<_> = lock(&self.inner.handles)
+            .iter()
+            .map(|(id, handle)| (id.clone(), handle.clone()))
+            .collect();
+        let mut paused = Vec::new();
+        for (chat_id, handle) in handles {
+            if !handle.queue_paused.swap(true, Ordering::AcqRel) {
+                paused.push(chat_id);
+            }
+        }
+        QueuePause { chats: paused }
+    }
+
+    /// Unpause only the queues [`Self::pause_queues_for_handoff`] paused (a
+    /// queue that was already paused stays paused), and wake each so a row
+    /// whose turn ended during the pause is not stranded.
+    pub fn resume_queues_after_handoff(&self, pause: QueuePause) {
+        for chat_id in pause.chats {
+            if let Some(handle) = lock(&self.inner.handles).get(&chat_id) {
+                handle.queue_paused.store(false, Ordering::Release);
+            }
+            if let Err(err) = self.enqueue_wakeup(&chat_id) {
+                tracing::warn!(chat = %chat_id, %err, "could not wake a queue after a handoff pause");
+            }
         }
     }
 
@@ -4834,6 +4868,12 @@ impl DocHost {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
         if !self.is_host(&handle.chat_id) {
+            return;
+        }
+        // A live update has frozen the runs: leave every command pending
+        // (they are durable). A thaw re-kicks this drain; after the exec the
+        // successor drains them when it opens the doc.
+        if sessions.handoff_frozen() {
             return;
         }
         // Do not let another drain overtake a prompt waiting for mailbox

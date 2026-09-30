@@ -433,6 +433,13 @@ impl Auth {
         self.inner.retry_tx.send_replace(retry.generation);
     }
 
+    /// Hold off token refreshes while the guard lives. WorkOS refresh tokens
+    /// are single-use, so an engine handoff must not exec in the middle of a
+    /// rotation (the successor would reload a burned token and be signed out).
+    pub async fn quiesce_refresh(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.refresh_gate.lock().await
+    }
+
     /// Sleep-until-near-expiry refresh loop so long-lived dials (relay, rooms) always
     /// have a live token to present on reconnect. No-op task in dev mode.
     pub fn spawn_refresh_loop(&self) -> tokio::task::JoinHandle<()> {

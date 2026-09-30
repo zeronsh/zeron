@@ -35,6 +35,8 @@ async fn main() -> anyhow::Result<()> {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         mcp: None,

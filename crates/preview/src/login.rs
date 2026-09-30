@@ -200,6 +200,11 @@ impl CallbackTunnels {
             .insert(login_id.to_owned(), forwarder);
     }
 
+    /// Any login callback is being forwarded.
+    pub fn any(&self) -> bool {
+        !self.0.lock().unwrap().is_empty()
+    }
+
     /// Stop forwarding `login_id` (a no-op when none runs).
     pub fn close(&self, login_id: &str) {
         self.0.lock().unwrap().remove(login_id);

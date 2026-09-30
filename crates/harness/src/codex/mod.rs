@@ -35,6 +35,12 @@
 //! - Interrupt: cancelling [`RunControls::interrupt`] sends `turn/interrupt`,
 //!   escalating to SIGTERM → SIGKILL if the child is unresponsive; the stream
 //!   always ends with `Done { status: Interrupted }`.
+//! - Live update (`crate::handoff`): a run freezes at a message boundary
+//!   (between turns, mid-turn, or with a server request parked on the user)
+//!   and a later image adopts the same app server from its pipes, the RPC
+//!   client's unhandled messages and leftover bytes, its id counter and
+//!   `CodexLoopState`. Setup, an in-flight steer, any other request of ours in
+//!   flight and interrupting refuse (`Busy`); title runs never hand off.
 
 pub(crate) mod catalog;
 mod normalize;
@@ -42,14 +48,13 @@ mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -57,9 +62,13 @@ use zeron_proto::{
     RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
+use crate::handoff::StderrDrain;
 use crate::jsonrpc::{Incoming, RpcClient};
-use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls};
+use crate::process::{Command, Stdio};
+use crate::{
+    ChildHandle, FreezeRefusal, FreezeRequest, Harness, HarnessError, HarnessHandoff, RunControls,
+    SteerMessage,
+};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
@@ -668,6 +677,29 @@ impl Harness for CodexHarness {
         request.auto_approve = false;
         self.run_with_mode(request, controls, true).await
     }
+
+    fn supports_adoption(&self) -> bool {
+        cfg!(unix)
+    }
+
+    async fn adopt(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        _request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        #[cfg(unix)]
+        {
+            self.adopt_unix(handoff, controls)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (handoff, controls);
+            Err(HarnessError::Protocol(
+                "Codex runs cannot be adopted on this platform".into(),
+            ))
+        }
+    }
 }
 
 impl CodexHarness {
@@ -711,10 +743,13 @@ impl CodexHarness {
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
+        // Not killed on drop: a run frozen for a live update is held through
+        // an `execve` and its app server must outlive the old image's
+        // handles. Every ending shuts the child down explicitly.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(false);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
@@ -732,37 +767,107 @@ impl CodexHarness {
             .take()
             .ok_or_else(|| HarnessError::Protocol("codex child has no stdout".into()))?;
         let stderr_tail = crate::StderrTail::default();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = stderr_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::codex", "stderr: {line}");
-                    tail.push(&line);
-                }
-            });
-        }
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stderr| StderrDrain::spawn(stderr, stderr_tail.clone(), "codex"));
 
         let (client, incoming) = RpcClient::new(stdin, stdout);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
+            child: ChildHandle::Owned(child),
+            client,
+            incoming,
+            event_tx,
+            controls,
+            stderr,
+            stderr_tail,
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            start: Start::Fresh(Box::new(request)),
+        }));
+        Ok(event_stream(event_rx))
+    }
+
+    /// Rebuild a run around an app server a previous image froze: same pipes
+    /// (duplicated), same thread and turn, the RPC id counter carried on, no
+    /// `initialize`, no `thread/start`, no `SessionStarted` and no first
+    /// turn. Parked server requests are re-attached under the engine's
+    /// existing input requests and answered with their original JSON-RPC ids.
+    #[cfg(unix)]
+    fn adopt_unix(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        use crate::handoff::dup_inherited;
+        use crate::process::{ChildStdin, ChildStdout};
+        if handoff.state_version != STATE_VERSION {
+            return Err(HarnessError::Protocol(format!(
+                "codex handoff state version {} is not {STATE_VERSION}",
+                handoff.state_version
+            )));
+        }
+        let exported: CodexHandoffState<CodexLoopState> = serde_json::from_value(handoff.state)
+            .map_err(|e| HarnessError::Protocol(format!("codex handoff state: {e}")))?;
+        let stdin = ChildStdin::from_std(std::process::ChildStdin::from(dup_inherited(
+            handoff.stdin_fd,
+        )?))?;
+        let stdout = ChildStdout::from_std(std::process::ChildStdout::from(dup_inherited(
+            handoff.stdout_fd,
+        )?))?;
+        let stderr = match handoff.stderr_fd {
+            Some(fd) => Some(tokio::process::ChildStderr::from_std(
+                std::process::ChildStderr::from(dup_inherited(fd)?),
+            )?),
+            None => None,
+        };
+        let child = ChildHandle::adopt(handoff.pid)?;
+        let stderr_tail = crate::StderrTail::seeded(handoff.stderr_tail);
+        let stderr = stderr.map(|s| StderrDrain::spawn(s, stderr_tail.clone(), "codex"));
+        let state = exported.run;
+        // Parked requests answer under the engine's existing request: the
+        // bridge finds it by any of its question ids. No second prompt.
+        let answers = Answers::new();
+        for parked in &state.parked {
+            let answer = match parked.questions().first() {
+                Some(question) => (controls.rebind_input)(question.id.clone()),
+                None => tokio::sync::oneshot::channel().1,
+            };
+            answers.push(await_answer(parked.key(), answer));
+        }
+        let (client, incoming) =
+            RpcClient::from_parts(stdin, stdout, handoff.stdout_leftover, exported.rpc_next_id);
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        tokio::spawn(run_session(Session {
+            title_only: false,
             child,
             client,
             incoming,
             event_tx,
             controls,
-            request,
+            stderr,
+            stderr_tail,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
-            stderr_tail,
+            start: Start::Adopted {
+                state: Box::new(state),
+                answers,
+            },
         }));
-
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        })
-        .boxed())
+        Ok(event_stream(event_rx))
     }
+}
+
+fn event_stream(
+    rx: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    futures::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+    )
+    .boxed()
 }
 
 // ---------------------------------------------------------------------------
@@ -771,23 +876,41 @@ impl CodexHarness {
 
 struct Session {
     title_only: bool,
-    child: Child,
+    child: ChildHandle,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
-    request: RunRequest,
-    interrupt_grace: Duration,
-    kill_grace: Duration,
+    stderr: Option<StderrDrain>,
     /// Rolling stderr tail for the crash message on an unexpected exit.
     stderr_tail: crate::StderrTail,
+    interrupt_grace: Duration,
+    kill_grace: Duration,
+    start: Start,
+}
+
+/// Where a run loop begins.
+enum Start {
+    /// A new app server: handshake, thread, `SessionStarted`, first turn.
+    Fresh(Box<RunRequest>),
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// An app server a previous image froze mid-session: straight into the
+    /// main loop with its state and the answers of its parked requests.
+    Adopted {
+        state: Box<CodexLoopState>,
+        answers: Answers,
+    },
 }
 
 /// Turn-routing state (port of codex.ts's activeTurnId/completedTurnIds): the
 /// `turn/start` response and the turn lifecycle notifications are separate
 /// app-server messages that may arrive in either order — never revive a turn
 /// that `turn/completed` already declared finished.
-#[derive(Default)]
+///
+/// Serialized into a live-update handoff: `active` often comes only from the
+/// `turn/start` RESPONSE, which the RPC client swallows, so it cannot be
+/// re-derived from the stream.
+#[derive(Default, Serialize, Deserialize)]
 struct TurnRouter {
     active: Option<String>,
     completed: VecDeque<String>,
@@ -833,6 +956,184 @@ impl TurnRouter {
         // Bounded so a months-long persistent session can't grow it forever.
         while self.completed.len() > 32 {
             self.completed.pop_front();
+        }
+    }
+}
+
+/// A server→client request waiting on the user (a tool's question, a stray
+/// approval), as a handoff carries it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParkedRequest {
+    /// The app server's JSON-RPC id, answered exactly as it came.
+    rpc_id: Value,
+    ask: ParkedAsk,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ParkedAsk {
+    /// `item/tool/requestUserInput`: each question with its WIRE id (the
+    /// answer keys by it) and as the engine knows it (random id, minted once;
+    /// the engine rebinds by it).
+    UserInput {
+        questions: Vec<(String, UserInputQuestion)>,
+    },
+    /// A command / file-change approval, asked as a yes/no question.
+    Approval { question: UserInputQuestion },
+}
+
+impl ParkedRequest {
+    /// Its key among the loop's pending answers.
+    fn key(&self) -> String {
+        self.rpc_id.to_string()
+    }
+
+    fn questions(&self) -> Vec<UserInputQuestion> {
+        match &self.ask {
+            ParkedAsk::UserInput { questions } => {
+                questions.iter().map(|(_, q)| q.clone()).collect()
+            }
+            ParkedAsk::Approval { question } => vec![question.clone()],
+        }
+    }
+
+    /// What the app server expects back for `answers`.
+    fn response(&self, answers: &[UserInputAnswer]) -> Value {
+        match &self.ask {
+            // `{ answers: { <wire id>: { answers: [labels] } } }`
+            ParkedAsk::UserInput { questions } => {
+                let mut by_id = serde_json::Map::new();
+                for (wire_id, q) in questions {
+                    let labels: Vec<Value> = answers
+                        .iter()
+                        .find(|a| a.question_id == q.id)
+                        .map(|a| a.labels.iter().cloned().map(Value::String).collect())
+                        .unwrap_or_default();
+                    by_id.insert(wire_id.clone(), json!({ "answers": labels }));
+                }
+                json!({ "answers": by_id })
+            }
+            // No answer (the caller went away) declines: never silently allowed.
+            ParkedAsk::Approval { question } => {
+                let accept = answers.iter().any(|a| {
+                    a.question_id == question.id
+                        && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
+                });
+                json!({ "decision": if accept { "accept" } else { "decline" } })
+            }
+        }
+    }
+}
+
+/// Answers for parked requests, keyed by [`ParkedRequest::key`]. Kept in the
+/// loop (not a detached task) so a freeze can export what is still parked,
+/// and never dropped by a freeze: the engine resolves a question whose
+/// receiver goes away.
+type Answers = futures::stream::FuturesUnordered<
+    futures::future::BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)>,
+>;
+
+fn await_answer(
+    key: String,
+    answer: tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>,
+) -> futures::future::BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)> {
+    Box::pin(async move { (key, answer.await.ok()) })
+}
+
+/// The main loop's protocol state: what a freeze exports and an adoption
+/// resumes from. The loop's other locals (`interrupted`, `interrupt_sent`,
+/// `done_after_interrupt`, the escalation task) are non-default only in
+/// states a freeze refuses, so they never need exporting.
+#[derive(Serialize, Deserialize)]
+struct CodexLoopState {
+    thread_id: String,
+    /// Every `turn/start` param except `threadId` and `input` (policy,
+    /// sandbox, model, effort, tier), fixed at setup.
+    turn_template: serde_json::Map<String, Value>,
+    auto_approve: bool,
+    assistant_message_id: String,
+    /// Agent-message items with streamed deltas this turn, so a model that
+    /// never streams (item/completed only) still emits its text exactly once.
+    /// Cleared at every turn end.
+    streamed_text: HashSet<String>,
+    reasoning_streams: HashMap<String, ReasoningStream>,
+    /// Token usage is held until the turn ends, emitted just before Done.
+    pending_usage: Option<AgentEvent>,
+    /// Steers whose `turn/steer` lost the turn-completed race (or wait behind
+    /// a native command); delivered as the next `turn/start` when the
+    /// expected turn's end notification arrives.
+    queued_steers: VecDeque<String>,
+    steering_open: bool,
+    /// A Done has been emitted for the turn currently/last in flight.
+    done_current: bool,
+    /// The turn in flight is a native command (`/compact`, `/review`).
+    current_native: bool,
+    router: TurnRouter,
+    children: subagents::Subagents,
+    parked: Vec<ParkedRequest>,
+}
+
+impl CodexLoopState {
+    fn turn_params(&self, text: &str) -> Value {
+        let mut p = self.turn_template.clone();
+        p.insert("threadId".into(), Value::String(self.thread_id.clone()));
+        p.insert("input".into(), prompt_input(text));
+        Value::Object(p)
+    }
+}
+
+/// What a handoff's `state` holds: the loop state and the RPC client's id
+/// counter (the adopter must never reuse an id: a late response would
+/// resolve the wrong request).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(unix), allow(dead_code))]
+struct CodexHandoffState<S> {
+    rpc_next_id: i64,
+    #[serde(rename = "loop")]
+    run: S,
+}
+
+/// Schema version of [`CodexHandoffState`] in a [`HarnessHandoff`]; an
+/// adopter refuses any other, and the engine falls back to crash recovery.
+#[cfg(unix)]
+pub(crate) const STATE_VERSION: u32 = 1;
+
+/// A freeze during setup (`initialize` through the first `turn/start`
+/// response) is refused with this.
+const BUSY_SETUP: &str = "the app-server session is starting";
+/// A freeze while a steer's `turn/steer` (or its fallback `turn/start`)
+/// awaits its response is refused with this.
+const BUSY_STEER: &str = "a steer is being delivered";
+
+/// The run's freeze channel and whether it still has a sender (with none,
+/// `recv()` is `None` at once and forever — see `crate::handoff`).
+struct FreezeGate {
+    rx: mpsc::Receiver<FreezeRequest>,
+    open: bool,
+}
+
+impl FreezeGate {
+    /// Await `fut`, answering every freeze request that arrives meanwhile
+    /// with `Busy(reason)`: the loop is not at a safe point until it is done.
+    async fn refuse_while<F: std::future::Future>(
+        &mut self,
+        reason: &'static str,
+        fut: F,
+    ) -> F::Output {
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                biased;
+                out = &mut fut => return out,
+                request = self.rx.recv(), if self.open => match request {
+                    Some(request) => {
+                        let _ = request.reply.send(Err(FreezeRefusal::Busy(reason)));
+                    }
+                    None => self.open = false,
+                },
+            }
         }
     }
 }
@@ -942,29 +1243,17 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
 }
 
-/// The per-run event loop: one task multiplexing app-server messages, the
-/// steering mailbox, the interrupt token, and consumer liveness.
-async fn run_session(session: Session) {
-    let Session {
-        title_only,
-        mut child,
-        client,
-        mut incoming,
-        event_tx,
-        controls,
-        request,
-        interrupt_grace,
-        kill_grace,
-        stderr_tail,
-    } = session;
-    let RunControls {
-        execution_lease: _execution_lease,
-        request_input,
-        mut steering,
-        interrupt,
-    } = controls;
-    let request_input = Arc::new(request_input);
-
+/// Handshake, thread and first turn of a fresh app server; `None` when the
+/// run already ended here (its Done, if any, is sent). Every freeze request
+/// meanwhile is refused: this is not a safe point.
+async fn setup(
+    client: &RpcClient,
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    interrupt: &crate::CancellationToken,
+    gate: &mut FreezeGate,
+    request: RunRequest,
+    title_only: bool,
+) -> Option<CodexLoopState> {
     // ---- wire params ------------------------------------------------------
     // Parity with the Claude adapter, which auto-approves every `can_use_tool`
     // regardless of `auto_approve` (zeron sessions run unattended; combined
@@ -1035,8 +1324,8 @@ async fn run_session(session: Session) {
         p
     };
 
-    // ---- handshake + thread + first turn (interruptible) ------------------
-    let setup = async {
+    // ---- handshake + thread (interruptible) --------------------------------
+    let handshake = async {
         client
             .request(
                 "initialize",
@@ -1098,9 +1387,9 @@ async fn run_session(session: Session) {
         children.restore(&thread["thread"]);
         Ok::<_, HarnessError>((thread_id, children))
     };
-    let (thread_id, mut children) = tokio::select! {
-        res = setup => match res {
-            Ok(thread_id) => thread_id,
+    let (thread_id, children) = tokio::select! {
+        res = gate.refuse_while(BUSY_SETUP, handshake) => match res {
+            Ok(thread) => thread,
             Err(e) => {
                 let _ = event_tx
                     .send(Ok(AgentEvent::Done {
@@ -1110,8 +1399,7 @@ async fn run_session(session: Session) {
                         session_id: None,
                     }))
                     .await;
-                shutdown_child(&mut child, kill_grace).await;
-                return;
+                return None;
             }
         },
         _ = interrupt.cancelled() => {
@@ -1123,96 +1411,315 @@ async fn run_session(session: Session) {
                     session_id: None,
                 }))
                 .await;
-            shutdown_child(&mut child, kill_grace).await;
-            return;
+            return None;
         }
     };
 
-    let turn_params = |text: &str| -> Value {
-        let mut p = serde_json::Map::new();
-        p.insert("threadId".into(), Value::String(thread_id.clone()));
-        p.insert("input".into(), prompt_input(text));
-        p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert(
-            "sandboxPolicy".into(),
-            sandbox_policy_value(request.sandbox),
-        );
-        // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
-        // when asked for — without this codex "thinks" in silence for minutes:
-        // nothing renders and the UI's 45s staleness gate flips Working off
-        // (user report: "not streaming, doesn't say it's working").
-        p.insert("summary".into(), "auto".into());
-        if let Some(model) = &request.model {
-            p.insert("model".into(), Value::String(model.clone()));
-        }
-        if let Some(effort) = effort {
-            p.insert("effort".into(), effort.into());
-        }
-        if let Some(tier) = &service_tier {
-            p.insert("serviceTier".into(), Value::String(tier.clone()));
-        }
-        Value::Object(p)
-    };
+    let mut turn_template = serde_json::Map::new();
+    turn_template.insert("approvalPolicy".into(), approval_policy.into());
+    turn_template.insert(
+        "sandboxPolicy".into(),
+        sandbox_policy_value(request.sandbox),
+    );
+    // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
+    // when asked for — without this codex "thinks" in silence for minutes:
+    // nothing renders and the UI's 45s staleness gate flips Working off
+    // (user report: "not streaming, doesn't say it's working").
+    turn_template.insert("summary".into(), "auto".into());
+    if let Some(model) = &request.model {
+        turn_template.insert("model".into(), Value::String(model.clone()));
+    }
+    if let Some(effort) = effort {
+        turn_template.insert("effort".into(), effort.into());
+    }
+    if let Some(tier) = &service_tier {
+        turn_template.insert("serviceTier".into(), Value::String(tier.clone()));
+    }
 
-    let mut assistant_message_id = new_message_id();
+    let mut state = CodexLoopState {
+        current_native: command_request(&request.prompt, &thread_id)
+            .ok()
+            .flatten()
+            .is_some(),
+        thread_id,
+        turn_template,
+        auto_approve: request.auto_approve,
+        assistant_message_id: new_message_id(),
+        streamed_text: HashSet::new(),
+        reasoning_streams: HashMap::new(),
+        pending_usage: None,
+        queued_steers: VecDeque::new(),
+        steering_open: true,
+        done_current: false,
+        router: TurnRouter::default(),
+        children,
+        parked: Vec::new(),
+    };
     if !send(
-        &event_tx,
+        event_tx,
         AgentEvent::SessionStarted {
             harness: HarnessId::Codex,
             model: request.model.clone().unwrap_or_default(),
             tools: Vec::new(),
             cwd: request.cwd.clone(),
-            session_id: thread_id.clone(),
-            assistant_message_id: assistant_message_id.clone(),
+            session_id: state.thread_id.clone(),
+            assistant_message_id: state.assistant_message_id.clone(),
         },
     )
     .await
     {
-        shutdown_child(&mut child, kill_grace).await;
-        return;
+        return None;
     }
 
-    let mut router = TurnRouter::default();
-    match start_turn(&client, turn_params(&request.prompt)).await {
-        Ok(id) => router.adopt_started(id),
+    // The first turn's `turn/start` response is still setup: its turn id is
+    // the active turn and nothing else carries it.
+    match gate
+        .refuse_while(
+            BUSY_SETUP,
+            start_turn(client, state.turn_params(&request.prompt)),
+        )
+        .await
+    {
+        Ok(id) => state.router.adopt_started(id),
         Err(e) => {
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
                     error: Some(e.to_string()),
-                    session_id: Some(thread_id.clone()),
+                    session_id: Some(state.thread_id.clone()),
                 }))
                 .await;
-            shutdown_child(&mut child, kill_grace).await;
-            return;
+            return None;
         }
     }
+    Some(state)
+}
+
+/// The next steer: those a thawed freeze put back first, then the mailbox.
+async fn next_steer(
+    held: &mut VecDeque<SteerMessage>,
+    steering: &mut mpsc::Receiver<SteerMessage>,
+) -> Option<SteerMessage> {
+    match held.pop_front() {
+        Some(steer) => Some(steer),
+        None => steering.recv().await,
+    }
+}
+
+/// The per-run event loop: one task multiplexing app-server messages, the
+/// steering mailbox, parked answers, the interrupt token, live-update
+/// freezes and consumer liveness.
+async fn run_session(session: Session) {
+    let Session {
+        title_only,
+        child,
+        client,
+        mut incoming,
+        event_tx,
+        controls,
+        mut stderr,
+        stderr_tail,
+        interrupt_grace,
+        kill_grace,
+        start,
+    } = session;
+    let RunControls {
+        execution_lease: _execution_lease,
+        request_input,
+        mut steering,
+        interrupt,
+        freeze,
+        rebind_input: _rebind_input,
+    } = controls;
+    let mut gate = FreezeGate {
+        rx: freeze,
+        open: true,
+    };
+    // `None` only after a committed freeze handed it to a successor.
+    let mut child = Some(child);
+
+    let (mut state, mut answers) = match start {
+        Start::Fresh(request) => {
+            match setup(
+                &client, &event_tx, &interrupt, &mut gate, *request, title_only,
+            )
+            .await
+            {
+                Some(state) => (state, Answers::new()),
+                None => {
+                    if let Some(mut child) = child {
+                        child.shutdown(kill_grace).await;
+                    }
+                    return;
+                }
+            }
+        }
+        Start::Adopted { state, answers } => (*state, answers),
+    };
 
     // ---- main loop --------------------------------------------------------
-    // Deltas seen per agent-message item, so a model that never streams
-    // (item/completed only) still emits its text exactly once.
-    let mut streamed_text: HashSet<String> = HashSet::new();
-    let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
-    // Token usage is held until the turn ends, emitted just before Done.
-    let mut pending_usage: Option<AgentEvent> = None;
-    // Steers whose `turn/steer` lost the turn-completed race; delivered as the
-    // next `turn/start` when the expected turn's end notification arrives.
-    let mut queued_steers: VecDeque<String> = VecDeque::new();
-    let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
-    // A Done has been emitted for the turn currently/last in flight.
-    let mut done_current = false;
-    let mut current_native = command_request(&request.prompt, &thread_id)
-        .ok()
-        .flatten()
-        .is_some();
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    // Steers a freeze drained from the mailbox and a thaw put back.
+    let mut held_steers: VecDeque<SteerMessage> = VecDeque::new();
 
     'main: loop {
         tokio::select! {
+            // Biased: a freeze request is answered ahead of new input (the
+            // engine asks while nothing else should move), and the rare inputs
+            // (steers, answers) go ahead of a possibly continuous stdout.
+            biased;
+
+            _ = interrupt.cancelled(), if !interrupt_sent => {
+                interrupt_sent = true;
+                interrupted = true;
+                if let Some(turn) = state.router.active.clone() {
+                    let client = client.clone();
+                    let thread = state.thread_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client
+                            .request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }))
+                            .await
+                        {
+                            tracing::debug!(
+                                target: "zeron_harness::codex",
+                                "turn/interrupt failed (escalation will reap): {e}"
+                            );
+                        }
+                    });
+                    // Escalate if the app server doesn't wind down (turn/aborted)
+                    // within the grace periods: SIGTERM, then SIGKILL.
+                    if let Some(pid) = child.as_ref().and_then(ChildHandle::signal_target) {
+                        escalation = Some(tokio::spawn(async move {
+                            tokio::time::sleep(interrupt_grace).await;
+                            send_signal(&pid, Signal::Term);
+                            tokio::time::sleep(kill_grace).await;
+                            send_signal(&pid, Signal::Kill);
+                        }));
+                    }
+                } else {
+                    // Idle between turns: nothing to interrupt — the terminal
+                    // bookkeeping below still guarantees Done { Interrupted }.
+                    break 'main;
+                }
+            },
+
+            request = gate.rx.recv(), if gate.open => match request {
+                None => gate.open = false,
+                Some(request) => {
+                    let refusal = if title_only {
+                        Some(FreezeRefusal::Unsupported)
+                    } else if interrupted {
+                        Some(FreezeRefusal::Busy("interrupting"))
+                    } else {
+                        None
+                    };
+                    if let Some(refusal) = refusal {
+                        let _ = request.reply.send(Err(refusal));
+                        continue;
+                    }
+                    // Answers already given (ready in the same tick as this
+                    // request, which the biased select took first) are
+                    // written now, ahead of the writer's pause: the engine no
+                    // longer holds their resolvers, so exporting them as
+                    // parked would leave the adopter answering with nothing.
+                    while let Some(Some((key, answer))) = answers.next().now_or_never() {
+                        write_answer(&client, &mut state, &key, answer);
+                    }
+                    let outcome = freeze_run(request, Freezing {
+                        child: &mut child,
+                        client: &client,
+                        incoming: &mut incoming,
+                        stderr: &mut stderr,
+                        stderr_tail: &stderr_tail,
+                        state: &state,
+                        held_steers: &mut held_steers,
+                        steering: &mut steering,
+                    })
+                    .await;
+                    if let Frozen::Committed = outcome {
+                        // The successor owns the app server and its pipes;
+                        // ending the stream (no Done) is the end the engine
+                        // expects.
+                        return;
+                    }
+                }
+            },
+
+            steer = next_steer(&mut held_steers, &mut steering), if state.steering_open && !interrupted => match steer {
+                Some(msg) => {
+                    let text = msg.prompt;
+                    // Native operations run at a turn boundary, never as text
+                    // injected into an already running model turn. Later messages
+                    // must stay behind queued commands: Steered acknowledgments
+                    // retire the engine's accepted-message ledger in FIFO order.
+                    if !state.done_current && (!state.queued_steers.is_empty() || state.current_native || !matches!(command_request(&text, &state.thread_id), Ok(None))) {
+                        state.queued_steers.push_back(text);
+                        continue 'main;
+                    }
+                    if let Some(expected) = state.router.active.clone() {
+                        let steer_params = json!({
+                            "threadId": state.thread_id,
+                            "expectedTurnId": expected,
+                            "input": prompt_input(&text),
+                        });
+                        match gate.refuse_while(BUSY_STEER, client.request("turn/steer", steer_params)).await {
+                            Ok(_) => {
+                                let (prev, next) = rotate(&mut state.assistant_message_id);
+                                if !send(
+                                    &event_tx,
+                                    AgentEvent::Steered {
+                                        assistant_message_id: Some(prev),
+                                        next_assistant_message_id: Some(next),
+                                    },
+                                )
+                                .await
+                                {
+                                    break 'main;
+                                }
+                            }
+                            // A failed `turn/steer` does NOT mean the text is
+                            // bad: most commonly the active turn finished
+                            // between the UI send and this request. Queue it
+                            // for redelivery as the next `turn/start` when the
+                            // expected turn's end arrives (also the safe
+                            // fallback for older Codex without steering).
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "zeron_harness::codex",
+                                    "turn/steer rejected (queued as next turn): {e}"
+                                );
+                                if state.router.active.as_deref() == Some(expected.as_str())
+                                    && !state.router.is_completed(&expected)
+                                {
+                                    state.queued_steers.push_back(text);
+                                } else if !steer_as_new_turn(&client, &mut gate, &mut state, &event_tx, &text).await {
+                                    break 'main;
+                                }
+                            }
+                        }
+                    } else if !steer_as_new_turn(&client, &mut gate, &mut state, &event_tx, &text).await {
+                        break 'main;
+                    }
+                }
+                None => {
+                    // Mailbox closed (the caller's graceful idle-reap): finish
+                    // once nothing is in flight — mirrors codex.ts's steer loop
+                    // `finish()` on a null take.
+                    state.steering_open = false;
+                    if state.done_current && state.router.active.is_none() && state.queued_steers.is_empty() {
+                        break 'main;
+                    }
+                }
+            },
+
+            Some((key, answer)) = answers.next(), if !answers.is_empty() => {
+                write_answer(&client, &mut state, &key, answer);
+            },
+
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
@@ -1220,7 +1727,7 @@ async fn run_session(session: Session) {
                 // (a child's turn/completed would settle the PARENT turn).
                 if let Some(nthread) = notification_thread_id(&method, &params)
                     && !nthread.is_empty()
-                    && nthread != thread_id
+                    && nthread != state.thread_id
                 {
                     match route_child_notification(&method) {
                         ChildRoute::Parent => {
@@ -1230,7 +1737,7 @@ async fn run_session(session: Session) {
                         }
                         ChildRoute::Consumed => continue,
                         ChildRoute::Subagent => {
-                            for event in children.notification(&nthread, &method, &params) {
+                            for event in state.children.notification(&nthread, &method, &params) {
                                 if !send(&event_tx, event).await {
                                     break 'main;
                                 }
@@ -1240,10 +1747,10 @@ async fn run_session(session: Session) {
                     }
                 }
                 match method.as_str() {
-                    "turn/started" => router.note_started(turn_id(&params)),
+                    "turn/started" => state.router.note_started(turn_id(&params)),
 
                     "item/agentMessage/delta" => {
-                        streamed_text.insert(item_id(&params));
+                        state.streamed_text.insert(item_id(&params));
                         if let Some(text) = delta_text(&params)
                             && !send(&event_tx, AgentEvent::TextDelta { text }).await
                         {
@@ -1253,7 +1760,7 @@ async fn run_session(session: Session) {
 
                     "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta"
                     | "item/reasoning/summaryPartAdded" => {
-                        for event in reasoning_streams.entry(thread_id.clone()).or_default()
+                        for event in state.reasoning_streams.entry(state.thread_id.clone()).or_default()
                             .map(&method, &params)
                         {
                             if !send(&event_tx, event).await {
@@ -1284,7 +1791,7 @@ async fn run_session(session: Session) {
                                 // Fallback for non-streamed messages only.
                                 let id = item.get("id").and_then(Value::as_str).unwrap_or("");
                                 let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-                                if !streamed_text.contains(id)
+                                if !state.streamed_text.contains(id)
                                     && !text.is_empty()
                                     && !send(&event_tx, AgentEvent::TextDelta { text: text.into() }).await
                                 {
@@ -1310,7 +1817,7 @@ async fn run_session(session: Session) {
                                 // Deltas are token chunks, not steering
                                 // boundaries: the completed item is the
                                 // provider-authoritative end of the text part.
-                                let (prev, _next) = rotate(&mut assistant_message_id);
+                                let (prev, _next) = rotate(&mut state.assistant_message_id);
                                 if !send(
                                     &event_tx,
                                     AgentEvent::AssistantMessageCompleted {
@@ -1323,7 +1830,7 @@ async fn run_session(session: Session) {
                                 }
                             }
                         } else {
-                            for ev in children.parent_item(phase, item) {
+                            for ev in state.children.parent_item(phase, item) {
                                 if !send(&event_tx, ev).await {
                                     break 'main;
                                 }
@@ -1335,17 +1842,17 @@ async fn run_session(session: Session) {
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
                         if let Some(usage) = usage_event(&params) {
-                            pending_usage = Some(usage);
+                            state.pending_usage = Some(usage);
                         }
                     }
 
                     "turn/completed" => {
                         let id = turn_id(&params);
-                        router.note_completed(&id);
+                        state.router.note_completed(&id);
                         // Item ids never span turns; without this the set grew
                         // one entry per message for a persistent session's life.
-                        streamed_text.clear();
-                        if let Some(usage) = pending_usage.take()
+                        state.streamed_text.clear();
+                        if let Some(usage) = state.pending_usage.take()
                             && !send(&event_tx, usage).await
                         {
                             break 'main;
@@ -1364,14 +1871,14 @@ async fn run_session(session: Session) {
                         } else {
                             DoneStatus::Completed
                         };
-                        done_current = true;
+                        state.done_current = true;
                         if !send(
                             &event_tx,
                             AgentEvent::Done {
                                 status,
                                 result: None,
                                 error,
-                                session_id: Some(thread_id.clone()),
+                                session_id: Some(state.thread_id.clone()),
                             },
                         )
                         .await
@@ -1385,34 +1892,24 @@ async fn run_session(session: Session) {
                         // Persistent session: a steer that lost the race with
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
-                        current_native = false;
-                        if let Some(text) = queued_steers.pop_front() {
-                            current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                            if !steer_as_new_turn(
-                                &client,
-                                turn_params(&text),
-                                &mut router,
-                                &event_tx,
-                                &mut assistant_message_id,
-                                &mut done_current,
-                            )
-                            .await
-                            {
+                        state.current_native = false;
+                        if let Some(text) = state.queued_steers.pop_front() {
+                            if !steer_as_new_turn(&client, &mut gate, &mut state, &event_tx, &text).await {
                                 break 'main;
                             }
-                        } else if !steering_open {
+                        } else if !state.steering_open {
                             break 'main;
                         }
                     }
 
                     "turn/failed" => {
-                        router.note_completed(&turn_id(&params));
-                        if let Some(usage) = pending_usage.take()
+                        state.router.note_completed(&turn_id(&params));
+                        if let Some(usage) = state.pending_usage.take()
                             && !send(&event_tx, usage).await
                         {
                             break 'main;
                         }
-                        done_current = true;
+                        state.done_current = true;
                         if interrupted {
                             done_after_interrupt = true;
                         }
@@ -1429,7 +1926,7 @@ async fn run_session(session: Session) {
                                     turn_error_message(&params)
                                         .unwrap_or_else(|| "Codex turn failed".into()),
                                 ),
-                                session_id: Some(thread_id.clone()),
+                                session_id: Some(state.thread_id.clone()),
                             },
                         )
                         .await;
@@ -1437,8 +1934,8 @@ async fn run_session(session: Session) {
                     }
 
                     "turn/aborted" => {
-                        router.note_completed(&turn_id(&params));
-                        done_current = true;
+                        state.router.note_completed(&turn_id(&params));
+                        state.done_current = true;
                         if interrupted {
                             done_after_interrupt = true;
                         }
@@ -1448,7 +1945,7 @@ async fn run_session(session: Session) {
                                 status: DoneStatus::Interrupted,
                                 result: None,
                                 error: None,
-                                session_id: Some(thread_id.clone()),
+                                session_id: Some(state.thread_id.clone()),
                             },
                         )
                         .await;
@@ -1481,8 +1978,9 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.auto_approve,
                         &request_input,
+                        &mut state,
+                        &mut answers,
                     );
                 }
 
@@ -1490,118 +1988,13 @@ async fn run_session(session: Session) {
                 Some(Incoming::Eof) | None => break 'main,
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
-                Some(msg) => {
-                    let text = msg.prompt;
-                    // Native operations run at a turn boundary, never as text
-                    // injected into an already running model turn. Later messages
-                    // must stay behind queued commands: Steered acknowledgments
-                    // retire the engine's accepted-message ledger in FIFO order.
-                    if !done_current && (!queued_steers.is_empty() || current_native || !matches!(command_request(&text, &thread_id), Ok(None))) {
-                        queued_steers.push_back(text);
-                        continue 'main;
-                    }
-                    if let Some(expected) = router.active.clone() {
-                        let steer_params = json!({
-                            "threadId": thread_id,
-                            "expectedTurnId": expected,
-                            "input": prompt_input(&text),
-                        });
-                        match client.request("turn/steer", steer_params).await {
-                            Ok(_) => {
-                                let (prev, next) = rotate(&mut assistant_message_id);
-                                if !send(
-                                    &event_tx,
-                                    AgentEvent::Steered {
-                                        assistant_message_id: Some(prev),
-                                        next_assistant_message_id: Some(next),
-                                    },
-                                )
-                                .await
-                                {
-                                    break 'main;
-                                }
-                            }
-                            // A failed `turn/steer` does NOT mean the text is
-                            // bad: most commonly the active turn finished
-                            // between the UI send and this request. Queue it
-                            // for redelivery as the next `turn/start` when the
-                            // expected turn's end arrives (also the safe
-                            // fallback for older Codex without steering).
-                            Err(e) => {
-                                tracing::debug!(
-                                    target: "zeron_harness::codex",
-                                    "turn/steer rejected (queued as next turn): {e}"
-                                );
-                                if router.active.as_deref() == Some(expected.as_str())
-                                    && !router.is_completed(&expected)
-                                {
-                                    queued_steers.push_back(text);
-                                } else {
-                                    current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                                    if !steer_as_new_turn(
-                                        &client, turn_params(&text), &mut router, &event_tx,
-                                        &mut assistant_message_id, &mut done_current,
-                                    ).await { break 'main; }
-                                }
-                            }
-                        }
-                    } else {
-                        current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                        if !steer_as_new_turn(
-                            &client, turn_params(&text), &mut router, &event_tx,
-                            &mut assistant_message_id, &mut done_current,
-                        ).await { break 'main; }
-                    }
-                }
-                None => {
-                    // Mailbox closed (the caller's graceful idle-reap): finish
-                    // once nothing is in flight — mirrors codex.ts's steer loop
-                    // `finish()` on a null take.
-                    steering_open = false;
-                    if done_current && router.active.is_none() && queued_steers.is_empty() {
-                        break 'main;
-                    }
-                }
-            },
-
-            _ = interrupt.cancelled(), if !interrupt_sent => {
-                interrupt_sent = true;
-                interrupted = true;
-                if let Some(turn) = router.active.clone() {
-                    let client = client.clone();
-                    let thread = thread_id.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = client
-                            .request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }))
-                            .await
-                        {
-                            tracing::debug!(
-                                target: "zeron_harness::codex",
-                                "turn/interrupt failed (escalation will reap): {e}"
-                            );
-                        }
-                    });
-                    // Escalate if the app server doesn't wind down (turn/aborted)
-                    // within the grace periods: SIGTERM, then SIGKILL.
-                    if let Some(pid) = crate::process::signal_target(&child) {
-                        escalation = Some(tokio::spawn(async move {
-                            tokio::time::sleep(interrupt_grace).await;
-                            send_signal(&pid, Signal::Term);
-                            tokio::time::sleep(kill_grace).await;
-                            send_signal(&pid, Signal::Kill);
-                        }));
-                    }
-                } else {
-                    // Idle between turns: nothing to interrupt — the terminal
-                    // bookkeeping below still guarantees Done { Interrupted }.
-                    break 'main;
-                }
-            },
-
             _ = event_tx.closed() => break 'main,
         }
     }
+    // (Only a commit takes the child, and a commit returns above.)
+    let Some(mut child) = child else {
+        return;
+    };
 
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
@@ -1612,14 +2005,21 @@ async fn run_session(session: Session) {
                     status: DoneStatus::Interrupted,
                     result: None,
                     error: None,
-                    session_id: Some(thread_id.clone()),
+                    session_id: Some(state.thread_id.clone()),
                 }))
                 .await;
-        } else if !interrupted && !done_current {
+        } else if !interrupted && !state.done_current {
             // A child KILLED mid-turn (OS memory pressure, `killall codex`)
             // must not read as a silent success — codex.ts's signal-death
-            // handling, reduced to the turn-in-flight case.
-            let status = child.try_wait().ok().flatten();
+            // handling, reduced to the turn-in-flight case. Stdout EOF
+            // usually just precedes the exit (and the last stderr lines):
+            // give both a moment so the message says what happened.
+            stderr_tail.wait_closed().await;
+            let status = tokio::time::timeout(Duration::from_millis(500), child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|outcome| outcome.status());
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
@@ -1629,16 +2029,152 @@ async fn run_session(session: Session) {
                         status,
                         &stderr_tail,
                     )),
-                    session_id: Some(thread_id.clone()),
+                    session_id: Some(state.thread_id.clone()),
                 }))
                 .await;
         }
     }
 
-    shutdown_child(&mut child, kill_grace).await;
+    child.shutdown(kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();
     }
+}
+
+/// Answer the parked request `key` and forget it. A dropped sender (the
+/// caller went away) degrades to empty answers so the agent is unblocked
+/// rather than wedged (an approval then declines).
+fn write_answer(
+    client: &RpcClient,
+    state: &mut CodexLoopState,
+    key: &str,
+    answer: Option<Vec<UserInputAnswer>>,
+) {
+    if let Some(at) = state.parked.iter().position(|parked| parked.key() == key) {
+        let parked = state.parked.remove(at);
+        client.respond(&parked.rpc_id, parked.response(&answer.unwrap_or_default()));
+    }
+}
+
+/// How a freeze ended for the run loop.
+enum Frozen {
+    /// The engine let the run go (a failed exec, a refusal): carry on.
+    Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// A same-process successor took the app server and its pipes: end the
+    /// stream.
+    Committed,
+}
+
+/// What a freeze needs of the run loop.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Freezing<'a> {
+    child: &'a mut Option<ChildHandle>,
+    client: &'a RpcClient,
+    incoming: &'a mut mpsc::Receiver<Incoming>,
+    stderr: &'a mut Option<StderrDrain>,
+    stderr_tail: &'a crate::StderrTail,
+    state: &'a CodexLoopState,
+    held_steers: &'a mut VecDeque<SteerMessage>,
+    steering: &'a mut mpsc::Receiver<SteerMessage>,
+}
+
+/// Stop at this message boundary and offer the run to the engine; suspended
+/// until its verdict. Refusals the loop can see itself (a title run,
+/// interrupting) are answered before this is called; setup and an in-flight
+/// steer never reach it (they refuse through [`FreezeGate::refuse_while`]),
+/// and any other request of ours in flight makes [`RpcClient::freeze`]
+/// refuse.
+#[cfg(unix)]
+async fn freeze_run(request: FreezeRequest, run: Freezing<'_>) -> Frozen {
+    use crate::handoff::drain_steering;
+    use crate::{FrozenRun, SteerRecord};
+    let busy = |reply: tokio::sync::oneshot::Sender<_>, refusal| {
+        let _ = reply.send(Err(refusal));
+        Frozen::Thawed
+    };
+    const EXITED: FreezeRefusal = FreezeRefusal::Busy("the agent process has exited");
+    let Some(child) = run.child.as_ref() else {
+        return busy(request.reply, EXITED);
+    };
+    let Some(pid) = child.id() else {
+        return busy(request.reply, EXITED);
+    };
+    // An exit inside the freeze window must stay reapable by the next image.
+    if !child.hold_reaping() {
+        return busy(request.reply, EXITED);
+    }
+    // Queued stdin lines finish, the reader stops at a line boundary, and the
+    // messages this loop has not handled yet are taken back out: exported
+    // ahead of the reader's leftover, or redelivered by a thaw.
+    let mut rpc = match run.client.freeze(run.incoming).await {
+        Ok(rpc) => rpc,
+        Err(refusal) => {
+            child.release_reaping();
+            return busy(request.reply, refusal);
+        }
+    };
+    let (Some(stdin_fd), Some(stdout_fd)) = (rpc.stdin_fd, rpc.stdout_fd) else {
+        drop(rpc);
+        child.release_reaping();
+        return busy(
+            request.reply,
+            FreezeRefusal::Busy("the agent's pipes are not exportable"),
+        );
+    };
+    // Steers a previous, thawed freeze put back come first, then the mailbox.
+    let mut undrained: Vec<SteerRecord> =
+        run.held_steers.drain(..).map(SteerRecord::from).collect();
+    undrained.extend(drain_steering(run.steering));
+    let state = serde_json::to_value(CodexHandoffState {
+        rpc_next_id: rpc.next_id,
+        run: run.state,
+    })
+    .expect("codex loop state serializes");
+    let handoff = HarnessHandoff {
+        harness: HarnessId::Codex,
+        state_version: STATE_VERSION,
+        pid: pid as i32,
+        stdin_fd,
+        stdout_fd,
+        stderr_fd: run.stderr.as_ref().and_then(StderrDrain::fd),
+        extra_fds: Vec::new(),
+        stdout_leftover: std::mem::take(&mut rpc.leftover),
+        stderr_tail: run.stderr_tail.lines(),
+        state,
+        undrained_steers: undrained.clone(),
+    };
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    let sent = request.reply.send(Ok(FrozenRun {
+        handoff,
+        commit: commit_tx,
+    }));
+    if sent.is_ok() && commit_rx.await.is_ok() {
+        // A same-process successor owns the app server and its pipes now (the
+        // exec path never gets here): give them up without closing, killing
+        // or reaping anything.
+        rpc.abandon().await;
+        if let Some(stderr) = run.stderr.take() {
+            stderr.abandon().await;
+        }
+        if let Some(child) = run.child.take() {
+            let _ = child.release();
+        }
+        return Frozen::Committed;
+    }
+    // Thawed: dropping the frozen client redelivers the taken messages and
+    // resumes both pipes; the drained steers are read again, in order.
+    drop(rpc);
+    child.release_reaping();
+    run.held_steers
+        .extend(undrained.into_iter().map(SteerMessage::from));
+    Frozen::Thawed
+}
+
+#[cfg(not(unix))]
+async fn freeze_run(request: FreezeRequest, _run: Freezing<'_>) -> Frozen {
+    let _ = request.reply.send(Err(FreezeRefusal::Unsupported));
+    Frozen::Thawed
 }
 
 /// Deliver a steer as a fresh `turn/start` on the same thread (the fallback
@@ -1646,17 +2182,23 @@ async fn run_session(session: Session) {
 /// when the loop should end (turn/start failed or the consumer hung up).
 async fn steer_as_new_turn(
     client: &RpcClient,
-    params: Value,
-    router: &mut TurnRouter,
+    gate: &mut FreezeGate,
+    state: &mut CodexLoopState,
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
-    assistant_message_id: &mut String,
-    done_current: &mut bool,
+    text: &str,
 ) -> bool {
-    match start_turn(client, params).await {
+    state.current_native = command_request(text, &state.thread_id)
+        .ok()
+        .flatten()
+        .is_some();
+    match gate
+        .refuse_while(BUSY_STEER, start_turn(client, state.turn_params(text)))
+        .await
+    {
         Ok(id) => {
-            router.adopt_started(id);
-            *done_current = false;
-            let (prev, next) = rotate(assistant_message_id);
+            state.router.adopt_started(id);
+            state.done_current = false;
+            let (prev, next) = rotate(&mut state.assistant_message_id);
             send(
                 event_tx,
                 AgentEvent::Steered {
@@ -1690,84 +2232,59 @@ type RequestInputFn = Box<
 >;
 
 /// Serve one server→client request. Approval requests round-trip through
-/// `request_input` as a synthesized yes/no question (in a subtask so the
-/// message loop keeps flowing); with `auto_approve` they're accepted outright
+/// `request_input` as a synthesized yes/no question, parked in the loop (it
+/// keeps flowing meanwhile); with `auto_approve` they're accepted outright
 /// (belt to the wire-level `approvalPolicy: "never"`). Anything else is
 /// rejected as unsupported so the server never wedges awaiting a reply.
+///
+/// The engine's input bridge owns the `InputRequested`/`InputResolved`
+/// lifecycle (it mints the request id the resolver is parked under);
+/// emitting our own copy doubled the doc's input part with an id
+/// `respond_input` could never match.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
-    auto_approve: bool,
-    request_input: &Arc<RequestInputFn>,
+    request_input: &RequestInputFn,
+    state: &mut CodexLoopState,
+    answers: &mut Answers,
 ) {
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
     // answer keyed by question id, `{ answers: { <id>: { answers: [..] } } }`.
-    if method == "item/tool/requestUserInput" {
+    let ask = if method == "item/tool/requestUserInput" {
         let questions = user_input_questions(params);
         if questions.is_empty() {
             client.respond(&id, json!({ "answers": {} }));
             return;
         }
-        let client = client.clone();
-        let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
-            let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
-            let answers = (request_input)(asked).await.unwrap_or_default();
-            let mut by_id = serde_json::Map::new();
-            for (wire_id, q) in &questions {
-                let labels: Vec<Value> = answers
-                    .iter()
-                    .find(|a| a.question_id == q.id)
-                    .map(|a| a.labels.iter().cloned().map(Value::String).collect())
-                    .unwrap_or_default();
-                by_id.insert(wire_id.clone(), json!({ "answers": labels }));
-            }
-            client.respond(&id, json!({ "answers": by_id }));
-        });
-        return;
-    }
-    let is_approval = matches!(
+        ParkedAsk::UserInput { questions }
+    } else if matches!(
         method,
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
-    );
-    if !is_approval {
+    ) {
+        if state.auto_approve {
+            client.respond(&id, json!({ "decision": "accept" }));
+            return;
+        }
+        ParkedAsk::Approval {
+            question: approval_question(method, params),
+        }
+    } else {
         tracing::debug!(
             target: "zeron_harness::codex",
             "unhandled server request: {method}"
         );
         client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
         return;
-    }
-    if auto_approve {
-        client.respond(&id, json!({ "decision": "accept" }));
-        return;
-    }
-
-    let question = approval_question(method, params);
-    let client = client.clone();
-    let request_input = Arc::clone(request_input);
-    tokio::spawn(async move {
-        // The engine's input bridge owns the `InputRequested`/`InputResolved`
-        // lifecycle (it mints the request id the resolver is parked under);
-        // emitting our own copy here doubled the doc's input part with an id
-        // `respond_input` could never match.
-        //
-        // A dropped sender (caller went away) degrades to a decline so the
-        // agent is unblocked — never silently allowed.
-        let answers = (request_input)(vec![question.clone()])
-            .await
-            .unwrap_or_default();
-        let accept = answers.iter().any(|a| {
-            a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
-        });
-        client.respond(
-            &id,
-            json!({ "decision": if accept { "accept" } else { "decline" } }),
-        );
-    });
+    };
+    let parked = ParkedRequest { rpc_id: id, ask };
+    answers.push(await_answer(
+        parked.key(),
+        request_input(parked.questions()),
+    ));
+    state.parked.push(parked);
 }
 
 /// Parse `item/tool/requestUserInput` questions into (wire id, question)
@@ -1969,6 +2486,119 @@ mod tests {
         assert!(*is_default);
         assert_eq!(astra.options[0].choices.len(), 2);
         assert_eq!(astra.options[0].choices[1].id, "fast");
+    }
+
+    #[test]
+    fn loop_state_round_trips_losslessly_and_resumes_the_same_session() {
+        let mut children = subagents::Subagents::new("th-1".into());
+        // Early content of a child whose spawn is not known yet: buffered.
+        let early = children.notification(
+            "child-a",
+            "item/agentMessage/delta",
+            &json!({"threadId": "child-a", "itemId": "i1", "delta": "early"}),
+        );
+        assert!(early.is_empty());
+        let mut reasoning = HashMap::new();
+        let mut stream = ReasoningStream::default();
+        stream.map(
+            "item/reasoning/summaryTextDelta",
+            &json!({"itemId": "r1", "summaryIndex": 0, "delta": "**one**"}),
+        );
+        reasoning.insert("th-1".to_owned(), stream);
+        let mut router = TurnRouter::default();
+        router.note_completed("t-0");
+        router.adopt_started("t-1".into());
+        let parked = ParkedRequest {
+            rpc_id: json!("srv-7"),
+            ask: ParkedAsk::UserInput {
+                questions: user_input_questions(
+                    &json!({"questions": [{"id": "pick", "question": "Pick one", "options": ["A", "B"]}]}),
+                ),
+            },
+        };
+        let state = CodexLoopState {
+            thread_id: "th-1".into(),
+            turn_template: json!({"approvalPolicy": "never", "summary": "auto"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            auto_approve: false,
+            assistant_message_id: "msg-1".into(),
+            streamed_text: HashSet::from(["item-1".to_owned()]),
+            reasoning_streams: reasoning,
+            pending_usage: Some(AgentEvent::Usage {
+                input_tokens: 3,
+                output_tokens: 4,
+            }),
+            queued_steers: VecDeque::from(["later".to_owned()]),
+            steering_open: true,
+            done_current: false,
+            current_native: false,
+            router,
+            children,
+            parked: vec![parked],
+        };
+        let text = serde_json::to_value(CodexHandoffState {
+            rpc_next_id: 42,
+            run: &state,
+        })
+        .unwrap();
+        let back: CodexHandoffState<CodexLoopState> = serde_json::from_value(text.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(CodexHandoffState {
+                rpc_next_id: back.rpc_next_id,
+                run: &back.run,
+            })
+            .unwrap(),
+            text,
+            "lossless"
+        );
+        let mut back = back.run;
+        assert_eq!(back.router.active.as_deref(), Some("t-1"));
+        assert!(back.router.is_completed("t-0"));
+        assert_eq!(
+            back.turn_params("go")["threadId"],
+            "th-1",
+            "turns go to the same thread"
+        );
+        // The buffered child content still drains to its spawn, once.
+        let drained = back.children.bind("child-a", "spawn-a");
+        assert_eq!(
+            drained,
+            vec![AgentEvent::Subagent {
+                parent_tool_use_id: "spawn-a".into(),
+                event: Box::new(AgentEvent::TextDelta {
+                    text: "early".into()
+                }),
+            }]
+        );
+        // A new reasoning part still gets its paragraph break.
+        let next = back.reasoning_streams.get_mut("th-1").unwrap().map(
+            "item/reasoning/summaryTextDelta",
+            &json!({"itemId": "r1", "summaryIndex": 1, "delta": "**two**"}),
+        );
+        assert_eq!(
+            next[0],
+            AgentEvent::ReasoningDelta {
+                text: "\n\n".into()
+            }
+        );
+        // The parked request answers under its original id and wire ids.
+        let parked = &back.parked[0];
+        assert_eq!(parked.rpc_id, json!("srv-7"));
+        let question = &parked.questions()[0];
+        assert_eq!(
+            question.id,
+            state.parked[0].questions()[0].id,
+            "question ids survive: the engine rebinds by them"
+        );
+        assert_eq!(
+            parked.response(&[UserInputAnswer {
+                question_id: question.id.clone(),
+                labels: vec!["B".into()],
+            }]),
+            json!({"answers": {"pick": {"answers": ["B"]}}})
+        );
     }
 
     #[test]

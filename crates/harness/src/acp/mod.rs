@@ -26,10 +26,15 @@
 //!   steering mailbox lives.
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
+//! - Live update (`crate::handoff`): a run freezes at a message boundary —
+//!   mid-turn too, carrying its in-flight `session/prompt` by JSON-RPC id —
+//!   and a later image adopts the same agent from its pipes and the loop's
+//!   serialized state ([`AcpLoopState`]).
 
 mod antigravity_paths;
 mod devin_models;
 mod normalize;
+#[cfg_attr(not(unix), allow(dead_code))]
 mod subagent;
 mod subagent_devin;
 mod system_message;
@@ -52,17 +57,21 @@ use zeron_proto::{
     RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
-use crate::jsonrpc::{Incoming, RpcClient};
+use crate::handoff::StderrDrain;
+use crate::jsonrpc::{InFlight, Incoming, RpcClient};
 pub(crate) use crate::process::owned as child;
 use crate::process::{Command, Stdio};
 use crate::scratch::ScratchDir;
 use crate::{
-    CancellationToken, Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child,
+    CancellationToken, FreezeRefusal, FreezeRequest, Harness, HarnessError, HarnessHandoff,
+    RunControls, Signal, SteerMessage, send_signal, shutdown_child,
 };
-use child::Child;
+use child::{Child, GroupChild};
 use normalize::{map_update, parse_commands, preferred_allow_option};
+use serde::{Deserialize, Serialize};
 use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
+use system_message::SystemMessageEchoFilter;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1230,6 +1239,9 @@ pub struct AcpHarness {
     /// Override of the agent's on-disk sessions root (grok's
     /// `~/.grok/sessions`), where subagent transcripts are tailed from.
     sessions_root: Option<PathBuf>,
+    /// Give the child a private temp root even for a program launch (test
+    /// seam; archive launches always get one).
+    force_scratch: bool,
     /// Grace between `session/cancel` and SIGTERM.
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
@@ -1255,6 +1267,7 @@ impl AcpHarness {
             spec,
             executable: None,
             sessions_root: None,
+            force_scratch: false,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             // Generous: the handshake is local work for every agent
@@ -1294,7 +1307,7 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr, sign_in_prompted) =
+        let (_scratch, mut child, _stderr, _drain, sign_in_prompted) =
             self.spawn_agent(home.as_deref(), false, &[], None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -1479,6 +1492,14 @@ impl AcpHarness {
     #[doc(hidden)]
     pub fn with_sessions_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.sessions_root = Some(root.into());
+        self
+    }
+
+    /// Test seam: give every launch the private temp root archive adapters
+    /// get (see [`crate::scratch`]).
+    #[doc(hidden)]
+    pub fn with_adapter_scratch(mut self) -> Self {
+        self.force_scratch = true;
         self
     }
 
@@ -1668,9 +1689,11 @@ impl AcpHarness {
     }
 
     fn adapter_scratch(&self) -> Result<Option<ScratchDir>, HarnessError> {
-        Ok(matches!(self.resolve_launch()?, Launch::Archive { .. })
-            .then(|| ScratchDir::new(self.spec.executable))
-            .transpose()?)
+        Ok(
+            (self.force_scratch || matches!(self.resolve_launch()?, Launch::Archive { .. }))
+                .then(|| ScratchDir::new(self.spec.executable))
+                .transpose()?,
+        )
     }
 
     async fn spawn_agent(
@@ -1684,6 +1707,7 @@ impl AcpHarness {
             Option<ScratchDir>,
             Child,
             crate::StderrTail,
+            Option<StderrDrain>,
             CancellationToken,
         ),
         HarnessError,
@@ -1715,10 +1739,13 @@ impl AcpHarness {
         if let Some(dir) = &scratch {
             dir.apply(&mut cmd);
         }
+        // Not killed on drop: a run frozen for a live update is held through
+        // an `execve` and its agent must outlive the old image's handles. The
+        // group kill of `Child`/`GroupChild` covers every other drop.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(false);
         let child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
@@ -1729,23 +1756,11 @@ impl AcpHarness {
         let mut child = Child::new(child);
         let stderr_tail = crate::StderrTail::default();
         let sign_in_prompted = CancellationToken::new();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = stderr_tail.clone();
-            let prompted = sign_in_prompted.clone();
-            let harness = self.spec.id;
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::acp", "stderr: {line}");
-                    tail.push(&line);
-                    if is_sign_in_prompt(harness, &line) {
-                        prompted.cancel();
-                    }
-                }
-                tail.close();
-            });
-        }
-        Ok((scratch, child, stderr_tail, sign_in_prompted))
+        let drain = child
+            .stderr
+            .take()
+            .map(|stderr| drain_stderr(stderr, &stderr_tail, self.spec.id, &sign_in_prompted));
+        Ok((scratch, child, stderr_tail, drain, sign_in_prompted))
     }
 
     /// Short-lived discovery run for [`Harness::commands`]: initialize, scan
@@ -1757,7 +1772,7 @@ impl AcpHarness {
         &self,
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (_scratch, mut child, _stderr, sign_in_prompted) = self
+        let (_scratch, mut child, _stderr, _drain, sign_in_prompted) = self
             .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
@@ -1829,7 +1844,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (_scratch, mut child, stderr_tail, sign_in_prompted) =
+        let (_scratch, mut child, stderr_tail, _drain, sign_in_prompted) =
             self.spawn_agent(None, false, &[], None).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -2326,7 +2341,7 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (scratch, mut child, stderr_tail, sign_in_prompted) = self
+        let (scratch, mut child, stderr_tail, stderr, sign_in_prompted) = self
             .spawn_agent(Some(&request.cwd), true, &[], request.mcp.as_ref())
             .await?;
         let stdin = child
@@ -2340,6 +2355,7 @@ impl Harness for AcpHarness {
         let (client, incoming) =
             client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let child = GroupChild::spawned(child);
         let devin_selection = match request.model.as_deref() {
             Some(model) if self.spec.id == HarnessId::Devin => {
                 let (exe, _) = self.resolve_program(false).await?;
@@ -2371,14 +2387,17 @@ impl Harness for AcpHarness {
             }
             _ => None,
         };
+        let event_tx = EventSink::new(event_tx, self.spec.id, None);
         tokio::spawn(run_session(Session {
             child,
             scratch,
+            stderr,
             client,
             incoming,
             event_tx,
             controls,
             request,
+            adopted: None,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
             prompt_transform: self.spec.prompt_transform,
@@ -2398,16 +2417,228 @@ impl Harness for AcpHarness {
             stderr_tail,
             sign_in_prompted,
         }));
+        Ok(event_stream(event_rx))
+    }
 
-        let events = futures::stream::unfold(event_rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        })
-        .boxed();
-        Ok(if self.spec.id == HarnessId::Antigravity {
-            system_message::strip_system_message_echoes(events)
-        } else {
-            events
-        })
+    fn supports_adoption(&self) -> bool {
+        cfg!(unix)
+    }
+
+    async fn adopt(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        #[cfg(unix)]
+        {
+            self.adopt_unix(handoff, controls, request)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (handoff, controls, request);
+            Err(HarnessError::Protocol(
+                "ACP runs cannot be adopted on this platform".into(),
+            ))
+        }
+    }
+}
+
+fn event_stream(
+    rx: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    futures::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+    )
+    .boxed()
+}
+
+/// Drain an agent's stderr into its tail, cancelling `prompted` when an
+/// agent that signs in from Settings asks for a browser sign-in instead.
+fn drain_stderr<R>(
+    stderr: R,
+    tail: &crate::StderrTail,
+    harness: HarnessId,
+    prompted: &CancellationToken,
+) -> StderrDrain
+where
+    R: tokio::io::AsyncRead + crate::handoff::PipeFd + Unpin + Send + 'static,
+{
+    let prompted = prompted.clone();
+    StderrDrain::spawn_observed(stderr, tail.clone(), "acp", move |line| {
+        if is_sign_in_prompt(harness, line) {
+            prompted.cancel();
+        }
+    })
+}
+
+impl AcpHarness {
+    /// Rebuild a run around an agent a previous image froze: same pipes
+    /// (duplicated), same session, the RPC id counter carried on and the
+    /// in-flight `session/prompt` (and `_session/steering`) re-registered by
+    /// id, so their responses reach this loop. No `initialize`, no session
+    /// setup, no `SessionStarted`, no prompt. Parked questions are re-attached
+    /// under the engine's existing input requests and answered with their
+    /// original JSON-RPC ids; subagent tails resume from their offsets.
+    #[cfg(unix)]
+    fn adopt_unix(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        use crate::handoff::dup_inherited;
+        let protocol = |what: String| HarnessError::Protocol(what);
+        if handoff.state_version != STATE_VERSION {
+            return Err(protocol(format!(
+                "ACP handoff state version {} is not {STATE_VERSION}",
+                handoff.state_version
+            )));
+        }
+        if handoff.harness != self.spec.id {
+            return Err(protocol(format!(
+                "a {:?} run cannot be adopted by the {:?} harness",
+                handoff.harness, self.spec.id
+            )));
+        }
+        let exported: AcpHandoffState = serde_json::from_value(handoff.state)
+            .map_err(|e| protocol(format!("ACP handoff state: {e}")))?;
+        let resumed = |id: Option<i64>| -> Result<Option<InFlight>, HarnessError> {
+            let Some(id) = id else { return Ok(None) };
+            match exported.in_flight.iter().find(|call| call.id == id) {
+                Some(call) => Ok(Some(call.clone())),
+                None => Err(protocol(format!(
+                    "ACP handoff state: request {id} is not in flight"
+                ))),
+            }
+        };
+        let turn_call = resumed(exported.turn_request)?;
+        let steering_call = resumed(exported.steering_request.as_ref().map(|(_, id)| *id))?;
+        let stdin = ChildStdin::from_std(std::process::ChildStdin::from(dup_inherited(
+            handoff.stdin_fd,
+        )?))?;
+        let stdout = ChildStdout::from_std(std::process::ChildStdout::from(dup_inherited(
+            handoff.stdout_fd,
+        )?))?;
+        let stderr = match handoff.stderr_fd {
+            Some(fd) => Some(tokio::process::ChildStderr::from_std(
+                std::process::ChildStderr::from(dup_inherited(fd)?),
+            )?),
+            None => None,
+        };
+        // Disarmed until everything else succeeded: a refused adoption must
+        // not kill the agent (the engine falls back, or rolls back to the
+        // previous image, which adopts it again).
+        let mut child = GroupChild::adopt(handoff.pid, exported.pgid)?;
+        child.disarm();
+        let scratch = exported
+            .scratch
+            .map(ScratchDir::adopt)
+            .transpose()
+            .map_err(|e| protocol(e.to_string()))?;
+        child.arm();
+
+        let stderr_tail = crate::StderrTail::seeded(handoff.stderr_tail);
+        let sign_in_prompted = CancellationToken::new();
+        let stderr = stderr.map(|s| drain_stderr(s, &stderr_tail, self.spec.id, &sign_in_prompted));
+        // The carried requests are registered before the reader starts: a
+        // response already buffered would otherwise be read and dropped as
+        // unknown before its waiter exists.
+        let carried: Vec<InFlight> = turn_call
+            .iter()
+            .chain(steering_call.iter())
+            .cloned()
+            .collect();
+        let observer: Option<crate::jsonrpc::StdoutObserver> =
+            if self.spec.id == HarnessId::Antigravity {
+                let prompted = sign_in_prompted.clone();
+                Some(Box::new(move |_| prompted.cancel()))
+            } else {
+                None
+            };
+        let (client, incoming, mut resumed_calls) = RpcClient::from_parts_carrying(
+            stdin,
+            stdout,
+            handoff.stdout_leftover,
+            exported.rpc_next_id,
+            observer,
+            &carried,
+        );
+        let mut resumed_calls = resumed_calls.drain(..);
+        let mut next_call = |call: &InFlight| PromptCall {
+            rpc_id: Some(call.id),
+            fut: resumed_calls
+                .next()
+                .expect("one future per carried request"),
+        };
+        let turn = turn_call.as_ref().map(&mut next_call);
+        let steering = match (exported.steering_request, steering_call.as_ref()) {
+            (Some((text, _)), Some(call)) => Some((text, next_call(call))),
+            _ => None,
+        };
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let event_tx = EventSink::new(event_tx, self.spec.id, exported.echo);
+        let subagents = match exported.subagents {
+            SubagentsState::Devin(tracker) => SubagentObserver::Devin(tracker),
+            SubagentsState::Grok(state) => SubagentObserver::Grok(SubagentTracker::restore(
+                exported.run.session_id.clone(),
+                event_tx.raw(),
+                self.sessions_root.clone(),
+                state,
+            )),
+        };
+        // Parked questions answer under the engine's existing requests: no
+        // second prompt.
+        let answers = Answers::new();
+        for parked in &exported.run.parked {
+            let answer = (controls.rebind_input)(parked.question.id.clone());
+            answers.push(await_answer(parked.question.id.clone(), answer));
+        }
+        let now = tokio::time::Instant::now();
+        let adopted = LoopStart {
+            last_update_at: now
+                .checked_sub(Duration::from_millis(exported.since_last_update_ms))
+                .unwrap_or(now),
+            prompt_stall_deadline: exported
+                .prompt_stall_remaining_ms
+                .map(|ms| now + Duration::from_millis(ms)),
+            state: exported.run,
+            subagents,
+            turn,
+            steering,
+            answers,
+        };
+        tokio::spawn(run_session(Session {
+            child,
+            scratch,
+            stderr,
+            client,
+            incoming,
+            event_tx,
+            controls,
+            request,
+            adopted: Some(Box::new(adopted)),
+            harness: self.spec.id,
+            agent_name: self.spec.display_name,
+            prompt_transform: self.spec.prompt_transform,
+            effort_values: self.spec.effort_values,
+            prompt_complete_extension: self.spec.prompt_complete_extension,
+            preempt_steers: self.spec.steering_mode == SteeringMode::StepBoundary,
+            devin_selection: None,
+            resend_unstarted: self.spec.drops_unstarted_cancelled_prompt,
+            prompt_stall: self.spec.prompt_stall,
+            stall_hint: self.spec.stall_hint,
+            effort_in_model_id: self.spec.effort_in_model_id,
+            auth_method: self.spec.auth_method,
+            sessions_root: self.sessions_root.clone(),
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            handshake_timeout: self.handshake_timeout,
+            stderr_tail,
+            sign_in_prompted,
+        }));
+        Ok(event_stream(event_rx))
     }
 }
 
@@ -2416,13 +2647,16 @@ impl Harness for AcpHarness {
 // ---------------------------------------------------------------------------
 
 struct Session {
-    child: Child,
+    child: GroupChild,
     scratch: Option<ScratchDir>,
+    stderr: Option<StderrDrain>,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
-    event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    event_tx: EventSink,
     controls: RunControls,
     request: RunRequest,
+    /// A run a previous image froze: straight into the main loop.
+    adopted: Option<Box<LoopStart>>,
     harness: HarnessId,
     agent_name: &'static str,
     prompt_complete_extension: bool,
@@ -2531,7 +2765,7 @@ fn rotate(id: &mut String) -> (String, String) {
     (prev, id.clone())
 }
 
-async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEvent) -> bool {
+async fn send(tx: &EventSink, ev: AgentEvent) -> bool {
     tx.send(Ok(ev)).await.is_ok()
 }
 
@@ -2933,7 +3167,7 @@ fn prompt_turn(
     session_id: String,
     text: String,
     prompt_id: Option<String>,
-) -> BoxFuture<'static, Result<Value, HarnessError>> {
+) -> PromptCall {
     let mut params = json!({
         "sessionId": session_id,
         "prompt": [{ "type": "text", "text": text }],
@@ -2943,7 +3177,45 @@ fn prompt_turn(
     }
     // Written now, not on first poll: a steer's `session/cancel` issued in
     // the same loop iteration must reach the agent after this prompt.
-    client.request_now("session/prompt", params)
+    PromptCall::request(&client, "session/prompt", params)
+}
+
+/// A `session/prompt` or `_session/steering` request the loop awaits, named
+/// by its JSON-RPC id so a live update can carry it to the next image (see
+/// [`RpcClient::freeze_carrying_requests`]).
+struct PromptCall {
+    /// `None` for a turn end synthesized from `prompt_complete`: nothing on
+    /// the wire answers it, and a freeze waits until the loop has taken it.
+    rpc_id: Option<i64>,
+    fut: BoxFuture<'static, Result<Value, HarnessError>>,
+}
+
+impl PromptCall {
+    fn request(client: &RpcClient, method: &str, params: Value) -> Self {
+        let (id, fut) = client.request_with_id(method, params);
+        Self {
+            rpc_id: Some(id),
+            fut,
+        }
+    }
+
+    fn settled(result: Value) -> Self {
+        Self {
+            rpc_id: None,
+            fut: Box::pin(async move { Ok(result) }),
+        }
+    }
+}
+
+impl std::future::Future for PromptCall {
+    type Output = Result<Value, HarnessError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.fut.as_mut().poll(cx)
+    }
 }
 
 /// Answer a server→client request. Permission requests are auto-accepted with
@@ -3005,28 +3277,29 @@ fn is_user_question(options: &[Value]) -> bool {
 }
 
 /// The live-run request handler: tool permissions auto-accept like
-/// [`handle_server_request`], but question-shaped requests block on the
-/// engine's input bridge (in a subtask so the message loop keeps flowing)
-/// and answer with the option whose name matches the chosen label. A dropped
-/// resolver degrades to `cancelled` — never a silent allow.
+/// [`handle_server_request`], but a question-shaped request comes back to be
+/// PARKED ([`park_question`]): the loop keeps flowing, asks the engine's
+/// input bridge, and answers with the option whose name matches the chosen
+/// label ([`write_answer`]). A dropped resolver degrades to `cancelled` —
+/// never a silent allow.
 fn handle_server_request_live(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
-    request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
-) -> Vec<AgentEvent> {
+) -> Option<ParkedQuestion> {
     if params
         .get("sessionId")
         .and_then(Value::as_str)
         .is_some_and(|id| id != session_id)
     {
         client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
-        return Vec::new();
+        return None;
     }
     if method != "session/request_permission" {
-        return handle_server_request(client, id, method, params);
+        handle_server_request(client, id, method, params);
+        return None;
     }
     let options: Vec<Value> = params
         .get("options")
@@ -3034,7 +3307,8 @@ fn handle_server_request_live(
         .cloned()
         .unwrap_or_default();
     if !is_user_question(&options) {
-        return handle_server_request(client, id, method, params);
+        handle_server_request(client, id, method, params);
+        return None;
     }
     let names: Vec<String> = options
         .iter()
@@ -3054,36 +3328,86 @@ fn handle_server_request_live(
             .and_then(Value::as_str)
             .unwrap_or("The agent needs your input.")
             .to_owned(),
-        options: names.clone(),
+        options: names,
         prefill: None,
         multiline: false,
         multi_select: false,
     };
-    let client = client.clone();
-    let request_input = std::sync::Arc::clone(request_input);
-    tokio::spawn(async move {
-        let answers = (request_input)(vec![question.clone()])
-            .await
-            .unwrap_or_default();
-        let picked = answers
-            .iter()
-            .find(|a| a.question_id == question.id)
-            .and_then(|a| a.labels.first())
-            .and_then(|label| {
-                options
-                    .iter()
-                    .find(|o| o.get("name").and_then(Value::as_str) == Some(label.as_str()))
-            })
-            .and_then(|o| o.get("optionId").and_then(Value::as_str));
-        match picked {
-            Some(option_id) => client.respond(
-                &id,
-                json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
-            ),
-            None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
-        }
-    });
-    Vec::new()
+    Some(ParkedQuestion {
+        rpc_id: id,
+        question,
+        options,
+    })
+}
+
+/// A question-shaped `session/request_permission` waiting for the user.
+/// Kept in the loop (not a detached task) so a live update can export it and
+/// the adopter answer it with the ORIGINAL JSON-RPC id.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParkedQuestion {
+    rpc_id: Value,
+    question: UserInputQuestion,
+    /// The agent's options; the chosen label picks one by name.
+    options: Vec<Value>,
+}
+
+/// Answers for parked questions, keyed by question id.
+type Answers =
+    futures::stream::FuturesUnordered<BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)>>;
+
+fn await_answer(
+    key: String,
+    answer: tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>,
+) -> BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)> {
+    Box::pin(async move { (key, answer.await.ok()) })
+}
+
+/// Ask the engine and wait for the answer in the loop's `answers`.
+fn park_question(
+    question: ParkedQuestion,
+    request_input: &RequestInputFn,
+    parked: &mut Vec<ParkedQuestion>,
+    answers: &Answers,
+) {
+    let answer = (request_input)(vec![question.question.clone()]);
+    answers.push(await_answer(question.question.id.clone(), answer));
+    parked.push(question);
+}
+
+/// Answer the parked question `key` and forget it.
+fn write_answer(
+    client: &RpcClient,
+    parked: &mut Vec<ParkedQuestion>,
+    key: &str,
+    answers: Option<Vec<UserInputAnswer>>,
+) {
+    let Some(at) = parked.iter().position(|p| p.question.id == key) else {
+        return;
+    };
+    let ParkedQuestion {
+        rpc_id,
+        question,
+        options,
+    } = parked.remove(at);
+    let answers = answers.unwrap_or_default();
+    let picked = answers
+        .iter()
+        .find(|a| a.question_id == question.id)
+        .and_then(|a| a.labels.first())
+        .and_then(|label| {
+            options
+                .iter()
+                .find(|o| o.get("name").and_then(Value::as_str) == Some(label.as_str()))
+        })
+        .and_then(|o| o.get("optionId").and_then(Value::as_str));
+    match picked {
+        Some(option_id) => client.respond(
+            &rpc_id,
+            json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
+        ),
+        None => client.respond(&rpc_id, json!({ "outcome": { "outcome": "cancelled" } })),
+    }
 }
 
 /// Where an agent that signs in from settings sends a signed-out run: the
@@ -3460,57 +3784,482 @@ fn track_open_tools(ev: &AgentEvent, open_tools: &mut std::collections::HashSet<
 /// A mid-turn `_session/steering` call. `idleBehavior: promptRequired`
 /// covers the turn-ended race: the agent hands the text back instead of
 /// firing an untracked turn.
-fn steering_call_future(
-    client: &RpcClient,
-    session_id: &str,
-    text: &str,
-) -> BoxFuture<'static, Result<Value, HarnessError>> {
+fn steering_call_future(client: &RpcClient, session_id: &str, text: &str) -> PromptCall {
     let params = json!({
         "sessionId": session_id,
         "prompt": [{ "type": "text", "text": text }],
         "_meta": { "steering": { "idleBehavior": "promptRequired" } },
     });
-    prompt_like_request(client.clone(), "_session/steering", params)
+    PromptCall::request(client, "_session/steering", params)
 }
 
-/// The per-run event loop: one task multiplexing agent messages, the pending
-/// turn, the steering mailbox, the interrupt token, and consumer liveness.
-async fn run_session(session: Session) {
-    let Session {
-        // Locals drop in reverse binding order: reap the child before cleanup.
-        scratch: _scratch,
-        mut child,
+/// The events a run sends, through the Antigravity system-message echo
+/// filter when the agent needs it. The filter runs here, in the loop, rather
+/// than on the consumer's side of the channel, so a live update can export
+/// the text it holds back (a wakeup block split across the handoff).
+struct EventSink {
+    tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    echo: Option<std::sync::Mutex<SystemMessageEchoFilter>>,
+}
+
+impl EventSink {
+    fn new(
+        tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+        harness: HarnessId,
+        echo: Option<SystemMessageEchoFilter>,
+    ) -> Self {
+        let echo = (harness == HarnessId::Antigravity)
+            .then(|| std::sync::Mutex::new(echo.unwrap_or_default()));
+        Self { tx, echo }
+    }
+
+    fn filter(
+        &self,
+        apply: impl FnOnce(&mut SystemMessageEchoFilter) -> Vec<AgentEvent>,
+    ) -> Vec<AgentEvent> {
+        match &self.echo {
+            Some(echo) => apply(
+                &mut echo
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    /// Send one item; `Err` once the consumer has gone.
+    async fn send(&self, item: Result<AgentEvent, HarnessError>) -> Result<(), ()> {
+        let (events, error) = match item {
+            Ok(event) if self.echo.is_some() => (self.filter(|echo| echo.apply(event)), None),
+            Ok(event) => (vec![event], None),
+            Err(error) => (self.filter(SystemMessageEchoFilter::finish), Some(error)),
+        };
+        for event in events {
+            self.tx.send(Ok(event)).await.map_err(|_| ())?;
+        }
+        if let Some(error) = error {
+            self.tx.send(Err(error)).await.map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
+    /// The stream is ending: send any text the filter still holds.
+    async fn flush(&self) {
+        for event in self.filter(SystemMessageEchoFilter::finish) {
+            if self.tx.send(Ok(event)).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    async fn closed(&self) {
+        self.tx.closed().await
+    }
+
+    fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    /// An unfiltered sender for tasks that only send subagent-tagged events
+    /// (which the filter passes through untouched).
+    fn raw(&self) -> mpsc::Sender<Result<AgentEvent, HarnessError>> {
+        self.tx.clone()
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// The filter's state, for a live update.
+    fn echo_state(&self) -> Option<SystemMessageEchoFilter> {
+        self.echo.as_ref().map(|echo| {
+            echo.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+    }
+}
+
+/// The main loop's protocol state: what a freeze exports and an adoption
+/// resumes from (fresh runs start from [`open_session`]'s).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpLoopState {
+    session_id: String,
+    /// The agent advertised the `_session/steering` extension.
+    steer_ext: bool,
+    /// The run's reasoning level; steers are transformed like the prompt.
+    reasoning: Option<ReasoningLevel>,
+    assistant_message_id: String,
+    /// Prompt-completion settlement (the prompt-complete extension): one
+    /// prompt is outstanding at a time, identified by `current_prompt_id`
+    /// (`zeron-p<prompt_seq>`); settled ids are remembered so a STALE
+    /// `prompt_complete` (a late replay of an already-settled prompt) can
+    /// never settle a newer turn.
+    prompt_seq: u64,
+    current_prompt_id: Option<String>,
+    completed_prompts: VecDeque<String>,
+    /// The text of the prompt in flight (re-sent by a preempt when the agent
+    /// drops an unstarted cancelled prompt).
+    current_prompt_text: String,
+    /// The prompt (`prompt_seq`) that last showed progress (text, thought,
+    /// tool or plan). Pi and Devin keep a prompt cancelled before that in
+    /// their history; Grok drops it, so its preempt re-sends the text.
+    progress_seq: u64,
+    /// Steers waiting for the turn boundary (agents without the extension,
+    /// or extension steers that lost the turn-end race).
+    queued_steers: VecDeque<String>,
+    /// Steers waiting behind the `_session/steering` call in flight.
+    steer_backlog: VecDeque<String>,
+    steering_open: bool,
+    /// Immediate steering for agents without a mid-turn steering extension:
+    /// a steer cancels the current generation (never a running tool — it
+    /// waits for open tools to finish) and the cancelled turn continues as
+    /// the steer's prompt in the same session, the way Codex `turn/steer`
+    /// behaves.
+    preempt_pending: bool,
+    preempt_sent: bool,
+    /// A Done has been emitted for the turn currently/last in flight.
+    done_current: bool,
+    /// Tools to avoid prompting into an unowned self-continued turn.
+    open_tools: std::collections::HashSet<String>,
+    /// Question-shaped permission requests waiting for the user.
+    parked: Vec<ParkedQuestion>,
+}
+
+/// Subagent correlation state in a handoff.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SubagentsState {
+    Devin(DevinTracker),
+    Grok(subagent::GrokSubagents),
+}
+
+/// What a handoff's `state` holds: the loop state and everything else the
+/// adopter needs to rebuild the run around the same agent.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(unix), allow(dead_code))]
+struct AcpHandoffState {
+    /// The id the next request must carry (never reuse one: a late response
+    /// would resolve the wrong call).
+    rpc_next_id: i64,
+    /// Every request of ours awaiting its response at the freeze.
+    in_flight: Vec<InFlight>,
+    /// The `session/prompt` the turn awaits (`None` between turns).
+    turn_request: Option<i64>,
+    /// The `_session/steering` call in flight: its text and request id.
+    steering_request: Option<(String, i64)>,
+    /// The agent's process group (it leads its own).
+    pgid: Option<i32>,
+    /// The agent's private temp root; the adopter removes it at run end.
+    scratch: Option<PathBuf>,
+    /// Since the last session update (the busy-session check).
+    since_last_update_ms: u64,
+    /// Left on the prompt-stall watchdog, when armed.
+    prompt_stall_remaining_ms: Option<u64>,
+    subagents: SubagentsState,
+    /// Antigravity's system-message echo filter.
+    echo: Option<SystemMessageEchoFilter>,
+    #[serde(rename = "loop")]
+    run: AcpLoopState,
+}
+
+/// Schema version of [`AcpHandoffState`] in a [`HarnessHandoff`]; an adopter
+/// refuses any other, and the engine falls back to crash recovery.
+#[cfg(unix)]
+pub(crate) const STATE_VERSION: u32 = 1;
+
+/// A freeze during setup (`initialize` through the session's config) is
+/// refused with this.
+const BUSY_SETUP: &str = "the ACP session is starting";
+
+/// Unread agent output above this is not handed over (the manifest's size is
+/// shared by every run): the freeze answers `Busy` and is retried.
+#[cfg(unix)]
+const MAX_LEFTOVER: usize = 8 << 20;
+
+/// Where the main loop starts: a fresh session's first turn, or what a
+/// previous image froze.
+struct LoopStart {
+    state: AcpLoopState,
+    subagents: SubagentObserver,
+    /// The `session/prompt` in flight. Silence is not a turn boundary:
+    /// completed tools, text, and usage may all precede a slow model
+    /// request, so the prompt future stays alive until its response (or an
+    /// authoritative completion extension) arrives.
+    /// ZERON_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
+    turn: Option<PromptCall>,
+    /// The in-flight `_session/steering` call (text + response), its
+    /// followers waiting in [`AcpLoopState::steer_backlog`]. Polled from the
+    /// main select so the loop keeps draining `incoming` while the agent
+    /// responds — awaiting inline deadlocks against a full incoming channel
+    /// when the agent floods updates (the reader blocks on the channel and
+    /// never parses the steering response).
+    steering: Option<(String, PromptCall)>,
+    answers: Answers,
+    last_update_at: tokio::time::Instant,
+    prompt_stall_deadline: Option<tokio::time::Instant>,
+}
+
+/// The run's freeze channel and whether it still has a sender (with none,
+/// `recv()` is `None` at once and forever — see `crate::handoff`).
+struct FreezeGate {
+    rx: mpsc::Receiver<FreezeRequest>,
+    open: bool,
+}
+
+impl FreezeGate {
+    /// Await `fut`, answering every freeze request that arrives meanwhile
+    /// with `Busy(reason)`: the loop is not at a safe point until it is done.
+    async fn refuse_while<F: std::future::Future>(
+        &mut self,
+        reason: &'static str,
+        fut: F,
+    ) -> F::Output {
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                biased;
+                out = &mut fut => return out,
+                request = self.rx.recv(), if self.open => match request {
+                    Some(request) => {
+                        let _ = request.reply.send(Err(FreezeRefusal::Busy(reason)));
+                    }
+                    None => self.open = false,
+                },
+            }
+        }
+    }
+}
+
+/// The next steer: those a thawed freeze put back first, then the mailbox.
+async fn next_steer(
+    held: &mut VecDeque<SteerMessage>,
+    steering: &mut mpsc::Receiver<SteerMessage>,
+) -> Option<SteerMessage> {
+    match held.pop_front() {
+        Some(steer) => Some(steer),
+        None => steering.recv().await,
+    }
+}
+
+/// How a freeze ended for the run loop.
+enum Frozen {
+    /// The engine let the run go (a failed exec, a refusal): carry on.
+    Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// A same-process successor took the agent and its pipes: end the
+    /// stream.
+    Committed,
+}
+
+/// What a freeze needs of the run loop.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Freezing<'a> {
+    harness: HarnessId,
+    child: &'a mut GroupChild,
+    client: &'a RpcClient,
+    incoming: &'a mut mpsc::Receiver<Incoming>,
+    stderr: &'a mut Option<StderrDrain>,
+    stderr_tail: &'a crate::StderrTail,
+    scratch: &'a mut Option<ScratchDir>,
+    event_tx: &'a EventSink,
+    subagents: &'a SubagentObserver,
+    held_steers: &'a mut VecDeque<SteerMessage>,
+    steering: &'a mut mpsc::Receiver<SteerMessage>,
+    turn_request: Option<i64>,
+    steering_request: Option<(String, i64)>,
+    since_last_update: Duration,
+    prompt_stall_remaining: Option<Duration>,
+    state: AcpLoopState,
+}
+
+/// Stop at this message boundary and offer the run to the engine; suspended
+/// until its verdict. Refusals the loop can see itself (interrupting, a
+/// recovery deadline armed, an exited child) are answered before this is
+/// called and setup never reaches it. A `session/prompt` (or
+/// `_session/steering`) in flight is carried by id, unless its response was
+/// already read: the loop must handle that first.
+#[cfg(unix)]
+async fn freeze_run(request: FreezeRequest, run: Freezing<'_>) -> Frozen {
+    use crate::handoff::drain_steering;
+    use crate::{FrozenRun, SteerRecord};
+    let busy = |reply: tokio::sync::oneshot::Sender<_>, refusal| {
+        let _ = reply.send(Err(refusal));
+        Frozen::Thawed
+    };
+    const EXITED: FreezeRefusal = FreezeRefusal::Busy("the agent process has exited");
+    let Some(pid) = run.child.id() else {
+        return busy(request.reply, EXITED);
+    };
+    // An exit inside the freeze window must stay reapable by the next image.
+    if !run.child.hold_reaping() {
+        return busy(request.reply, EXITED);
+    }
+    // Queued stdin lines finish, the reader stops at a line boundary, and the
+    // messages this loop has not handled yet are taken back out: exported
+    // ahead of the reader's leftover, or redelivered by a thaw.
+    let mut rpc = match run.client.freeze_carrying_requests(run.incoming).await {
+        Ok(rpc) => rpc,
+        Err(refusal) => {
+            run.child.release_reaping();
+            return busy(request.reply, refusal);
+        }
+    };
+    // Refuse after the RPC freeze: dropping `rpc` thaws the client.
+    macro_rules! refuse {
+        ($reason:expr) => {{
+            drop(rpc);
+            run.child.release_reaping();
+            return busy(request.reply, FreezeRefusal::Busy($reason));
+        }};
+    }
+    // A response resolved after the loop's last poll sits in its future,
+    // which the next image would not have.
+    let carried = |id: i64| rpc.in_flight.iter().any(|call| call.id == id);
+    if run.turn_request.is_some_and(|id| !carried(id))
+        || run
+            .steering_request
+            .as_ref()
+            .is_some_and(|(_, id)| !carried(*id))
+    {
+        refuse!("a turn is settling");
+    }
+    let (Some(stdin_fd), Some(stdout_fd)) = (rpc.stdin_fd, rpc.stdout_fd) else {
+        refuse!("the agent's pipes are not exportable");
+    };
+    if rpc.leftover.len() > MAX_LEFTOVER {
+        refuse!("too much unread agent output to hand over");
+    }
+    // Subagent transcripts: Devin's are plain data, Grok's tails park.
+    let (subagents, tails) = match run.subagents {
+        SubagentObserver::Devin(tracker) => (SubagentsState::Devin(tracker.clone()), None),
+        SubagentObserver::Grok(tracker) => match tracker.freeze().await {
+            Ok(tails) => (SubagentsState::Grok(tracker.export(&tails)), Some(tails)),
+            Err(reason) => refuse!(reason),
+        },
+    };
+    // Steers a previous, thawed freeze put back come first, then the mailbox.
+    let mut undrained: Vec<SteerRecord> =
+        run.held_steers.drain(..).map(SteerRecord::from).collect();
+    undrained.extend(drain_steering(run.steering));
+    // Exported: a frozen task that is dropped must neither kill the group
+    // nor remove the scratch dir the next image owns now.
+    run.child.disarm();
+    let scratch = run.scratch.take().map(ScratchDir::into_path);
+    let state = serde_json::to_value(AcpHandoffState {
+        rpc_next_id: rpc.next_id,
+        in_flight: rpc.in_flight.clone(),
+        turn_request: run.turn_request,
+        steering_request: run.steering_request,
+        pgid: run.child.pgid(),
+        scratch: scratch.clone(),
+        since_last_update_ms: run.since_last_update.as_millis() as u64,
+        prompt_stall_remaining_ms: run.prompt_stall_remaining.map(|d| d.as_millis() as u64),
+        subagents,
+        echo: run.event_tx.echo_state(),
+        run: run.state,
+    })
+    .expect("ACP loop state serializes");
+    let handoff = HarnessHandoff {
+        harness: run.harness,
+        state_version: STATE_VERSION,
+        pid: pid as i32,
+        stdin_fd,
+        stdout_fd,
+        stderr_fd: run.stderr.as_ref().and_then(StderrDrain::fd),
+        extra_fds: Vec::new(),
+        stdout_leftover: std::mem::take(&mut rpc.leftover),
+        stderr_tail: run.stderr_tail.lines(),
+        state,
+        undrained_steers: undrained.clone(),
+    };
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    let sent = request.reply.send(Ok(FrozenRun {
+        handoff,
+        commit: commit_tx,
+    }));
+    if sent.is_ok() && commit_rx.await.is_ok() {
+        // A same-process successor owns the agent, its pipes, its tails'
+        // transcripts and its scratch dir now (the exec path never gets
+        // here): give them up without closing, killing or removing anything.
+        rpc.abandon().await;
+        if let Some(stderr) = run.stderr.take() {
+            stderr.abandon().await;
+        }
+        if let Some(tails) = tails {
+            tails.abandon();
+        }
+        return Frozen::Committed;
+    }
+    // Thawed: dropping the frozen client redelivers the taken messages and
+    // resumes both pipes; the tails carry on; the drained steers are read
+    // again, in order.
+    drop(rpc);
+    drop(tails);
+    *run.scratch = scratch.map(ScratchDir::resume);
+    run.child.arm();
+    run.child.release_reaping();
+    run.held_steers
+        .extend(undrained.into_iter().map(SteerMessage::from));
+    Frozen::Thawed
+}
+
+#[cfg(not(unix))]
+async fn freeze_run(request: FreezeRequest, _run: Freezing<'_>) -> Frozen {
+    let _ = request.reply.send(Err(FreezeRefusal::Unsupported));
+    Frozen::Thawed
+}
+
+/// What [`open_session`] needs of the run.
+struct Opening<'a> {
+    client: &'a RpcClient,
+    incoming: &'a mut mpsc::Receiver<Incoming>,
+    event_tx: &'a EventSink,
+    child: &'a mut GroupChild,
+    gate: &'a mut FreezeGate,
+    interrupt: &'a CancellationToken,
+    request: &'a RunRequest,
+    harness: HarnessId,
+    agent_name: &'static str,
+    devin_selection: Option<devin_models::Selection>,
+    auth_method: Option<&'static str>,
+    effort_in_model_id: bool,
+    effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
+    prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
+    prompt_complete_extension: bool,
+    prompt_stall: Option<Duration>,
+    sessions_root: Option<PathBuf>,
+    handshake_timeout: Duration,
+    stderr_tail: &'a crate::StderrTail,
+    sign_in_prompted: &'a CancellationToken,
+}
+
+/// Handshake, session setup, `SessionStarted` and the first prompt: where a
+/// fresh run's main loop starts. `None` when the run already ended here (its
+/// Done, if any, is sent); the caller then stops the child. Freeze requests
+/// meanwhile are refused: setup is not a safe point.
+async fn open_session(opening: Opening<'_>) -> Option<LoopStart> {
+    let Opening {
         client,
-        mut incoming,
+        incoming,
         event_tx,
-        controls,
+        child,
+        gate,
+        interrupt,
         request,
         harness,
         agent_name,
-        prompt_complete_extension,
-        preempt_steers,
         devin_selection,
-        resend_unstarted,
-        prompt_stall,
-        stall_hint,
-        effort_in_model_id,
         auth_method,
-        sessions_root,
-        prompt_transform,
+        effort_in_model_id,
         effort_values,
-        interrupt_grace,
-        kill_grace,
+        prompt_transform,
+        prompt_complete_extension,
+        prompt_stall,
+        sessions_root,
         handshake_timeout,
         stderr_tail,
         sign_in_prompted,
-    } = session;
-    let RunControls {
-        execution_lease: _execution_lease,
-        request_input,
-        mut steering,
-        interrupt,
-    } = controls;
-    let request_input = std::sync::Arc::new(request_input);
+    } = opening;
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
@@ -3527,7 +4276,7 @@ async fn run_session(session: Session) {
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
-            match request_draining(&client, &mut incoming, "session/load", load).await {
+            match request_draining(client, incoming, "session/load", load).await {
                 Ok(resp) => (resume.clone(), resp),
                 Err(e) if auth_method.is_some() && is_auth_required(&e) => {
                     return Err(HarnessError::Protocol(not_signed_in(agent_name)));
@@ -3538,12 +4287,12 @@ async fn run_session(session: Session) {
                         target: "zeron_harness::acp",
                         "session/load failed (starting fresh): {e}"
                     );
-                    let _ = send(&event_tx, AgentEvent::Error {
+                    let _ = send(event_tx, AgentEvent::Error {
                         message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
                     }).await;
                     let new = new_session(
-                        &client,
-                        &mut incoming,
+                        client,
+                        incoming,
                         session_params.clone(),
                         agent_name,
                         auth_method.is_some(),
@@ -3560,8 +4309,8 @@ async fn run_session(session: Session) {
             }
         } else {
             let new = new_session(
-                &client,
-                &mut incoming,
+                client,
+                incoming,
                 session_params,
                 agent_name,
                 auth_method.is_some(),
@@ -3589,8 +4338,8 @@ async fn run_session(session: Session) {
         {
             let selection = devin_selection.clone().unwrap_or_default();
             let advertised = devin_models::wait_for_model(
-                &client,
-                &mut incoming,
+                client,
+                incoming,
                 &session_id,
                 &mut session_response,
                 &model,
@@ -3632,8 +4381,8 @@ async fn run_session(session: Session) {
             first_class_model_change(&session_response, requested_model.as_deref())?
         {
             request_draining(
-                &client,
-                &mut incoming,
+                client,
+                incoming,
                 "session/set_model",
                 json!({
                     "sessionId": session_id,
@@ -3684,8 +4433,8 @@ async fn run_session(session: Session) {
                     }
                 }
                 match request_draining(
-                    &client,
-                    &mut incoming,
+                    client,
+                    incoming,
                     "session/set_config_option",
                     Value::Object(params),
                 )
@@ -3731,9 +4480,16 @@ async fn run_session(session: Session) {
             init_commands,
         ))
     };
-    let setup = unless_sign_in_prompted(setup, &sign_in_prompted, agent_name);
-    let (session_id, steer_ext, init_commands) = tokio::select! {
-        res = tokio::time::timeout(handshake_timeout, setup) => {
+    let setup = unless_sign_in_prompted(setup, sign_in_prompted, agent_name);
+    // Not a safe point for a live update until the session is up.
+    let setup = gate.refuse_while(BUSY_SETUP, async {
+        tokio::select! {
+            res = tokio::time::timeout(handshake_timeout, setup) => Some(res),
+            _ = interrupt.cancelled() => None,
+        }
+    });
+    let (session_id, steer_ext, init_commands) = match setup.await {
+        Some(res) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
                 // get, a wedged adapter) used to spin "Working" forever —
@@ -3758,11 +4514,11 @@ async fn run_session(session: Session) {
                     // journaled, so the cause survives for later inspection. A
                     // still-live child (the timeout) contributes its stderr tail.
                     let error = match child.try_wait() {
-                        Ok(Some(status)) => {
+                        Ok(Some(outcome)) => {
                             tokio::time::sleep(Duration::from_millis(200)).await;
                             format!(
                                 "{e}; {}",
-                                crate::crash_message(agent_name, Some(status), &stderr_tail)
+                                crate::crash_message(agent_name, outcome.status(), stderr_tail)
                             )
                         }
                         _ => match stderr_tail.snapshot() {
@@ -3779,12 +4535,11 @@ async fn run_session(session: Session) {
                             session_id: None,
                         }))
                         .await;
-                    child.shutdown(kill_grace).await;
-                    return;
+                    return None;
                 }
             }
-        },
-        _ = interrupt.cancelled() => {
+        }
+        None => {
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Interrupted,
@@ -3793,14 +4548,13 @@ async fn run_session(session: Session) {
                     session_id: None,
                 }))
                 .await;
-            child.shutdown(kill_grace).await;
-            return;
+            return None;
         }
     };
 
-    let mut assistant_message_id = new_message_id();
+    let assistant_message_id = new_message_id();
     if !send(
-        &event_tx,
+        event_tx,
         AgentEvent::SessionStarted {
             harness,
             model: request.model.clone().unwrap_or_default(),
@@ -3812,43 +4566,117 @@ async fn run_session(session: Session) {
     )
     .await
     {
-        child.shutdown(kill_grace).await;
-        return;
+        return None;
     }
     if !init_commands.is_empty()
         && !send(
-            &event_tx,
+            event_tx,
             AgentEvent::AvailableCommands {
                 commands: init_commands,
             },
         )
         .await
     {
-        child.shutdown(kill_grace).await;
-        return;
+        return None;
     }
 
     // Subagent correlation + transcript tails: Devin carries nested updates
     // on ACP itself; everything else gets the Grok tracker (inert without
     // Grok's subagent lifecycle extension).
-    let mut subagents = if harness == HarnessId::Devin {
+    let subagents = if harness == HarnessId::Devin {
         SubagentObserver::Devin(DevinTracker::default())
     } else {
         SubagentObserver::Grok(SubagentTracker::new(
             session_id.clone(),
-            event_tx.clone(),
+            event_tx.raw(),
             sessions_root,
         ))
     };
 
-    // ---- main loop --------------------------------------------------------
-    // Prompt-completion settlement state (the prompt-complete extension):
-    // one prompt is outstanding at a time, identified by `current_prompt_id`;
-    // settled ids are remembered so a STALE `prompt_complete` (a late replay
-    // of an already-settled prompt) can never settle a newer turn.
-    let mut prompt_seq: u64 = 1;
-    let mut current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-    let mut completed_prompts: VecDeque<String> = VecDeque::new();
+    let now = tokio::time::Instant::now();
+    let current_prompt_id = prompt_complete_extension.then(|| "zeron-p1".to_owned());
+    let current_prompt_text = prompt_transform(request.reasoning, &request.prompt);
+    let turn = prompt_turn(
+        client.clone(),
+        session_id.clone(),
+        current_prompt_text.clone(),
+        current_prompt_id.clone(),
+    );
+    Some(LoopStart {
+        state: AcpLoopState {
+            session_id,
+            steer_ext,
+            reasoning: request.reasoning,
+            assistant_message_id,
+            prompt_seq: 1,
+            current_prompt_id,
+            completed_prompts: VecDeque::new(),
+            current_prompt_text,
+            progress_seq: 0,
+            queued_steers: VecDeque::new(),
+            steer_backlog: VecDeque::new(),
+            steering_open: true,
+            preempt_pending: false,
+            preempt_sent: false,
+            done_current: false,
+            open_tools: std::collections::HashSet::new(),
+            parked: Vec::new(),
+        },
+        subagents,
+        turn: Some(turn),
+        steering: None,
+        answers: Answers::new(),
+        last_update_at: now,
+        prompt_stall_deadline: prompt_stall.map(|d| now + d),
+    })
+}
+
+/// The per-run event loop: one task multiplexing agent messages, the pending
+/// turn, the steering mailbox, parked answers, the interrupt token,
+/// live-update freezes and consumer liveness.
+async fn run_session(session: Session) {
+    let Session {
+        // Locals drop in reverse binding order: reap the child before cleanup.
+        mut scratch,
+        mut child,
+        mut stderr,
+        client,
+        mut incoming,
+        event_tx,
+        controls,
+        request,
+        adopted,
+        harness,
+        agent_name,
+        prompt_complete_extension,
+        preempt_steers,
+        devin_selection,
+        resend_unstarted,
+        prompt_stall,
+        stall_hint,
+        effort_in_model_id,
+        auth_method,
+        sessions_root,
+        prompt_transform,
+        effort_values,
+        interrupt_grace,
+        kill_grace,
+        handshake_timeout,
+        stderr_tail,
+        sign_in_prompted,
+    } = session;
+    let RunControls {
+        execution_lease: _execution_lease,
+        request_input,
+        mut steering,
+        interrupt,
+        freeze,
+        rebind_input: _rebind_input,
+    } = controls;
+    let mut gate = FreezeGate {
+        rx: freeze,
+        open: true,
+    };
     // `ZERON_ACP_PROMPT_STALL_MS` overrides the spec's bound; 0 disables.
     let prompt_stall: Option<Duration> = match std::env::var("ZERON_ACP_PROMPT_STALL_MS")
         .ok()
@@ -3858,44 +4686,78 @@ async fn run_session(session: Session) {
         Some(ms) => Some(Duration::from_millis(ms)),
         None => prompt_stall,
     };
-    let mut prompt_stall_deadline: Option<tokio::time::Instant> =
-        prompt_stall.map(|d| tokio::time::Instant::now() + d);
-    // The text of the prompt in flight (re-sent by a preempt when the agent
-    // drops an unstarted cancelled prompt).
-    let mut current_prompt_text = prompt_transform(request.reasoning, &request.prompt);
-    let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
-        prompt_turn(
-            client.clone(),
-            session_id.clone(),
-            current_prompt_text.clone(),
-            current_prompt_id.clone(),
-        )
-    });
-    // Steers waiting for the turn boundary (agents without the extension, or
-    // extension steers that lost the turn-end race).
-    let mut queued_steers: VecDeque<String> = VecDeque::new();
-    // The in-flight `_session/steering` call (text + response future), plus
-    // followers awaiting their turn. Polled from the main select so the loop
-    // keeps draining `incoming` while the agent responds — awaiting inline
-    // deadlocks against a full incoming channel when the agent floods
-    // updates (the reader blocks on the channel and never parses the
-    // steering response).
-    let mut steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
-    let mut steer_backlog: VecDeque<String> = VecDeque::new();
-    let mut steering_open = true;
-    // Immediate steering for agents without a mid-turn steering extension:
-    // a steer cancels the current generation (never a running tool — it
-    // waits for open tools to finish) and the cancelled turn continues as the
-    // steer's prompt in the same session, the way Codex `turn/steer` behaves.
-    let mut preempt_pending = false;
-    let mut preempt_sent = false;
-    // The prompt (`prompt_seq`) that last showed progress (text, thought,
-    // tool or plan). Pi and Devin keep a prompt cancelled before that in
-    // their history; Grok drops it, so its preempt re-sends the text.
-    let mut progress_seq: u64 = 0;
+
+    let start = match adopted {
+        Some(start) => *start,
+        None => {
+            let opening = Opening {
+                client: &client,
+                incoming: &mut incoming,
+                event_tx: &event_tx,
+                child: &mut child,
+                gate: &mut gate,
+                interrupt: &interrupt,
+                request: &request,
+                harness,
+                agent_name,
+                devin_selection,
+                auth_method,
+                effort_in_model_id,
+                effort_values,
+                prompt_transform,
+                prompt_complete_extension,
+                prompt_stall,
+                sessions_root,
+                handshake_timeout,
+                stderr_tail: &stderr_tail,
+                sign_in_prompted: &sign_in_prompted,
+            };
+            match open_session(opening).await {
+                Some(start) => start,
+                None => {
+                    child.shutdown(kill_grace).await;
+                    return;
+                }
+            }
+        }
+    };
+    let LoopStart {
+        state,
+        mut subagents,
+        mut turn,
+        steering: mut steering_call,
+        mut answers,
+        mut last_update_at,
+        mut prompt_stall_deadline,
+    } = start;
+    let AcpLoopState {
+        session_id,
+        steer_ext,
+        reasoning,
+        mut assistant_message_id,
+        mut prompt_seq,
+        mut current_prompt_id,
+        mut completed_prompts,
+        mut current_prompt_text,
+        mut progress_seq,
+        mut queued_steers,
+        mut steer_backlog,
+        mut steering_open,
+        mut preempt_pending,
+        mut preempt_sent,
+        mut done_current,
+        mut open_tools,
+        mut parked,
+    } = state;
+    // Steers a freeze drained from the mailbox and a thaw put back.
+    let mut held_steers: VecDeque<SteerMessage> = VecDeque::new();
+
+    // ---- main loop --------------------------------------------------------
+    // The loop's protocol state (see [`AcpLoopState`]) came from `start`.
+    // The locals below are non-default only in states a freeze refuses, so
+    // they never need exporting.
     let mut interrupted = false;
     let mut interrupt_sent = false;
-    let mut done_current = false;
     let mut done_after_interrupt = false;
     let mut escalation_target = None;
     let mut escalation_deadline = None;
@@ -3914,12 +4776,6 @@ async fn run_session(session: Session) {
     // the queued steer is promoted to a fresh turn.
     const STARVE_GRACE: Duration = Duration::from_secs(2);
     let mut starve_deadline: Option<tokio::time::Instant> = None;
-    // Silence is not a turn boundary: completed tools, text, and usage may
-    // all precede a slow model request. Keep the prompt future alive until
-    // its response (or an authoritative completion extension) arrives.
-    // ZERON_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
-    let mut last_update_at = tokio::time::Instant::now();
-    let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // PREVENTION, ahead of all the recovery above: never send a
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
@@ -3935,7 +4791,101 @@ async fn run_session(session: Session) {
 
     let mut child_exit = None;
     let mut exit_drain_deadline = None;
+    // Answer one freeze request (see `freeze_run`). A request already
+    // waiting is answered ahead of anything else at the top of each
+    // iteration (the engine asks while nothing else should move; the select
+    // below is not biased, so it could otherwise pick new input first).
+    macro_rules! answer_freeze {
+        ($request:expr) => {{
+            let request: FreezeRequest = $request;
+            let busy = if interrupted || interrupt_sent {
+                Some("interrupting")
+            } else if child_exit.is_some() {
+                Some("the agent process has exited")
+            } else if starve_deadline.is_some() {
+                Some("a starved prompt is being settled")
+            } else if cancel_flush_deadline.is_some() {
+                Some("a busy session is being cancelled")
+            } else if turn.as_ref().is_some_and(|call| call.rpc_id.is_none()) {
+                // `prompt_complete` settled the turn; the loop has not
+                // taken it yet (nothing on the wire would redo it).
+                Some("a turn is settling")
+            } else {
+                None
+            };
+            if let Some(reason) = busy {
+                let _ = request.reply.send(Err(FreezeRefusal::Busy(reason)));
+                continue;
+            }
+            // Answers already given are written now, ahead of the
+            // writer's pause: the engine no longer holds their
+            // resolvers, so exporting them as parked would leave the
+            // adopter answering with nothing.
+            while let Some(Some((key, answer))) = futures::FutureExt::now_or_never(answers.next()) {
+                write_answer(&client, &mut parked, &key, answer);
+            }
+            let now = tokio::time::Instant::now();
+            let outcome = freeze_run(
+                request,
+                Freezing {
+                    harness,
+                    child: &mut child,
+                    client: &client,
+                    incoming: &mut incoming,
+                    stderr: &mut stderr,
+                    stderr_tail: &stderr_tail,
+                    scratch: &mut scratch,
+                    event_tx: &event_tx,
+                    subagents: &subagents,
+                    held_steers: &mut held_steers,
+                    steering: &mut steering,
+                    turn_request: turn.as_ref().and_then(|call| call.rpc_id),
+                    steering_request: steering_call
+                        .as_ref()
+                        .and_then(|(text, call)| Some((text.clone(), call.rpc_id?))),
+                    since_last_update: now.saturating_duration_since(last_update_at),
+                    prompt_stall_remaining: prompt_stall_deadline
+                        .map(|deadline| deadline.saturating_duration_since(now)),
+                    state: AcpLoopState {
+                        session_id: session_id.clone(),
+                        steer_ext,
+                        reasoning,
+                        assistant_message_id: assistant_message_id.clone(),
+                        prompt_seq,
+                        current_prompt_id: current_prompt_id.clone(),
+                        completed_prompts: completed_prompts.clone(),
+                        current_prompt_text: current_prompt_text.clone(),
+                        progress_seq,
+                        queued_steers: queued_steers.clone(),
+                        steer_backlog: steer_backlog.clone(),
+                        steering_open,
+                        preempt_pending,
+                        preempt_sent,
+                        done_current,
+                        open_tools: open_tools.clone(),
+                        parked: parked.clone(),
+                    },
+                },
+            )
+            .await;
+            if let Frozen::Committed = outcome {
+                // A same-process successor owns the agent, its group
+                // and its pipes: give the child up without signalling
+                // or reaping it, and end the stream (no Done) — the
+                // end the engine expects.
+                #[cfg(unix)]
+                let _ = child.release();
+                return;
+            }
+        }};
+    }
     'main: loop {
+        if gate.open
+            && let Ok(request) = gate.rx.try_recv()
+        {
+            answer_freeze!(request);
+            continue;
+        }
         tokio::select! {
             _ = sign_in_prompted.cancelled() => {
                 if !interrupted && !done_current {
@@ -3951,7 +4901,7 @@ async fn run_session(session: Session) {
             },
             status = child.wait(), if child_exit.is_none() => {
                 escalation_deadline = None;
-                child_exit = Some(status.ok());
+                child_exit = Some(status.ok().and_then(|outcome| outcome.status()));
                 child.request_group_shutdown();
                 // Descendants can hold stdout open after an adapter crash.
                 // Drain already-written frames, but never wait on them forever.
@@ -3986,12 +4936,22 @@ async fn run_session(session: Session) {
                 // a full channel never parses the response): past it the call
                 // is abandoned and the steer redelivered.
                 if let Some((text, mut fut)) = steering_call.take() {
-                    let outcome = match tokio::time::timeout(
-                        Duration::from_millis(1000),
-                        &mut fut,
-                    )
-                    .await
-                    {
+                    // Answers the user gives meanwhile are still written: a
+                    // response needs no reply, and a held one could wedge
+                    // the agent behind its own question.
+                    let settled = {
+                        let wait = tokio::time::timeout(Duration::from_millis(1000), &mut fut);
+                        tokio::pin!(wait);
+                        loop {
+                            tokio::select! {
+                                settled = &mut wait => break settled,
+                                Some((key, answer)) = answers.next(), if !answers.is_empty() => {
+                                    write_answer(&client, &mut parked, &key, answer);
+                                }
+                            }
+                        }
+                    };
+                    let outcome = match settled {
                         Ok(Ok(resp)) => resp
                             .get("outcome")
                             .and_then(Value::as_str)
@@ -4040,18 +5000,14 @@ async fn run_session(session: Session) {
                             }
                         }
                         Incoming::Request { id, method, params } => {
-                            for ev in handle_server_request_live(
+                            if let Some(question) = handle_server_request_live(
                                 &client,
                                 id,
                                 &method,
                                 &params,
-                                &request_input,
                                 &session_id,
                             ) {
-                                if !send(&event_tx, ev).await {
-                                    consumer_gone = true;
-                                    break;
-                                }
+                                park_question(question, &request_input, &mut parked, &answers);
                             }
                         }
                         _ => {}
@@ -4236,9 +5192,7 @@ async fn run_session(session: Session) {
                                     let _ = old.await;
                                 });
                             }
-                            turn = Some(Box::pin(async move {
-                                Ok(json!({ "stopReason": stop }))
-                            }));
+                            turn = Some(PromptCall::settled(json!({ "stopReason": stop })));
                         }
                     }
                     // Other notifications (other sessions, agent noise) are
@@ -4264,17 +5218,14 @@ async fn run_session(session: Session) {
                 }
                 Some(Incoming::Request { id, method, params }) => {
                     prompt_stall_deadline = None;
-                    for ev in handle_server_request_live(
+                    if let Some(question) = handle_server_request_live(
                         &client,
                         id,
                         &method,
                         &params,
-                        &request_input,
                         &session_id,
                     ) {
-                        if !send(&event_tx, ev).await {
-                            break 'main;
-                        }
+                        park_question(question, &request_input, &mut parked, &answers);
                     }
                 }
                 Some(Incoming::Eof) | None => {
@@ -4319,7 +5270,7 @@ async fn run_session(session: Session) {
                 }
             },
 
-            res = async { steering_call.as_mut().expect("guarded by if").1.as_mut().await },
+            res = async { (&mut steering_call.as_mut().expect("guarded by if").1).await },
                 if steering_call.is_some() =>
             {
                 let (text, _) = steering_call.take().expect("guarded by if");
@@ -4374,18 +5325,14 @@ async fn run_session(session: Session) {
                                     }
                                 }
                                 Incoming::Request { id, method, params } => {
-                                    for ev in handle_server_request_live(
+                                    if let Some(question) = handle_server_request_live(
                                         &client,
                                         id,
                                         &method,
                                         &params,
-                                        &request_input,
-                                &session_id,
+                                        &session_id,
                                     ) {
-                                        if !send(&event_tx, ev).await {
-                                            consumer_gone = true;
-                                            break;
-                                        }
+                                        park_question(question, &request_input, &mut parked, &answers);
                                     }
                                 }
                                 _ => {}
@@ -4595,11 +5542,11 @@ async fn run_session(session: Session) {
                 }
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
+            steer = next_steer(&mut held_steers, &mut steering), if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
-                    let text = prompt_transform(request.reasoning, &msg.prompt);
+                    let text = prompt_transform(reasoning, &msg.prompt);
                     if turn.is_none() && cancel_flush_deadline.is_some() {
                         // A busy-session cancel is already in flight: this
                         // steer lines up behind it and dispatches at flush.
@@ -4688,6 +5635,15 @@ async fn run_session(session: Session) {
                 }
             },
 
+            Some((key, answer)) = answers.next(), if !answers.is_empty() => {
+                write_answer(&client, &mut parked, &key, answer);
+            },
+
+            request = gate.rx.recv(), if gate.open => match request {
+                None => gate.open = false,
+                Some(request) => answer_freeze!(request),
+            },
+
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
@@ -4695,7 +5651,7 @@ async fn run_session(session: Session) {
                     client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
                     // Escalate if the agent doesn't wind down (stopReason
                     // "cancelled") within the grace periods.
-                    if let Some(pid) = crate::process::signal_target(&child) {
+                    if let Some(pid) = child.signal_target() {
                         escalation_target = Some(pid);
                         escalation_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
                     }
@@ -4798,7 +5754,8 @@ async fn run_session(session: Session) {
                 None => tokio::time::timeout(Duration::from_millis(200), child.wait())
                     .await
                     .ok()
-                    .and_then(Result::ok),
+                    .and_then(Result::ok)
+                    .and_then(|outcome| outcome.status()),
             };
             child.request_group_shutdown();
             stderr_tail.wait_closed().await;
@@ -4813,6 +5770,7 @@ async fn run_session(session: Session) {
         }
     }
 
+    event_tx.flush().await;
     child.shutdown(kill_grace).await;
 }
 

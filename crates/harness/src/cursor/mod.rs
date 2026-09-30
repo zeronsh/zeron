@@ -43,8 +43,9 @@ mod state;
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::collections::VecDeque;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -52,8 +53,13 @@ use zeron_proto::{
     RunRequest, SteeringMode, TodoItem, ToolCall,
 };
 
-use crate::process::{Child, ChildStdin, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use crate::handoff::{ChildHandle, StderrDrain, WriteMsg, run_writer};
+use crate::line_reader::LineReader;
+use crate::process::{ChildStdin, ChildStdout, Command, Stdio};
+use crate::{
+    FreezeRefusal, FreezeRequest, Harness, HarnessError, HarnessHandoff, RunControls, Signal,
+    SteerMessage, send_signal,
+};
 
 /// The pinned SDK (public beta 1.0.x line; inspected against 1.0.31's
 /// typings). Bump deliberately — see the module header.
@@ -91,6 +97,9 @@ fn cursor_cli_paths() -> Vec<PathBuf> {
 pub struct CursorHarness {
     /// Test seam: run this program AS the shim instead of node+managed SDK.
     executable: Option<PathBuf>,
+    /// Test seam: keep the conversation store lease under this directory even
+    /// with a fake `executable` (production always leases the real state root).
+    lease_root: Option<PathBuf>,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Credential-scoped successful catalog, with bounded refresh and backoff.
@@ -101,6 +110,7 @@ impl Default for CursorHarness {
     fn default() -> Self {
         Self {
             executable: None,
+            lease_root: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             models_cache: catalog::Catalog::default(),
@@ -124,6 +134,13 @@ impl CursorHarness {
 
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
+        self
+    }
+
+    /// Test seam: hold the store lease under `root` although the shim is a fake.
+    #[doc(hidden)]
+    pub fn with_lease_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.lease_root = Some(root.into());
         self
     }
 
@@ -299,8 +316,9 @@ impl Harness for CursorHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let lease = if self.executable.is_none() {
-            Some(state::Lease::acquire(&state::state_root(), request.resume.as_deref()).await?)
+        let lease_root = self.lease_root.clone().unwrap_or_else(state::state_root);
+        let lease = if self.executable.is_none() || self.lease_root.is_some() {
+            Some(state::Lease::acquire(&lease_root, request.resume.as_deref()).await?)
         } else {
             None
         };
@@ -308,7 +326,7 @@ impl Harness for CursorHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(&args);
         if lease.is_some() {
-            cmd.env("ZERON_CURSOR_STATE_DIR", state::state_root());
+            cmd.env("ZERON_CURSOR_STATE_DIR", &lease_root);
         }
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
@@ -317,7 +335,8 @@ impl Harness for CursorHarness {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            // A live update must not kill the shim when this image goes away.
+            .kill_on_drop(false);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(exe.display().to_string())
@@ -335,19 +354,12 @@ impl Harness for CursorHarness {
             .take()
             .ok_or_else(|| HarnessError::Protocol("cursor shim has no stdout".into()))?;
         let stderr_tail = crate::StderrTail::default();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = stderr_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::cursor", "stderr: {line}");
-                    tail.push(&line);
-                }
-            });
-        }
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stderr| StderrDrain::spawn(stderr, stderr_tail.clone(), "cursor"));
 
-        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<String>();
-        tokio::spawn(stdin_writer(stdin, stdin_rx));
+        let writer = spawn_writer(stdin);
         let first = json!({
             "op": "run",
             "prompt": request.prompt,
@@ -360,27 +372,173 @@ impl Harness for CursorHarness {
             "mcp": request.mcp,
             "storeDir": lease.as_ref().and_then(|lease| lease.store_dir.as_ref()),
         });
-        let _ = stdin_tx.send(first.to_string());
+        let _ = writer.send(WriteMsg::Line(first.to_string()));
 
+        let mut state = CursorLoopState::new(request.cwd, request.model.unwrap_or_default());
+        state.has_lease = lease.is_some();
+        state.store_dir = lease.as_ref().and_then(|lease| lease.store_dir.clone());
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        tokio::spawn(run_session(Session {
+            lease,
+            child: ChildHandle::Owned(child),
+            reader: LineReader::new(stdout),
+            writer,
+            stderr,
+            event_tx,
+            controls,
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            stderr_tail,
+            state,
+        }));
+
+        Ok(event_stream(event_rx))
+    }
+
+    fn supports_adoption(&self) -> bool {
+        cfg!(unix)
+    }
+
+    /// Rebuild a run around a shim a previous image froze: same pipes
+    /// (duplicated), same store lease, no `SessionStarted`, no first frame.
+    async fn adopt(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        _request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        #[cfg(unix)]
+        {
+            self.adopt_unix(handoff, controls)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (handoff, controls);
+            Err(HarnessError::Protocol(
+                "Cursor runs cannot be adopted on this platform".into(),
+            ))
+        }
+    }
+}
+
+fn event_stream(
+    rx: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    futures::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+    )
+    .boxed()
+}
+
+fn spawn_writer(stdin: ChildStdin) -> mpsc::UnboundedSender<WriteMsg> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_writer(stdin, rx, "cursor"));
+    tx
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+/// Version of [`CursorLoopState`]'s schema.
+pub(crate) const STATE_VERSION: u32 = 1;
+
+/// The run loop's protocol state that cannot be re-read from the shim: what a
+/// freeze exports and an adopter restores. (Interrupting runs refuse to
+/// freeze, so nothing about an interrupt is here.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorLoopState {
+    assistant_message_id: String,
+    session_id: Option<String>,
+    steering_open: bool,
+    /// A turn is settled and the session is parked awaiting the next prompt.
+    parked: bool,
+    pending_steers: usize,
+    any_done: bool,
+    request_cwd: String,
+    request_model: String,
+    /// The conversation's store directory when this run holds its lease.
+    store_dir: Option<PathBuf>,
+    /// This run holds the store lease (its descriptor rides in `extra_fds`).
+    has_lease: bool,
+}
+
+impl CursorLoopState {
+    fn new(request_cwd: String, request_model: String) -> Self {
+        Self {
+            assistant_message_id: new_message_id(),
+            session_id: None,
+            steering_open: true,
+            parked: false,
+            pending_steers: 0,
+            any_done: false,
+            request_cwd,
+            request_model,
+            store_dir: None,
+            has_lease: false,
+        }
+    }
+}
+
+impl CursorHarness {
+    #[cfg(unix)]
+    fn adopt_unix(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        use crate::handoff::dup_inherited;
+        if handoff.state_version != STATE_VERSION {
+            return Err(HarnessError::Protocol(format!(
+                "cursor handoff state version {} is not {STATE_VERSION}",
+                handoff.state_version
+            )));
+        }
+        let state: CursorLoopState = serde_json::from_value(handoff.state)
+            .map_err(|e| HarnessError::Protocol(format!("cursor handoff state: {e}")))?;
+        let stdin = ChildStdin::from_std(std::process::ChildStdin::from(dup_inherited(
+            handoff.stdin_fd,
+        )?))?;
+        let stdout = ChildStdout::from_std(std::process::ChildStdout::from(dup_inherited(
+            handoff.stdout_fd,
+        )?))?;
+        let stderr = match handoff.stderr_fd {
+            Some(fd) => Some(tokio::process::ChildStderr::from_std(
+                std::process::ChildStderr::from(dup_inherited(fd)?),
+            )?),
+            None => None,
+        };
+        // The store lease is a flock on an open file: duplicating the inherited
+        // descriptor shares the open file description, so the lock stays held.
+        let lease = if state.has_lease {
+            let fd =
+                handoff.extra_fds.first().copied().ok_or_else(|| {
+                    HarnessError::Protocol("cursor handoff lacks its lease".into())
+                })?;
+            Some(state::Lease::adopt(
+                dup_inherited(fd)?,
+                state.store_dir.clone(),
+            ))
+        } else {
+            None
+        };
+        let child = ChildHandle::adopt(handoff.pid)?;
+        let stderr_tail = crate::StderrTail::seeded(handoff.stderr_tail);
+        let stderr = stderr.map(|s| StderrDrain::spawn(s, stderr_tail.clone(), "cursor"));
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             lease,
             child,
-            stdout_lines: BufReader::new(stdout).lines(),
-            stdin_tx,
+            reader: LineReader::with_leftover(stdout, handoff.stdout_leftover),
+            writer: spawn_writer(stdin),
+            stderr,
             event_tx,
             controls,
-            request_cwd: request.cwd,
-            request_model: request.model.unwrap_or_default(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
+            state,
         }));
-
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        })
-        .boxed())
+        Ok(event_stream(event_rx))
     }
 }
 
@@ -468,33 +626,18 @@ fn map_model_items(items: &Value) -> Vec<Model> {
         .collect()
 }
 
-async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
-    while let Some(line) = rx.recv().await {
-        let write = async {
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await
-        };
-        if let Err(e) = write.await {
-            tracing::debug!(target: "zeron_harness::cursor", "stdin write failed (tolerated): {e}");
-            return;
-        }
-    }
-    let _ = stdin.shutdown().await;
-}
-
 struct Session {
     lease: Option<state::Lease>,
-    child: Child,
-    stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
-    stdin_tx: mpsc::UnboundedSender<String>,
+    child: ChildHandle,
+    reader: LineReader<ChildStdout>,
+    writer: mpsc::UnboundedSender<WriteMsg>,
+    stderr: Option<StderrDrain>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
-    request_cwd: String,
-    request_model: String,
     interrupt_grace: Duration,
     kill_grace: Duration,
     stderr_tail: crate::StderrTail,
+    state: CursorLoopState,
 }
 
 fn new_message_id() -> String {
@@ -503,36 +646,48 @@ fn new_message_id() -> String {
 
 async fn run_session(session: Session) {
     let Session {
-        lease: _lease,
-        mut child,
-        mut stdout_lines,
-        stdin_tx,
+        mut lease,
+        child,
+        reader,
+        writer,
+        mut stderr,
         event_tx,
         controls,
-        request_cwd,
-        request_model,
         interrupt_grace,
         kill_grace,
         stderr_tail,
+        state,
     } = session;
     let RunControls {
         execution_lease: _execution_lease,
         request_input: _request_input,
         mut steering,
         interrupt,
+        mut freeze,
+        rebind_input: _rebind_input,
     } = controls;
-
-    let mut assistant_message_id = new_message_id();
-    let mut session_id: Option<String> = None;
-    let mut steering_open = true;
+    let mut child = Some(child);
+    let mut reader = Some(reader);
+    let CursorLoopState {
+        mut assistant_message_id,
+        mut session_id,
+        mut steering_open,
+        mut parked,
+        mut pending_steers,
+        mut any_done,
+        request_cwd,
+        request_model,
+        store_dir,
+        has_lease,
+    } = state;
     let mut interrupted = false;
     let mut interrupt_sent = false;
-    let mut any_done = false;
     let mut done_after_interrupt = false;
-    // A turn is settled and the session is parked awaiting the next prompt.
-    let mut parked = false;
-    let mut pending_steers = 0usize;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    // Steers a thawed freeze put back, read before the mailbox.
+    let mut held_steers: VecDeque<SteerMessage> = VecDeque::new();
+    // With no sender `freeze.recv()` is `None` at once and forever.
+    let mut freeze_open = true;
 
     let send = |ev: AgentEvent| {
         let tx = event_tx.clone();
@@ -546,8 +701,8 @@ async fn run_session(session: Session) {
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
-                let _ = stdin_tx.send(json!({ "op": "interrupt" }).to_string());
-                if let Some(pid) = crate::process::signal_target(&child) {
+                let _ = writer.send(WriteMsg::Line(json!({ "op": "interrupt" }).to_string()));
+                if let Some(pid) = child.as_ref().and_then(ChildHandle::signal_target) {
                     escalation = Some(tokio::spawn(async move {
                         tokio::time::sleep(interrupt_grace).await;
                         send_signal(&pid, Signal::Term);
@@ -557,7 +712,46 @@ async fn run_session(session: Session) {
                 }
             },
 
-            line = stdout_lines.next_line() => match line {
+            request = freeze.recv(), if freeze_open => match request {
+                None => freeze_open = false,
+                Some(request) => {
+                    if interrupted {
+                        let _ = request.reply.send(Err(FreezeRefusal::Busy("interrupting")));
+                        continue;
+                    }
+                    let snapshot = CursorLoopState {
+                        assistant_message_id: assistant_message_id.clone(),
+                        session_id: session_id.clone(),
+                        steering_open,
+                        parked,
+                        pending_steers,
+                        any_done,
+                        request_cwd: request_cwd.clone(),
+                        request_model: request_model.clone(),
+                        store_dir: store_dir.clone(),
+                        has_lease,
+                    };
+                    let outcome = freeze_run(request, Freezing {
+                        child: &mut child,
+                        reader: &mut reader,
+                        writer: &writer,
+                        stderr: &mut stderr,
+                        stderr_tail: &stderr_tail,
+                        lease: &mut lease,
+                        state: &snapshot,
+                        held_steers: &mut held_steers,
+                        steering: &mut steering,
+                    })
+                    .await;
+                    if let Frozen::Committed = outcome {
+                        // The successor owns the shim and its pipes; ending the
+                        // stream (no Done) is the end the engine expects.
+                        return;
+                    }
+                }
+            },
+
+            line = reader.as_mut().expect("read until committed").next_line() => match line {
                 Ok(Some(line)) => {
                     let line = line.trim();
                     if line.is_empty() {
@@ -648,12 +842,12 @@ async fn run_session(session: Session) {
                 }
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
+            steer = next_steer(&mut held_steers, &mut steering), if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     pending_steers += 1;
                     parked = false;
                     any_done = false;
-                    let _ = stdin_tx.send(json!({ "op": "steer", "prompt": msg.prompt }).to_string());
+                    let _ = writer.send(WriteMsg::Line(json!({ "op": "steer", "prompt": msg.prompt }).to_string()));
                 }
                 None => {
                     steering_open = false;
@@ -681,10 +875,14 @@ async fn run_session(session: Session) {
             // Give the just-died child a beat to be reaped and its stderr
             // reader to drain, so the crash message carries the real exit
             // status and tail instead of "still running".
-            let status = tokio::time::timeout(Duration::from_millis(500), child.wait())
-                .await
-                .ok()
-                .and_then(Result::ok);
+            let status = match child.as_mut() {
+                Some(child) => tokio::time::timeout(Duration::from_millis(500), child.wait())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .and_then(|outcome| outcome.status()),
+                None => None,
+            };
             tokio::task::yield_now().await;
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
@@ -697,18 +895,163 @@ async fn run_session(session: Session) {
         }
     }
 
-    drop(stdin_tx);
+    drop(writer);
     // EOF asks the shim to cancel/close the SDK and settle its durable state.
     // Signals remain the bounded fallback when the SDK cannot shut down.
-    if !matches!(
-        tokio::time::timeout(interrupt_grace, child.wait()).await,
-        Ok(Ok(_))
-    ) {
-        shutdown_child(&mut child, kill_grace).await;
+    if let Some(child) = child.as_mut()
+        && !matches!(
+            tokio::time::timeout(interrupt_grace, child.wait()).await,
+            Ok(Ok(_))
+        )
+    {
+        child.shutdown(kill_grace).await;
     }
+    drop(lease);
     if let Some(handle) = escalation {
         handle.abort();
     }
+}
+
+/// The next steer: those a thawed freeze put back first, then the mailbox.
+async fn next_steer(
+    held: &mut VecDeque<SteerMessage>,
+    steering: &mut mpsc::Receiver<SteerMessage>,
+) -> Option<SteerMessage> {
+    match held.pop_front() {
+        Some(steer) => Some(steer),
+        None => steering.recv().await,
+    }
+}
+
+/// How a freeze ended for the run loop.
+enum Frozen {
+    /// The engine let the run go (a failed exec, a refusal): carry on.
+    Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// A same-process successor took the run (tests; the exec path never
+    /// commits): end without a `Done`.
+    Committed,
+}
+
+/// How long a writer may take to finish its queued lines before a freeze
+/// gives up and the run carries on.
+#[cfg(unix)]
+const PAUSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What a freeze needs of the run loop.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Freezing<'a> {
+    child: &'a mut Option<ChildHandle>,
+    reader: &'a mut Option<LineReader<ChildStdout>>,
+    writer: &'a mpsc::UnboundedSender<WriteMsg>,
+    stderr: &'a mut Option<StderrDrain>,
+    stderr_tail: &'a crate::StderrTail,
+    lease: &'a mut Option<state::Lease>,
+    state: &'a CursorLoopState,
+    held_steers: &'a mut VecDeque<SteerMessage>,
+    steering: &'a mut mpsc::Receiver<SteerMessage>,
+}
+
+/// Stop at this line boundary and offer the run to the engine; suspended until
+/// its verdict. Interrupting runs are refused before this is called.
+#[cfg(unix)]
+async fn freeze_run(request: FreezeRequest, run: Freezing<'_>) -> Frozen {
+    use crate::handoff::{PipeFd, drain_steering};
+    use crate::{FrozenRun, SteerRecord};
+    use std::os::fd::AsRawFd;
+    let busy = |reply: tokio::sync::oneshot::Sender<_>, reason| {
+        let _ = reply.send(Err(FreezeRefusal::Busy(reason)));
+        Frozen::Thawed
+    };
+    let (Some(child), Some(reader)) = (run.child.as_ref(), run.reader.as_ref()) else {
+        return busy(request.reply, "the agent process has exited");
+    };
+    let Some(pid) = child.id() else {
+        return busy(request.reply, "the agent process has exited");
+    };
+    // An exit inside the freeze window must stay reapable by the next image.
+    if !child.hold_reaping() {
+        return busy(request.reply, "the agent process has exited");
+    }
+    // Queued stdin lines finish first; the writer then parks WITH its pipe and
+    // queue, so a thaw needs nothing rebuilt.
+    let (pause_tx, pause_rx) = tokio::sync::oneshot::channel();
+    let paused = match run.writer.send(WriteMsg::Pause(pause_tx)) {
+        Ok(()) => tokio::time::timeout(PAUSE_TIMEOUT, pause_rx)
+            .await
+            .ok()
+            .and_then(Result::ok),
+        Err(_) => None,
+    };
+    let Some(paused) = paused else {
+        child.release_reaping();
+        return busy(request.reply, "the agent is not taking its input");
+    };
+    let Some(stdin_fd) = paused.stdin_fd else {
+        child.release_reaping();
+        return busy(request.reply, "the agent's pipes are not exportable");
+    };
+    let stdout_fd = reader.get_ref().as_raw_fd();
+    crate::handoff::grow_pipe(stdout_fd);
+    // Steers a previous, thawed freeze put back come first, then the mailbox.
+    let mut undrained: Vec<SteerRecord> =
+        run.held_steers.drain(..).map(SteerRecord::from).collect();
+    undrained.extend(drain_steering(run.steering));
+    let handoff = HarnessHandoff {
+        harness: HarnessId::Cursor,
+        state_version: STATE_VERSION,
+        pid: pid as i32,
+        stdin_fd,
+        stdout_fd,
+        stderr_fd: run.stderr.as_ref().and_then(StderrDrain::fd),
+        extra_fds: run
+            .lease
+            .as_ref()
+            .map(state::Lease::raw_fd)
+            .into_iter()
+            .collect(),
+        stdout_leftover: reader.leftover().to_vec(),
+        stderr_tail: run.stderr_tail.lines(),
+        state: serde_json::to_value(run.state).expect("cursor loop state serializes"),
+        undrained_steers: undrained.clone(),
+    };
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    let sent = request.reply.send(Ok(FrozenRun {
+        handoff,
+        commit: commit_tx,
+    }));
+    if sent.is_ok() && commit_rx.await.is_ok() {
+        // A same-process successor owns the shim, its pipes and the lease now
+        // (the exec path never gets here): give them up without closing,
+        // killing or reaping anything.
+        paused.abandon().await;
+        if let Some(stderr) = run.stderr.take() {
+            stderr.abandon().await;
+        }
+        if let Some(child) = run.child.take() {
+            let _ = child.release();
+        }
+        if let Some(reader) = run.reader.take() {
+            reader.into_parts().0.leak_pipe();
+        }
+        if let Some(lease) = run.lease.take() {
+            lease.leak();
+        }
+        return Frozen::Committed;
+    }
+    // Thawed: dropping the guard resumes the writer, the reader kept its
+    // buffer, and the drained steers are read again, in order.
+    drop(paused);
+    child.release_reaping();
+    run.held_steers
+        .extend(undrained.into_iter().map(SteerMessage::from));
+    Frozen::Thawed
+}
+
+#[cfg(not(unix))]
+async fn freeze_run(request: FreezeRequest, _run: Freezing<'_>) -> Frozen {
+    let _ = request.reply.send(Err(FreezeRefusal::Unsupported));
+    Frozen::Thawed
 }
 
 /// Decode one cursor SDK tool (public vocabulary name + args) into a typed

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeron_proto::AgentEvent;
 
@@ -10,12 +11,16 @@ use super::normalize::{ChildStream, Phase, collab_spawn_child, item_type, map_it
 
 const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct Pending {
     events: Vec<AgentEvent>,
     bytes: usize,
 }
 
+/// Serialized whole into a live-update handoff: bindings span turns, and
+/// early child content (bounded by `MAX_PENDING_BYTES`) must still find its
+/// spawn after an adoption.
+#[derive(Serialize, Deserialize)]
 pub(super) struct Subagents {
     root: String,
     spawns: HashMap<String, String>,

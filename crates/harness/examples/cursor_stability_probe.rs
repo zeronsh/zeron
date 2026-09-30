@@ -28,6 +28,8 @@ async fn turn(
             let _ = tx.send(vec![]);
             rx
         }),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         mcp: None,
@@ -147,6 +149,8 @@ async fn parked(harness: &CursorHarness, count: usize) {
             let _ = tx.send(vec![]);
             rx
         }),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         mcp: None,
@@ -258,6 +262,8 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
             let _ = tx.send(vec![]);
             rx
         }),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         mcp: None,
@@ -395,6 +401,8 @@ async fn history(harness: &CursorHarness, count: usize) {
             let _ = tx.send(vec![]);
             rx
         }),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let request = RunRequest {
         mcp: None,

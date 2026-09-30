@@ -34,6 +34,8 @@ async fn main() -> anyhow::Result<()> {
                     let _ = tx.send(vec![]);
                     rx
                 }),
+                freeze: RunControls::no_freeze(),
+                rebind_input: RunControls::no_rebind(),
             },
         )
         .await?;

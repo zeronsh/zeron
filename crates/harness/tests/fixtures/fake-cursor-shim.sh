@@ -22,10 +22,14 @@ esac
 case "$first" in
 
 *scenario:mcp*)
-  case "$first" in
-    *'"mcp":{"args":["mcp"],"command":"/path with spaces/zeron","env":{"ZERON_CHAT_ID":"origin-chat"},"name":"zeron"}'*) ;;
-    *) exit 1 ;;
-  esac
+  # Key order is not part of the contract (serde_json may or may not preserve
+  # insertion order depending on which features other crates unify in).
+  for part in '"args":["mcp"]' '"command":"/path with spaces/zeron"' '"env":{"ZERON_CHAT_ID":"origin-chat"}' '"name":"zeron"'; do
+    case "$first" in
+      *"$part"*) ;;
+      *) exit 1 ;;
+    esac
+  done
   emit '{"ev":"ready","agentId":"agent-1","model":"auto"}'
   emit '{"ev":"text","text":"mcp configured"}'
   emit '{"ev":"turn","status":"finished"}'

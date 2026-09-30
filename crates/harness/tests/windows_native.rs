@@ -234,6 +234,8 @@ async fn exercise(prompt: &str, resume: Option<&str>) {
         }),
         steering,
         interrupt: interrupt.clone(),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let operation = async {
         let mut stream = harness
@@ -327,6 +329,8 @@ async fn exercise_tree(prompt: &str, drop_stream: bool) {
         }),
         steering,
         interrupt: interrupt.clone(),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     let mut stream = harness
         .run(request(dir.path(), prompt, None), controls)
@@ -487,6 +491,8 @@ async fn batch_overrides_launch_through_cmd() {
             }),
             steering,
             interrupt: CancellationToken::new(),
+            freeze: RunControls::no_freeze(),
+            rebind_input: RunControls::no_rebind(),
         };
         // Consume the whole stream: the shim cannot speak any agent protocol,
         // so the run must fail loudly — but only AFTER a safe launch.

@@ -46,17 +46,27 @@
 //! A prompt that produces NO session-scoped event within
 //! [`default_stall_bound`] (`ZERON_OPENCODE_STALL_MS`, 0 disables) errors
 //! out instead of spinning "Working" forever.
+//!
+//! Live update (`crate::handoff`): the server already outlives stdio (its
+//! stdin and stdout are `/dev/null`), so a run hands over the server's pid,
+//! its stderr pipe, and the loop's protocol state ([`OpencodeLoopState`]:
+//! base url and credential, session, feeds, queued steers, parked questions).
+//! The bus has no replay, so an adopted run (and a thawed one whose bus
+//! dropped) subscribes FIRST, then RECONCILES the gap from REST — messages,
+//! children, `/permission`, `/question` — through the idempotent snapshot
+//! path, and only then settles an idle turn. See [`reconcile_from_rest`].
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -64,8 +74,12 @@ use zeron_proto::{
     RunRequest, SlashCommand, SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
-use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, shutdown_child};
+use crate::handoff::StderrDrain;
+use crate::process::{Command, Stdio};
+use crate::{
+    ChildHandle, FreezeRefusal, FreezeRequest, Harness, HarnessError, HarnessHandoff, RunControls,
+    SteerMessage,
+};
 
 /// opencode loads plugins and MCP config before the server answers; cold
 /// plugin-heavy starts can take minutes. Shared by chat startup and model
@@ -282,19 +296,20 @@ impl OpencodeHarness {
         &self,
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
+        outlives_drop: bool,
     ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
+        Server::spawn(&exe, cwd, self.startup_timeout, mcp, outlives_drop).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
     /// commands cache so concurrent picker/composer fetches share one boot.
     async fn probe_models(&self) -> Result<Vec<Model>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        let mut server = self.server(None, None).await?;
+        let mut server = self.server(None, None, false).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
             let mut models = models_from_providers(&providers);
@@ -326,7 +341,7 @@ impl OpencodeHarness {
         if let Some(commands) = self.commands_cache.get() {
             return Ok(commands.clone());
         }
-        let mut server = self.server(None, None).await?;
+        let mut server = self.server(None, None, false).await?;
         let result = server
             .commands_wire(None)
             .await
@@ -407,7 +422,7 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None).await?;
+        let mut server = self.server(Some(directory), None, false).await?;
         let result = server.commands_wire(Some(directory)).await;
         server.shutdown(self.kill_grace).await;
         let commands = result?;
@@ -427,7 +442,7 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None).await?;
+        let mut server = self.server(Some(directory), None, false).await?;
         let result = server
             .commands_wire(Some(directory))
             .await
@@ -447,7 +462,9 @@ impl Harness for OpencodeHarness {
         let initial_native_command_selected = selected_native_command(&request.prompt, self.id());
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), request.mcp.as_ref()).await?;
+        let server = self
+            .server(cwd.as_deref(), request.mcp.as_ref(), true)
+            .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -459,10 +476,117 @@ impl Harness for OpencodeHarness {
             known_commands: None, // Resolve the live session directory, never a global probe cache.
             initial_native_command_selected,
         }));
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        })
-        .boxed())
+        Ok(event_stream(event_rx))
+    }
+
+    fn supports_adoption(&self) -> bool {
+        cfg!(unix)
+    }
+
+    /// Rebuild a run around the `opencode serve` a previous image froze: the
+    /// same server (reached with the handed-over credential), the same
+    /// session, no `SessionStarted` and no prompt. The gap is reconciled from
+    /// REST before the loop resumes; parked questions are re-attached under
+    /// the engine's existing requests.
+    async fn adopt(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        #[cfg(unix)]
+        {
+            self.adopt_unix(handoff, controls, request)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (handoff, controls, request);
+            Err(HarnessError::Protocol(
+                "OpenCode runs cannot be adopted on this platform".into(),
+            ))
+        }
+    }
+}
+
+fn event_stream(
+    rx: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    futures::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+    )
+    .boxed()
+}
+
+impl OpencodeHarness {
+    #[cfg(unix)]
+    fn adopt_unix(
+        &self,
+        handoff: HarnessHandoff,
+        controls: RunControls,
+        request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if handoff.state_version != STATE_VERSION {
+            return Err(HarnessError::Protocol(format!(
+                "opencode handoff state version {} is not {STATE_VERSION}",
+                handoff.state_version
+            )));
+        }
+        let state: OpencodeLoopState = serde_json::from_value(handoff.state)
+            .map_err(|e| HarnessError::Protocol(format!("opencode handoff state: {e}")))?;
+        let stderr = match handoff.stderr_fd {
+            Some(fd) => Some(tokio::process::ChildStderr::from_std(
+                std::process::ChildStderr::from(crate::handoff::dup_inherited(fd)?),
+            )?),
+            None => None,
+        };
+        // No child to adopt when the run drove an already-running server (a
+        // test seam). A pid that is not our child is settled at once by
+        // `ChildHandle::adopt` ("not our child"): the server is still driven
+        // over HTTP, but never signalled or reaped — it is not ours to stop.
+        let child = if handoff.pid > 1 {
+            Some(ChildHandle::adopt(handoff.pid)?)
+        } else {
+            None
+        };
+        if child.as_ref().is_some_and(|c| c.id().is_none()) {
+            tracing::warn!(
+                target: "zeron_harness::opencode",
+                pid = handoff.pid,
+                "the handed-over opencode server is not our child; driving it without owning it"
+            );
+        }
+        let stderr_tail = crate::StderrTail::seeded(handoff.stderr_tail);
+        let stderr = stderr.map(|s| StderrDrain::spawn(s, stderr_tail.clone(), "opencode"));
+        let protocol = tokio::sync::OnceCell::new();
+        let _ = protocol.set(state.protocol);
+        let version = tokio::sync::OnceCell::new();
+        if let Some(raw) = &state.server_version {
+            let _ = version.set(ServerVersion::parse(raw));
+        }
+        let server = Server {
+            child,
+            base: state.base_url.clone(),
+            auth: state.auth.clone(),
+            client: http_client(),
+            stderr_tail,
+            stderr,
+            protocol,
+            version,
+        };
+        // `handoff.undrained_steers` are not read here: the engine re-queues
+        // them into the new mailbox.
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        tokio::spawn(adopt_session(Adopted {
+            server,
+            event_tx,
+            controls,
+            request,
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            state,
+        }));
+        Ok(event_stream(event_rx))
     }
 }
 
@@ -471,12 +595,18 @@ impl Harness for OpencodeHarness {
 // ---------------------------------------------------------------------------
 
 struct Server {
-    child: Option<Child>,
+    /// The `opencode serve` child, when this run owns it (spawned, or
+    /// adopted across a live update).
+    child: Option<ChildHandle>,
     base: String,
     /// `Authorization` header value (`Basic <b64>`), when we own the process.
     auth: Option<String>,
     client: reqwest::Client,
     stderr_tail: crate::StderrTail,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Drains the owned child's stderr, also while a run is frozen, so the
+    /// server never writes into a full (or reader-less) pipe.
+    stderr: Option<StderrDrain>,
     /// Wire generation, resolved once via the health endpoints.
     protocol: tokio::sync::OnceCell<Protocol>,
     version: tokio::sync::OnceCell<ServerVersion>,
@@ -485,7 +615,8 @@ struct Server {
 /// The attached server's wire generation: the 1.x "v1" global namespace
 /// (`/global/*`, `/session/*`, prompt_async) and the 2.x `/api/*` surface
 /// (session-scoped model, prompt with delivery, interrupt).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum Protocol {
     V1,
     V2,
@@ -566,7 +697,27 @@ impl Server {
             auth: None,
             client: http_client(),
             stderr_tail: crate::StderrTail::default(),
+            stderr: None,
             protocol: tokio::sync::OnceCell::new(),
+            version: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// An HTTP-only view of the same server (no process, no stderr): what a
+    /// detached request task needs.
+    fn http_view(
+        base: String,
+        auth: Option<String>,
+        protocol: tokio::sync::OnceCell<Protocol>,
+    ) -> Self {
+        Self {
+            child: None,
+            base,
+            auth,
+            client: http_client(),
+            stderr_tail: crate::StderrTail::default(),
+            stderr: None,
+            protocol,
             version: tokio::sync::OnceCell::new(),
         }
     }
@@ -594,6 +745,7 @@ impl Server {
         cwd: Option<&str>,
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
+        outlives_drop: bool,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
@@ -637,10 +789,15 @@ impl Server {
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
+        // A RUN's server is not killed on drop: a run frozen for a live update
+        // is held through an `execve` and its server must outlive the old
+        // image's handles (every ending shuts it down explicitly). A short-lived
+        // PROBE server keeps kill-on-drop: a cancelled or timed-out probe would
+        // otherwise leak a running `opencode serve` nothing ever stops.
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(!outlives_drop);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(exe))
@@ -649,16 +806,10 @@ impl Server {
             }
         })?;
         let stderr_tail = crate::StderrTail::default();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = stderr_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::opencode", "stderr: {line}");
-                    tail.push(&line);
-                }
-            });
-        }
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stderr| StderrDrain::spawn(stderr, stderr_tail.clone(), "opencode"));
 
         use base64::Engine as _;
         let auth = format!(
@@ -666,11 +817,12 @@ impl Server {
             base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"))
         );
         let mut server = Self {
-            child: Some(child),
+            child: Some(ChildHandle::Owned(child)),
             base: format!("http://127.0.0.1:{port}"),
             auth: Some(auth),
             client: http_client(),
             stderr_tail,
+            stderr,
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
         };
@@ -681,11 +833,11 @@ impl Server {
         let deadline = tokio::time::Instant::now() + startup;
         loop {
             if let Some(child) = server.child.as_mut()
-                && let Ok(Some(status)) = child.try_wait()
+                && let Ok(Some(outcome)) = child.try_wait()
             {
                 return Err(HarnessError::Protocol(crate::crash_message(
                     "opencode serve",
-                    Some(status),
+                    outcome.status(),
                     &server.stderr_tail,
                 )));
             }
@@ -840,9 +992,11 @@ impl Server {
         req
     }
 
+    /// Stop and reap the server this run owns (a pid that is not our child
+    /// is never signalled).
     async fn shutdown(&mut self, kill_grace: Duration) {
         if let Some(child) = self.child.as_mut() {
-            shutdown_child(child, kill_grace).await;
+            child.shutdown(kill_grace).await;
         }
     }
 
@@ -1344,7 +1498,7 @@ enum BusMsg {
 }
 
 /// Per-part streaming state (dedup between full-part snapshots and deltas).
-#[derive(Default)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct PartState {
     /// "text" | "reasoning" | "tool".
     kind: String,
@@ -1352,10 +1506,18 @@ struct PartState {
     emitted: usize,
     tool_started: bool,
     tool_done: bool,
+    /// The part was healed from a REST snapshot while bus frames were
+    /// buffered: deltas are not idempotent, and one produced before that
+    /// snapshot would repeat text it already contains. Deltas are dropped
+    /// until a bus snapshot at least as long as what was emitted re-anchors
+    /// the part (text only grows, so that snapshot is at least as new as the
+    /// REST one; the part's closing snapshot always is).
+    #[serde(default)]
+    resync: bool,
 }
 
 /// Streaming state for one opencode session's feed (ours or a child's).
-#[derive(Default)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct SessionFeed {
     /// messageID → is-assistant (user prompt echoes must not render).
     assistant_messages: HashMap<String, bool>,
@@ -1365,6 +1527,7 @@ struct SessionFeed {
 }
 
 /// A spawned subagent (a `task` tool call on OUR session).
+#[derive(Clone, Serialize, Deserialize)]
 struct ChildRun {
     /// The parent-feed tool part id its traffic is tagged with.
     parent_tool_use_id: String,
@@ -1374,11 +1537,21 @@ struct ChildRun {
 }
 
 /// A `task` chip awaiting its child session id.
+#[derive(Clone, Serialize, Deserialize)]
 struct PendingSpawn {
     tool_part_id: String,
     description: String,
 }
 
+fn default_status_backoff() -> Duration {
+    Duration::from_millis(100)
+}
+
+/// A turn's bookkeeping. The two deadlines are process-local instants and
+/// are not carried across a live update: a freeze refuses while the idle
+/// poll is confirming, and an adopter re-arms the stall watchdog and runs
+/// its own explicit status check after reconciling.
+#[derive(Clone, Serialize, Deserialize)]
 struct TurnState {
     /// A prompt is in flight (busy expected/observed; idle settles it).
     active: bool,
@@ -1387,7 +1560,9 @@ struct TurnState {
     /// turn must not settle a just-submitted boundary steer.
     idle_ready: bool,
     idle_confirmations: u8,
+    #[serde(skip)]
     status_poll: Option<tokio::time::Instant>,
+    #[serde(skip, default = "default_status_backoff")]
     status_backoff: Duration,
     /// Bus events about our session seen since the prompt was posted.
     saw_activity: bool,
@@ -1400,6 +1575,7 @@ struct TurnState {
     /// This turn was aborted because the provider retry loop hit the cap.
     aborted_for_retry: bool,
     /// Deadline for the first session-scoped event after the prompt.
+    #[serde(skip)]
     stall_deadline: Option<tokio::time::Instant>,
     /// Main-session tool calls started and not yet finished.
     open_tools: std::collections::HashSet<String>,
@@ -1480,10 +1656,12 @@ async fn run_session(session: Session) {
         initial_native_command_selected,
     } = session;
     let RunControls {
-        execution_lease: _execution_lease,
+        execution_lease,
         request_input,
-        mut steering,
+        steering,
         interrupt,
+        freeze,
+        rebind_input,
     } = controls;
     let request_input = Arc::new(request_input);
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
@@ -1605,7 +1783,7 @@ async fn run_session(session: Session) {
         .collect();
     drop(providers);
 
-    let mut assistant_message_id = new_message_id();
+    let assistant_message_id = new_message_id();
     if !send(
         &event_tx,
         AgentEvent::SessionStarted {
@@ -1646,41 +1824,28 @@ async fn run_session(session: Session) {
     }
 
     // ---- SSE bus ----------------------------------------------------------
-    let (bus_tx, mut bus_rx) = mpsc::channel::<BusMsg>(256);
-    let bus_handle = tokio::spawn(bus_task(
-        server.base.clone(),
-        server.auth.clone(),
-        server.protocol().await,
-        bus_tx.clone(),
-    ));
+    let protocol = server.protocol().await;
+    let bus = Bus::subscribe(&server, protocol, V2BusState::default());
 
     // ---- first prompt -----------------------------------------------------
     // The bus has no replay: wait for the subscription to be LIVE before
     // prompting, or a fast-failing turn's whole lifecycle can slip into the
     // gap (observed live: busy → error → idle inside ~200ms). Bounded — the
     // stall watchdog still guards a bus that never comes up.
-    let connect_wait = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            match bus_rx.recv().await {
-                Some(BusMsg::Connected) | None => return,
-                // Nothing else can arrive before Connected; drop defensively.
-                Some(_) => {}
-            }
-        }
-    })
-    .await;
-    if connect_wait.is_err() {
+    let mut bus = bus;
+    if !bus.wait_connected().await {
         tracing::debug!(
             target: "zeron_harness::opencode",
             "event bus not connected within 15s; prompting anyway"
         );
     }
     let stall = stall_bound();
-    let (command_failure_tx, mut command_failure_rx) = mpsc::unbounded_channel();
-    let mut turn_generation = 0_u64;
+    let (command_failure_tx, command_failure_rx) = mpsc::unbounded_channel();
+    let turn_generation = 0_u64;
+    let posts = Arc::new(Posts::default());
     if let Err(e) = post_prompt(
         &server,
-        &bus_tx,
+        &bus.tx,
         &session_id,
         dir,
         &commands,
@@ -1693,6 +1858,7 @@ async fn run_session(session: Session) {
             variant: variant.as_deref(),
             attachments: &request.attachments,
         },
+        &posts,
     )
     .await
     {
@@ -1713,23 +1879,411 @@ async fn run_session(session: Session) {
             },
         )
         .await;
-        bus_handle.abort();
+        bus.handle.abort();
         server.shutdown(kill_grace).await;
         return;
     }
-    let mut turn = TurnState::begin(stall);
 
-    // ---- main loop --------------------------------------------------------
-    let mut main_feed = SessionFeed::default();
-    let mut children: HashMap<String, ChildRun> = HashMap::new();
-    let mut pending_spawns: VecDeque<PendingSpawn> = VecDeque::new();
-    // Child sessions created before their spawn chip was seen (id → title).
-    let mut unbound_children: HashMap<String, String> = HashMap::new();
-    let mut queued_steers: VecDeque<(String, bool)> = VecDeque::new();
-    let mut steering_open = true;
+    drive(Driver {
+        server,
+        event_tx,
+        request_input,
+        rebind_input,
+        steering,
+        interrupt,
+        freeze,
+        execution_lease,
+        dir: directory,
+        interrupt_grace,
+        kill_grace,
+        stall,
+        bus,
+        command_failure_tx,
+        command_failure_rx,
+        posts,
+        st: OpencodeLoopState {
+            // The connection fields are filled in at export.
+            base_url: String::new(),
+            auth: None,
+            protocol,
+            server_version: None,
+            session_id,
+            assistant_message_id,
+            turn: TurnState::begin(stall),
+            main_feed: SessionFeed::default(),
+            children: HashMap::new(),
+            pending_spawns: VecDeque::new(),
+            unbound_children: HashMap::new(),
+            queued_steers: VecDeque::new(),
+            steering_open: true,
+            pending_usage: None,
+            turn_generation,
+            commands,
+            model,
+            variant,
+            context_windows,
+            v2_tool_names: Vec::new(),
+            v2_session_models: HashMap::new(),
+            parked_questions: Vec::new(),
+            asked_questions: std::collections::HashSet::new(),
+            last_prompt_ms: None,
+        },
+        rebind: None,
+    })
+    .await;
+}
+
+/// The run loop's protocol state: what a freeze exports (inside the
+/// anonymous handoff manifest — `auth` is the server's credential) and an
+/// adoption resumes from. Everything else the loop keeps is either derived
+/// from the server (exported beside this: pid, stderr) or is a state a
+/// freeze refuses (interrupting, a preempting steer, an idle being confirmed,
+/// a request in flight).
+#[derive(Clone, Serialize, Deserialize)]
+struct OpencodeLoopState {
+    base_url: String,
+    /// The `Authorization` header (Basic, carrying the server password).
+    auth: Option<String>,
+    protocol: Protocol,
+    server_version: Option<String>,
+    session_id: String,
+    assistant_message_id: String,
+    turn: TurnState,
+    main_feed: SessionFeed,
+    children: HashMap<String, ChildRun>,
+    pending_spawns: VecDeque<PendingSpawn>,
+    /// Child sessions created before their spawn chip was seen (id → title).
+    unbound_children: HashMap<String, String>,
+    /// Steers read from the mailbox, waiting for the turn to go idle
+    /// (delivered text, native-command flag).
+    queued_steers: VecDeque<(String, bool)>,
+    steering_open: bool,
+    pending_usage: Option<AgentEvent>,
+    turn_generation: u64,
+    commands: Vec<SlashCommand>,
+    model: Option<(String, String)>,
+    variant: Option<String>,
+    context_windows: HashMap<String, u64>,
+    /// The 2.x bus normalizer's state (see [`V2BusState`]).
+    v2_tool_names: Vec<(V2ToolKey, String)>,
+    v2_session_models: HashMap<String, V2ModelIdentity>,
+    /// Questions surfaced to the user and not answered yet.
+    parked_questions: Vec<ParkedQuestion>,
+    /// Every question request this run surfaced: a late bus copy of one the
+    /// reconcile already surfaced (or that was answered since) is ignored.
+    asked_questions: std::collections::HashSet<String>,
+    /// Wall-clock ms at which the run last posted a turn: REST messages
+    /// created before it were consumed live (a turn's content precedes its
+    /// idle), so a reconcile only replays from here on.
+    last_prompt_ms: Option<u64>,
+}
+
+/// Schema version of [`OpencodeLoopState`] in a [`HarnessHandoff`]; an
+/// adopter refuses any other, and the engine falls back to crash recovery.
+#[cfg(unix)]
+pub(crate) const STATE_VERSION: u32 = 1;
+
+/// A `question.asked` surfaced to the user, waiting for the answer.
+#[derive(Clone, Serialize, Deserialize)]
+struct ParkedQuestion {
+    /// OpenCode's question request id; the reply goes back under it.
+    request_id: String,
+    /// The questions as the engine knows them (their ids are unique per
+    /// request: the engine rebinds by them after a handoff).
+    questions: Vec<UserInputQuestion>,
+}
+
+/// Answers for parked questions, keyed by request id. Kept in the loop (not
+/// a detached task) so a freeze can flush the ones already given and export
+/// what is still parked.
+type Answers = futures::stream::FuturesUnordered<
+    futures::future::BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)>,
+>;
+
+fn await_answer(
+    request_id: String,
+    answer: tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>,
+) -> futures::future::BoxFuture<'static, (String, Option<Vec<UserInputAnswer>>)> {
+    Box::pin(async move { (request_id, answer.await.ok()) })
+}
+
+/// Turn requests the run has in flight to the server, and when it last
+/// posted one (the reconcile watermark).
+#[derive(Default)]
+struct Posts {
+    /// Native `/command` requests: synchronous for the whole turn.
+    commands: AtomicUsize,
+    /// `prompt_async` / `prompt` requests not yet acknowledged.
+    prompts: AtomicUsize,
+    last_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Posts {
+    fn last_ms(&self) -> Option<u64> {
+        Some(self.last_ms.load(Ordering::SeqCst)).filter(|ms| *ms > 0)
+    }
+}
+
+/// Counts one request in flight until dropped.
+struct PostGuard {
+    posts: Arc<Posts>,
+    command: bool,
+}
+
+impl PostGuard {
+    fn new(posts: &Arc<Posts>, command: bool) -> Self {
+        let counter = if command {
+            &posts.commands
+        } else {
+            &posts.prompts
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self {
+            posts: posts.clone(),
+            command,
+        }
+    }
+}
+
+impl Drop for PostGuard {
+    fn drop(&mut self) {
+        let counter = if self.command {
+            &self.posts.commands
+        } else {
+            &self.posts.prompts
+        };
+        counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The run's end of the SSE bus.
+struct Bus {
+    tx: mpsc::Sender<BusMsg>,
+    rx: mpsc::Receiver<BusMsg>,
+    handle: tokio::task::JoinHandle<()>,
+    /// Shared with the reader so a freeze can export it.
+    v2: Arc<std::sync::Mutex<V2BusState>>,
+}
+
+impl Bus {
+    fn subscribe(server: &Server, protocol: Protocol, v2: V2BusState) -> Self {
+        let (tx, rx) = mpsc::channel::<BusMsg>(256);
+        let v2 = Arc::new(std::sync::Mutex::new(v2));
+        let handle = tokio::spawn(bus_task(
+            server.base.clone(),
+            server.auth.clone(),
+            protocol,
+            tx.clone(),
+            v2.clone(),
+        ));
+        Self { tx, rx, handle, v2 }
+    }
+
+    /// Wait (bounded) until the first stream is live. `false` on timeout.
+    /// Anything but `Connected` (a bus that gave up) is put back for the
+    /// loop to see.
+    async fn wait_connected(&mut self) -> bool {
+        let rx = &mut self.rx;
+        let waited = tokio::time::timeout(Duration::from_secs(15), async {
+            match rx.recv().await {
+                Some(BusMsg::Connected) | None => None,
+                // Nothing but a give-up can arrive before Connected.
+                Some(other) => Some(other),
+            }
+        })
+        .await;
+        match waited {
+            Ok(None) => true,
+            Ok(Some(other)) => {
+                let _ = self.tx.try_send(other);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Everything the run loop owns.
+struct Driver {
+    server: Server,
+    event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    request_input: Arc<RequestInput>,
+    rebind_input: crate::RebindInput,
+    steering: mpsc::Receiver<SteerMessage>,
+    interrupt: crate::CancellationToken,
+    freeze: mpsc::Receiver<FreezeRequest>,
+    /// Held until the loop has finished with the server.
+    execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    dir: Option<String>,
+    interrupt_grace: Duration,
+    kill_grace: Duration,
+    stall: Option<Duration>,
+    bus: Bus,
+    command_failure_tx: mpsc::UnboundedSender<NativeCommandFailure>,
+    command_failure_rx: mpsc::UnboundedReceiver<NativeCommandFailure>,
+    posts: Arc<Posts>,
+    st: OpencodeLoopState,
+    /// Adopted: reconcile the gap before anything else, and re-attach these
+    /// questions the previous image had parked.
+    rebind: Option<Vec<ParkedQuestion>>,
+}
+
+/// An adopted run's inputs (see [`OpencodeHarness::adopt`]).
+#[cfg(unix)]
+struct Adopted {
+    server: Server,
+    event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    controls: RunControls,
+    request: RunRequest,
+    interrupt_grace: Duration,
+    kill_grace: Duration,
+    state: OpencodeLoopState,
+}
+
+/// Resume a handed-over run: subscribe the bus FIRST (it is broadcast with
+/// no replay: from here on every frame is either buffered on the bus or
+/// already in the REST snapshot), then let the loop reconcile before
+/// anything else.
+#[cfg(unix)]
+async fn adopt_session(adopted: Adopted) {
+    let Adopted {
+        server,
+        event_tx,
+        controls,
+        request,
+        interrupt_grace,
+        kill_grace,
+        mut state,
+    } = adopted;
+    let RunControls {
+        execution_lease,
+        request_input,
+        steering,
+        interrupt,
+        freeze,
+        rebind_input,
+    } = controls;
+    let v2 = V2BusState {
+        tool_names: std::mem::take(&mut state.v2_tool_names)
+            .into_iter()
+            .collect(),
+        session_models: std::mem::take(&mut state.v2_session_models),
+    };
+    let mut bus = Bus::subscribe(&server, state.protocol, v2);
+    if !bus.wait_connected().await {
+        tracing::warn!(
+            target: "zeron_harness::opencode",
+            "adopted run: event bus not connected within 15s; reconciling anyway"
+        );
+    }
+    let posts = Arc::new(Posts::default());
+    posts
+        .last_ms
+        .store(state.last_prompt_ms.unwrap_or(0), Ordering::SeqCst);
+    let stall = stall_bound();
+    if state.turn.active && !state.turn.saw_activity {
+        state.turn.stall_deadline = stall.map(|d| tokio::time::Instant::now() + d);
+    }
+    let rebind = std::mem::take(&mut state.parked_questions);
+    let (command_failure_tx, command_failure_rx) = mpsc::unbounded_channel();
+    drive(Driver {
+        server,
+        event_tx,
+        request_input: Arc::new(request_input),
+        rebind_input,
+        steering,
+        interrupt,
+        freeze,
+        execution_lease,
+        dir: (!request.cwd.is_empty()).then(|| request.cwd.clone()),
+        interrupt_grace,
+        kill_grace,
+        stall,
+        bus,
+        command_failure_tx,
+        command_failure_rx,
+        posts,
+        st: state,
+        rebind: Some(rebind),
+    })
+    .await;
+}
+
+/// The run loop: bus frames, steers, answers, interrupts, freezes.
+async fn drive(driver: Driver) {
+    let Driver {
+        mut server,
+        event_tx,
+        request_input,
+        rebind_input,
+        mut steering,
+        interrupt,
+        mut freeze,
+        execution_lease: _execution_lease,
+        dir: directory,
+        interrupt_grace,
+        kill_grace,
+        stall,
+        bus,
+        command_failure_tx,
+        mut command_failure_rx,
+        posts,
+        st,
+        rebind,
+    } = driver;
+    let dir = directory.as_deref();
+    let Bus {
+        tx: bus_tx,
+        rx: mut bus_rx,
+        handle: bus_handle,
+        v2: bus_v2,
+    } = bus;
+    let OpencodeLoopState {
+        base_url: _,
+        auth: _,
+        protocol: _,
+        server_version: _,
+        session_id,
+        mut assistant_message_id,
+        mut turn,
+        mut main_feed,
+        mut children,
+        mut pending_spawns,
+        mut unbound_children,
+        mut queued_steers,
+        mut steering_open,
+        mut pending_usage,
+        mut turn_generation,
+        commands,
+        model,
+        variant,
+        context_windows,
+        v2_tool_names: _,
+        v2_session_models: _,
+        mut parked_questions,
+        mut asked_questions,
+        last_prompt_ms: _,
+    } = st;
     let mut interrupt_requested = false;
-    let mut pending_usage: Option<AgentEvent> = None;
     let mut done_sent = false;
+    let mut answers = Answers::new();
+    // Question replies being posted (a freeze waits for them).
+    let mut replies = tokio::task::JoinSet::new();
+    // Steers a freeze drained from the mailbox and a thaw put back.
+    let mut held_steers: VecDeque<SteerMessage> = VecDeque::new();
+    // With no sender `freeze.recv()` is `None` at once and forever.
+    let mut freeze_open = true;
+    // Adopted, or the bus reconnected: what the gap swallowed is re-read
+    // from REST before anything else (see `reconcile_from_rest`).
+    let mut pending_reconcile = rebind.is_some();
+    let mut to_rebind = rebind.unwrap_or_default();
 
     // Post-abort grace: the abort endpoint promised an idle; if it never
     // arrives the run hard-stops. Unlike the stall bound this is NOT
@@ -1804,6 +2358,7 @@ async fn run_session(session: Session) {
                         variant: variant.as_deref(),
                         attachments: &[],
                     },
+                    &posts,
                 )
                 .await
                 {
@@ -1879,7 +2434,152 @@ async fn run_session(session: Session) {
         }};
     }
 
+    // One bus payload (live or reconstructed from REST) through the router.
+    macro_rules! route_event {
+        ($event:expr) => {
+            handle_bus_event(BusCtx {
+                event: $event,
+                session_id: &session_id,
+                server: &server,
+                dir,
+                event_tx: &event_tx,
+                request_input: &request_input,
+                main_feed: &mut main_feed,
+                children: &mut children,
+                pending_spawns: &mut pending_spawns,
+                unbound_children: &mut unbound_children,
+                turn: &mut turn,
+                pending_usage: &mut pending_usage,
+                context_windows: &context_windows,
+                answers: &mut answers,
+                parked_questions: &mut parked_questions,
+                asked_questions: &mut asked_questions,
+            })
+            .await
+        };
+    }
+
+    // Reconciled payloads through the same router as live frames: snapshots
+    // are idempotent (`emitted`), so what already streamed never repeats.
+    // Snapshots never settle a turn; the explicit status check does.
+    macro_rules! feed_reconciled {
+        ($label:lifetime, $payloads:expr) => {{
+            let payloads: Vec<Value> = $payloads;
+            for event in &payloads {
+                if let BusOutcome::ConsumerGone = route_event!(event) {
+                    break $label;
+                }
+            }
+            resync_parts(&payloads, &session_id, &mut main_feed, &mut children);
+        }};
+    }
+
     'main: loop {
+        if pending_reconcile {
+            pending_reconcile = false;
+            let watermark = posts.last_ms();
+            let protocol = server.protocol().await;
+            // Our session first (it registers spawn chips), then its child
+            // sessions (binding them), then what the children said. An
+            // aborted turn takes no more content (as on the live path).
+            if protocol == Protocol::V1 && !interrupt_requested {
+                let path = format!("/session/{session_id}/message");
+                if let Some(list) = reconcile_from_rest(&server, dir, &path).await {
+                    feed_reconciled!('main, message_payloads(&list, watermark));
+                }
+                let path = format!("/session/{session_id}/children");
+                if let Some(list) = reconcile_from_rest(&server, dir, &path).await {
+                    feed_reconciled!(
+                        'main,
+                        child_payloads(&list, &session_id, &children, &unbound_children, watermark)
+                    );
+                }
+                let live: Vec<String> = children
+                    .iter()
+                    .filter(|(_, child)| !child.done)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for child in live {
+                    let path = format!("/session/{child}/message");
+                    if let Some(list) = reconcile_from_rest(&server, dir, &path).await {
+                        feed_reconciled!('main, message_payloads(&list, watermark));
+                    }
+                }
+            } else if protocol == Protocol::V2 {
+                // The 2.x message shape is not modelled; a 2.x run only
+                // freezes between turns, where nothing streams.
+                tracing::debug!(
+                    target: "zeron_harness::opencode",
+                    "2.x wire: message and child reconcile skipped"
+                );
+            }
+            // Usage re-read for a turn that already settled belongs to no
+            // turn: never fold it into the next one's end.
+            if !turn.active {
+                pending_usage = None;
+            }
+            // Permissions asked in the gap: the ordinary auto-reply.
+            let path = match protocol {
+                Protocol::V1 => "/permission".to_owned(),
+                Protocol::V2 => format!("/api/session/{session_id}/permission"),
+            };
+            if let Some(list) = reconcile_from_rest(&server, dir, &path).await {
+                feed_reconciled!(
+                    'main,
+                    list.into_iter()
+                        .map(|request| json!({ "type": "permission.asked", "properties": request }))
+                        .collect()
+                );
+            }
+            // Questions: the ones the previous image parked are re-attached
+            // under the engine's existing requests (never asked twice); a
+            // parked one the server no longer holds is let go (the engine
+            // resolves it); any other pending one was asked in the gap.
+            let pending = match protocol {
+                Protocol::V1 => reconcile_from_rest(&server, dir, "/question").await,
+                // (2.x questions are not surfaced by this driver.)
+                Protocol::V2 => None,
+            };
+            for parked in std::mem::take(&mut to_rebind) {
+                let answer = match parked.questions.first() {
+                    Some(question) => (rebind_input)(question.id.clone()),
+                    None => tokio::sync::oneshot::channel().1,
+                };
+                let still_pending = pending
+                    .as_ref()
+                    .is_none_or(|list| list.iter().any(|q| q["id"] == parked.request_id.as_str()));
+                asked_questions.insert(parked.request_id.clone());
+                if still_pending {
+                    answers.push(await_answer(parked.request_id.clone(), answer));
+                    parked_questions.push(parked);
+                } else {
+                    drop(answer);
+                }
+            }
+            if let Some(list) = pending {
+                feed_reconciled!(
+                    'main,
+                    list.into_iter()
+                        .map(|request| json!({ "type": "question.asked", "properties": request }))
+                        .collect()
+                );
+            }
+            // Only now may an idle turn settle: after its content is healed.
+            if turn.active
+                && matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        server.session_running(&session_id, dir)
+                    )
+                    .await,
+                    Ok(Ok(false))
+                )
+            {
+                settle_idle!('main);
+            }
+            continue 'main;
+        }
+
         // The stall watchdog only arms while a turn awaits its first sign of
         // life; a running tool's silence never trips it (events already
         // proved the turn alive and disarmed it). Computed by value each
@@ -1939,6 +2639,115 @@ async fn run_session(session: Session) {
                 }
             }
 
+            // A freeze is answered ahead of new input (the engine asks while
+            // nothing else should move).
+            request = freeze.recv(), if freeze_open => match request {
+                None => freeze_open = false,
+                Some(request) => {
+                    let protocol = server.protocol().await;
+                    let refusal = if interrupt_requested || abort_deadline.is_some() {
+                        Some("interrupting")
+                    } else if turn.preempted {
+                        Some("a steer is preempting the turn")
+                    } else if posts.commands.load(Ordering::SeqCst) > 0 {
+                        Some("a native command is in flight")
+                    } else if posts.prompts.load(Ordering::SeqCst) > 0 {
+                        Some("a prompt request is in flight")
+                    } else if turn.active
+                        && turn.status_poll.is_some()
+                        && turn.idle_confirmations > 0
+                    {
+                        Some("the turn is settling")
+                    } else if turn.active && !turn.idle_ready {
+                        // Acknowledged but the server has not turned busy yet: a
+                        // reconcile now would find "not running" and end a turn
+                        // that has not started (the live path guards this with
+                        // `idle_ready`; the adopter's explicit check does not).
+                        Some("the turn has not started yet")
+                    } else if protocol == Protocol::V2 && turn.active {
+                        // Only 1.x messages can be reconciled from REST.
+                        Some("mid-turn on the 2.x wire")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = refusal {
+                        let _ = request.reply.send(Err(FreezeRefusal::Busy(reason)));
+                        continue 'main;
+                    }
+                    // An answer the user already gave but the loop has not
+                    // posted yet must reach the server BEFORE the freeze
+                    // completes: exported as "still parked" it would be lost
+                    // across the exec (the engine no longer holds it).
+                    while !answers.is_empty()
+                        && let Some(Some((request_id, answer))) =
+                            futures::FutureExt::now_or_never(answers.next())
+                    {
+                        post_answer(&server, dir, &event_tx, &mut parked_questions, &mut replies, request_id, answer);
+                    }
+                    let replied = tokio::time::timeout(REPLY_FLUSH, async {
+                        while replies.join_next().await.is_some() {}
+                    })
+                    .await;
+                    if replied.is_err() {
+                        let _ = request
+                            .reply
+                            .send(Err(FreezeRefusal::Busy("a question reply is in flight")));
+                        continue 'main;
+                    }
+                    let state = {
+                        let v2 = bus_v2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        OpencodeLoopState {
+                            base_url: server.base.clone(),
+                            auth: server.auth.clone(),
+                            protocol,
+                            server_version: server.version.get().map(|v| v.raw.clone()),
+                            session_id: session_id.clone(),
+                            assistant_message_id: assistant_message_id.clone(),
+                            turn: turn.clone(),
+                            main_feed: main_feed.clone(),
+                            children: children.clone(),
+                            pending_spawns: pending_spawns.clone(),
+                            unbound_children: unbound_children.clone(),
+                            queued_steers: queued_steers.clone(),
+                            steering_open,
+                            pending_usage: pending_usage.clone(),
+                            turn_generation,
+                            commands: commands.clone(),
+                            model: model.clone(),
+                            variant: variant.clone(),
+                            context_windows: context_windows.clone(),
+                            v2_tool_names: v2
+                                .tool_names
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                            v2_session_models: v2.session_models.clone(),
+                            parked_questions: parked_questions.clone(),
+                            asked_questions: asked_questions.clone(),
+                            last_prompt_ms: posts.last_ms(),
+                        }
+                    };
+                    let outcome = freeze_run(request, Freezing {
+                        server: &mut server,
+                        state,
+                        held_steers: &mut held_steers,
+                        steering: &mut steering,
+                    })
+                    .await;
+                    if let Frozen::Committed = outcome {
+                        // The successor owns the server now; ending the
+                        // stream (no Done, no shutdown) is the end the
+                        // engine expects.
+                        bus_handle.abort();
+                        return;
+                    }
+                }
+            },
+
+            Some((request_id, answer)) = answers.next(), if !answers.is_empty() => {
+                post_answer(&server, dir, &event_tx, &mut parked_questions, &mut replies, request_id, answer);
+            },
+
             failure = command_failure_rx.recv() => {
                 let Some(failure) = failure else { continue 'main; };
                 if failure.generation != turn_generation || !turn.active || interrupt_requested {
@@ -1971,7 +2780,7 @@ async fn run_session(session: Session) {
                 break 'main;
             }
 
-            steer = steering.recv(), if steering_open => {
+            steer = next_steer(&mut held_steers, &mut steering), if steering_open => {
                 match steer {
                     Some(steer) => {
                         let native_command_selected =
@@ -2007,6 +2816,7 @@ async fn run_session(session: Session) {
                                     variant: variant.as_deref(),
                                     attachments: &[],
                                 },
+                                &posts,
                             )
                             .await
                             {
@@ -2097,23 +2907,21 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     BusMsg::Connected => {
-                        // A RECONNECT mid-turn may have swallowed our idle
-                        // (no replay): re-sync from the server's own status
-                        // surface — not running means idle. Can't tell:
-                        // leave the turn running; the next disconnect or
-                        // event decides.
-                        if turn.active
-                            && !server
-                                .session_running(&session_id, dir)
-                                .await
-                                .unwrap_or(true)
-                        {
-                            settle_idle!('main);
-                        }
+                        // A RECONNECT (the bus dropped, maybe while the run
+                        // was frozen) may have swallowed content, questions
+                        // and our idle (no replay): reconcile from REST, then
+                        // re-sync from the server's own status surface — not
+                        // running means idle. Can't tell: leave the turn
+                        // running; the next disconnect or event decides.
+                        pending_reconcile = true;
                     }
                     BusMsg::Disconnected => {
                         let crashed = match server.child.as_mut() {
-                            Some(child) => child.try_wait().ok().flatten(),
+                            Some(child) => child
+                                .try_wait()
+                                .ok()
+                                .flatten()
+                                .and_then(|outcome| outcome.status()),
                             None => None,
                         };
                         let message = crate::crash_message(
@@ -2149,21 +2957,7 @@ async fn run_session(session: Session) {
                             if ours && idle { settle_idle!('main); }
                             continue;
                         }
-                        let outcome = handle_bus_event(BusCtx {
-                            event: &event,
-                            session_id: &session_id,
-                            server: &server,
-                            dir,
-                            event_tx: &event_tx,
-                            request_input: &request_input,
-                            main_feed: &mut main_feed,
-                            children: &mut children,
-                            pending_spawns: &mut pending_spawns,
-                            unbound_children: &mut unbound_children,
-                            turn: &mut turn,
-                            pending_usage: &mut pending_usage,
-                            context_windows: &context_windows,
-                        }).await;
+                        let outcome = route_event!(&event);
                         match outcome {
                             BusOutcome::Continue => maybe_preempt!(),
                             BusOutcome::ConsumerGone => break 'main,
@@ -2191,6 +2985,341 @@ async fn run_session(session: Session) {
     }
     bus_handle.abort();
     server.shutdown(kill_grace).await;
+}
+
+/// The next steer: those a thawed freeze put back first, then the mailbox.
+async fn next_steer(
+    held: &mut VecDeque<SteerMessage>,
+    steering: &mut mpsc::Receiver<SteerMessage>,
+) -> Option<SteerMessage> {
+    match held.pop_front() {
+        Some(steer) => Some(steer),
+        None => steering.recv().await,
+    }
+}
+
+/// How long a freeze waits for question replies already being posted.
+const REPLY_FLUSH: Duration = Duration::from_secs(5);
+
+/// Post the answer to a parked question (a dropped answer — the user or the
+/// engine went away — rejects it, so the agent is unblocked rather than
+/// wedged) on a tracked task: a freeze waits for it.
+fn post_answer(
+    server: &Server,
+    dir: Option<&str>,
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    parked_questions: &mut Vec<ParkedQuestion>,
+    replies: &mut tokio::task::JoinSet<()>,
+    request_id: String,
+    answer: Option<Vec<UserInputAnswer>>,
+) {
+    let Some(at) = parked_questions
+        .iter()
+        .position(|parked| parked.request_id == request_id)
+    else {
+        return;
+    };
+    let parked = parked_questions.remove(at);
+    while replies.try_join_next().is_some() {}
+    let server = Server::http_view(
+        server.base.clone(),
+        server.auth.clone(),
+        server.protocol.clone(),
+    );
+    let dir = dir.map(str::to_owned);
+    let tx = event_tx.clone();
+    replies.spawn(async move {
+        let reply = match answer {
+            Some(answers) => {
+                let ordered: Vec<Vec<String>> = parked
+                    .questions
+                    .iter()
+                    .map(|q| {
+                        answers
+                            .iter()
+                            .find(|a| a.question_id == q.id)
+                            .map(|a| a.labels.clone())
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                server
+                    .post_json(
+                        &format!("/question/{request_id}/reply"),
+                        dir.as_deref(),
+                        &json!({ "answers": ordered }),
+                    )
+                    .await
+            }
+            None => {
+                server
+                    .post_json(
+                        &format!("/question/{request_id}/reject"),
+                        dir.as_deref(),
+                        &Value::Null,
+                    )
+                    .await
+            }
+        };
+        if let Err(e) = reply {
+            tracing::debug!(
+                target: "zeron_harness::opencode",
+                "question reply failed: {e}"
+            );
+        }
+        let _ = tx
+            .send(Ok(AgentEvent::InputResolved {
+                request_id: request_id.clone(),
+            }))
+            .await;
+    });
+}
+
+/// How a freeze ended for the run loop.
+#[cfg_attr(not(unix), allow(dead_code))]
+enum Frozen {
+    /// The engine let the run go (a failed exec): carry on.
+    Thawed,
+    /// A same-process successor took the server: end the stream.
+    Committed,
+}
+
+/// What a freeze needs of the run loop.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Freezing<'a> {
+    server: &'a mut Server,
+    state: OpencodeLoopState,
+    held_steers: &'a mut VecDeque<SteerMessage>,
+    steering: &'a mut mpsc::Receiver<SteerMessage>,
+}
+
+/// Offer the run to the engine at this safe point; suspended until its
+/// verdict. The bus reader keeps running meanwhile (frames queue up for a
+/// thaw; a dropped stream reconnects and the thaw reconciles). Refusals the
+/// loop can see itself are answered before this is called.
+#[cfg(unix)]
+async fn freeze_run(request: FreezeRequest, run: Freezing<'_>) -> Frozen {
+    use crate::SteerRecord;
+    use crate::handoff::drain_steering;
+    let busy = |reply: tokio::sync::oneshot::Sender<_>, reason| {
+        let _ = reply.send(Err(FreezeRefusal::Busy(reason)));
+        Frozen::Thawed
+    };
+    // The pid the next image adopts. None when this run drives a server it
+    // does not own (an attached one, or one adopted that is not our child).
+    let pid = match run.server.child.as_mut() {
+        None => None,
+        Some(child) => match child.try_wait() {
+            Ok(Some(outcome)) if outcome.not_our_child() => None,
+            Ok(None) => match child.id() {
+                // An exit inside the freeze window must stay reapable by
+                // the next image.
+                Some(pid) if child.hold_reaping() => Some(pid as i32),
+                _ => return busy(request.reply, "the opencode server has exited"),
+            },
+            _ => return busy(request.reply, "the opencode server has exited"),
+        },
+    };
+    let release_reaping = |server: &Server| {
+        if let Some(child) = server.child.as_ref() {
+            child.release_reaping();
+        }
+    };
+    // Steers a previous, thawed freeze put back come first, then the mailbox.
+    let mut undrained: Vec<SteerRecord> =
+        run.held_steers.drain(..).map(SteerRecord::from).collect();
+    undrained.extend(drain_steering(run.steering));
+    let state = match serde_json::to_value(&run.state) {
+        Ok(state) => state,
+        Err(_) => {
+            release_reaping(run.server);
+            run.held_steers
+                .extend(undrained.into_iter().map(SteerMessage::from));
+            return busy(request.reply, "the run state does not serialize");
+        }
+    };
+    let handoff = HarnessHandoff {
+        harness: HarnessId::Opencode,
+        state_version: STATE_VERSION,
+        pid: pid.unwrap_or(0),
+        // The server's stdin and stdout are /dev/null: no pipes to carry.
+        stdin_fd: HarnessHandoff::NO_PIPE,
+        stdout_fd: HarnessHandoff::NO_PIPE,
+        stderr_fd: run.server.stderr.as_ref().and_then(StderrDrain::fd),
+        extra_fds: Vec::new(),
+        stdout_leftover: Vec::new(),
+        stderr_tail: run.server.stderr_tail.lines(),
+        state,
+        undrained_steers: undrained.clone(),
+    };
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    let sent = request.reply.send(Ok(crate::FrozenRun {
+        handoff,
+        commit: commit_tx,
+    }));
+    if sent.is_ok() && commit_rx.await.is_ok() {
+        // A same-process successor owns the server now (the exec path never
+        // gets here): let go of it without stopping or reaping anything.
+        if let Some(stderr) = run.server.stderr.take() {
+            stderr.abandon().await;
+        }
+        if let Some(child) = run.server.child.take() {
+            let _ = child.release();
+        }
+        return Frozen::Committed;
+    }
+    // Thawed: the bus reader kept its stream (or reconnects and the loop
+    // reconciles), and the drained steers are read again, in order.
+    release_reaping(run.server);
+    run.held_steers
+        .extend(undrained.into_iter().map(SteerMessage::from));
+    Frozen::Thawed
+}
+
+#[cfg(not(unix))]
+async fn freeze_run(request: FreezeRequest, _run: Freezing<'_>) -> Frozen {
+    let _ = request.reply.send(Err(FreezeRefusal::Unsupported));
+    Frozen::Thawed
+}
+
+/// Bound on one reconcile GET: the loop answers nothing else meanwhile.
+const RECONCILE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// One REST list for a reconcile: `GET path`, unwrapping 2.x's `{data}`.
+/// `None` — logged, never fatal — when the server lacks the route (404) or
+/// the call fails: the reconcile carries on without it.
+async fn reconcile_from_rest(server: &Server, dir: Option<&str>, path: &str) -> Option<Vec<Value>> {
+    let response = match tokio::time::timeout(RECONCILE_TIMEOUT, server.get_json(path, dir)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::debug!(
+                target: "zeron_harness::opencode",
+                path,
+                %error,
+                "reconcile: route unavailable; skipped"
+            );
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(target: "zeron_harness::opencode", path, "reconcile: route timed out; skipped");
+            return None;
+        }
+    };
+    match unwrap_data(response) {
+        Value::Array(list) => Some(list),
+        other => {
+            tracing::debug!(
+                target: "zeron_harness::opencode",
+                path,
+                kind = %if other.is_object() { "object" } else { "scalar" },
+                "reconcile: not a list; skipped"
+            );
+            None
+        }
+    }
+}
+
+/// A message's creation time (ms), when the server says.
+fn created_ms(info: &Value) -> Option<u64> {
+    info.pointer("/time/created").and_then(Value::as_u64)
+}
+
+/// `GET /session/{id}/message` (`[{info, parts}]`) as the bus payloads that
+/// would have carried it: `message.updated` (the role, the usage) then each
+/// part's snapshot, and — when the message failed (1.x keeps the error on
+/// the assistant message) — the `session.error` the bus carried (deduped
+/// against one already seen). Only messages created since the run last
+/// posted a turn: earlier ones were consumed live before their turn went
+/// idle — and a resumed session's history must never render again.
+fn message_payloads(list: &[Value], watermark: Option<u64>) -> Vec<Value> {
+    let Some(watermark) = watermark else {
+        return Vec::new();
+    };
+    let mut payloads = Vec::new();
+    for message in list {
+        let info = message.get("info").unwrap_or(&Value::Null);
+        if created_ms(info).is_none_or(|created| created < watermark) {
+            continue;
+        }
+        payloads.push(json!({ "type": "message.updated", "properties": { "info": info } }));
+        for part in message
+            .get("parts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            payloads
+                .push(json!({ "type": "message.part.updated", "properties": { "part": part } }));
+        }
+        if info.get("role").and_then(Value::as_str) == Some("assistant")
+            && let Some(error) = info.get("error").filter(|e| e.is_object())
+        {
+            payloads.push(json!({
+                "type": "session.error",
+                "properties": { "sessionID": info.get("sessionID"), "error": error },
+            }));
+        }
+    }
+    payloads
+}
+
+/// `GET /session/{id}/children` as `session.created` payloads for the
+/// children this run has not seen, created since it last posted a turn.
+fn child_payloads(
+    list: &[Value],
+    session_id: &str,
+    children: &HashMap<String, ChildRun>,
+    unbound: &HashMap<String, String>,
+    watermark: Option<u64>,
+) -> Vec<Value> {
+    let Some(watermark) = watermark else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter(|info| info.get("parentID").and_then(Value::as_str) == Some(session_id))
+        .filter(|info| {
+            info.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !children.contains_key(id) && !unbound.contains_key(id))
+        })
+        .filter(|info| created_ms(info).is_some_and(|created| created >= watermark))
+        .map(|info| json!({ "type": "session.created", "properties": { "info": info } }))
+        .collect()
+}
+
+/// After a REST snapshot, the bus frames buffered meanwhile may predate it:
+/// mark every text/reasoning part the snapshot healed (see
+/// [`PartState::resync`]).
+fn resync_parts(
+    payloads: &[Value],
+    session_id: &str,
+    main_feed: &mut SessionFeed,
+    children: &mut HashMap<String, ChildRun>,
+) {
+    for payload in payloads {
+        if payload.get("type").and_then(Value::as_str) != Some("message.part.updated") {
+            continue;
+        }
+        let part = payload.pointer("/properties/part").unwrap_or(&Value::Null);
+        let (Some(session), Some(id)) = (
+            part.get("sessionID").and_then(Value::as_str),
+            part.get("id").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let feed = if session == session_id {
+            &mut *main_feed
+        } else {
+            match children.get_mut(session) {
+                Some(child) => &mut child.feed,
+                None => continue,
+            }
+        };
+        if let Some(state) = feed.parts.get_mut(id)
+            && state.kind != "tool"
+        {
+            state.resync = true;
+        }
+    }
 }
 
 async fn create_session(
@@ -2426,12 +3555,15 @@ async fn post_prompt(
     turn_generation: u64,
     command_failure_tx: &mpsc::UnboundedSender<NativeCommandFailure>,
     spec: TurnSpec<'_>,
+    posts: &Arc<Posts>,
 ) -> Result<(), HarnessError> {
     let TurnSpec {
         model,
         variant,
         attachments,
     } = spec;
+    // Before the request exists: every message of this turn is created after.
+    posts.last_ms.store(wall_ms(), Ordering::SeqCst);
     let protocol = server.protocol().await;
     if let Some((name, arguments)) =
         native_command_request(prompt, commands, native_command_selected)?
@@ -2459,16 +3591,12 @@ async fn post_prompt(
         let path_owned = path.clone();
         let protocol = server.protocol.clone();
         let command_failure_tx = command_failure_tx.clone();
+        // A freeze refuses while this is in flight: the response would be
+        // lost with the old image.
+        let in_flight = PostGuard::new(posts, true);
         tokio::spawn(async move {
-            let server = Server {
-                child: None,
-                base: server_base,
-                auth,
-                client: http_client(),
-                stderr_tail: crate::StderrTail::default(),
-                protocol,
-                version: tokio::sync::OnceCell::new(),
-            };
+            let _in_flight = in_flight;
+            let server = Server::http_view(server_base, auth, protocol);
             // The command endpoint blocks for the whole turn; the bus
             // carries the real events, so this response is ignored —
             // but it must not be cut off mid-turn by CALL_TIMEOUT.
@@ -2510,19 +3638,21 @@ async fn post_prompt(
         ),
     };
     let server = Server {
-        child: None,
-        base: server.base.clone(),
-        auth: server.auth.clone(),
         client: server.client.clone(),
-        stderr_tail: crate::StderrTail::default(),
-        protocol: server.protocol.clone(),
-        version: tokio::sync::OnceCell::new(),
+        ..Server::http_view(
+            server.base.clone(),
+            server.auth.clone(),
+            server.protocol.clone(),
+        )
     };
     let bus_tx = bus_tx.clone();
     let dir = dir.map(str::to_owned);
+    // A freeze refuses until the server has the prompt.
+    let in_flight = PostGuard::new(posts, false);
     // The bus owns turn completion. A stalled HTTP acknowledgement must not
     // prevent cancellation or event consumption; post_json bounds the request.
     tokio::spawn(async move {
+        let _in_flight = in_flight;
         if let Err(error) = server.post_json(&path, dir.as_deref(), &body).await {
             let _ = bus_tx.send(BusMsg::CommandFailed(error.to_string())).await;
         }
@@ -2592,6 +3722,9 @@ struct BusCtx<'a> {
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
     context_windows: &'a HashMap<String, u64>,
+    answers: &'a mut Answers,
+    parked_questions: &'a mut Vec<ParkedQuestion>,
+    asked_questions: &'a mut std::collections::HashSet<String>,
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2643,6 +3776,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         turn,
         pending_usage,
         context_windows,
+        answers,
+        parked_questions,
+        asked_questions,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
     // /event feed (tests) delivers the payload directly.
@@ -2989,15 +4125,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 "reply"
             };
             tokio::spawn(async move {
-                let server = Server {
-                    child: None,
-                    base,
-                    auth,
-                    client: http_client(),
-                    stderr_tail: crate::StderrTail::default(),
-                    protocol: protocol_cell,
-                    version: tokio::sync::OnceCell::new(),
-                };
+                let server = Server::http_view(base, auth, protocol_cell);
                 // Like Claude and Codex, normal Zeron sessions run unattended,
                 // regardless of RunRequest.auto_approve. Approve each owned
                 // request without writing durable permission rules via "always".
@@ -3035,10 +4163,16 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let Some(id) = props.get("id").and_then(Value::as_str) else {
                 return BusOutcome::Continue;
             };
+            // Once per request: a reconcile may surface it from REST while its
+            // bus frame is still buffered.
+            if asked_questions.contains(id) {
+                return BusOutcome::Continue;
+            }
             let questions = map_questions(props);
             if questions.is_empty() {
                 return BusOutcome::Continue;
             }
+            asked_questions.insert(id.to_owned());
             if !send(
                 event_tx,
                 AgentEvent::InputRequested {
@@ -3050,64 +4184,13 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             {
                 return BusOutcome::ConsumerGone;
             }
+            // Parked in the loop (answered by `post_answer`), so a freeze can
+            // flush a given answer and export what is still open.
             let rx = (request_input)(questions.clone());
-            let base = server.base.clone();
-            let auth = server.auth.clone();
-            let dir_owned = dir.map(str::to_owned);
-            let request_id = id.to_owned();
-            let tx = event_tx.clone();
-            let protocol_cell = server.protocol.clone();
-            tokio::spawn(async move {
-                let server = Server {
-                    child: None,
-                    base,
-                    auth,
-                    client: http_client(),
-                    stderr_tail: crate::StderrTail::default(),
-                    protocol: protocol_cell,
-                    version: tokio::sync::OnceCell::new(),
-                };
-                let reply = match rx.await {
-                    Ok(answers) => {
-                        let ordered: Vec<Vec<String>> = questions
-                            .iter()
-                            .map(|q| {
-                                answers
-                                    .iter()
-                                    .find(|a| a.question_id == q.id)
-                                    .map(|a| a.labels.clone())
-                                    .unwrap_or_default()
-                            })
-                            .collect();
-                        server
-                            .post_json(
-                                &format!("/question/{request_id}/reply"),
-                                dir_owned.as_deref(),
-                                &json!({ "answers": ordered }),
-                            )
-                            .await
-                    }
-                    Err(_) => {
-                        server
-                            .post_json(
-                                &format!("/question/{request_id}/reject"),
-                                dir_owned.as_deref(),
-                                &Value::Null,
-                            )
-                            .await
-                    }
-                };
-                if let Err(e) = reply {
-                    tracing::debug!(
-                        target: "zeron_harness::opencode",
-                        "question reply failed: {e}"
-                    );
-                }
-                let _ = tx
-                    .send(Ok(AgentEvent::InputResolved {
-                        request_id: request_id.clone(),
-                    }))
-                    .await;
+            answers.push(await_answer(id.to_owned(), rx));
+            parked_questions.push(ParkedQuestion {
+                request_id: id.to_owned(),
+                questions,
             });
             BusOutcome::Continue
         }
@@ -3312,6 +4395,11 @@ fn part_snapshot_events(
                     kind: kind.to_owned(),
                     ..PartState::default()
                 });
+            // At least as long as what was emitted: at least as new as the
+            // REST snapshot that marked the part, so deltas after it apply.
+            if text.len() >= entry.emitted {
+                entry.resync = false;
+            }
             let Some(suffix) = text
                 .get(entry.emitted..)
                 .filter(|s| !s.is_empty())
@@ -3499,7 +4587,9 @@ fn part_delta_events(
             kind: "text".to_owned(),
             ..PartState::default()
         });
-    if entry.kind == "tool" {
+    // Healed from REST while this delta was buffered: it may already be in
+    // the text (see `PartState::resync`); the next snapshot fills any gap.
+    if entry.kind == "tool" || entry.resync {
         return Vec::new();
     }
     entry.emitted += delta.len();
@@ -3514,8 +4604,12 @@ fn part_delta_events(
     }]
 }
 
-/// `question.asked` → the input panel's questions (ids are positional).
+/// `question.asked` → the input panel's questions. Ids are positional within
+/// the request and prefixed by its id, so they are unique across requests:
+/// after a live update the engine re-attaches a parked question by one of
+/// its question ids, and two parked requests must never share one.
 fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
+    let request = props.get("id").and_then(Value::as_str).unwrap_or_default();
     props
         .get("questions")
         .and_then(Value::as_array)
@@ -3525,7 +4619,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
                     Some(UserInputQuestion {
-                        id: format!("q{ix}"),
+                        id: format!("{request}/q{ix}"),
                         header: q
                             .get("header")
                             .and_then(Value::as_str)
@@ -3669,10 +4763,18 @@ const MAX_PENDING_V2_TOOLS: usize = 4096;
 /// Cache cap; overflow clears the cache instead of failing the run.
 const MAX_V2_SESSION_MODELS: usize = 4096;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct V2ModelIdentity {
     provider_id: String,
     model_id: String,
+}
+
+/// The 2.x bus normalizer's memory (pending tool names, latest model per
+/// session). It outlives reconnects, and a freeze exports it.
+#[derive(Default)]
+struct V2BusState {
+    tool_names: HashMap<V2ToolKey, String>,
+    session_models: HashMap<String, V2ModelIdentity>,
 }
 
 fn v2_model_identity(model: &Value) -> Option<V2ModelIdentity> {
@@ -4041,6 +5143,7 @@ async fn bus_task(
     auth: Option<String>,
     protocol: Protocol,
     tx: mpsc::Sender<BusMsg>,
+    v2: Arc<std::sync::Mutex<V2BusState>>,
 ) {
     let client = http_client();
     let url = match protocol {
@@ -4048,8 +5151,6 @@ async fn bus_task(
         Protocol::V2 => format!("{base}/api/event"),
     };
     let mut failures: u32 = 0;
-    let mut v2_tool_names: HashMap<V2ToolKey, String> = HashMap::new();
-    let mut v2_session_models: HashMap<String, V2ModelIdentity> = HashMap::new();
     loop {
         if tx.is_closed() {
             return;
@@ -4063,14 +5164,7 @@ async fn bus_task(
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 failures = 0;
-                stream_bus(
-                    &tx,
-                    resp,
-                    protocol,
-                    &mut v2_tool_names,
-                    &mut v2_session_models,
-                )
-                .await;
+                stream_bus(&tx, resp, protocol, &v2).await;
                 if tx.is_closed() {
                     return;
                 }
@@ -4092,8 +5186,7 @@ async fn stream_bus(
     tx: &mpsc::Sender<BusMsg>,
     resp: reqwest::Response,
     protocol: Protocol,
-    v2_tool_names: &mut HashMap<V2ToolKey, String>,
-    v2_session_models: &mut HashMap<String, V2ModelIdentity>,
+    v2: &std::sync::Mutex<V2BusState>,
 ) {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
@@ -4126,22 +5219,30 @@ async fn stream_bus(
                     continue;
                 };
                 if protocol == Protocol::V2 {
-                    let payloads = normalize_v2_frame_with_session_models(
-                        event,
-                        v2_tool_names,
-                        v2_session_models,
-                    );
-                    if v2_tool_names.len() > MAX_PENDING_V2_TOOLS {
+                    let (payloads, overflow) = {
+                        let mut v2 = v2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let V2BusState {
+                            tool_names,
+                            session_models,
+                        } = &mut *v2;
+                        let payloads = normalize_v2_frame_with_session_models(
+                            event,
+                            tool_names,
+                            session_models,
+                        );
+                        // Model identity only feeds usage frames. Dropping
+                        // the cache degrades to "window preserved" and refills
+                        // on the next step.started, so — unlike leaked pending
+                        // tools — it must not fail the run, especially now that
+                        // the cache survives reconnects.
+                        if session_models.len() > MAX_V2_SESSION_MODELS {
+                            session_models.clear();
+                        }
+                        (payloads, tool_names.len() > MAX_PENDING_V2_TOOLS)
+                    };
+                    if overflow {
                         let _ = tx.send(BusMsg::Disconnected).await;
                         return;
-                    }
-                    // Model identity only feeds usage frames. Dropping the
-                    // cache degrades to "window preserved" and refills on the
-                    // next step.started, so — unlike leaked pending tools — it
-                    // must not fail the run, especially now that the cache
-                    // survives reconnects.
-                    if v2_session_models.len() > MAX_V2_SESSION_MODELS {
-                        v2_session_models.clear();
                     }
                     for payload in payloads {
                         if tx.send(BusMsg::Event(payload)).await.is_err() {
@@ -4281,6 +5382,60 @@ fn mcp_config(
 mod mcp_injection_tests {
     use super::*;
 
+    /// A run's server outlives its handles (it must survive an exec handoff);
+    /// a short-lived probe server must not leak when its future is dropped.
+    /// (Linux only: liveness is read from /proc.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn only_a_runs_server_outlives_a_dropped_handle_a_probe_server_is_killed() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let exe = fixture.path().join("opencode");
+        std::fs::write(
+            &exe,
+            r#"#!/usr/bin/env node
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('1.0.0'); process.exit(0); }
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  if (req.url === '/global/health') { res.end(JSON.stringify({version: '1.0.0'})); return; }
+  res.statusCode = 404; res.end('{}');
+}).listen(port, '127.0.0.1');
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alive = |pid: u32| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| {
+                    !stat
+                        .rsplit_once(')')
+                        .is_some_and(|(_, r)| r.trim_start().starts_with('Z'))
+                })
+                .unwrap_or(false)
+        };
+        for (outlives, expect_alive) in [(false, false), (true, true)] {
+            let server = Server::spawn(
+                &exe,
+                fixture.path().to_str(),
+                Duration::from_secs(10),
+                None,
+                outlives,
+            )
+            .await
+            .unwrap();
+            let pid = server.child.as_ref().and_then(ChildHandle::id).unwrap();
+            drop(server);
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            assert_eq!(alive(pid), expect_alive, "outlives_drop={outlives}");
+            if expect_alive {
+                // SAFETY: kill(2) on the pid of the child this test spawned.
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn mcp_injection_reaches_isolated_server_processes() {
@@ -4322,6 +5477,7 @@ http.createServer((req, res) => {{
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&first),
+                false,
             )
             .await
             .unwrap();
@@ -4330,6 +5486,7 @@ http.createServer((req, res) => {{
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&second),
+                false,
             )
             .await
             .unwrap();

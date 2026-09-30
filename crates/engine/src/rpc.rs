@@ -651,6 +651,7 @@ impl EngineRpc {
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
+            version: Some(zeron_update::current_version().to_string()),
         };
         Self {
             sessions,

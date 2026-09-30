@@ -40,6 +40,8 @@ async fn main() {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        freeze: RunControls::no_freeze(),
+        rebind_input: RunControls::no_rebind(),
     };
     // Optional second arg overrides the prompt (e.g. the mock rig's
     // "TWO subagents" variant exercising concurrent binding).

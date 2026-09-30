@@ -29,6 +29,7 @@ mod composer_dock;
 mod composer_markdown;
 mod context_usage;
 pub mod edge_fade;
+pub mod engine_host;
 pub mod file_icons;
 pub mod files;
 pub mod frost;
@@ -61,6 +62,7 @@ pub mod theme;
 pub mod theme_library;
 pub mod transcript;
 pub mod typography;
+mod ui_state;
 mod workspace_links;
 
 use std::path::PathBuf;
@@ -68,6 +70,7 @@ use std::path::PathBuf;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
+pub use engine_host::HostPolicy;
 pub use state::EngineBootConfig;
 pub use zeron_proto::HarnessId;
 
@@ -121,6 +124,9 @@ impl gpui::Global for ReopenState {}
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
+    // Before any thread exists: note how this process was started (an update
+    // swap) and keep that out of the environment its children inherit.
+    app_update::capture_start_env();
     // Retain ownership for the whole application lifetime. The bridge's
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
@@ -214,6 +220,7 @@ pub fn run_app(config: UiConfig) {
             }
         })
         .detach();
+        engine_host::set_policy(HostPolicy::from_env());
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
@@ -249,7 +256,11 @@ pub fn run_app(config: UiConfig) {
         // synchronously, so `set_menus` reads the final bindings for the ⌘-key
         // equivalents (gpui snapshots the keymap at set time).
         cx.set_menus(app_menus::app_menus());
-        cx.activate(true);
+        // A window an update swap started while the user was elsewhere must
+        // not pull the focus to itself.
+        if !app_update::started_in_background() {
+            cx.activate(true);
+        }
     });
 }
 

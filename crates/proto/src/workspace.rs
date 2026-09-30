@@ -15,6 +15,17 @@ pub mod capabilities {
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
+    /// The engine can replace itself in place (exec handoff) without stopping
+    /// running agents or terminals (`HandoffEngine`). Deliberately NOT in
+    /// [`CURRENT`]: it is advertised only by the headless IPC owner that
+    /// serves that method, never by an embedded engine that shares `EngineRpc`.
+    pub const HANDOFF_V1: &str = "handoff-v1";
+
+    /// This engine is the host a headed app started for itself (its process
+    /// carries `ZERON_ENGINE_HOST=app`): quitting that app stops it, and an
+    /// update swap of the window leaves it running. Not in [`CURRENT`]; a
+    /// service or hand-started engine never has it.
+    pub const APP_HOSTED: &str = "app-hosted";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -55,6 +66,11 @@ pub struct EngineInfo {
     /// Supported protocol/document features. Missing on older engines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Build version of the owning engine, for diagnostics and UI skew
+    /// display only (never a compatibility gate — see `capabilities`).
+    /// Absent on older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl EngineInfo {
@@ -89,6 +105,7 @@ mod tests {
             workspace_scope: WorkspaceScope::Local,
             cursor_sdk_version: Some("1.0.31".into()),
             capabilities: capabilities::current(),
+            version: None,
         };
         assert_eq!(
             serde_json::to_value(&info).unwrap(),
@@ -107,6 +124,42 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn engine_info_without_a_version_still_parses() {
+        let old: EngineInfo = serde_json::from_value(serde_json::json!({
+            "deviceId": "d",
+            "workspaceScope": "local"
+        }))
+        .unwrap();
+        assert_eq!(old.version, None);
+        let new = EngineInfo {
+            version: Some("0.3.0".into()),
+            ..old
+        };
+        let round: EngineInfo =
+            serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(round.version.as_deref(), Some("0.3.0"));
+        // An engine that does not report a version leaves the key out entirely.
+        let bare = EngineInfo {
+            version: None,
+            ..new
+        };
+        assert!(
+            serde_json::to_value(&bare)
+                .unwrap()
+                .get("version")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn handoff_capability_is_advertised_only_by_the_headless_ipc_owner() {
+        // The headless IPC owner adds it to `EngineInfo` because only it serves
+        // `HandoffEngine`; an embedded engine sharing `EngineRpc` must not.
+        assert_eq!(capabilities::HANDOFF_V1, "handoff-v1");
+        assert!(!capabilities::CURRENT.contains(&capabilities::HANDOFF_V1));
     }
 
     #[test]

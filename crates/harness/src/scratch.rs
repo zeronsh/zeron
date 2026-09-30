@@ -48,6 +48,7 @@ impl ScratchDir {
                 std::process::id(),
                 NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
             ));
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -64,6 +65,58 @@ impl ScratchDir {
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Give the directory up WITHOUT removing it: a live update hands it to
+    /// the next image, whose [`Self::adopt`] removes it at the run's end.
+    pub(crate) fn into_path(self) -> PathBuf {
+        let mut this = std::mem::ManuallyDrop::new(self);
+        std::mem::take(&mut this.path)
+    }
+
+    /// Take back a directory this image gave up with [`Self::into_path`]
+    /// (a thawed live update).
+    pub(crate) fn resume(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Own a directory a previous image created with [`Self::new`] and handed
+    /// over ([`Self::into_path`]); dropping the guard removes it. The path
+    /// comes off the wire, and removal is recursive, so anything that is not
+    /// a private `zeron-*` directory directly under our temp dir is refused.
+    pub(crate) fn adopt(path: PathBuf) -> std::io::Result<Self> {
+        let refuse = |why: &str| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to adopt {} as a scratch dir: {why}",
+                    path.display()
+                ),
+            ))
+        };
+        let ours = path.parent() == Some(std::env::temp_dir().as_path())
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("zeron-"));
+        if !ours {
+            return refuse("not one of ours");
+        }
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.is_dir() {
+            return refuse("not a directory");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: getuid has no preconditions.
+            let uid = unsafe { libc::getuid() };
+            if meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+                return refuse("not private to this user");
+            }
+        }
+        Ok(Self { path })
     }
 
     /// Route the child's temp files into this directory.
@@ -153,6 +206,32 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_handed_over_scratch_dir_survives_until_its_adopter_drops() {
+    let dir = ScratchDir::new("handoff").unwrap();
+    let path = dir.into_path();
+    assert!(path.is_dir(), "into_path must not remove the directory");
+    let adopted = ScratchDir::adopt(path.clone()).unwrap();
+    assert!(path.is_dir());
+    drop(adopted);
+    assert!(!path.exists(), "the adopter removes it");
+}
+
+#[cfg(test)]
+#[test]
+fn only_our_own_scratch_dirs_are_adopted() {
+    let foreign = tempfile::tempdir().unwrap();
+    assert!(ScratchDir::adopt(foreign.path().to_path_buf()).is_err());
+    assert!(ScratchDir::adopt(std::env::temp_dir()).is_err());
+    assert!(ScratchDir::adopt(PathBuf::from("/")).is_err());
+    let nested = ScratchDir::new("nest").unwrap();
+    let inner = nested.path().join("zeron-inner");
+    std::fs::create_dir(&inner).unwrap();
+    assert!(ScratchDir::adopt(inner).is_err(), "not directly under temp");
+    assert!(foreign.path().is_dir());
 }
 
 #[cfg(all(test, unix))]
