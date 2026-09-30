@@ -111,8 +111,8 @@ fn ascii(s: &Source, light: bool) -> Vec<u8> {
 fn halftone(s: &Source, light: bool) -> Vec<u8> {
     let paper = if light { 255u8 } else { 0 };
     let mut out = vec![0u8; s.rgba.len()];
-    for px in out.chunks_exact_mut(4) {
-        px.copy_from_slice(&[paper, paper, paper, 255]);
+    for px in out.as_chunks_mut::<4>().0 {
+        *px = [paper, paper, paper, 255];
     }
     for y in (0..s.h).step_by(4) {
         for x in (0..s.w).step_by(4) {
@@ -180,6 +180,7 @@ fn contrast(a: f32, b: f32) -> f32 {
 /// tail when text is light, the dark tail when text is dark. Clamped to
 /// [0, `max_opacity`].
 #[uniffi::export]
+#[allow(clippy::too_many_arguments)] // a flat FFI signature: Swift/Kotlin call it positionally
 pub fn wallpaper_safe_opacity(
     rgba: Vec<u8>,
     width: u32,

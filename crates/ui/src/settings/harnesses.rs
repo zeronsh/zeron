@@ -184,6 +184,10 @@ pub struct HarnessesPage {
     toggle_task: Option<Task<()>>,
     installing: Option<HarnessId>,
     install_task: Option<Task<()>>,
+    /// First click on Uninstall arms it; the second (the same agent) runs it.
+    uninstall_armed: Option<HarnessId>,
+    uninstalling: Option<HarnessId>,
+    uninstall_task: Option<Task<()>>,
 
     expanded_harness: Option<HarnessId>,
     /// The expanded provider's Accounts section — one page, retargeted as
@@ -208,6 +212,9 @@ impl HarnessesPage {
             toggle_task: None,
             installing: None,
             install_task: None,
+            uninstall_armed: None,
+            uninstalling: None,
+            uninstall_task: None,
 
             expanded_harness: None,
             accounts_page: None,
@@ -266,7 +273,8 @@ impl HarnessesPage {
             .gap(px(20.0))
             .child(self.render_completion_for(harness, theme, cx))
             .children(self.render_updates_for(harness, theme, cx))
-            .when_some(accounts, |details, accounts| details.child(accounts));
+            .when_some(accounts, |details, accounts| details.child(accounts))
+            .children(self.render_uninstall_for(harness, theme, cx));
         if motion::reduced_motion(cx) {
             content.into_any_element()
         } else {
@@ -339,6 +347,137 @@ impl HarnessesPage {
         )
     }
 
+    /// The expanded provider's Installation section: remove the CLI that
+    /// Zeron's installer put on the device (a CLI installed any other way is
+    /// refused by the engine with how to remove it). Two clicks, no dialog.
+    /// Only for an installed CLI (enabled rows may lack one).
+    fn render_uninstall_for(
+        &self,
+        harness: HarnessId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let Loadable::Ready(harnesses) = &self.harnesses else {
+            return None;
+        };
+        let installed = harnesses
+            .iter()
+            .any(|descriptor| descriptor.id == harness && descriptor.installed);
+        if !installed && self.uninstalling != Some(harness) {
+            return None;
+        }
+        let armed = self.uninstall_armed == Some(harness);
+        let running = self.uninstalling == Some(harness);
+        let note = if running {
+            "Removing the CLI…"
+        } else if armed {
+            "Removes what Zeron installed. Accounts stay signed in; sign out first to remove them."
+        } else {
+            "Remove this agent's CLI from the device."
+        };
+        let row = div()
+            .min_h(px(52.0))
+            .py(px(10.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Uninstall"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![div().child(note).into_any_element()],
+                    )),
+            )
+            .when(armed && !running, |row| {
+                row.child(
+                    widgets::ghost_action(theme)
+                        .id(format!("harness-uninstall-cancel-{harness:?}"))
+                        .on_click(cx.listener(|page, _, _, cx| {
+                            page.uninstall_armed = None;
+                            cx.notify();
+                        }))
+                        .child("Cancel"),
+                )
+            })
+            .when(!running, |row| {
+                let danger = theme.danger;
+                row.child(
+                    widgets::action_button(theme, widgets::ActionTone::Outlined)
+                        .id(format!("harness-uninstall-{harness:?}"))
+                        .when(armed, move |el| el.text_color(danger))
+                        .when(self.uninstalling.is_none(), |el| {
+                            el.on_click(
+                                cx.listener(move |page, _, _, cx| page.uninstall(harness, cx)),
+                            )
+                        })
+                        .child(if armed {
+                            "Confirm uninstall"
+                        } else {
+                            "Uninstall"
+                        }),
+                )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .child(widgets::details_label(theme, "Installation"))
+            .child(row)
+            .into_any_element()
+            .into()
+    }
+
+    fn uninstall(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        if self.uninstall_armed != Some(harness) {
+            self.uninstall_armed = Some(harness);
+            cx.notify();
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = install_params(harness, &self.target_device);
+        let target = self.target_device.clone();
+        self.uninstall_armed = None;
+        self.uninstalling = Some(harness);
+        self.error = None;
+        self.uninstall_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::UNINSTALL_HARNESS, params)
+                .await
+                .map_err(|error| error.to_string());
+            this.update(cx, |page, cx| {
+                if page.target_device != target {
+                    return;
+                }
+                page.uninstalling = None;
+                match result {
+                    Ok(value) => {
+                        if let Ok(list) = serde_json::from_value::<Vec<HarnessDescriptor>>(
+                            value["harnesses"].clone(),
+                        ) {
+                            page.harnesses = Loadable::Ready(list);
+                        }
+                        if let Some(remaining) = value["remaining"].as_str() {
+                            page.error = Some(remaining.to_owned());
+                        } else if page.expanded_harness == Some(harness) {
+                            page.expanded_harness = None;
+                        }
+                        crate::pickers::bump_harness_catalog(cx);
+                    }
+                    Err(error) => page.error = Some(format!("Uninstall failed — {error}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     /// Params with the `targetDeviceId` passthrough merged in.
     fn with_target(&self, mut value: serde_json::Value) -> serde_json::Value {
         if let (Some(target), Some(object)) = (&self.target_device, value.as_object_mut()) {
@@ -394,6 +533,9 @@ impl HarnessesPage {
         }
         self.installing = None;
         self.install_task = None;
+        self.uninstall_armed = None;
+        self.uninstalling = None;
+        self.uninstall_task = None;
         self.policy_selects.clear();
         self.target_device = target;
         if let Some(accounts) = &self.accounts_page {

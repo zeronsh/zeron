@@ -4,14 +4,11 @@ import android.app.Application
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
-import sh.zeron.android.design.Appearance
-import sh.zeron.android.design.ThemeMode
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -19,36 +16,43 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.json.JSONObject
+import sh.zeron.android.design.Appearance
+import sh.zeron.android.design.ThemeMode
+import sh.zeron.runtime.CustomServer
+import sh.zeron.runtime.RuntimeState
 import uniffi.zeron_core.AuthCallback
 import uniffi.zeron_core.AuthOrg
+import uniffi.zeron_core.BusyPolicy
 import uniffi.zeron_core.ChatConfig
 import uniffi.zeron_core.ClientEvent
 import uniffi.zeron_core.ClientListener
 import uniffi.zeron_core.Connectivity
 import uniffi.zeron_core.CoreClient
 import uniffi.zeron_core.CoreConfig
+import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.Credentials
 import uniffi.zeron_core.DemoFixture
 import uniffi.zeron_core.DemoOptions
+import uniffi.zeron_core.DeviceView
+import uniffi.zeron_core.EngineAccount
+import uniffi.zeron_core.EngineEdge
+import uniffi.zeron_core.EngineIdentity
+import uniffi.zeron_core.EngineLink
 import uniffi.zeron_core.NewSession
 import uniffi.zeron_core.SandboxLevel
 import uniffi.zeron_core.SendRequest
-import uniffi.zeron_core.BusyPolicy
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.SessionTarget
 import uniffi.zeron_core.StreamSpeed
 import uniffi.zeron_core.TranscriptScale
 import uniffi.zeron_core.WorkspaceSnapshot
 import uniffi.zeron_core.WorktreeSpec
-import uniffi.zeron_core.authExchangeCode
-import uniffi.zeron_core.authListOrgs
 import uniffi.zeron_core.authProductionEdgeUrl
-import uniffi.zeron_core.authRefresh
 import uniffi.zeron_core.parseAuthCallback
-import uniffi.zeron_core.workosAuthorizeUrl
 import java.io.File
-import java.util.UUID
 
 /** How the app was launched (adb extras mirror the iOS launch arguments). */
 data class LaunchOptions(
@@ -58,22 +62,46 @@ data class LaunchOptions(
     val big: Boolean = false,
     val huge: Boolean = false,
     val noProjects: Boolean = false,
+    /** Back to the first-run screen (the engine's sign-in is kept). */
     val signedOut: Boolean = false,
+    /** Skip the first-run screen: continue without an account. */
+    val local: Boolean = false,
+    /** Developer: join this edge (`zeron local-edge`) with [serverToken]; `none` clears it. */
+    val server: String? = null,
+    val serverToken: String? = null,
     val route: String? = null,
     val wallpaper: String? = null,
     val wallpaperEffect: String? = null,
 )
 
 /**
- * App-wide state owner: holds the Rust [CoreClient], republishes its
- * snapshots as flows, and fans session events out to screens. Core events
- * arrive on Rust threads and hop to the main thread here.
+ * App-wide state owner. The phone is a regular Zeron device: its engine (the
+ * `:runtime` guest) owns the account, and the app is that device's viewer —
+ * a [CoreClient] with the engine's device id, edge and identity, whose bearer
+ * comes from the engine ([Credentials.Engine]; docs/android.md). The engine
+ * sets itself up on first launch and restarts with the app; signing in or out
+ * goes through it and restarts it into the new workspace.
+ *
+ * Core events arrive on Rust threads and hop to the main thread here.
  */
 class AppModel(private val app: Application) {
     private val scope = MainScope()
     private val main = Handler(Looper.getMainLooper())
-    val credentials = CredentialStore(app)
     val wallpaper = WallpaperStore(app)
+    val phone by lazy { PhoneEngine(app) }
+    val notifier by lazy { Notifier(app) }
+    val transfers by lazy { TransferCenter(app, this) }
+    val workspaceApi by lazy { sh.zeron.android.tools.WorkspaceApi(this) }
+    val downloads by lazy { sh.zeron.android.tools.Downloads(app, this) }
+
+    private val settings = app.getSharedPreferences("settings", 0)
+
+    /** Past the first-run screen (signed in, or continuing without an account). */
+    private val _onboarded = MutableStateFlow(settings.getBoolean(ONBOARDED, false))
+    val onboarded: StateFlow<Boolean> = _onboarded.asStateFlow()
+
+    /** A route to open once the main UI is up (`chat:<id>` from a notification). */
+    val pendingRoute = MutableStateFlow<String?>(null)
 
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
@@ -88,11 +116,23 @@ class AppModel(private val app: Application) {
     private val _sessionEvents = MutableSharedFlow<String>(extraBufferCapacity = 256)
     val sessionEvents: SharedFlow<String> = _sessionEvents
 
+    /**
+     * This phone's device id — its engine's (`Identity`), which the app's
+     * client shares. Null until the running engine has answered.
+     */
+    private val _engineDeviceId = MutableStateFlow<String?>(null)
+    val engineDeviceId: StateFlow<String?> = _engineDeviceId.asStateFlow()
+
+    /** Who this device is signed in as, per its engine. */
+    private val _account = MutableStateFlow<Account>(Account.Unknown)
+    val account: StateFlow<Account> = _account.asStateFlow()
+
+    private val _signIn = MutableStateFlow<SignIn>(SignIn.Idle)
+    val signIn: StateFlow<SignIn> = _signIn.asStateFlow()
+
     /** Organizations to pick from mid sign-in (more than one). */
     val orgChoice = MutableStateFlow<Pair<List<AuthOrg>, CompletableDeferred<AuthOrg?>>?>(null)
-    val signInError = MutableStateFlow<String?>(null)
 
-    private val settings = app.getSharedPreferences("settings", 0)
     private val _appearance = MutableStateFlow(
         Appearance(
             runCatching { ThemeMode.valueOf(settings.getString("theme", "System")!!) }.getOrDefault(ThemeMode.System),
@@ -101,21 +141,35 @@ class AppModel(private val app: Application) {
     )
     val appearance: StateFlow<Appearance> = _appearance.asStateFlow()
 
+    /** Starred models in the model picker (device-local, every mode). */
+    val favorites = FavoritesStore(settings)
+
     fun setAppearance(value: Appearance) {
         _appearance.value = value
         settings.edit().putString("theme", value.mode.name).putBoolean("dynamicColor", value.dynamicColor).apply()
     }
 
-    var lastDraft: NewSessionDraft = NewSessionDraft(
+    /** Settings → About: seven taps on the version reveal the developer options. */
+    private val _developer = MutableStateFlow(settings.getBoolean("developer", false))
+    val developer: StateFlow<Boolean> = _developer.asStateFlow()
+
+    fun setDeveloper(on: Boolean) {
+        _developer.value = on
+        settings.edit().putBoolean("developer", on).apply()
+    }
+
+    private fun storedDraft() = NewSessionDraft(
         projectId = settings.getString("draft.project", null),
         hostId = settings.getString("draft.host", null),
         harness = settings.getString("draft.harness", null) ?: "claude-code",
         model = settings.getString("draft.model", null),
         effort = settings.getString("draft.effort", null),
     )
+
+    var lastDraft: NewSessionDraft = storedDraft()
         set(value) {
             field = value
-            if (!launch.demo) {
+            if (!isDemo) {
                 settings.edit()
                     .putString("draft.project", value.projectId)
                     .putString("draft.host", value.hostId)
@@ -131,7 +185,13 @@ class AppModel(private val app: Application) {
 
     val isDemo: Boolean get() = _client.value?.isDemo() == true
     private var refreshScheduled = false
-    private var authState: String? = null
+    private var foreground = false
+    private var booted = false
+
+    /** The engine the current client speaks for, and who it is (a changed key → a new client). */
+    private var engine: EngineLink? = null
+    private var engineKey: String? = null
+    private var connecting: Job? = null
 
     private val listener = object : ClientListener {
         override fun onEvent(event: ClientEvent) {
@@ -139,11 +199,29 @@ class AppModel(private val app: Application) {
         }
     }
 
+    /** Entry points other than MainActivity (the share sheet): boot once with defaults. */
+    fun ensureBooted() {
+        if (!booted) boot(LaunchOptions())
+    }
+
     fun boot(options: LaunchOptions) {
         launch = options
-        if (_client.value != null) return
-        if (options.signedOut) credentials.clear()
+        if (booted) return
+        booted = true
+        pendingRoute.value = options.route
+        if (options.signedOut) setOnboarded(false)
+        if (options.local) setOnboarded(true)
+        options.server?.let { url ->
+            val next = if (url == "none") null else CustomServer.of(url, options.serverToken.orEmpty())
+            if (next != phone.customServer) {
+                phone.customServer = next
+                phone.restart()
+            }
+        }
         watchNetwork()
+        // Incoming-transfer notifications and Downloads export, whenever this
+        // phone's engine runs (docs/android.md § File transfers).
+        transfers.start()
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
         // set the wallpaper at launch (screenshots, tests).
         options.wallpaper?.let { path ->
@@ -152,11 +230,12 @@ class AppModel(private val app: Application) {
         options.wallpaperEffect?.let { name ->
             WallpaperStore.effects.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let(wallpaper::setEffect)
         }
-        val stored = credentials.stored()
-        when {
-            options.demo -> start(Credentials.Demo(demoOptions()))
-            stored != null -> start(stored)
-        }
+        // The engine is part of the app: set up on first launch (in the
+        // background, while the first-run screen is up), started on every
+        // launch unless the user stopped it, restarted by the runtime if it dies.
+        if (phone.isSupportedAbi && settings.getBoolean(AUTOSTART, true) && phone.state.value.isIdle()) phone.start()
+        scope.launch { phone.state.collect(::onEngine) }
+        if (options.demo) startDemo()
         // Relative times ("4m") and staleness age without events.
         scope.launch {
             while (true) {
@@ -177,38 +256,268 @@ class AppModel(private val app: Application) {
         longReply = launch.longReply,
     )
 
-    private val coreDir get() = File(app.filesDir, "core")
-
-    /** Local docs belong to one identity: another account starts empty. */
-    private fun claimCoreDir(credentials: Credentials) {
-        val owner = when (credentials) {
-            is Credentials.WorkOs -> "${credentials.userId}/${credentials.orgId}"
-            is Credentials.Dev -> "${credentials.userId}/${credentials.orgId}"
-            is Credentials.Demo -> return
-        }
-        val marker = File(coreDir, ".owner")
-        if (runCatching { marker.readText() }.getOrNull() != owner) coreDir.deleteRecursively()
-        coreDir.mkdirs()
-        marker.writeText(owner)
+    private fun setOnboarded(value: Boolean) {
+        _onboarded.value = value
+        settings.edit().putBoolean(ONBOARDED, value).apply()
     }
 
-    private fun start(credentials: Credentials): Boolean {
-        val demo = credentials is Credentials.Demo
-        val dir = if (demo) File(app.filesDir, "demo") else coreDir
-        if (!demo) claimCoreDir(credentials)
+    // ── the engine ─────────────────────────────────────────────────────────
+
+    /** Engine state → the device's client: (re)built whenever the engine answers. */
+    private fun onEngine(state: RuntimeState) {
+        if (state is RuntimeState.Running && !isDemo) {
+            connecting?.cancel()
+            connecting = scope.launch { connect(state) }
+        }
+    }
+
+    /**
+     * Ask the running engine who this device is, where it syncs and as whom,
+     * and (re)build the client when any of that changed. A restart with the
+     * same answers keeps the client (it redials on its own).
+     */
+    private suspend fun connect(running: RuntimeState.Running) {
+        val link = EngineLink(running.ipcUrl, running.ipcToken)
+        var answer: Pair<EngineIdentity, EngineEdge>? = null
+        for (attempt in 1..10) {
+            answer = runCatching { link.identity() to link.edge() }
+                .onFailure { Log.w("Zeron", "engine didn't answer (attempt $attempt)", it) }
+                .getOrNull()
+            if (answer != null) break
+            delay(500L * attempt)
+        }
+        val (identity, edge) = answer ?: return
+        _engineDeviceId.value = identity.deviceId
+        if (edge.signedOut) {
+            // A synced engine whose session ended stops itself; bring it back local-only.
+            phone.restart()
+            return
+        }
+        engine = link
+        refreshAccount(link, identity.workspaceScope)
+        // The first-run screen is up (or the demo): the client waits for the user.
+        if (!_onboarded.value || isDemo) return
+        val key = DeviceIdentity.key(identity.deviceId, edge.edgeUrl, edge.userId, edge.orgId)
+        if (key == engineKey && _client.value != null) return
+        dropClient()
+        engineKey = key
+        start(
+            Credentials.Engine(running.ipcUrl, running.ipcToken, edge.userId, edge.orgId),
+            edgeUrl = edge.edgeUrl,
+            deviceId = identity.deviceId,
+            name = running.deviceName,
+            owner = key,
+        )
+        if (_signIn.value == SignIn.Restarting) _signIn.value = SignIn.Idle
+    }
+
+    private suspend fun refreshAccount(link: EngineLink, workspaceScope: String) {
+        val server = phone.customServer
+        val account = runCatching { link.account() }.getOrNull()
+        _account.value = when {
+            server != null -> Account.Server(server.edgeUrl)
+            account is EngineAccount.SignedIn && workspaceScope == "synced" -> {
+                val org = account.orgId?.let { orgName(link, it) }
+                Account.SignedIn(account.name, account.email, org)
+            }
+            // Signed in on the engine, but it still runs local-only until restarted.
+            account is EngineAccount.SignedIn || account is EngineAccount.NeedsOrganization -> Account.Local(pendingRestart = true)
+            else -> Account.Local(pendingRestart = false)
+        }
+    }
+
+    private suspend fun orgName(link: EngineLink, orgId: String): String? {
+        settings.getString("org.$orgId", null)?.let { return it }
+        val name = runCatching { link.listOrgs() }.getOrNull()?.firstOrNull { it.organizationId == orgId }?.name ?: return null
+        settings.edit().putString("org.$orgId", name).apply()
+        return name
+    }
+
+    /** Settings → This phone → Start: relaunches bring it back up too. */
+    fun startEngine() {
+        settings.edit().putBoolean(AUTOSTART, true).apply()
+        phone.start()
+    }
+
+    fun stopEngine() {
+        settings.edit().putBoolean(AUTOSTART, false).apply()
+        phone.stop()
+    }
+
+    /**
+     * Wipe the guest — projects, agents, their sign-ins and the device's
+     * account — and set it up again. Runs in the app's scope: the engine
+     * stopping swaps the screen that asked for it away.
+     */
+    fun resetEngine() {
+        dropClient()
+        engineKey = null
+        _engineDeviceId.value = null
+        _account.value = Account.Unknown
+        scope.launch {
+            phone.reset()
+            File(app.filesDir, "core").deleteRecursively()
+            if (settings.getBoolean(AUTOSTART, true)) phone.start()
+        }
+    }
+
+    /** Developer: join a `zeron local-edge` (or back to Zeron with null), then restart. */
+    fun setCustomServer(server: CustomServer?) {
+        phone.customServer = server
+        dropClient()
+        engineKey = null
+        // A custom server's engine has its own data dir, hence device id.
+        _engineDeviceId.value = null
+        phone.restart()
+    }
+
+    // ── first run and sign-in ──────────────────────────────────────────────
+
+    /** "Continue without an account": this phone's local workspace. */
+    fun continueLocally() {
+        setOnboarded(true)
+        (phone.state.value as? RuntimeState.Running)?.let(::onEngine)
+    }
+
+    /**
+     * Sign in *through the engine*, like the desktop: it builds the WorkOS
+     * URL (redirecting to the app's `zeron://callback`), exchanges the code
+     * and keeps the session. `open` shows the URL (a Custom Tab). Waits for
+     * the engine if it is still setting up.
+     */
+    fun signIn(open: (String) -> Unit) {
+        if (_signIn.value is SignIn.Busy) return
+        scope.launch {
+            try {
+                _signIn.value = SignIn.Preparing
+                if (phone.state.value.isIdle()) startEngine()
+                val running = phone.state.first { it is RuntimeState.Running || it is RuntimeState.Failed }
+                if (running !is RuntimeState.Running) {
+                    _signIn.value = SignIn.Failed("This phone's engine didn't start. See Settings → This phone.")
+                    return@launch
+                }
+                val link = EngineLink(running.ipcUrl, running.ipcToken)
+                val url = link.signInUrl(CALLBACK)
+                if (url.isEmpty()) {
+                    _signIn.value = SignIn.Failed("This phone uses a custom server, which has no Zeron accounts.")
+                    return@launch
+                }
+                engine = link
+                _signIn.value = SignIn.Browser
+                open(url)
+            } catch (e: Exception) {
+                _signIn.value = SignIn.Failed(e.userMessage())
+            }
+        }
+    }
+
+    /** `zeron://callback?code=…&state=…` → the engine; then the org; then restart it synced. */
+    fun handleCallback(url: String) {
+        when (val cb = parseAuthCallback(url)) {
+            is AuthCallback.Code -> scope.launch { completeSignIn(cb.state.orEmpty(), cb.code) }
+            is AuthCallback.Error -> _signIn.value = SignIn.Failed(cb.description ?: cb.error)
+            null -> Unit
+        }
+    }
+
+    private suspend fun completeSignIn(state: String, code: String) {
+        val link = engine ?: (phone.state.value as? RuntimeState.Running)?.let { EngineLink(it.ipcUrl, it.ipcToken) }
+        if (link == null) {
+            _signIn.value = SignIn.Failed("This phone's engine isn't running.")
+            return
+        }
+        try {
+            _signIn.value = SignIn.Completing
+            link.completeSignIn(state, code)
+            if (link.account() is EngineAccount.NeedsOrganization) {
+                val orgs = link.listOrgs()
+                val org = when {
+                    orgs.isEmpty() -> {
+                        _signIn.value = SignIn.Failed("This account isn't in an organization yet. Create one in Zeron on your computer.")
+                        link.signOut()
+                        return
+                    }
+                    orgs.size == 1 -> orgs[0]
+                    else -> {
+                        val choice = CompletableDeferred<AuthOrg?>()
+                        orgChoice.value = orgs to choice
+                        choice.await().also { orgChoice.value = null }
+                    }
+                }
+                if (org == null) {
+                    link.signOut()
+                    _signIn.value = SignIn.Idle
+                    return
+                }
+                link.selectOrg(org.organizationId)
+                settings.edit().putString("org.${org.organizationId}", org.name).apply()
+            }
+            if (link.account() !is EngineAccount.SignedIn) {
+                _signIn.value = SignIn.Failed("Sign-in didn't complete. Try again.")
+                return
+            }
+            // The engine's workspace is fixed per run: restart it into the account.
+            setOnboarded(true)
+            _signIn.value = SignIn.Restarting
+            dropClient()
+            engineKey = null
+            phone.restart()
+        } catch (e: Exception) {
+            _signIn.value = SignIn.Failed(e.userMessage())
+        }
+    }
+
+    fun dismissSignInError() {
+        if (_signIn.value is SignIn.Failed) _signIn.value = SignIn.Idle
+    }
+
+    /** Sign the device out: its engine forgets the account and restarts local-only. */
+    fun signOut() {
+        val link = engine ?: return
+        scope.launch {
+            _signIn.value = SignIn.Restarting
+            runCatching { link.signOut() }
+            dropClient()
+            engineKey = null
+            _account.value = Account.Local(pendingRestart = false)
+            phone.restart()
+        }
+    }
+
+    // ── the demo ───────────────────────────────────────────────────────────
+
+    /** The offline demo (first-run screen only); never remembered. */
+    fun startDemo() {
+        dropClient()
+        engineKey = null
+        start(Credentials.Demo(demoOptions()), edgeUrl = authProductionEdgeUrl(), deviceId = "android-demo", name = "Pixel", owner = null)
+    }
+
+    fun leaveDemo() {
+        dropClient()
+        (phone.state.value as? RuntimeState.Running)?.let(::onEngine)
+    }
+
+    // ── the client ─────────────────────────────────────────────────────────
+
+    private fun start(credentials: Credentials, edgeUrl: String, deviceId: String, name: String, owner: String?): Boolean {
+        val dir = when (credentials) {
+            is Credentials.Demo -> File(app.filesDir, "demo")
+            else -> claimCoreDir(owner.orEmpty())
+        }
         dir.mkdirs()
         val config = CoreConfig(
             edgeUrl = edgeUrl,
             dataDir = dir.path,
             deviceId = deviceId,
-            deviceName = deviceName(),
+            deviceName = name,
             platform = "android",
             appVersion = app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: "0",
         )
         return try {
             val client = CoreClient(config, credentials, listener)
-            if (credentials is Credentials.WorkOs) this.credentials.store(credentials)
             _client.value = client
+            lastDraft = storedDraft()
             refreshWorkspace()
             client.preloadSessions()
             true
@@ -218,90 +527,28 @@ class AppModel(private val app: Application) {
         }
     }
 
-    fun startDemo() {
-        start(Credentials.Demo(demoOptions()))
+    /** The client's cache belongs to one device identity: another starts empty. */
+    private fun claimCoreDir(owner: String): File {
+        val dir = File(app.filesDir, "core")
+        val marker = File(dir, ".owner")
+        if (runCatching { marker.readText() }.getOrNull() != owner) dir.deleteRecursively()
+        dir.mkdirs()
+        marker.writeText(owner)
+        return dir
     }
 
-    val edgeUrl: String get() = authProductionEdgeUrl()
-
-    private val deviceId: String
-        get() {
-            val prefs = app.getSharedPreferences("device", 0)
-            prefs.getString("deviceId", null)?.let { return it }
-            val id = "android-" + UUID.randomUUID().toString().take(8)
-            prefs.edit().putString("deviceId", id).apply()
-            return id
-        }
-
-    private fun deviceName(): String =
-        Settings.Global.getString(app.contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL
-
-    // ── sign-in ────────────────────────────────────────────────────────────
-
-    /** The WorkOS authorize URL to open in a Custom Tab. */
-    fun beginSignIn(): String {
-        val state = UUID.randomUUID().toString()
-        authState = state
-        return workosAuthorizeUrl(state)
-    }
-
-    /** `zeron://callback?code=…`: code → tokens → org → client. */
-    fun handleCallback(url: String) {
-        when (val cb = parseAuthCallback(url)) {
-            is AuthCallback.Code -> scope.launch { signIn(cb.code) }
-            is AuthCallback.Error -> signInError.value = cb.description ?: cb.error
-            null -> Unit
-        }
-    }
-
-    private suspend fun signIn(code: String) {
-        try {
-            val exchange = authExchangeCode(edgeUrl, code)
-            val orgs = authListOrgs(edgeUrl, exchange.tokens.accessToken)
-            if (orgs.isEmpty()) {
-                signInError.value = "This account isn't in an organization yet."
-                return
-            }
-            val org = if (orgs.size == 1) orgs[0] else {
-                val choice = CompletableDeferred<AuthOrg?>()
-                orgChoice.value = orgs to choice
-                choice.await().also { orgChoice.value = null } ?: return
-            }
-            val tokens = authRefresh(edgeUrl, exchange.tokens.refreshToken, org.organizationId)
-            val user = exchange.user
-            val name = listOfNotNull(user.firstName, user.lastName).map { it.trim() }.filter { it.isNotEmpty() }.joinToString(" ")
-            credentials.profile = CredentialStore.Profile(name.ifEmpty { null }, user.email, org.name)
-            if (!start(Credentials.WorkOs(user.id, org.organizationId, tokens))) {
-                signInError.value = "Couldn't open your workspace. Try signing in again."
-            }
-        } catch (e: Exception) {
-            signInError.value = e.message ?: "Sign-in failed"
-        }
-    }
-
-    fun signOut() {
-        val wasDemo = isDemo
+    private fun dropClient() {
         _client.value?.shutdown()
         _client.value = null
         _workspace.value = null
         _connectivity.value = null
-        if (!wasDemo) {
-            credentials.clear()
-            coreDir.deleteRecursively()
-        }
     }
 
     val accountName: String
-        get() = when {
-            isDemo -> "Demo"
-            _client.value == null -> "Signed out"
-            else -> credentials.profile.let { it.name ?: it.email ?: "Signed in" }
-        }
+        get() = if (isDemo) "Demo" else _account.value.title
 
     val accountDetail: String
-        get() = if (isDemo) "Offline demo workspace" else credentials.profile.let { p ->
-            listOfNotNull(if (p.name != null) p.email else null, p.orgName).joinToString(" · ").ifEmpty { "Zeron account" }
-        }
+        get() = if (isDemo) "Offline demo workspace" else _account.value.detail
 
     // ── events ─────────────────────────────────────────────────────────────
 
@@ -311,8 +558,15 @@ class AppModel(private val app: Application) {
             is ClientEvent.SessionChanged -> _sessionEvents.tryEmit(event.chatId)
             is ClientEvent.ComposerChanged -> _sessionEvents.tryEmit(event.chatId)
             is ClientEvent.ConnectivityChanged -> _connectivity.value = event.connectivity
-            is ClientEvent.AuthRefreshed -> credentials.updateTokens(event.tokens)
-            is ClientEvent.AuthExpired -> signOut()
+            // The engine refreshes; the app never holds tokens.
+            is ClientEvent.AuthRefreshed -> Unit
+            // The engine signed out (or now serves another account): it
+            // restarts local-only; the next Running builds the new client.
+            is ClientEvent.AuthExpired -> {
+                dropClient()
+                engineKey = null
+                phone.restart()
+            }
         }
     }
 
@@ -328,15 +582,20 @@ class AppModel(private val app: Application) {
 
     fun refreshWorkspace() {
         val client = _client.value ?: return
-        _workspace.value = client.workspace()
+        val previous = _workspace.value
+        val next = client.workspace()
+        _workspace.value = next
+        if (!client.isDemo()) notifier.onWorkspace(previous, next, foreground)
     }
 
     fun onForeground() {
+        foreground = true
         _client.value?.onForeground()
         refreshWorkspace()
     }
 
     fun onBackground() {
+        foreground = false
         _client.value?.onBackground()
     }
 
@@ -385,6 +644,55 @@ class AppModel(private val app: Application) {
 
     fun row(id: String): SessionRow? = _client.value?.sessionRow(id)
 
+    /** The workspace a chat runs in, for the developer tools. */
+    fun workspaceRef(chatId: String): sh.zeron.android.tools.WorkspaceRef? {
+        val row = row(chatId) ?: return null
+        val project = row.project?.let { runCatching { _client.value?.project(it.id) }.getOrNull() }
+        return sh.zeron.android.tools.WorkspaceRef(
+            deviceId = row.deviceId,
+            chatId = chatId,
+            spaceId = row.project?.id,
+            root = row.cwd ?: project?.path,
+            title = row.project?.name ?: row.cwd?.substringAfterLast('/')?.ifEmpty { null } ?: "Home",
+            deviceName = row.deviceName,
+        )
+    }
+
+    /** A project's folder on its device (no chat). */
+    fun projectRef(spaceId: String): sh.zeron.android.tools.WorkspaceRef? {
+        val p = runCatching { _client.value?.project(spaceId) }.getOrNull() ?: return null
+        return sh.zeron.android.tools.WorkspaceRef(p.deviceId, null, p.id, p.path, p.name, p.deviceName)
+    }
+
+    /** Devices that run agents — this phone among them, like any computer. */
+    fun executionDevices(): List<DeviceView> = runCatching { _client.value?.executionDevices() }.getOrNull().orEmpty()
+
+    // ── host calls ─────────────────────────────────────────────────────────
+
+    /** Untyped engine RPC (harness installs, agent sign-ins). Throws on failure. */
+    suspend fun hostCall(deviceId: String, method: String, params: JSONObject = JSONObject()): Any {
+        val c = _client.value ?: throw IllegalStateException("Not connected")
+        return Agents.parse(c.hostCall(deviceId, method, params.toString()))
+    }
+
+    /**
+     * Clone a repository, or create an empty one, on a device and make it a
+     * project. The device's engine does it (`CloneRepo` / `CreateRepo`) —
+     * on this phone into /home/zeron/projects, like any other device.
+     */
+    suspend fun addProject(deviceId: String, source: ProjectSource, input: String): Result<String> {
+        val (method, params) = when (source) {
+            ProjectSource.Clone -> "CloneRepo" to JSONObject().put("url", input.trim())
+            ProjectSource.Empty -> "CreateRepo" to JSONObject().put("name", input.trim())
+        }
+        val path = runCatching {
+            val reply = hostCall(deviceId, method, params) as? JSONObject
+            reply?.optString("path")?.ifEmpty { null } ?: error("The device didn't say where the project is.")
+        }.getOrElse { return Result.failure(it) }
+        val c = _client.value ?: return Result.failure(IllegalStateException("Not connected"))
+        return runCatching { c.createProject(deviceId, path, true) }.onSuccess { refreshWorkspace() }
+    }
+
     /** Create the chat and send its first message. */
     fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
@@ -395,7 +703,12 @@ class AppModel(private val app: Application) {
         }
         val config = ChatConfig(draft.harness, draft.model, draft.effort, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
         return try {
-            val chatId = client.createSession(NewSession(target, config, if (draft.worktree) null else draft.branch, null, null))
+            // A new worktree is minted with the first send; otherwise the
+            // session runs in the checkout — or in the picked branch's own
+            // worktree, reused as is (the desktop's "current worktree").
+            val chatId = client.createSession(
+                NewSession(target, config, if (draft.worktree) null else draft.branch, if (draft.worktree) null else draft.cwd, null),
+            )
             val handle = client.openSession(chatId)
             val project = _workspace.value?.projects?.firstOrNull { it.id == draft.projectId }
             val worktree = if (draft.worktree && project != null) WorktreeSpec(project.path, draft.branch ?: "HEAD", project.id) else null
@@ -407,7 +720,81 @@ class AppModel(private val app: Application) {
             null
         }
     }
+
+    companion object {
+        /** The app's WorkOS redirect (registered for the engine's client id). */
+        const val CALLBACK = "zeron://callback"
+        private const val ONBOARDED = "onboarded"
+        private const val AUTOSTART = "engineAutostart"
+    }
 }
+
+/** The engine isn't running and nothing is on its way to start it. */
+fun RuntimeState.isIdle(): Boolean =
+    this == RuntimeState.NotInstalled || this == RuntimeState.Stopped || this is RuntimeState.Failed
+
+/** Who the device is signed in as (its engine's account). */
+sealed interface Account {
+    val title: String
+    val detail: String
+
+    data object Unknown : Account {
+        override val title = "This phone"
+        override val detail = "Connecting to this phone's engine…"
+    }
+
+    /** No account: a local workspace, on this phone only. */
+    data class Local(val pendingRestart: Boolean) : Account {
+        override val title = "Not signed in"
+        override val detail = "Local workspace on this phone"
+    }
+
+    data class SignedIn(val name: String?, val email: String, val orgName: String?) : Account {
+        override val title = name?.takeIf { it.isNotBlank() } ?: email
+        override val detail = listOfNotNull(if (name.isNullOrBlank()) null else email, orgName).joinToString(" · ").ifEmpty { "Zeron account" }
+    }
+
+    /** Developer: a `zeron local-edge` instead of Zeron's servers. */
+    data class Server(val edgeUrl: String) : Account {
+        override val title = "Custom server"
+        override val detail = edgeUrl
+    }
+}
+
+/** Sign-in through the engine, as the first-run screen and Settings show it. */
+sealed interface SignIn {
+    /** Something is in flight; the buttons wait. */
+    sealed interface Busy : SignIn
+
+    data object Idle : SignIn
+    /** Waiting for this phone's engine (first launch sets it up). */
+    data object Preparing : Busy
+    data object Browser : SignIn
+    data object Completing : Busy
+    /** Signed in; the engine restarts into the account's workspace. */
+    data object Restarting : Busy
+    data class Failed(val message: String) : SignIn
+}
+
+/** Human wording for core errors. */
+fun Throwable.userMessage(): String = when (this) {
+    is CoreException.HostUnavailable ->
+        if (Agents.isTimeout(reason)) "The device took too long to answer." else "The device isn't reachable right now."
+    is CoreException.Unsupported -> "Not supported by this device's engine."
+    is CoreException.Closed -> "Not connected."
+    // Host errors arrive as "Method: reason" — the reason is what people read.
+    is CoreException.HostException -> reason.substringAfter(": ", reason).ifBlank { "The device couldn't do that." }
+    is CoreException.NotFound -> reason
+    is CoreException.InvalidArgument -> reason
+    is CoreException.Network -> reason
+    is CoreException.Auth -> reason
+    is CoreException.Storage -> reason
+    is CoreException.NotImplemented -> reason
+    is CoreException.Internal -> reason
+    else -> message ?: "Something went wrong."
+}
+
+enum class ProjectSource { Clone, Empty }
 
 /** The new-session page's options (kept across launches). */
 data class NewSessionDraft(
@@ -418,4 +805,6 @@ data class NewSessionDraft(
     val effort: String? = null,
     val branch: String? = null,
     val worktree: Boolean = false,
+    /** Run in this existing worktree of [branch] instead of the project folder. */
+    val cwd: String? = null,
 )

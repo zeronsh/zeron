@@ -11,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -137,6 +138,31 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
             state.toggleDetail(key, kind.detail, kind.open)
         }
         WidgetKind.Shimmer -> Shimmer(state, model, w, palette)
+        is WidgetKind.OpenFile -> FileBadgeTap(kind.path, actions)
+    }
+}
+
+/** A tool line's file badge: tap opens the file, long-press offers its quick actions. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun FileBadgeTap(path: String, actions: TranscriptActions) {
+    var menu by remember { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
+    Box(
+        Modifier
+            .fillMaxSize()
+            .semantics { contentDescription = "Open $path" }
+            .combinedClickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = { actions.openFile(path) },
+                onLongClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    menu = true
+                },
+            ),
+    ) {
+        sh.zeron.android.ui.ActionMenu(menu, { menu = false }, actions.fileActions(path))
     }
 }
 

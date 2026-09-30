@@ -54,7 +54,7 @@ impl NpmPin {
     }
 
     /// Filesystem-safe directory name (`@scope/name` → `scope__name`).
-    fn dir_name(&self) -> String {
+    pub(crate) fn dir_name(&self) -> String {
         self.name.trim_start_matches('@').replace('/', "__")
     }
 }
@@ -183,7 +183,10 @@ pub(crate) fn find_npm() -> Option<PathBuf> {
     )
 }
 
-fn node_sibling_for_npm(npm: &Path, platform: crate::executable::Platform) -> Option<PathBuf> {
+pub(crate) fn node_sibling_for_npm(
+    npm: &Path,
+    platform: crate::executable::Platform,
+) -> Option<PathBuf> {
     if platform == crate::executable::Platform::Windows {
         // <node-root>/node_modules/npm/bin/npm-cli.js -> <node-root>/node.exe
         npm.parent()?

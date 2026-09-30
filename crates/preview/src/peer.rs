@@ -356,6 +356,26 @@ impl Peers {
             .await
         }
     }
+    /// Whether a live, paired connection to `device` exists right now.
+    pub async fn is_paired(&self, device: &str) -> bool {
+        self.0.peers.lock().await.get(device).is_some_and(|peer| {
+            !peer.stop.is_cancelled()
+                && peer.ready.borrow().as_ref().is_some_and(|m| !m.is_closed())
+        })
+    }
+    /// Close the connection to `device` if no stream uses it any more — a
+    /// tunnel paired for one job (a file transfer) is torn down after it.
+    pub async fn release_if_idle(&self, device: &str) {
+        let idle = self.0.peers.lock().await.get(device).is_some_and(|peer| {
+            peer.ready
+                .borrow()
+                .as_ref()
+                .is_none_or(|mux| mux.active_streams() == 0)
+        });
+        if idle {
+            self.remove(device).await;
+        }
+    }
     pub async fn remove(&self, device: &str) {
         self.0.requested.lock().await.remove(device);
         if let Some(peer) = self.0.peers.lock().await.remove(device) {

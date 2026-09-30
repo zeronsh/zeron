@@ -179,6 +179,9 @@ pub enum WidgetKind {
     Detail { title: String },
     /// A small SF-symbol-like icon by name.
     Icon { name: String, color: ColorRole },
+    /// A file badge on a tool line (Read/Write/Edit): tapping opens `path`
+    /// (as the agent called it — absolute or relative to the chat's folder).
+    OpenFile { path: String },
     /// A tool group's disclosure chevron (rotates between states).
     Chevron { expanded: bool },
     /// The activity rail of an expanded tool group, in the widget's

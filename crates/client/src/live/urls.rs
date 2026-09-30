@@ -38,13 +38,23 @@ pub(crate) fn registry_ws(edge: &str, org_id: &str, token: &str, device_id: &str
     )
 }
 
-pub(crate) fn registry_rows(edge: &str, org_id: &str, device_id: &str, since: u64) -> String {
+/// `beat`: the pull doubles as this device's presence beat.
+pub(crate) fn registry_rows(
+    edge: &str,
+    org_id: &str,
+    device_id: &str,
+    since: u64,
+    beat: bool,
+) -> String {
     let mut url = format!(
-        "{}/registry/{}/rows?device={}&beat=1",
+        "{}/registry/{}/rows?device={}",
         edge.trim_end_matches('/'),
         encode(org_id),
         encode(device_id)
     );
+    if beat {
+        url.push_str("&beat=1");
+    }
     if since > 0 {
         url.push_str(&format!("&since={since}"));
     }
@@ -136,7 +146,7 @@ mod tests {
             "wss://e.sh/chat2/c1/ws?token=t%40o&device=ios-1"
         );
         assert_eq!(
-            registry_rows("https://e.sh", "o", "d", 0),
+            registry_rows("https://e.sh", "o", "d", 0, true),
             "https://e.sh/registry/o/rows?device=d&beat=1"
         );
         assert_eq!(

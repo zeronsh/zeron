@@ -17,6 +17,9 @@ struct Manifest {
     file_extensions: HashMap<String, String>,
     #[serde(default, rename = "fileNames")]
     file_names: HashMap<String, String>,
+    folder: Option<String>,
+    #[serde(default, rename = "folderNames")]
+    folder_names: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +32,7 @@ static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| {
     let mut m: Manifest = serde_json::from_str(include_str!("../../../ui/src/file-icons.json")).expect("bundled file-icon manifest");
     m.file_extensions = m.file_extensions.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
     m.file_names = m.file_names.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+    m.folder_names = m.folder_names.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
     m
 });
 
@@ -67,6 +71,19 @@ pub(crate) fn file_icon_asset(path: &str) -> String {
     format!("fileicon-{}", asset.trim_end_matches(".svg").replace('/', "-"))
 }
 
+/// Asset name for a folder's icon by its name (`fileicon-folders-folder-src`),
+/// the generic folder otherwise.
+pub(crate) fn folder_icon_asset(name: &str) -> String {
+    let name = basename(name.trim_end_matches(['/', '\\'])).to_ascii_lowercase();
+    let asset = MANIFEST
+        .folder_names
+        .get(&name)
+        .or(MANIFEST.folder.as_ref())
+        .and_then(|d| definition_asset(d))
+        .unwrap_or("folders/folder.svg");
+    format!("fileicon-{}", asset.trim_end_matches(".svg").replace('/', "-"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +93,23 @@ mod tests {
         assert_eq!(file_icon_asset("crates/mobile/src/lib.rs"), "fileicon-files-rust");
         assert_eq!(file_icon_asset("/x/Cargo.toml"), file_icon_asset("Cargo.toml"));
         assert!(file_icon_asset("weird.unknownext").starts_with("fileicon-files-"));
+    }
+
+    #[test]
+    fn inline_code_paths_are_links() {
+        use super::super::markdown::code_path;
+        for yes in ["report.pdf", "src/app.py", "/home/zeron/projects/x/index.html", "./a.md", "https://x.dev/a"] {
+            assert!(code_path(yes), "{yes}");
+        }
+        for no in ["datetime", "N 0 obj", "%PDF-1.4", "a.b", "foo.bar()", "/Length", "prefers-color-scheme", "v1.2"] {
+            assert!(!code_path(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn folders_resolve_by_name() {
+        assert_eq!(folder_icon_asset("unknown-dir"), "fileicon-folders-folder");
+        assert_ne!(folder_icon_asset("src"), "fileicon-folders-folder");
+        assert_eq!(folder_icon_asset("a/b/SRC/"), folder_icon_asset("src"));
     }
 }

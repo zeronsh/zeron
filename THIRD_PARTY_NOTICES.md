@@ -141,3 +141,25 @@ Zeron code.
 The Zui native overlay renderer adapts Apache-2.0 GPUI code from
 [`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
 Attribution is retained in the pinned Zui dependency’s `NOTICE`.
+
+## Android on-device runtime
+
+The Android app's on-device engine runs inside a user-space Linux guest. These
+components ship as separate executables or data (never linked into Zeron code);
+`scripts/android/fetch-proot.sh` and `scripts/android/fetch-rootfs.sh` pin the
+exact versions and sha256 sums.
+
+| Component | Version | License | Source |
+| --- | --- | --- | --- |
+| PRoot (Termux fork), shipped as `libproot.so`, `libproot-loader.so`, `libproot-loader32.so` | 5.1.107.95 | GPL-2.0-or-later | https://github.com/termux/proot/tree/v5.1.107.95 |
+| talloc (`libtalloc.so`) | 2.4.3 | LGPL-3.0-or-later | https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz |
+| libandroid-shmem (`libandroid-shmem.so`) | 0.7 | BSD-3-Clause | https://github.com/termux/libandroid-shmem/tree/v0.7 |
+| Alpine Linux minirootfs (guest rootfs asset) | 3.24.2 | Various (per package; mostly GPL-2.0, MIT, BSD) | https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/ and https://gitlab.alpinelinux.org/alpine/aports |
+
+The arm64 PRoot, talloc and libandroid-shmem binaries are Termux's builds
+(https://packages.termux.dev/apt/termux-main) with only ELF metadata changed
+(SONAME / NEEDED / RUNPATH, via patchelf). The x86_64 PRoot is rebuilt from the
+source above with a small patch (in `scripts/android/fetch-proot.sh`) that maps
+`fork`/`vfork` to `clone` under Android's x86_64 app seccomp policy. Packages
+the guest installs at runtime (`apk add …`, agent CLIs) are downloaded on the
+device from their upstreams and are not distributed with Zeron.

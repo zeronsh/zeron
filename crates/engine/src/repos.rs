@@ -3,7 +3,8 @@
 //!
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
-//! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
+//! the user points us; cloned/created ones land in `{data_dir}/repos` (or
+//! `$ZERON_PROJECTS_DIR`). Worktrees are
 //! created under `~/.zeron/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
 //! matching `zeron/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
@@ -159,6 +160,16 @@ pub struct Repos {
 }
 
 impl Repos {
+    /// Where CloneRepo / CreateRepo put new checkouts: `$ZERON_PROJECTS_DIR`
+    /// (the Android guest's `/home/zeron/projects`, docs/android.md), else
+    /// `{data_dir}/repos`.
+    fn projects_root(&self) -> PathBuf {
+        std::env::var_os("ZERON_PROJECTS_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.inner.data_dir.join("repos"))
+    }
+
     pub(crate) fn data_dir(&self) -> &Path {
         &self.inner.data_dir
     }
@@ -390,7 +401,7 @@ impl Repos {
         self.to_repo(&abs).await
     }
 
-    /// `git clone <url>` under `{data_dir}/repos`. (Named `clone_repo` to keep
+    /// `git clone <url>` under the projects root. (Named `clone_repo` to keep
     /// `Clone::clone` unambiguous on the service handle.)
     pub async fn clone_repo(&self, url: &str) -> Result<Repo, EngineError> {
         let trimmed = url.trim().trim_end_matches('/');
@@ -401,7 +412,7 @@ impl Repos {
             .filter(|s| !s.is_empty())
             .unwrap_or("repo")
             .to_string();
-        let repos_dir = self.inner.data_dir.join("repos");
+        let repos_dir = self.projects_root();
         let target = repos_dir.join(&name);
         if target.exists() {
             return Err(EngineError::Other(format!(
@@ -416,7 +427,7 @@ impl Repos {
         self.to_repo(&target).await
     }
 
-    /// `git init -b main` a fresh repository under `{data_dir}/repos`.
+    /// `git init -b main` a fresh repository under the projects root.
     pub async fn create(&self, name: &str) -> Result<Repo, EngineError> {
         let clean: String = name
             .trim()
@@ -432,7 +443,7 @@ impl Repos {
         if clean.is_empty() || clean.chars().all(|c| c == '-' || c == '.') {
             return Err(EngineError::Other("Invalid repository name".into()));
         }
-        let target = self.inner.data_dir.join("repos").join(&clean);
+        let target = self.projects_root().join(&clean);
         if target.exists() {
             return Err(EngineError::Other(format!(
                 "Already exists: {}",

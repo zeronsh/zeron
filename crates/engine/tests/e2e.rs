@@ -3061,3 +3061,77 @@ async fn real_image_generation_profile_smoke() {
     );
     core.sessions.shutdown().await;
 }
+
+/// The session row carries how many subagents are streaming, so sidebars on
+/// every device can badge a chat they have not opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_row_counts_running_subagents_until_the_run_ends() {
+    fn spawn(id: &str) -> AgentEvent {
+        AgentEvent::ToolCall {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: "Agent: probe".into(),
+                input: None,
+            },
+        }
+    }
+    fn chatter(parent: &str) -> AgentEvent {
+        AgentEvent::Subagent {
+            parent_tool_use_id: parent.into(),
+            event: Box::new(AgentEvent::TextDelta {
+                text: "working".into(),
+            }),
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                spawn("sub-1"),
+                spawn("sub-2"),
+                chatter("sub-1"),
+                chatter("sub-2"),
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "sub-1".into(),
+                    event: Box::new(done(DoneStatus::Completed)),
+                },
+            ],
+            step_delay: Duration::from_millis(400),
+            hang_until_interrupt: true,
+        }),
+    );
+    let running = || {
+        core.sessions
+            .session_status(CHAT)
+            .map(|s| s.running_subagents)
+    };
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "subagents-run",
+        SessionCommandPayload::Run {
+            request: run_request("fan out"),
+            message_id: "subagents-user".into(),
+        },
+    );
+
+    wait_for(|| running() == Some(2), "both subagents counted").await;
+    wait_for(|| running() == Some(1), "one subagent settled").await;
+
+    queue_as_viewer(
+        handle.doc(),
+        "subagents-interrupt",
+        SessionCommandPayload::Interrupt {},
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "run to end",
+    )
+    .await;
+    assert_eq!(
+        running(),
+        Some(0),
+        "an ended run leaves no subagents counted"
+    );
+}

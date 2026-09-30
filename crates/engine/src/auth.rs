@@ -164,6 +164,10 @@ pub struct AuthConfig {
     pub workos_api_base: String,
     /// Dev-mode bearer/user id (mirrors the old `ZERON_EDGE_TOKEN` behavior).
     pub dev_user_id: String,
+    /// Dev-mode bearer when it is an opaque shared secret rather than the
+    /// user id — the embedded local edge (docs/android.md). `None` = the
+    /// bearer is `dev_user_id`.
+    pub dev_bearer: Option<String>,
     /// Loopback callback port; `None` = ephemeral.
     pub callback_port: Option<u16>,
 }
@@ -176,6 +180,7 @@ impl AuthConfig {
             workos_client_id: None,
             workos_api_base: "https://api.workos.com".into(),
             dev_user_id: "dev-user".into(),
+            dev_bearer: None,
             callback_port: None,
         }
     }
@@ -392,11 +397,15 @@ impl Auth {
 
     /// Current bearer. Network failures preserve the session and return
     /// `TemporarilyUnavailable`; only absent/revoked credentials are `SignedOut`.
-    /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
-    /// it has under 30s left.
+    /// Dev mode: the configured bearer (by default the user id). WorkOS: cached
+    /// access token, refreshed when it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
         if self.inner.workos.is_none() {
-            return Ok(self.inner.config.dev_user_id.clone());
+            let config = &self.inner.config;
+            return Ok(config
+                .dev_bearer
+                .clone()
+                .unwrap_or_else(|| config.dev_user_id.clone()));
         }
         if let Some(entry) = &*lock(&self.inner.access)
             && entry.remaining() > TOKEN_SLACK
@@ -421,6 +430,26 @@ impl Auth {
             .ok_or_else(|| {
                 TokenError::TemporarilyUnavailable("session changed during refresh; retry".into())
             })
+    }
+
+    /// [`Self::access_token`] for a signed-in session, with how long the token
+    /// stays valid (`None` = a dev bearer, which never expires) — the
+    /// `EdgeBearer` answer for a viewer sharing this engine's account. The
+    /// engine refreshes [`TOKEN_SLACK`] before that, so a viewer re-asking
+    /// inside the slack gets the rotated token instead of refreshing itself.
+    pub async fn access_token_with_expiry(&self) -> Result<(String, Option<Duration>), TokenError> {
+        if self.inner.workos.is_none() {
+            return Ok((self.access_token().await?, None));
+        }
+        if !self.state().is_signed_in() {
+            return Err(TokenError::SignedOut);
+        }
+        let token = self.access_token().await?;
+        let remaining = lock(&self.inner.access)
+            .as_ref()
+            .filter(|entry| entry.token == token)
+            .map(AccessEntry::remaining);
+        Ok((token, remaining))
     }
 
     /// Allow one fresh attempt after a connectivity hint or an explicit Retry.
@@ -518,6 +547,18 @@ impl Auth {
         }
         let edge = self.inner.config.edge_url.trim_end_matches('/');
         self.begin_sign_in(&format!("{edge}/auth/cli/callback"))
+    }
+
+    /// Begin a sign-in that redirects to the caller's own URI — an app's deep
+    /// link (`zeron://callback`, registered for the same client id) that hands
+    /// the callback's `state` and `code` back through [`Self::complete_sign_in`]
+    /// as `state.code`, exactly like the paste-code flow. For a viewer on the
+    /// same device whose engine owns the account (the Android app).
+    pub fn start_redirect_sign_in(&self, redirect_uri: &str) -> String {
+        if self.inner.workos.is_none() {
+            return String::new();
+        }
+        self.begin_sign_in(redirect_uri)
     }
 
     /// Finish a headless sign-in with the pasted `state.code` string. The state half
@@ -1379,6 +1420,36 @@ mod tests {
         assert_eq!(claims.exp, Some(100));
         assert_eq!(claims.iat, Some(40));
         assert_eq!(claims.org_id.as_deref(), Some("org_1"));
+    }
+
+    /// The Android app's sign-in: the engine builds the URL with the app's
+    /// deep link, and the callback's `state.code` passes its CSRF check.
+    #[tokio::test]
+    async fn redirect_sign_in_uses_the_callers_uri_and_its_state() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nothing listens: a code that passed the state check fails at the exchange.
+        let mut config = AuthConfig::new("http://127.0.0.1:9", dir.path());
+        config.workos_client_id = Some("client_test".into());
+        let auth = Auth::new(config);
+        let url = auth.start_redirect_sign_in("zeron://callback");
+        assert!(url.contains("redirect_uri=zeron%3A%2F%2Fcallback"), "{url}");
+        let state = url.rsplit("state=").next().unwrap().to_string();
+        let unknown = auth.complete_sign_in("not-a-state.code").await.unwrap_err();
+        assert!(
+            unknown.to_string().contains("invalid or expired"),
+            "{unknown}"
+        );
+        let known = auth
+            .complete_sign_in(&format!("{state}.code"))
+            .await
+            .unwrap_err();
+        assert!(known.to_string().contains("unreachable"), "{known}");
+        // Single use.
+        let again = auth
+            .complete_sign_in(&format!("{state}.code"))
+            .await
+            .unwrap_err();
+        assert!(again.to_string().contains("invalid or expired"), "{again}");
     }
 
     #[test]

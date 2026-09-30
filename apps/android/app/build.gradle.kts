@@ -24,6 +24,31 @@ val buildCore by tasks.registering(Exec::class) {
     onlyIf { !skip || !lib.exists() }
 }
 
+// The on-device engine's payload (docs/android.md § Build): proot and its
+// libs, the static musl engine (jniLibs/<abi>/lib*.so) and the Alpine rootfs
+// (assets/rootfs-<abi>.tar.gz). Each script runs only while its output is
+// missing — rerun it by hand to refresh; `-PzeronSkipRuntime` never runs them.
+val runtimeOut = repoRoot.resolve("target/android-runtime")
+val skipRuntime = providers.gradleProperty("zeronSkipRuntime").isPresent
+
+fun runtimeScript(name: String, script: String, output: String) = tasks.register<Exec>(name) {
+    description = "Runs scripts/android/$script when $output is missing."
+    val ndk = System.getenv("ANDROID_NDK_HOME")
+        ?: androidComponents.sdkComponents.sdkDirectory.get().dir("ndk/$NDK_VERSION").asFile.path
+    val out = runtimeOut.resolve(output)
+    val skip = skipRuntime
+    workingDir = repoRoot
+    commandLine("bash", "scripts/android/$script", runtimeOut.path)
+    environment("ANDROID_NDK_HOME", ndk)
+    onlyIf { !skip && !out.exists() }
+}
+
+// The first of ZERON_ANDROID_ABIS (as build-core.sh / build-engine.sh read it) stands for the set.
+val runtimeAbi = System.getenv("ZERON_ANDROID_ABIS")?.trim()?.split(Regex("\\s+"))?.firstOrNull() ?: "arm64-v8a"
+val fetchProot = runtimeScript("fetchProot", "fetch-proot.sh", "jniLibs/$runtimeAbi/libproot.so")
+val fetchRootfs = runtimeScript("fetchRootfs", "fetch-rootfs.sh", "assets/rootfs-$runtimeAbi.tar.gz")
+val buildEngine = runtimeScript("buildEngine", "build-engine.sh", "jniLibs/$runtimeAbi/libzeron.so")
+
 // Tool and file icons: the iOS asset catalog's SVGs, rasterized.
 val genIcons by tasks.registering(Exec::class) {
     description = "Rasterizes the shared transcript icons."
@@ -66,18 +91,36 @@ android {
     sourceSets["main"].apply {
         kotlin.directories.add(coreOut.resolve("kotlin").path)
         jniLibs.directories.add(coreOut.resolve("jniLibs").path)
+        jniLibs.directories.add(runtimeOut.resolve("jniLibs").path)
+        assets.directories.add(runtimeOut.resolve("assets").path)
         // The exact font bytes the Rust layout engine measures.
         assets.directories.add(repoRoot.resolve("apps/ios/Zeron/Fonts").path)
         assets.directories.add(iconsOut.get().asFile.resolve("assets").path)
         res.directories.add(iconsOut.get().asFile.resolve("res").path)
     }
 
-    packaging { jniLibs { useLegacyPackaging = false } }
+    packaging {
+        jniLibs {
+            // The runtime ships real executables as lib*.so: they must be
+            // extracted to nativeLibraryDir, the only exec-allowed location.
+            useLegacyPackaging = true
+            keepDebugSymbols += "**/libzeron.so"
+            keepDebugSymbols += "**/libproot*.so"
+            // patchelf'd (SONAME/NEEDED rewritten) by fetch-proot.sh: the strip
+            // pass corrupts them and libproot then fails to link.
+            keepDebugSymbols += "**/libtalloc.so"
+            keepDebugSymbols += "**/libandroid-shmem.so"
+        }
+    }
+
+    // Pure-Kotlin unit tests only: Android stubs return defaults instead of throwing.
+    testOptions { unitTests.isReturnDefaultValues = true }
 }
 
-tasks.named("preBuild") { dependsOn(buildCore, genIcons) }
+tasks.named("preBuild") { dependsOn(buildCore, genIcons, fetchProot, fetchRootfs, buildEngine) }
 
 dependencies {
+    implementation(project(":runtime"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.activity.compose)
@@ -96,6 +139,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("${libs.jna.get()}@aar")
     debugImplementation(libs.compose.ui.tooling)
+
+    testImplementation(libs.junit)
+    // android.jar's org.json is a stub under unit tests; the Agents parsers need the real one.
+    testImplementation(libs.org.json)
 }
 
 kotlin {

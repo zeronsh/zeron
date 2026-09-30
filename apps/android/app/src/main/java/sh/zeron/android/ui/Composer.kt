@@ -68,6 +68,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ToggleButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -100,6 +101,7 @@ import uniffi.zeron_core.SessionHandle
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.UserInputAnswer
 import uniffi.zeron_core.fallbackModels
+import uniffi.zeron_core.harnessLabel
 import uniffi.zeron_core.reasoningLabel
 
 private enum class Delivery(val label: String) { Queue("Queue"), Steer("Steer"), Interrupt("Stop & send") }
@@ -256,7 +258,7 @@ fun Composer(
             focusRequester = focus,
         ) {
             if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
-            SessionChips(client, c, row)
+            SessionChips(model, client, c, row)
         }
     }
 }
@@ -297,17 +299,21 @@ private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delive
 }
 
 @Composable
-private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?) {
+private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, row: SessionRow?) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val harness = row?.harness ?: "claude-code"
-    var models by remember { mutableStateOf<List<ModelInfo>?>(null) }
+    val deviceId = c.host.deviceId
+    val favorites by app.favorites.favorites.collectAsState()
+    val workspace by app.workspace.collectAsState()
+    // The harness's models: the device's list (the picker shows a loader until it lands).
+    var models by remember(deviceId, harness) { mutableStateOf<List<ModelInfo>?>(null) }
     var menu by remember { mutableStateOf<String?>(null) }
 
     fun open(which: String) {
         menu = which
         if (models == null) scope.launch {
-            models = runCatching { client.listModels(c.host.deviceId, harness) }.getOrNull() ?: fallbackModels(harness)
+            models = runCatching { client.listModels(deviceId, harness) }.getOrNull() ?: fallbackModels(harness)
         }
     }
 
@@ -318,15 +324,36 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
 
     val modelLabel = row?.modelLabel ?: row?.harnessLabel
     if (modelLabel != null) {
+        val label = row?.harnessLabel ?: harnessLabel(harness)
+        val catalog = models.orEmpty().map { ModelChoice(harness, label, it) }
+        val current = row?.model?.let { id ->
+            catalog.firstOrNull { it.model.id == id }
+                ?: ModelChoice(harness, label, ModelInfo(id, row.modelLabel ?: id, "Selected in this session; not in the device's model list", emptyList(), emptyList(), null))
+        }
         ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = { open("model") }) {
-            ChoiceMenu(menu == "model", { menu = null }, listOf(MenuSection(row?.harnessLabel, models.orEmpty().map { m ->
-                MenuChoice(m.label, m.id == row?.model, m.description) { setConfig { it.copy(model = m.id) } }
-            })))
+            // A session keeps its harness (as on the desktop): its own provider and its favorites.
+            ModelPickerPopover(
+                expanded = menu == "model",
+                onDismiss = { menu = null },
+                catalog = catalog,
+                current = current,
+                favorites = favorites,
+                onToggleFavorite = app.favorites::toggle,
+                onPick = { m -> setConfig { it.copy(model = m.model.id) } },
+                locked = true,
+                loading = models == null,
+                labelFor = { harnessLabel(it) },
+            )
         }
     }
-    row?.reasoning?.takeIf { it.isNotEmpty() }?.let { level ->
+    // Effort: the device's ladder once loaded, the built-in catalog's until then
+    // (never an empty menu); shown whenever the model has one.
+    val builtIn = remember(harness) { fallbackModels(harness) }
+    val ladder = (models ?: builtIn).let { list -> list.firstOrNull { it.id == row?.model } ?: list.firstOrNull() }
+    val levels = ladder?.reasoningLevels.orEmpty()
+    val level = row?.reasoning?.takeIf { it.isNotEmpty() } ?: ladder?.defaultReasoning?.takeIf { it in levels }
+    if (row != null && level != null && levels.isNotEmpty()) {
         ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
-            val levels = models?.let { list -> (list.firstOrNull { it.id == row.model } ?: list.firstOrNull())?.reasoningLevels }.orEmpty()
             ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
                 MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
             })))
@@ -337,24 +364,12 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
         ContextChip("#${pr.number}", leading = { ZIcon(ZIcons.PullRequest, null, Modifier.size(16.dp)) }, onClick = {
             CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(pr.url))
         })
-    } else {
-        row?.branch?.takeIf { it.isNotEmpty() }?.let {
-            ContextChip(it, leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) }, onClick = {})
-        }
     }
-    val tokens = c.contextUsage?.tokens
-    val window = c.contextUsage?.window
-    if (tokens != null && window != null && window > 0u) {
-        val fraction = tokens.toDouble() / window.toDouble()
-        if (fraction >= 0.5) {
-            ContextChip(
-                "${(fraction * 100).toInt()}% context",
-                leading = { ZIcon(if (fraction >= 0.85) ZIcons.Warning else ZIcons.Context, null, Modifier.size(16.dp)) },
-                onClick = {},
-                tint = if (fraction >= 0.85) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+    val project = workspace?.projects?.firstOrNull { it.id == row?.project?.id }
+    if (project?.gitDetected == true || !row?.branch.isNullOrEmpty()) {
+        SessionBranchChip(row?.branch?.takeIf { it.isNotEmpty() }, row?.cwd, project?.path)
     }
+    ContextUsageChip(c.contextUsage)
 }
 
 @Composable

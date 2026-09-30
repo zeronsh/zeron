@@ -144,7 +144,20 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
 }
 
 type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
-type VersionEntry = (Option<semver::Version>, std::collections::HashSet<String>);
+/// `(version, aliases, re-probe after)`: a failed probe is retried once its
+/// deadline passes — a cold start under proot (the Android guest) can outlast
+/// the timeout once, and a cached failure broke the harness until restart.
+type VersionEntry = (
+    Option<semver::Version>,
+    std::collections::HashSet<String>,
+    Option<std::time::Instant>,
+);
+
+/// How long `--version` may take. Bun/Node CLIs on a phone's proot guest take
+/// seconds on a cold page cache.
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+/// How long a failed probe is trusted before the next caller re-probes.
+const VERSION_FAILURE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 static VERSION_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<VersionKey, VersionEntry>>,
 > = std::sync::OnceLock::new();
@@ -156,12 +169,13 @@ pub(crate) fn invalidate_versions(names: &[&str]) {
         cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (_, aliases)| !names.iter().any(|name| aliases.contains(*name)));
+            .retain(|_, (_, aliases, _)| !names.iter().any(|name| aliases.contains(*name)));
     }
 }
 
-/// Probe once per executable identity. Failures are cached too, including timeout.
-/// Keep the lock during the short probe so concurrent descriptor requests coalesce.
+/// Probe once per executable identity. Failures (timeouts included) are cached
+/// for [`VERSION_FAILURE_TTL`], then probed again. Keep the lock during the
+/// short probe so concurrent descriptor requests coalesce.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
     use std::time::Duration;
     let canonical = path.canonicalize().ok()?;
@@ -176,7 +190,9 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    if let Some((version, aliases)) = cache.get_mut(&key) {
+    if let Some((version, aliases, retry_at)) = cache.get_mut(&key)
+        && retry_at.is_none_or(|at| std::time::Instant::now() < at)
+    {
         aliases.insert(alias);
         return version.clone();
     }
@@ -208,7 +224,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         let success = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.success(),
-                Ok(None) if start.elapsed() < Duration::from_secs(2) => {
+                Ok(None) if start.elapsed() < VERSION_PROBE_TIMEOUT => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
                 _ => {
@@ -227,7 +243,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         }
         let mut bytes = Vec::new();
         for reader in readers {
-            while !reader.is_finished() && start.elapsed() < Duration::from_secs(2) {
+            while !reader.is_finished() && start.elapsed() < VERSION_PROBE_TIMEOUT {
                 std::thread::sleep(Duration::from_millis(5));
             }
             if !reader.is_finished() {
@@ -256,7 +272,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
                         .stdout(crate::process::Stdio::piped())
                         .stderr(crate::process::Stdio::piped())
                         .kill_on_drop(true);
-                    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
+                    let output = tokio::time::timeout(VERSION_PROBE_TIMEOUT, command.output())
                         .await
                         .ok()?
                         .ok()?;
@@ -271,8 +287,15 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         .flatten()
     };
     let version = probe();
+    let retry_at = version
+        .is_none()
+        .then(|| std::time::Instant::now() + VERSION_FAILURE_TTL);
+    let mut aliases: std::collections::HashSet<String> = [alias].into_iter().collect();
+    if let Some((_, known, _)) = cache.get(&key) {
+        aliases.extend(known.iter().cloned());
+    }
     cache.retain(|(p, _, _), _| p != &key.0);
-    cache.insert(key, (version.clone(), [alias].into_iter().collect()));
+    cache.insert(key, (version.clone(), aliases, retry_at));
     version
 }
 
@@ -651,9 +674,39 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             let started = std::time::Instant::now();
             assert_eq!(binary_version(&path), None);
-            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            assert!(started.elapsed() < VERSION_PROBE_TIMEOUT + std::time::Duration::from_secs(1));
             assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
         }
+    }
+
+    /// A probe that failed once (a cold start outlasting the timeout on a
+    /// phone) is retried after its TTL instead of disabling the CLI for good.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_version_probe_is_retried_after_its_ttl() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("warm");
+        let path = dir.path().join("flaky");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ -e {m} ]; then echo 1.18.33; else touch {m}; exit 1; fi\n",
+                m = marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(binary_version(&path), None);
+        // Within the TTL the failure is served from the cache.
+        assert_eq!(binary_version(&path), None);
+        let canonical = path.canonicalize().unwrap();
+        for (key, entry) in VERSION_CACHE.get().unwrap().lock().unwrap().iter_mut() {
+            if key.0 == canonical {
+                entry.2 = Some(std::time::Instant::now());
+            }
+        }
+        assert_eq!(binary_version(&path).unwrap().to_string(), "1.18.33");
     }
 
     fn env(values: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {

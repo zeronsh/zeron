@@ -46,6 +46,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
@@ -271,7 +272,11 @@ fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSect
     DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
         val groups = sections.filter { it.choices.isNotEmpty() }
         val all = groups.sumOf { it.choices.size }
-        DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
+        // Scrolls: a computer with several agents lists dozens of models.
+        DropdownMenuGroup(
+            shapes = MenuDefaults.groupShape(0, 1),
+            modifier = Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()),
+        ) {
             var index = 0
             groups.forEach { section ->
                 section.title?.let { title -> MenuDefaults.Label { Text(title, style = MaterialTheme.typography.labelMedium) } }

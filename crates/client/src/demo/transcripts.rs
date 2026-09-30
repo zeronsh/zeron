@@ -4,7 +4,9 @@
 //! groups, questions, errors, attachments), the synthetic big transcripts
 //! for benchmarks, and the scripted streaming reply.
 
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
+use zeron_doc::{
+    MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus, ToolDiffStat,
+};
 use zeron_proto::{TodoItem, ToolCall, UserInputQuestion};
 
 pub(crate) const PHONE: &str = "ios-demo";
@@ -600,6 +602,8 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         "chat-ios-scroll" => scroll(host, now),
         "chat-home" => home(host, now),
         "chat-cjk" => cjk(host, now),
+        "chat-fanout" => fanout(chat_id, host, crate::now_ms()),
+        "chat-background" => background(chat_id, host, crate::now_ms()),
         "chat-deploy" => short(
             host,
             now,
@@ -791,4 +795,343 @@ pub(crate) fn asking() -> Vec<Step> {
             multi_select: false,
         }]),
     ]
+}
+
+// ── subagents ─────────────────────────────────────────────────────────────
+
+/// One demo subagent: its spawn id, task, agent type, and how it ended.
+struct DemoSpawn {
+    id: &'static str,
+    task: &'static str,
+    agent_type: &'static str,
+    status: SubagentStatus,
+    report: Option<&'static str>,
+}
+
+const fn done(
+    id: &'static str,
+    task: &'static str,
+    agent_type: &'static str,
+    report: &'static str,
+) -> DemoSpawn {
+    DemoSpawn {
+        id,
+        task,
+        agent_type,
+        status: SubagentStatus::Done,
+        report: Some(report),
+    }
+}
+
+const fn failed(
+    id: &'static str,
+    task: &'static str,
+    agent_type: &'static str,
+    report: &'static str,
+) -> DemoSpawn {
+    DemoSpawn {
+        id,
+        task,
+        agent_type,
+        status: SubagentStatus::Failed,
+        report: Some(report),
+    }
+}
+
+const fn running(id: &'static str, task: &'static str, agent_type: &'static str) -> DemoSpawn {
+    DemoSpawn {
+        id,
+        task,
+        agent_type,
+        status: SubagentStatus::Running,
+        report: None,
+    }
+}
+
+/// "chat-fanout": three turns of spawns — 13 completed (the list pages),
+/// 2 failed, 3 still running under a working parent.
+const FANOUT: &[(i64, &[DemoSpawn])] = &[
+    (
+        40 * 60_000,
+        &[
+            done(
+                "fo-registry",
+                "Map registry row writers",
+                "Explore",
+                "Four writers: engine sessions, workspace host, MCP create_chat and the demo host. All go through `upsert_session`.",
+            ),
+            done(
+                "fo-chat2",
+                "Trace chat2 room joins",
+                "Explore",
+                "Viewers join `chat2/{id}` once the row reads roomGen ≥ 2; hosts claim on first join.",
+            ),
+            done(
+                "fo-outbox",
+                "Audit the outbox retry loop",
+                "general-purpose",
+                "Retries back off to 30s and never give up; a 409 re-bases the cursor.",
+            ),
+            done(
+                "fo-cursor",
+                "Check cursor persistence",
+                "Explore",
+                "Cursor and snapshot commit in one transaction; the cursor is sampled before export.",
+            ),
+            done(
+                "fo-presence",
+                "Measure presence beat cost",
+                "general-purpose",
+                "One beat per 25s per device; the DO coalesces bursts.",
+            ),
+            done(
+                "fo-blob",
+                "Review sidecar blob uploads",
+                "Explore",
+                "Fire-and-forget PUTs, 4 KiB-capped outputs; a lost upload degrades to the summary.",
+            ),
+            done(
+                "fo-seen",
+                "Trace the seen marker",
+                "Explore",
+                "`lastSeenAt` is written on open and on every new turn while the chat is visible.",
+            ),
+            done(
+                "fo-evict",
+                "Audit warm-session eviction",
+                "general-purpose",
+                "Detached, quiet sessions past the cap are dropped oldest first.",
+            ),
+            failed(
+                "fo-edge",
+                "Load-test the edge relay",
+                "general-purpose",
+                "wrangler dev exited with status 1: port 8787 already in use",
+            ),
+        ],
+    ),
+    (
+        20 * 60_000,
+        &[
+            running("fo-soak", "Soak-test reconnect storms", "general-purpose"),
+            done(
+                "fo-schema",
+                "Diff the session doc schema",
+                "Explore",
+                "No breaking changes since epoch 2; `subagentTail` stays optional.",
+            ),
+            done(
+                "fo-heartbeat",
+                "Check heartbeat throttling",
+                "Explore",
+                "Status rows refresh at most every 10s while a run streams.",
+            ),
+            done(
+                "fo-queue",
+                "Walk the queue lease flow",
+                "general-purpose",
+                "Leases expire after 60s and demand review before delivery.",
+            ),
+            done(
+                "fo-pins",
+                "Verify pin ordering",
+                "Explore",
+                "Fractional keys between neighbours; ties break on chat id.",
+            ),
+            done(
+                "fo-archive",
+                "Check archive round trip",
+                "Explore",
+                "Archive keeps the row and its pins; unarchive restores both.",
+            ),
+            failed(
+                "fo-ios",
+                "Run the iOS snapshot tests",
+                "general-purpose",
+                "xcodebuild: no simulator matching 'iPhone 17' is installed",
+            ),
+        ],
+    ),
+    (
+        3 * 60_000,
+        &[
+            running("fo-fuzz", "Fuzz the row merge", "general-purpose"),
+            running("fo-docs", "Draft the sync design notes", "Plan"),
+        ],
+    ),
+];
+
+/// "chat-background": the parent's turn is over; two subagents still run.
+const BACKGROUND: &[(i64, &[DemoSpawn])] = &[(
+    12 * 60_000,
+    &[
+        running("bg-e2e", "Run the full e2e suite", "general-purpose"),
+        running("bg-bench", "Benchmark transcript layout", "general-purpose"),
+        done(
+            "bg-lint",
+            "Lint the workspace",
+            "general-purpose",
+            "clippy is clean: 0 warnings across 42 crates.",
+        ),
+    ],
+)];
+
+fn spawns_of(chat_id: &str) -> &'static [(i64, &'static [DemoSpawn])] {
+    match chat_id {
+        "chat-fanout" => FANOUT,
+        "chat-background" => BACKGROUND,
+        _ => &[],
+    }
+}
+
+/// Subagents a demo chat reports as running on its session row.
+pub(crate) fn running_subagents(chat_id: &str) -> u32 {
+    spawns_of(chat_id)
+        .iter()
+        .flat_map(|(_, spawns)| spawns.iter())
+        .filter(|s| s.status == SubagentStatus::Running)
+        .count() as u32
+}
+
+fn spawn_part(chat_id: &str, spawn: &DemoSpawn) -> MessagePart {
+    let mut part = tool(
+        spawn.id,
+        ToolCall::Unknown {
+            name: format!("Agent: {}", spawn.task),
+            input: Some(serde_json::json!({ "subagent_type": spawn.agent_type })),
+        },
+        false,
+        spawn.report,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        subagent_status,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = Some(format!("{chat_id}--sub--{}", spawn.id));
+        *subagent_status = Some(spawn.status);
+    }
+    part
+}
+
+fn fanout(chat_id: &str, host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let mut entries = vec![user(
+        "m1",
+        now - 42 * 60_000,
+        "Audit every sync path before the release. Fan out — one subagent per area — and report back.",
+    )];
+    for (turn, (ago, spawns)) in spawns_of(chat_id).iter().enumerate() {
+        let mut parts: Vec<MessagePart> = spawns.iter().map(|s| spawn_part(chat_id, s)).collect();
+        parts.insert(
+            0,
+            text(
+                "t0",
+                match turn {
+                    0 => "Splitting this across the stack — one agent per area:",
+                    1 => "First wave is back. Following up on what it surfaced:",
+                    _ => "Two more for the edges, then I'll write it up:",
+                },
+            ),
+        );
+        let mut entry = assistant(&format!("a{turn}"), host, now - ago, parts);
+        entry.duration_ms = Some(60_000);
+        entries.push(entry);
+    }
+    entries
+}
+
+fn background(chat_id: &str, host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let (ago, spawns) = spawns_of(chat_id)[0];
+    let mut parts: Vec<MessagePart> = spawns.iter().map(|s| spawn_part(chat_id, s)).collect();
+    parts.push(text(
+        "t1",
+        "Lint is clean. The e2e suite and the layout benchmark keep running in the background — I'll pick their results up when they land.",
+    ));
+    vec![
+        user(
+            "m1",
+            now - ago - 30_000,
+            "Run lint, the e2e suite and the layout benchmark in the background.",
+        ),
+        assistant("a0", host, now - ago, parts),
+    ]
+}
+
+/// The transcript of one demo subagent (`{chat}--sub--{spawn}`), shaped the
+/// way the engine writes a subagent doc: the task, then the agent's turn.
+/// A running one is still streaming.
+pub(crate) fn subagent(
+    chat_id: &str,
+    doc_id: &str,
+    host: &str,
+) -> Option<Vec<SessionMessageEntry>> {
+    let now = crate::now_ms();
+    let (ago, spawn) = spawns_of(chat_id).iter().find_map(|(ago, spawns)| {
+        spawns
+            .iter()
+            .find(|s| doc_id == format!("{chat_id}--sub--{}", s.id))
+            .map(|s| (*ago, s))
+    })?;
+    let started = now - ago;
+    let mut entries = vec![entry(
+        "u0",
+        MessageRole::User,
+        host,
+        started,
+        vec![text("t0", spawn.task)],
+    )];
+    let mut parts = vec![
+        tool(
+            "s1",
+            ToolCall::Search {
+                pattern: "sync".into(),
+                path: Some("crates".into()),
+            },
+            false,
+            Some("crates/sync/src/chat_client.rs\ncrates/client/src/live/room.rs"),
+        ),
+        tool("s2", read("crates/client/src/live/room.rs"), false, None),
+    ];
+    let mut turn = entry(
+        "a0",
+        MessageRole::Assistant,
+        host,
+        started + 2_000,
+        Vec::new(),
+    );
+    match spawn.status {
+        SubagentStatus::Running => {
+            parts.push(tool(
+                "s3",
+                exec("cargo test -p zeron-sync -- --nocapture"),
+                false,
+                None,
+            ));
+            if let MessagePart::Tool { resolved, .. } = &mut parts[2] {
+                *resolved = false;
+            }
+            parts.push(text("t1", "Still going — the soak loop is on its third reconnect storm and nothing has diverged yet."));
+            turn.status = Some(MessageStatus::Streaming);
+            turn.duration_ms = None;
+        }
+        SubagentStatus::Done => {
+            parts.push(text("t1", spawn.report.unwrap_or("Done.")));
+            turn.duration_ms = Some(95_000);
+        }
+        SubagentStatus::Failed => {
+            parts.push(tool("s3", exec("./scripts/check.sh"), true, spawn.report));
+            parts.push(text(
+                "t1",
+                &format!(
+                    "I couldn't finish: {}",
+                    spawn.report.unwrap_or("the run failed.")
+                ),
+            ));
+            turn.duration_ms = Some(41_000);
+        }
+    }
+    turn.parts = parts;
+    entries.push(turn);
+    Some(entries)
 }

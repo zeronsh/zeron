@@ -100,6 +100,19 @@ impl Device {
     pub fn supports(&self, capability: &str) -> bool {
         self.capabilities.iter().any(|value| value == capability)
     }
+
+    /// Whether this device runs an engine that can host sessions.
+    ///
+    /// Engines write their own row at boot and advertise their protocol
+    /// capabilities on it; a viewer app never does. That — not the platform —
+    /// is what makes a phone running its own engine (Android on-device mode,
+    /// docs/android.md) a host. Rows without capabilities (engines that
+    /// predate advertising them, viewer rows) fall back to the platform:
+    /// phones and tablets only view.
+    pub fn is_execution_host(&self) -> bool {
+        !self.capabilities.is_empty()
+            || !matches!(self.platform.as_str(), "ios" | "android" | "ipados")
+    }
 }
 
 /// A synced (device, folder) pair — the unit of organization in the sidebar.
@@ -302,6 +315,11 @@ pub struct Session {
     pub status: SessionStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+    /// Subagents of this chat streaming right now. Rides the session row (and
+    /// its staleness window) so every device's sidebar can badge a chat it
+    /// has not opened; read it through `view::running_subagents`.
+    #[serde(default)]
+    pub running_subagents: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -551,6 +569,40 @@ pub struct ReadWorkspaceImageRequest {
     pub expected_checkout_id: String,
     pub offset: usize,
     pub expected_content_hash: Option<String>,
+}
+
+/// Largest `ReadWorkspaceBytes` chunk (base64 keeps a frame under ~700 KiB).
+pub const WORKSPACE_BYTES_CHUNK_MAX: usize = 512 * 1024;
+
+/// Raw bytes of any regular workspace file, in chunks — PDF previews and
+/// downloads of files, folders and projects on another device. Unbounded
+/// size: a continuation names the revision its first chunk reported and
+/// fails if the file changed in between.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadWorkspaceBytesRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    pub path: String,
+    #[serde(default)]
+    pub offset: u64,
+    /// Chunk size (capped at [`WORKSPACE_BYTES_CHUNK_MAX`], the default).
+    #[serde(default)]
+    pub length: Option<usize>,
+    #[serde(default)]
+    pub expected_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceBytesChunk {
+    /// Opaque file revision (size, mtime, inode).
+    pub revision: String,
+    pub size: u64,
+    /// Base64.
+    pub data: String,
+    pub next_offset: u64,
+    pub done: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1190,6 +1242,30 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn engine_rows_host_sessions_whatever_the_platform() {
+        let device = |platform: &str, capabilities: &[&str]| Device {
+            id: "d".into(),
+            name: "d".into(),
+            platform: platform.into(),
+            last_seen_at: None,
+            created_at: None,
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
+        };
+        let current: Vec<&str> = crate::capabilities::CURRENT.to_vec();
+        // An engine on a phone (Android on-device mode) advertises capabilities.
+        assert!(device("android", &current).is_execution_host());
+        assert!(device("macos", &current).is_execution_host());
+        // Engines from before capability advertisement stay hosts…
+        assert!(device("linux", &[]).is_execution_host());
+        // …and capability-less phone rows stay viewers, exactly as before.
+        for viewer in ["ios", "android", "ipados"] {
+            assert!(!device(viewer, &[]).is_execution_host());
+        }
+    }
 
     #[test]
     fn legacy_chat_connectivity_has_no_live_delivery_proof() {

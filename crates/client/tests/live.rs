@@ -504,6 +504,17 @@ struct HostService {
     chunks: Mutex<std::collections::BTreeMap<(String, u64), String>>,
     committed: Mutex<Vec<(String, String, Vec<u8>)>>,
     spaces: Mutex<Vec<String>>,
+    /// Open `WatchWorkspaceFiles` streams (decremented when the host side drops).
+    file_watches: Arc<std::sync::atomic::AtomicI64>,
+}
+
+/// Counts a host stream while it lives.
+struct Live(Arc<std::sync::atomic::AtomicI64>);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 const HOST_IMAGE: &str = "/Users/dev/.zeron/uploads/host.png";
@@ -576,6 +587,35 @@ impl zeron_rpc::RpcService for HostService {
                     .unwrap()
                     .push(params["spaceId"].as_str().unwrap_or_default().to_owned());
                 json!({ "ok": true })
+            }
+            m::EDGE_BEARER => json!({
+                "edgeUrl": params["edgeUrl"], "userId": "user-1", "orgId": "org-1",
+                "bearer": "user-1@org-1",
+            }),
+            m::SUBSCRIBE_TERMINAL => {
+                let after = params["afterSeq"].as_u64().unwrap_or(0);
+                let items: Vec<serde_json::Value> = (after + 1..=3)
+                    .map(|seq| json!({ "type": "data", "seq": seq, "data": b64(format!("line {seq}\r\n").as_bytes()) }))
+                    .chain(std::iter::once(json!({ "type": "exit", "seq": 4, "exitCode": 0 })))
+                    .collect();
+                return Ok(RpcReply::Stream(Box::pin(futures::stream::iter(items))));
+            }
+            m::WATCH_WORKSPACE_FILES => {
+                if params["chatId"] != CHAT {
+                    return Err(zeron_rpc::RpcError::Failed("unknown chat".into()));
+                }
+                self.file_watches
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let live = Live(self.file_watches.clone());
+                let first = json!({ "sequence": 1, "resyncRequired": true, "changes": [] });
+                let stream = futures::StreamExt::chain(
+                    futures::stream::once(async move { first }),
+                    futures::stream::unfold(live, |live| async move {
+                        std::future::pending::<()>().await;
+                        Some((serde_json::Value::Null, live))
+                    }),
+                );
+                return Ok(RpcReply::Stream(Box::pin(stream)));
             }
             m::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let item = json!({
@@ -811,5 +851,225 @@ async fn phone_born_sessions_reach_the_host_before_their_first_command() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    client.shutdown();
+}
+
+// ── host streams ─────────────────────────────────────────────────────────
+
+/// Collects a host stream for assertions.
+#[derive(Default)]
+struct Collect {
+    items: Mutex<Vec<serde_json::Value>>,
+    ended: std::sync::atomic::AtomicBool,
+}
+
+impl zeron_client::rpc::HostWatchSink for Collect {
+    fn item(&self, value: serde_json::Value) {
+        self.items.lock().unwrap().push(value);
+    }
+
+    fn ended(&self) {
+        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Collect {
+    fn ended(&self) -> bool {
+        self.ended.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn len(&self) -> usize {
+        self.items.lock().unwrap().len()
+    }
+}
+
+/// Both stream shapes the Android tools use: a finite one that ends by
+/// itself (a terminal's replay + exit, resumed with `afterSeq`) and a
+/// silent watch that only stops when the viewer drops it — which must reach
+/// the host, so no engine keeps watching for a closed screen.
+async fn exercise_streams(client: &Client, device: &str, service: &HostService) {
+    use zeron_rpc::methods as m;
+    let sink = Arc::new(Collect::default());
+    let c = client.clone();
+    let (d, s) = (device.to_owned(), sink.clone());
+    let watch = zeron_client::runtime::run(async move {
+        c.host_watch(
+            &d,
+            m::SUBSCRIBE_TERMINAL,
+            serde_json::json!({ "terminalId": "t1" }),
+            s,
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    wait_for("terminal replay", Duration::from_secs(10), || sink.ended());
+    let items = sink.items.lock().unwrap().clone();
+    assert_eq!(items.len(), 4, "{items:?}");
+    assert_eq!(unb64(items[0]["data"].as_str().unwrap()), b"line 1\r\n");
+    assert_eq!(items[3]["type"], "exit");
+    drop(watch);
+
+    // Resume after the last seen seq.
+    let resumed = Arc::new(Collect::default());
+    let c = client.clone();
+    let (d, s) = (device.to_owned(), resumed.clone());
+    let _resumed = zeron_client::runtime::run(async move {
+        c.host_watch(
+            &d,
+            m::SUBSCRIBE_TERMINAL,
+            serde_json::json!({ "terminalId": "t1", "afterSeq": 2 }),
+            s,
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    wait_for("resumed replay", Duration::from_secs(10), || {
+        resumed.ended()
+    });
+    assert_eq!(resumed.items.lock().unwrap()[0]["seq"], 3);
+
+    // A rejected request fails the call itself, not as an empty stream.
+    let c = client.clone();
+    let d = device.to_owned();
+    let err = zeron_client::runtime::run(async move {
+        c.host_watch(
+            &d,
+            m::WATCH_WORKSPACE_FILES,
+            serde_json::json!({ "chatId": "nope" }),
+            Arc::new(Collect::default()),
+        )
+        .await
+    })
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("unknown chat"), "{err}");
+    let c = client.clone();
+    let d = device.to_owned();
+    let err = zeron_client::runtime::run(async move {
+        c.host_watch(
+            &d,
+            "FutureWatch",
+            serde_json::json!({}),
+            Arc::new(Collect::default()),
+        )
+        .await
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, zeron_client::ClientError::Unsupported(_)),
+        "{err:?}"
+    );
+
+    // A silent watch lives until the handle goes; then the host stops too.
+    let files = Arc::new(Collect::default());
+    let c = client.clone();
+    let (d, s) = (device.to_owned(), files.clone());
+    let watch = zeron_client::runtime::run(async move {
+        c.host_watch(
+            &d,
+            m::WATCH_WORKSPACE_FILES,
+            serde_json::json!({ "chatId": CHAT }),
+            s,
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    wait_for("first file frame", Duration::from_secs(10), || {
+        files.len() == 1
+    });
+    let open = || {
+        service
+            .file_watches
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+    assert_eq!(open(), 1);
+    assert!(watch.is_active());
+    watch.cancel();
+    assert!(!watch.is_active());
+    wait_for("host watch cancelled", Duration::from_secs(10), || {
+        open() == 0
+    });
+    assert!(!files.ended(), "a cancelled watch is silent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_streams_ride_the_device_relay() {
+    let edge = MockEdge::start().await;
+    let _host = HostRegistry::start(&edge).await;
+    let service = Arc::new(HostService::default());
+    let _relay = zeron_rpc::HostRelay::spawn(
+        zeron_rpc::HostRelayConfig::new(
+            edge.edge_url(),
+            HOST,
+            Arc::new(zeron_rpc::StaticToken("t".into())),
+        ),
+        service.clone(),
+        Arc::new(|_| true),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    let start = Instant::now();
+    while !(edge.relay_host_connected(HOST)
+        && client.workspace().device(HOST).is_some_and(|d| d.online))
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "host never reachable"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    exercise_streams(&client, HOST, &service).await;
+    client.shutdown();
+}
+
+/// A viewer sharing its device's engine (`Credentials::Engine`, the Android
+/// app) reaches that engine over its IPC port — no device room involved:
+/// nothing here serves one for the phone's id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn own_engine_calls_and_streams_use_its_ipc_port() {
+    const PHONE: &str = "phone-engine";
+    let edge = MockEdge::start().await;
+    let service = Arc::new(HostService::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(zeron_rpc::serve_ws_listener_with_token(
+        listener,
+        service.clone(),
+        Some("ipc-secret-token".into()),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = ClientConfig::new(edge.edge_url(), dir.path());
+    config.device_id = PHONE.into();
+    config.device_name = "Phone".into();
+    let client = Client::new(
+        config,
+        Credentials::Engine {
+            ipc_url: format!("ws://127.0.0.1:{port}"),
+            ipc_token: Some("ipc-secret-token".into()),
+            user_id: "user-1".into(),
+            org_id: "org-1".into(),
+        },
+        Arc::new(NullListener),
+    )
+    .unwrap();
+
+    let c = client.clone();
+    let folders = zeron_client::runtime::run(async move {
+        c.host_call(
+            PHONE,
+            zeron_rpc::methods::LIST_FOLDERS,
+            serde_json::json!({ "path": "/home/zeron" }),
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(folders["path"], "/home/zeron");
+    assert!(!edge.relay_host_connected(PHONE));
+    exercise_streams(&client, PHONE, &service).await;
     client.shutdown();
 }

@@ -11,7 +11,7 @@ use zeron_doc::parts::{MessagePart, SubagentStatus};
 use zeron_proto::ToolCall;
 use zeron_text::WhiteSpace;
 
-use super::display::{ColorRole, DisplayBuilder, WidgetKind};
+use super::display::{ColorRole, DisplayBuilder, LinkHit, WidgetKind};
 use super::file_icons::{basename, file_icon_asset};
 use super::markdown::{Ctx, PText, Px, place_text, prepare_plain};
 use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, row_key};
@@ -46,13 +46,16 @@ pub(crate) struct ToolLine {
     pub icon: String,
     pub label: PText,
     pub detail: Option<PText>,
-    /// File calls show a badge: (file-icon asset, basename).
-    pub badge: Option<(String, PText)>,
+    /// File calls show a badge: (file-icon asset, basename, path as called).
+    pub badge: Option<(String, PText, String)>,
     pub failed: bool,
     pub running: bool,
     pub key: u64,
     pub open: bool,
     pub body: Vec<DetailBlock>,
+    /// A spawned subagent's card opens its transcript: the card's tap link
+    /// (`zeron-subagent:{docId}`).
+    pub link: Option<String>,
 }
 
 pub(crate) struct ToolGroup {
@@ -296,10 +299,10 @@ fn diff_block(ctx: &mut Ctx, st: &Styles, diff: &zeron_proto::ToolDiff) -> Optio
 /// Result detail (desktop `tool_detail`): a diff wins, then stats, then output.
 fn result_block(ctx: &mut Ctx, st: &Styles, part: &MessagePart) -> Option<DetailBlock> {
     let MessagePart::Tool { output, diff, diff_stats, .. } = part else { return None };
-    if let Some(diff) = diff {
-        if let Some(b) = diff_block(ctx, st, diff) {
-            return Some(b);
-        }
+    if let Some(diff) = diff
+        && let Some(b) = diff_block(ctx, st, diff)
+    {
+        return Some(b);
     }
     if let Some(stats) = diff_stats.as_ref().filter(|s| !s.is_empty()) {
         return Some(DetailBlock::Stats(
@@ -373,7 +376,7 @@ impl RowBuilder {
                         let badge = if agents {
                             None
                         } else {
-                            file_path(call).map(|p| (file_icon_asset(p), prepare_plain(ctx, basename(p), st.label, st.lh, if *is_error { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre)))
+                            file_path(call).map(|p| (file_icon_asset(p), prepare_plain(ctx, basename(p), st.label, st.lh, if *is_error { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre), p.to_owned()))
                         };
                         let detail_color = if agents && !*is_error { ColorRole::TextSoft } else { color };
                         let detail = (badge.is_none() && !detail.is_empty()).then(|| prepare_plain(ctx, &detail, st.label, st.lh, detail_color, WhiteSpace::Pre));
@@ -393,6 +396,10 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link: subagent_ref
+                                .as_ref()
+                                .filter(|_| agents)
+                                .map(|doc| format!("{}{doc}", crate::client_ffi::SUBAGENT_LINK_SCHEME)),
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
@@ -413,6 +420,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link: None,
                         });
                     }
                     _ => {}
@@ -495,7 +503,8 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
     place_text(&line.label, tx, ry + (row_h - line.label.lh) / 2.0, lw + 1.0, Some(o));
     let dx = tx + lw + d(px, 8.0);
     let avail = (x + cw - dx).max(0.0);
-    if let Some((asset, name)) = &line.badge {
+    let mut badge_hit = None;
+    if let Some((asset, name, path)) = &line.badge {
         let bh = d(px, 22.0);
         let by = ry + (row_h - bh) / 2.0;
         let nw = name.p.max_content_width();
@@ -511,13 +520,18 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
                 None,
             );
             place_text_lines(name, dx + d(px, 27.0), ry + (row_h - name.lh) / 2.0, (bw - d(px, 33.0)).max(1.0), 1, px, o);
+            badge_hit = Some((path.clone(), (dx, by, bw, bh)));
         }
-    } else if let Some(detail) = &line.detail {
-        if avail > 1.0 {
-            place_text_lines(detail, dx, ry + (row_h - detail.lh) / 2.0, avail, 1, px, o);
-        }
+    } else if let Some(detail) = &line.detail
+        && avail > 1.0
+    {
+        place_text_lines(detail, dx, ry + (row_h - detail.lh) / 2.0, avail, 1, px, o);
     }
     o.widget(WidgetKind::ToolToggle { detail: line.key, open: line.open }, (x, ry, cw, row_h), None);
+    // Above the row toggle: tapping the file badge opens the file.
+    if let Some((path, rect)) = badge_hit {
+        o.widget(WidgetKind::OpenFile { path }, rect, None);
+    }
 }
 
 /// Inline detail under a row: blocks in the text column, each preceded by a
@@ -644,12 +658,15 @@ fn place_block(block: &DetailBlock, px: Px, bx: f32, by: f32, bw: f32, out: Opti
 fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mut DisplayBuilder>) -> f32 {
     let row = d(px, AGENT_ROW);
     let h = row * t.lines.len() as f32;
-    let Some(o) = out.as_deref_mut() else { return h };
+    let Some(o) = out.as_mut() else { return h };
     for (i, line) in t.lines.iter().enumerate() {
         let ry = y + i as f32 * row;
         let card_y = ry + (row - d(px, AGENT_CARD)) / 2.0;
         let card_h = d(px, AGENT_CARD);
         o.fill(x, card_y, cw, card_h, d(px, 9.0), ColorRole::AgentCard);
+        if let Some(url) = &line.link {
+            o.links.push(LinkHit { x, y: card_y, w: cw, h: card_h, url: url.clone(), scroller: o.scroller });
+        }
         o.hairline(x, card_y, cw, card_h, d(px, 9.0), ColorRole::AgentCardBorder);
         let tile = d(px, 18.0);
         let tx = x + d(px, 8.0);
@@ -683,7 +700,8 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
             .map(|l| {
                 l.label.p.heap_bytes()
                     + l.detail.as_ref().map_or(0, |d| d.p.heap_bytes())
-                    + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes())
+                    + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes() + b.2.capacity())
+                    + l.link.as_ref().map_or(0, String::capacity)
                     + l.body
                         .iter()
                         .map(|b| match b {

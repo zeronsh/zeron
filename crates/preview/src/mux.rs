@@ -196,6 +196,10 @@ impl Mux {
     pub fn is_closed(&self) -> bool {
         self.0.stop.is_cancelled()
     }
+    /// Streams currently open in either direction.
+    pub fn active_streams(&self) -> usize {
+        self.0.slots.lock().unwrap().len()
+    }
     async fn send(&self, frame: Frame) -> anyhow::Result<()> {
         tokio::select! { _ = self.0.stop.cancelled() => anyhow::bail!("preview connection closed"), result = self.0.outgoing.send(frame) => { result?; Ok(()) } }
     }

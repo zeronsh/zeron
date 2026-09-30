@@ -5320,7 +5320,15 @@ impl Shell {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let devices = &self.state.read(cx).devices;
+        // Projects live on devices whose engine hosts sessions (phones
+        // included when they run one) — never on a viewer-only row.
+        let devices: Vec<&Device> = self
+            .state
+            .read(cx)
+            .devices
+            .iter()
+            .filter(|d| d.is_execution_host())
+            .collect();
         let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()

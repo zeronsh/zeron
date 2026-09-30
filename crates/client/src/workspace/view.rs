@@ -32,9 +32,9 @@ pub const PROJECT_COLOR_COUNT: u32 = 8;
 /// monogram tone: 32-bit FNV-1a of the project's path (`"home"` without a
 /// project), so a project has the same color on every device.
 pub fn project_color_index(space_path: &str) -> u32 {
-    let hash = space_path
-        .bytes()
-        .fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hash = space_path.bytes().fold(2_166_136_261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
     hash % PROJECT_COLOR_COUNT
 }
 
@@ -102,6 +102,9 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
+    /// Subagents of this chat running right now — also after the parent's
+    /// turn has settled (staleness-gated like `indicator`).
+    pub running_subagents: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,7 +159,8 @@ pub struct DeviceView {
     pub last_seen_ms: Option<i64>,
     pub version: Option<String>,
     pub capabilities: Vec<String>,
-    /// Can run sessions (desktop/server engines — not phones).
+    /// Can run sessions: an engine's row (desktop, server, or a phone running
+    /// its own engine) — never a viewer app (`Device::is_execution_host`).
     pub is_execution_host: bool,
     /// This device.
     pub is_self: bool,
@@ -326,10 +330,6 @@ pub(crate) fn device_display_name(device: &Device) -> Option<String> {
     (!name.is_empty() && name != "unknown-device").then(|| name.to_owned())
 }
 
-fn is_execution_host(device: &Device) -> bool {
-    !matches!(device.platform.as_str(), "ios" | "android" | "ipados")
-}
-
 pub(crate) fn device_online(
     device_id: &str,
     presence: &HashMap<String, i64>,
@@ -407,6 +407,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
     row.room_gen.hash(&mut h);
+    row.running_subagents.hash(&mut h);
     h.finish()
 }
 
@@ -508,6 +509,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
         room_gen: chat.room_gen.unwrap_or(1),
+        running_subagents: zeron_proto::view::running_subagents(session, cx.now),
     };
     row.revision = hash_row(&row);
     // Unchanged rows keep their Arc across snapshots (pointer-equal diffing).
@@ -694,7 +696,7 @@ pub(crate) fn derive(
                 .or_else(|| device.last_seen_at.map(|t| t.timestamp_millis())),
             version: device.version.clone(),
             capabilities: device.capabilities.clone(),
-            is_execution_host: is_execution_host(device),
+            is_execution_host: device.is_execution_host(),
             is_self: device.id == cx.self_device_id,
             session_count: active.iter().filter(|c| c.device_id == device.id).count() as u32,
         })

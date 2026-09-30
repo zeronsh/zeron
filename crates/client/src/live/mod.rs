@@ -125,6 +125,8 @@ struct RegistryHttp {
     edge: String,
     org_id: String,
     device_id: String,
+    /// See [`Credentials::shares_engine_device`](crate::Credentials::shares_engine_device).
+    beat: bool,
 }
 
 fn http_err(err: reqwest::Error) -> SyncError {
@@ -134,7 +136,7 @@ fn http_err(err: reqwest::Error) -> SyncError {
 impl RegistryTransport for RegistryHttp {
     fn fetch(&self, since: u64) -> BoxFuture<'static, std::result::Result<String, SyncError>> {
         let bearer = self.bearer.clone();
-        let url = urls::registry_rows(&self.edge, &self.org_id, &self.device_id, since);
+        let url = urls::registry_rows(&self.edge, &self.org_id, &self.device_id, since, self.beat);
         Box::pin(async move {
             let token = bearer.get().await?;
             let response = crate::auth::http()
@@ -424,9 +426,13 @@ impl LiveBackend {
             edge: self.edge.clone(),
             org_id: inner.credentials.org_id().to_owned(),
             device_id: inner.config.device_id.clone(),
+            beat: !inner.credentials.shares_engine_device(),
         });
         let doc = inner.workspace.doc().clone();
         let device_id = inner.config.device_id.clone();
+        // A viewer sharing its engine's device id leaves presence to the
+        // engine: the device is online when the engine is.
+        let publish_presence = !inner.credentials.shares_engine_device();
         crate::runtime::shared().spawn(async move {
             let mut backoff = JOIN_RETRY_BASE;
             let client = loop {
@@ -458,7 +464,9 @@ impl LiveBackend {
                 }
                 backoff = (backoff * 2).min(JOIN_RETRY_CAP);
             };
-            client.set_presence(now_ms());
+            if publish_presence {
+                client.set_presence(now_ms());
+            }
             let mut events = client.events();
             {
                 let Some(inner) = weak.upgrade() else { return };
@@ -479,7 +487,8 @@ impl LiveBackend {
                     _ = cancel.cancelled() => return,
                     _ = beat.tick() => {
                         let Some(inner) = weak.upgrade() else { return };
-                        if let Some(live) = inner.live()
+                        if publish_presence
+                            && let Some(live) = inner.live()
                             && let Some(client) = lock(&live.registry).as_ref()
                         {
                             client.set_presence(now_ms());

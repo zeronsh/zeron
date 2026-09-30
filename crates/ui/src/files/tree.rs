@@ -5,7 +5,7 @@ use gpui::{
 use zeron_proto::WorkspaceEntryKind;
 
 use super::{
-    FilesSurface, WorkspacePathDrag, model::DirectoryLoadState, model::VisibleRowKind,
+    FilesEvent, FilesSurface, WorkspacePathDrag, model::DirectoryLoadState, model::VisibleRowKind,
     workspace_path_drag_ghost,
 };
 use crate::{
@@ -238,6 +238,7 @@ impl FilesSurface {
                     return gpui::Empty.into_any_element();
                 };
                 let path = row.path.clone();
+                let menu_path = row.path.clone();
                 let selected = self.tree.selected() == Some(path.as_str());
                 let focused = self.tree_focus.is_focused(window);
                 let is_directory = node.entry.kind == WorkspaceEntryKind::Directory;
@@ -289,6 +290,20 @@ impl FilesSurface {
                         this.tree_focus.focus(window, cx);
                         this.activate_tree_path(path.clone(), cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.tree_focus.focus(window, cx);
+                            this.tree.select(menu_path.clone());
+                            cx.emit(FilesEvent::EntryContextMenu {
+                                path: menu_path.clone(),
+                                is_directory,
+                                position: event.position,
+                            });
+                            cx.notify();
+                        }),
+                    )
                     .on_drag(drag_payload, |payload, _, _, cx| {
                         cx.stop_propagation();
                         workspace_path_drag_ghost(payload, cx)

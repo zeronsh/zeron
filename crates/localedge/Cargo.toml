@@ -1,0 +1,47 @@
+[package]
+name = "zeron-localedge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The single-tenant, loopback-only Rust port of the TypeScript edge (edge/src):
+# chat2 rooms, the registry room, the DeviceRoom relay and the small HTTP
+# surfaces around them, persisted in SQLite. `zeron headless` embeds it when
+# the Android app runs the engine on the phone (docs/android.md), so the
+# engine's and zeron-client's unmodified sync code talk production protocols
+# to 127.0.0.1.
+
+[dependencies]
+zeron-doc.workspace = true
+zeron-sync.workspace = true
+zeron-rpc.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+base64 = "0.22"
+bytes = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+subtle = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+loro.workspace = true
+zeron-proto.workspace = true
+zeron-engine.workspace = true
+zeron-client.workspace = true
+sha2.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
