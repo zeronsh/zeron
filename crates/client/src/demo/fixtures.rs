@@ -394,6 +394,7 @@ pub(crate) fn seed(
             checkout_id: source_context.as_ref().map(|s| s.checkout_id.clone()),
             source_context: source_context.clone(),
             config: Some(ChatConfig {
+                policy: Default::default(),
                 harness: demo.harness,
                 model: Some(demo.model.into()),
                 reasoning: Some(demo.reasoning),

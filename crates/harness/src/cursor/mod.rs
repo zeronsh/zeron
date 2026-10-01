@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SteeringMode, TodoItem, ToolCall,
+    RunRequest, SteeringMode, TodoItem, TodoStatus, ToolCall,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -235,6 +235,12 @@ impl Harness for CursorHarness {
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
+    }
+    /// Bypass only: the @cursor/sdk hard-codes `ignoreApprovals`, so the
+    /// agent never asks before a tool and no policy can answer for it. The
+    /// stricter modes wait for an OS sandbox that confines the process.
+    fn policy_caps(&self) -> zeron_proto::PolicyCaps {
+        zeron_proto::PolicyCaps::bypass_only()
     }
     /// "Installed" means the user's own cursor-agent CLI is present — the
     /// user-visible signal they use Cursor (the SDK itself is a managed
@@ -767,15 +773,19 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: t
-                        .get("content")
-                        .or_else(|| t.get("text"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into(),
-                    done: t.get("status").and_then(Value::as_str) == Some("completed")
-                        || t.get("completed").and_then(Value::as_bool) == Some(true),
+                .map(|t| {
+                    let status = if t.get("completed").and_then(Value::as_bool) == Some(true) {
+                        TodoStatus::Completed
+                    } else {
+                        TodoStatus::parse(t.get("status").and_then(Value::as_str).unwrap_or(""))
+                    };
+                    TodoItem::new(
+                        t.get("content")
+                            .or_else(|| t.get("text"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                        status,
+                    )
                 })
                 .collect(),
         },
@@ -1017,6 +1027,19 @@ mod tests {
                     text: "sub says".into()
                 }),
             }]
+        );
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_offers_only_bypass() {
+        assert_eq!(
+            CursorHarness::new().policy_caps(),
+            zeron_proto::PolicyCaps::bypass_only()
         );
     }
 }

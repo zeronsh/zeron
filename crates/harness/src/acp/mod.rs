@@ -30,6 +30,7 @@
 mod antigravity_paths;
 mod devin_models;
 mod normalize;
+mod policy;
 mod subagent;
 mod subagent_devin;
 mod system_message;
@@ -61,8 +62,16 @@ use crate::{
 };
 use child::Child;
 use normalize::{map_update, parse_commands, preferred_allow_option};
+use policy::{
+    BYPASS_MODES, antigravity_policy_caps, devin_policy_caps, grok_policy_caps, hermes_policy_caps,
+    permission_action, permission_outcome, policy_allow_option, policy_mode_value,
+    policy_reject_option,
+};
+
+use crate::policy::{Decision, Gate, SharedGate};
 use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
+use zeron_proto::PermissionMode;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -146,6 +155,9 @@ struct AcpAgentSpec {
     /// A prompt cancelled before it produced anything vanishes from the
     /// agent's history (Grok, verified live); preemption re-sends its text.
     drops_unstarted_cancelled_prompt: bool,
+    /// The permission modes this agent can honour (see [`policy_mode_value`]
+    /// for the mode each one selects).
+    policy_caps: fn() -> zeron_proto::PolicyCaps,
 }
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
@@ -264,6 +276,7 @@ fn grok_spec() -> AcpAgentSpec {
         skill_dirs: Vec::new,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: true,
+        policy_caps: grok_policy_caps,
     }
 }
 
@@ -341,6 +354,7 @@ fn devin_spec() -> AcpAgentSpec {
         skill_dirs: Vec::new,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: false,
+        policy_caps: devin_policy_caps,
     }
 }
 
@@ -412,6 +426,7 @@ fn hermes_spec() -> AcpAgentSpec {
         skill_dirs: Vec::new,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: false,
+        policy_caps: hermes_policy_caps,
     }
 }
 
@@ -1120,6 +1135,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         skill_dirs: antigravity_skill_dirs,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: false,
+        policy_caps: antigravity_policy_caps,
     }
 }
 
@@ -1309,7 +1325,7 @@ impl AcpHarness {
             client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
-            request_draining(&client, &mut incoming, "logout", json!({})).await
+            request_draining(&client, &mut incoming, "logout", json!({}), None).await
         };
         let result = tokio::time::timeout(SIGN_OUT_TIMEOUT, flow).await;
         child.shutdown(self.kill_grace).await;
@@ -1454,6 +1470,7 @@ impl AcpHarness {
                 &mut incoming,
                 "authenticate",
                 json!({ "methodId": method }),
+                None,
             )
             .await
         };
@@ -2154,6 +2171,11 @@ impl Harness for AcpHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         self.spec.reasoning_levels
     }
+    /// Per agent (see `acp::policy`): every mode where the agent has a mode
+    /// that asks before writes and commands, Bypass only where it doesn't.
+    fn policy_caps(&self) -> zeron_proto::PolicyCaps {
+        (self.spec.policy_caps)()
+    }
 
     /// The agent's own CLI, not the adapter: `claude` counts as installed even
     /// when `claude-agent-acp` would arrive via npx, and an npx-reachable
@@ -2693,6 +2715,48 @@ fn validate_config_model_selection(
     )))
 }
 
+/// `config_id` is the session's permission-mode select (category `mode`).
+fn is_mode_config_option(session_response: &Value, config_id: &str) -> bool {
+    session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option.get("id").and_then(Value::as_str) == Some(config_id)
+                    && option.get("category").and_then(Value::as_str) == Some("mode")
+            })
+        })
+}
+
+/// The `session/set_mode` a run outside Bypass needs on an agent that
+/// advertises only the superseded `modes` state (no `mode` config option):
+/// its asking (or plan) mode, unless already current.
+fn legacy_mode_change(session_response: &Value, mode: PermissionMode) -> Option<String> {
+    if mode == PermissionMode::Bypass {
+        return None;
+    }
+    let has_mode_option = session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| option.get("category").and_then(Value::as_str) == Some("mode"))
+        });
+    if has_mode_option {
+        return None;
+    }
+    let modes = session_response.get("modes")?;
+    let available: Vec<&str> = modes
+        .get("availableModes")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|m| m.get("id").and_then(Value::as_str))
+        .collect();
+    let wanted = policy_mode_value(&available, mode)?;
+    (modes.get("currentModeId").and_then(Value::as_str) != Some(wanted)).then(|| wanted.to_owned())
+}
+
 fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
     session_response
         .get("configOptions")
@@ -2722,6 +2786,7 @@ fn config_option_sets(
     model: Option<&str>,
     efforts: &[&'static str],
     model_options: &serde_json::Map<String, Value>,
+    mode: PermissionMode,
 ) -> Vec<(String, Value)> {
     let Some(options) = session_response
         .get("configOptions")
@@ -2761,25 +2826,23 @@ fn config_option_sets(
             // (approvalPolicy "never" + danger-full-access sandbox), Devin
             // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
             // as a Traits "Mode" option and win when the run selected one.
-            ("select", Some("mode")) => model_options
+            ("select", Some("mode")) if mode == PermissionMode::Bypass => model_options
                 .get("mode")
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
                 .map(|c| Value::String(c.to_owned()))
                 .or_else(|| {
-                    [
-                        "bypassPermissions",
-                        "bypass_permissions",
-                        "bypass",
-                        "yolo",
-                        "agent-full-access",
-                        "danger-full-access",
-                        "full-access",
-                    ]
-                    .into_iter()
-                    .find(|v| available.contains(v))
-                    .map(|v| Value::String(v.to_owned()))
+                    BYPASS_MODES
+                        .into_iter()
+                        .find(|v| available.contains(v))
+                        .map(|v| Value::String(v.to_owned()))
                 }),
+            // Any other policy decides the mode itself (a picker "Mode"
+            // trait can't loosen it): the agent's asking or plan mode, so
+            // every action reaches the policy.
+            ("select", Some("mode")) => {
+                policy_mode_value(&available, mode).map(|v| Value::String(v.to_owned()))
+            }
             ("select", Some("thought_level")) => efforts
                 .iter()
                 .find(|c| available.contains(*c))
@@ -2946,17 +3009,20 @@ fn prompt_turn(
     client.request_now("session/prompt", params)
 }
 
-/// Answer a server→client request. Permission requests are auto-accepted with
-/// the agent's preferred allow option — parity with the claude harness's
-/// bypassPermissions and the codex harness's approvalPolicy "never" (zeron
-/// sessions run unattended). Everything else (fs, terminal, elicitation) was
-/// declined at initialize, so a stray request gets method-not-found rather
-/// than wedging the agent.
+/// Answer a server→client request. In Bypass (`gate` = `None`) permission
+/// requests are auto-accepted with the agent's preferred allow option —
+/// parity with the claude harness's bypassPermissions and the codex
+/// harness's approvalPolicy "never" (zeron sessions run unattended); never
+/// with a reject option. Otherwise only what the policy allows outright is
+/// allowed here (no turn is running to ask the user in). Everything else
+/// (fs, terminal, elicitation) was declined at initialize, so a stray
+/// request gets method-not-found rather than wedging the agent.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
+    gate: Option<&SharedGate>,
 ) -> Vec<AgentEvent> {
     match method {
         "session/request_permission" => {
@@ -2965,13 +3031,14 @@ fn handle_server_request(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            match preferred_allow_option(&options) {
-                Some(option_id) => client.respond(
-                    &id,
-                    json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
-                ),
-                None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
-            }
+            let answer = match gate {
+                None => preferred_allow_option(&options),
+                Some(gate) => match gate.decide(&permission_action(params)) {
+                    Decision::Allow => policy_allow_option(&options),
+                    Decision::Ask | Decision::Deny(_) => policy_reject_option(&options),
+                },
+            };
+            client.respond(&id, permission_outcome(answer));
             Vec::new()
         }
         _ => {
@@ -3004,11 +3071,14 @@ fn is_user_question(options: &[Value]) -> bool {
     })
 }
 
-/// The live-run request handler: tool permissions auto-accept like
-/// [`handle_server_request`], but question-shaped requests block on the
-/// engine's input bridge (in a subtask so the message loop keeps flowing)
-/// and answer with the option whose name matches the chosen label. A dropped
-/// resolver degrades to `cancelled` — never a silent allow.
+/// The live-run request handler: in Bypass tool permissions auto-accept
+/// like [`handle_server_request`]; otherwise the policy answers each one
+/// (asking the user through the input bridge when it says to) with the
+/// agent's allow-this-once option or its reject-once option, never one that
+/// widens permissions. Question-shaped requests block on the engine's input
+/// bridge and answer with the option whose name matches the chosen label.
+/// Both wait in a subtask so the message loop keeps flowing. A dropped
+/// resolver degrades to a reject or `cancelled` — never a silent allow.
 fn handle_server_request_live(
     client: &RpcClient,
     id: Value,
@@ -3016,6 +3086,7 @@ fn handle_server_request_live(
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
+    gate: Option<&SharedGate>,
 ) -> Vec<AgentEvent> {
     if params
         .get("sessionId")
@@ -3026,7 +3097,7 @@ fn handle_server_request_live(
         return Vec::new();
     }
     if method != "session/request_permission" {
-        return handle_server_request(client, id, method, params);
+        return handle_server_request(client, id, method, params, gate);
     }
     let options: Vec<Value> = params
         .get("options")
@@ -3034,7 +3105,31 @@ fn handle_server_request_live(
         .cloned()
         .unwrap_or_default();
     if !is_user_question(&options) {
-        return handle_server_request(client, id, method, params);
+        let Some(gate) = gate else {
+            return handle_server_request(client, id, method, params, None);
+        };
+        let action = permission_action(params);
+        let gate = gate.clone();
+        let client = client.clone();
+        let request_input = std::sync::Arc::clone(request_input);
+        tokio::spawn(async move {
+            let answer = match gate.settle(&action, &**request_input).await {
+                Decision::Allow => {
+                    let allow = policy_allow_option(&options);
+                    if allow.is_none() {
+                        tracing::warn!(
+                            target: "zeron_harness::acp",
+                            "no allow-once option to approve {}; cancelling",
+                            action.summary()
+                        );
+                    }
+                    allow
+                }
+                Decision::Ask | Decision::Deny(_) => policy_reject_option(&options),
+            };
+            client.respond(&id, permission_outcome(answer));
+        });
+        return Vec::new();
     }
     let names: Vec<String> = options
         .iter()
@@ -3180,8 +3275,9 @@ async fn new_session(
     params: Value,
     agent_name: &str,
     signs_in_from_settings: bool,
+    gate: Option<&SharedGate>,
 ) -> Result<Value, HarnessError> {
-    match request_draining(client, incoming, "session/new", params).await {
+    match request_draining(client, incoming, "session/new", params, gate).await {
         Err(error) if signs_in_from_settings && is_auth_required(&error) => {
             Err(HarnessError::Protocol(not_signed_in(agent_name)))
         }
@@ -3346,6 +3442,7 @@ async fn request_draining(
     incoming: &mut mpsc::Receiver<Incoming>,
     method: &'static str,
     params: Value,
+    gate: Option<&SharedGate>,
 ) -> Result<Value, HarnessError> {
     let loading_session = matches!(method, "session/new" | "session/load");
     let requested_session = params
@@ -3360,7 +3457,7 @@ async fn request_draining(
             {
                 client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
             } else {
-                handle_server_request(client, id, &method, &params);
+                handle_server_request(client, id, &method, &params, gate);
             }
         }
         Incoming::Notification { method, params }
@@ -3511,6 +3608,9 @@ async fn run_session(session: Session) {
         interrupt,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
+    // Outside Bypass every tool permission goes through the policy.
+    let gate = (request.policy.mode != PermissionMode::Bypass)
+        .then(|| SharedGate::new(Gate::new(request.policy.clone(), request.cwd.clone())));
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
@@ -3527,7 +3627,9 @@ async fn run_session(session: Session) {
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
-            match request_draining(&client, &mut incoming, "session/load", load).await {
+            match request_draining(&client, &mut incoming, "session/load", load, gate.as_ref())
+                .await
+            {
                 Ok(resp) => (resume.clone(), resp),
                 Err(e) if auth_method.is_some() && is_auth_required(&e) => {
                     return Err(HarnessError::Protocol(not_signed_in(agent_name)));
@@ -3547,6 +3649,7 @@ async fn run_session(session: Session) {
                         session_params.clone(),
                         agent_name,
                         auth_method.is_some(),
+                        gate.as_ref(),
                     )
                     .await?;
                     (
@@ -3565,6 +3668,7 @@ async fn run_session(session: Session) {
                 session_params,
                 agent_name,
                 auth_method.is_some(),
+                gate.as_ref(),
             )
             .await?;
             (
@@ -3595,6 +3699,7 @@ async fn run_session(session: Session) {
                 &mut session_response,
                 &model,
                 &selection.members,
+                gate.as_ref(),
             )
             .await?;
             request.model = Some(advertised);
@@ -3639,6 +3744,7 @@ async fn run_session(session: Session) {
                     "sessionId": session_id,
                     "modelId": model,
                 }),
+                gate.as_ref(),
             )
             .await
             .map_err(|error| {
@@ -3662,6 +3768,7 @@ async fn run_session(session: Session) {
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
+            request.policy.mode,
         );
         // Devin's effort and speed choices depend on the selected model:
         // switch the model first, then choose them from what it offers.
@@ -3688,6 +3795,7 @@ async fn run_session(session: Session) {
                     &mut incoming,
                     "session/set_config_option",
                     Value::Object(params),
+                    gate.as_ref(),
                 )
                 .await
                 {
@@ -3706,6 +3814,17 @@ async fn run_session(session: Session) {
                                 requested_model.as_deref().unwrap_or_default()
                             )));
                         }
+                        // Outside Bypass the mode is what makes the agent ask:
+                        // running on in a mode that doesn't would ignore the
+                        // policy.
+                        if request.policy.mode != PermissionMode::Bypass
+                            && is_mode_config_option(&options_snapshot, &config_id)
+                        {
+                            return Err(HarnessError::Protocol(format!(
+                                "{agent_name} rejected the {} permission mode ({payload}): {e}",
+                                request.policy.mode.label()
+                            )));
+                        }
                         tracing::debug!(
                             target: "zeron_harness::acp",
                             "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
@@ -3722,8 +3841,27 @@ async fn run_session(session: Session) {
                 requested_model.as_deref(),
                 &efforts,
                 &request.model_options,
+                request.policy.mode,
             );
             sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
+        }
+        // Agents with only the superseded `modes` state (Hermes) switch
+        // through `session/set_mode`. Bypass leaves them as they were.
+        if let Some(mode_id) = legacy_mode_change(&options_snapshot, request.policy.mode) {
+            request_draining(
+                &client,
+                &mut incoming,
+                "session/set_mode",
+                json!({ "sessionId": session_id, "modeId": mode_id }),
+                gate.as_ref(),
+            )
+            .await
+            .map_err(|e| {
+                HarnessError::Protocol(format!(
+                    "{agent_name} rejected the {} permission mode ({mode_id}): {e}",
+                    request.policy.mode.label()
+                ))
+            })?;
         }
         Ok::<(String, bool, Vec<SlashCommand>), HarnessError>((
             session_id,
@@ -4047,6 +4185,7 @@ async fn run_session(session: Session) {
                                 &params,
                                 &request_input,
                                 &session_id,
+                                gate.as_ref(),
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -4271,6 +4410,7 @@ async fn run_session(session: Session) {
                         &params,
                         &request_input,
                         &session_id,
+                        gate.as_ref(),
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -4381,6 +4521,7 @@ async fn run_session(session: Session) {
                                         &params,
                                         &request_input,
                                 &session_id,
+                                        gate.as_ref(),
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -5432,7 +5573,13 @@ mod tests {
         // Model switch + effort preference list; fastMode untouched without a
         // model-option selection.
         assert_eq!(
-            config_option_sets(&response, Some("claude-opus-5"), &["medium"], &no_opts),
+            config_option_sets(
+                &response,
+                Some("claude-opus-5"),
+                &["medium"],
+                &no_opts,
+                PermissionMode::Bypass
+            ),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5" })),
                 ("effort".to_owned(), json!({ "value": "medium" })),
@@ -5440,7 +5587,13 @@ mod tests {
         );
         // Effort preference order: first ADVERTISED candidate wins.
         assert_eq!(
-            config_option_sets(&response, None, &["xhigh", "max"], &no_opts),
+            config_option_sets(
+                &response,
+                None,
+                &["xhigh", "max"],
+                &no_opts,
+                PermissionMode::Bypass
+            ),
             vec![("effort".to_owned(), json!({ "value": "max" }))]
         );
         // contextWindow=1m composes the [1m] model id; fastMode=on matches the
@@ -5449,7 +5602,13 @@ mod tests {
         opts.insert("contextWindow".into(), json!("1m"));
         opts.insert("fastMode".into(), json!("on"));
         assert_eq!(
-            config_option_sets(&response, Some("claude-opus-5"), &["high"], &opts),
+            config_option_sets(
+                &response,
+                Some("claude-opus-5"),
+                &["high"],
+                &opts,
+                PermissionMode::Bypass
+            ),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5[1m]" })),
                 (
@@ -5460,16 +5619,34 @@ mod tests {
         );
         // Already-current values and unadvertised models set nothing.
         assert_eq!(
-            config_option_sets(&response, Some("claude-sonnet-5"), &["high"], &no_opts),
+            config_option_sets(
+                &response,
+                Some("claude-sonnet-5"),
+                &["high"],
+                &no_opts,
+                PermissionMode::Bypass
+            ),
             Vec::new()
         );
         assert_eq!(
-            config_option_sets(&response, Some("gpt-5.6-sol"), &[], &no_opts),
+            config_option_sets(
+                &response,
+                Some("gpt-5.6-sol"),
+                &[],
+                &no_opts,
+                PermissionMode::Bypass
+            ),
             Vec::new()
         );
         // No configOptions advertised → nothing to set.
         assert_eq!(
-            config_option_sets(&json!({"sessionId": "s"}), Some("x"), &["high"], &no_opts),
+            config_option_sets(
+                &json!({"sessionId": "s"}),
+                Some("x"),
+                &["high"],
+                &no_opts,
+                PermissionMode::Bypass
+            ),
             Vec::new()
         );
     }
@@ -5790,7 +5967,7 @@ mod tests {
         });
         let no_opts = serde_json::Map::new();
         assert_eq!(
-            config_option_sets(&codex, None, &[], &no_opts),
+            config_option_sets(&codex, None, &[], &no_opts, PermissionMode::Bypass),
             vec![("mode".to_owned(), json!({ "value": "agent-full-access" }))]
         );
     }
@@ -6052,7 +6229,7 @@ async fn setup_retains_bounded_session_metadata_before_response() {
         RpcClient::new(child.stdin.take().unwrap(), child.stdout.take().unwrap());
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        request_draining(&client, &mut incoming, "session/new", json!({})),
+        request_draining(&client, &mut incoming, "session/new", json!({}), None),
     )
     .await
     .unwrap()

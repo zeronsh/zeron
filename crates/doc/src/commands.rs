@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{RunRequest, UserInputAnswer};
+use zeron_proto::{GoalCommand, RunRequest, UserInputAnswer};
 
 use crate::constants::COMMAND_DEFAULT_TTL_MS;
 
@@ -21,6 +21,9 @@ pub enum SessionCommandKind {
     Steer,
     Interrupt,
     RespondInput,
+    /// Goal-mode mutation (`/goal`); additive — hosts that predate it skip
+    /// the entry as unreadable and the goal simply never changes there.
+    Goal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +57,9 @@ pub enum SessionCommandPayload {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
+    Goal {
+        command: GoalCommand,
+    },
 }
 
 impl SessionCommandPayload {
@@ -63,6 +69,7 @@ impl SessionCommandPayload {
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
+            SessionCommandPayload::Goal { .. } => SessionCommandKind::Goal,
         }
     }
 }
@@ -349,6 +356,7 @@ mod tests {
 
     fn run_request() -> RunRequest {
         RunRequest {
+            policy: Default::default(),
             mcp: None,
             prompt: "hello".into(),
             harness: None,

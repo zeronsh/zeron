@@ -86,6 +86,12 @@ pub trait Harness: Send + Sync {
     fn supports_steering(&self) -> bool;
     fn steering_mode(&self) -> SteeringMode;
     fn reasoning_levels(&self) -> &[ReasoningLevel];
+    /// The permission modes and sandboxes this harness honours. An agent
+    /// that never asks Zeron before acting can only run `Bypass` (until an
+    /// OS sandbox confines it); pickers offer only what's listed here.
+    fn policy_caps(&self) -> zeron_proto::PolicyCaps {
+        zeron_proto::PolicyCaps::bypass_only()
+    }
     /// Whether the agent's own CLI is present on this device — the settings
     /// gate for enabling the harness. Version probes are cached by executable identity.
     /// Defaults to true for harnesses without a CLI to check (mock).
@@ -184,6 +190,7 @@ pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;
 pub mod opencode;
+pub mod policy;
 pub mod pi;
 pub mod process;
 mod scratch;

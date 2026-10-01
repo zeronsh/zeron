@@ -579,7 +579,7 @@ mod tests {
     use zeron_doc::MessageStatus;
 
     fn entry(id: &str, role: MessageRole, text: &str) -> SessionMessageEntry {
-        SessionMessageEntry {
+        SessionMessageEntry { origin: None,
             id: id.into(),
             role,
             parts: vec![MessagePart::Text {
