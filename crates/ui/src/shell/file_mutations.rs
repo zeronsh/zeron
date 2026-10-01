@@ -308,7 +308,8 @@ mod tests {
             shell.active_chat = "other".into();
             let input = shell.composer.read(cx).input.clone();
             let before = input.read(cx).text().to_string();
-            shell.attach_workspace_drag(&payload, window, cx);
+            let composer = shell.composer.clone();
+            shell.attach_workspace_drag(&payload, &composer, window, cx);
             assert_eq!(input.read(cx).text(), before);
         });
     }

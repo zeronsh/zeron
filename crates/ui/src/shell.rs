@@ -3101,9 +3101,12 @@ impl Shell {
             .collect()
     }
 
+    /// Attach a workspace path only while the surface it came from still
+    /// shows this chat's workspace; a drag outliving a session switch is dropped.
     fn attach_workspace_drag(
         &mut self,
         payload: &WorkspacePathDrag,
+        composer: &Entity<Composer>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3125,7 +3128,7 @@ impl Shell {
                 files.entity_id() == origin.surface_id && files.read(cx).accepts_origin(origin, cx)
             });
         if valid {
-            self.composer.update(cx, |composer, cx| {
+            composer.update(cx, |composer, cx| {
                 composer.add_workspace_path(&payload.path, payload.is_directory, window, cx)
             });
         }
@@ -3599,7 +3602,8 @@ impl Shell {
                                 crate::files::WorkspacePathSource::Tree,
                                 None,
                             );
-                        this.attach_workspace_drag(&payload, window, cx);
+                        let composer = this.composer.clone();
+                        this.attach_workspace_drag(&payload, &composer, window, cx);
                     }
                     FilesEvent::Mutate(intent) => {
                         this.start_file_mutation(source.clone(), intent.clone(), cx)
@@ -10079,17 +10083,7 @@ impl Shell {
             None
         };
         let status = self.render_status_strip(composer_width, cx);
-        // Attachment dropzone over the ENTIRE conversation column (transcript
-        // + composer, not just the pill). OS images keep using the upload
-        // pipeline; workspace files/directories and file tabs become the same
-        // projected file-mention chips the composer already understands.
-        // The veil itself uses typed `drag_over` styles below. Do not cache
-        // drag presence in shell state: the platform's `FileDrop::Exited`
-        // clears GPUI's external payload without sending one last mouse-move,
-        // so a cached bit can survive and reappear during an unrelated drag
-        // such as a pane resize.
-        div()
-            .id("chat-dropzone")
+        self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
@@ -10102,24 +10096,6 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                let paths = paths.paths().to_vec();
-                this.composer
-                    .update(cx, |composer, cx| composer.add_paths(paths, cx));
-                cx.notify();
-            }))
-            .on_drop::<WorkspacePathDrag>(cx.listener(
-                |this, payload: &WorkspacePathDrag, window, cx| {
-                    this.attach_workspace_drag(payload, window, cx);
-                    cx.notify();
-                },
-            ))
-            .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, window, cx| {
-                if let Some(path) = &payload.workspace_path {
-                    this.attach_workspace_drag(path, window, cx);
-                }
-                cx.notify();
-            }))
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.

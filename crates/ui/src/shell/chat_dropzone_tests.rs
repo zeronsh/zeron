@@ -18,6 +18,12 @@ impl Render for DropHost {
         self.shell.update(cx, |shell, cx| {
             let main = shell.render_main(window, 400., 400., cx);
             let right = shell.render_right_pane(window, cx);
+            // Tree and search rows stamp the explorer's current origin; the
+            // stale source models a drag that outlived its workspace.
+            let origin = shell
+                .files
+                .get(&shell.panel_key(cx))
+                .and_then(|files| files.read(cx).interaction_origin(cx));
             div()
                 .size_full()
                 .flex()
@@ -27,22 +33,30 @@ impl Render for DropHost {
                 // to enumerate a checkout. Targets and file tabs are real UI.
                 .child(
                     div().h(px(24.)).flex().children(
-                        [("file", "src/tree.rs", false), ("directory", "src", true)]
-                            .into_iter()
-                            .map(|(id, path, directory)| {
-                                div()
-                                    .id(id)
-                                    .debug_selector(move || id.into())
-                                    .w(px(100.))
-                                    .h_full()
-                                    .on_drag(
-                                        WorkspacePathDrag::new(path.into(), directory),
-                                        |payload, _, _, cx| {
-                                            crate::files::workspace_path_drag_ghost(payload, cx)
-                                        },
-                                    )
-                                    .child(id)
-                            }),
+                        [
+                            ("file", "src/tree.rs", false, origin.clone()),
+                            ("directory", "src", true, origin),
+                            ("stale", "src/stale.rs", false, None),
+                        ]
+                        .into_iter()
+                        .map(|(id, path, directory, origin)| {
+                            div()
+                                .id(id)
+                                .debug_selector(move || id.into())
+                                .w(px(100.))
+                                .h_full()
+                                .on_drag(
+                                    WorkspacePathDrag::new(path.into(), directory).with_origin(
+                                        origin,
+                                        crate::files::WorkspacePathSource::Tree,
+                                        None,
+                                    ),
+                                    |payload, _, _, cx| {
+                                        crate::files::workspace_path_drag_ghost(payload, cx)
+                                    },
+                                )
+                                .child(id)
+                        }),
                     ),
                 )
                 .child(
@@ -129,6 +143,15 @@ fn setup_with_shell(
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.add_file_surface("src/tab.rs".into(), window, cx);
+            let explorer = cx.new(|cx| {
+                crate::files::FilesSurface::new_explorer(
+                    shell.state.clone(),
+                    shell.active_chat.clone(),
+                    false,
+                    cx,
+                )
+            });
+            shell.files.insert(shell.panel_key(cx), explorer);
             let mut side = shell.state.read(cx).chats[0].clone();
             side.id = "saved-side".into();
             side.parent_chat_id = Some("parent".into());
@@ -243,6 +266,22 @@ fn workspace_drops_target_saved_and_unsaved_side_chat_composers(cx: &mut TestApp
             }
         });
     }
+    // A payload without a live origin attaches to neither side nor main chats.
+    let side = cx.update(|_, cx| {
+        shell.read(cx).side_chats[&1]
+            .composer
+            .read(cx)
+            .surface_bounds()
+            .get()
+            .unwrap()
+            .center()
+    });
+    drag(cx, "stale", side);
+    drag(cx, "stale", gpui::point(px(200.), px(150.)));
+    shell.read_with(cx, |shell, cx| {
+        assert!(!text(&shell.side_chats[&1].composer, cx).contains("stale.rs"));
+        assert!(text(&shell.composer, cx).is_empty());
+    });
 }
 
 #[gpui::test]

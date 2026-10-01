@@ -75,8 +75,7 @@ The production right-tab visual regression reproduces an eight-pixel moving clic
 
 ## File tree actions (2026-09-23)
 
-Workspace rows now expose a dedicated drag handle on Windows. The row body
-still uses `click_activation_drag_enabled()` and retains the jitter protection;
-the handle starts the same workspace-relative payload used by the composer.
+Workspace tree rows keep their row-wide drag on every platform, including
+Windows; GPUI's platform drag threshold protects ordinary clicks from jitter.
 Tree, search and file-tab payloads carry their originating surface and workspace
 context so a delayed drop cannot attach a path to a different session.

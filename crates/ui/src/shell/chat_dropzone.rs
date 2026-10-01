@@ -21,21 +21,19 @@ impl Shell {
                 cx.notify();
             }))
             .on_drop::<WorkspacePathDrag>(cx.listener(
-                move |_, payload: &WorkspacePathDrag, window, cx| {
-                    workspace.update(cx, |composer, cx| {
-                        composer.add_workspace_path(&payload.path, payload.is_directory, window, cx)
-                    });
+                move |this, payload: &WorkspacePathDrag, window, cx| {
+                    this.attach_workspace_drag(payload, &workspace, window, cx);
                     cx.notify();
                 },
             ))
-            .on_drop::<RightTabDrag>(cx.listener(move |_, payload: &RightTabDrag, window, cx| {
-                if let Some(path) = &payload.workspace_path {
-                    composer.update(cx, |composer, cx| {
-                        composer.add_workspace_path(&path.path, path.is_directory, window, cx)
-                    });
-                }
-                cx.notify();
-            }))
+            .on_drop::<RightTabDrag>(cx.listener(
+                move |this, payload: &RightTabDrag, window, cx| {
+                    if let Some(path) = &payload.workspace_path {
+                        this.attach_workspace_drag(path, &composer, window, cx);
+                    }
+                    cx.notify();
+                },
+            ))
     }
 
     pub(super) fn attachment_drop_overlay(theme: &Theme) -> gpui::Stateful<gpui::Div> {

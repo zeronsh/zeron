@@ -195,7 +195,8 @@ impl Shell {
                                 crate::files::WorkspacePathSource::Tree,
                                 None,
                             );
-                        this.attach_workspace_drag(&payload, window, cx);
+                        let composer = this.composer.clone();
+                        this.attach_workspace_drag(&payload, &composer, window, cx);
                     }
                     FilesEvent::Mutate(intent)
                         if this.accepts_file_navigation(&owner, &source, cx) =>
