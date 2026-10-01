@@ -213,8 +213,9 @@ impl Shell {
     }
 
     /// `+` in the titlebar: open the new-session canvas. A set sidebar filter
-    /// re-homes the canvas onto that project; under "All" the current pick
-    /// (the last selected project, restored from composer defaults) stands.
+    /// re-homes the canvas onto that project; under "All" the canvas restores
+    /// the last project/device picked in the composer (composer defaults), not
+    /// the project of whichever session happens to be open.
     ///
     /// A new chat always starts with the terminal hidden: when the drawer is
     /// open it just hides (detach, not close — the source chat's tabs and
@@ -255,6 +256,14 @@ impl Shell {
                 if let Some(device) = defaults.device {
                     s.select_device(device, cx);
                 }
+            } else if let Some(project) = defaults.project.filter(|id| s.space_row(id).is_some()) {
+                s.select_space(Some(project), cx);
+            } else if let Some(device) = defaults
+                .device
+                .filter(|id| s.devices.iter().any(|d| &d.id == id))
+            {
+                // The remembered project is gone; keep its device.
+                s.select_device(device, cx);
             }
             s.select_chat(None, cx);
         });

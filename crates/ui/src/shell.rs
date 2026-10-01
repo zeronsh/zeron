@@ -14831,6 +14831,83 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn new_session_restores_last_picked_project_not_open_session(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::settings::composer::ComposerDefaults {
+            device: Some("remote".into()),
+            project: Some("picked".into()),
+            ..Default::default()
+        }
+        .save(dir.path())
+        .unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let space = |id: &str, device: &str| zeron_proto::Space {
+            id: id.into(),
+            device_id: device.into(),
+            path: format!("/{id}"),
+            name: None,
+            git_detected: false,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        };
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_spaces(vec![space("picked", "remote"), space("open", "local")]);
+                    // Boot landed on the most recent session, in another project.
+                    state.selected_chat = Some("recent-chat".into());
+                    state.selected_space = Some("open".into());
+                    state.selected_device = Some("local".into());
+                });
+                shell.settings.space_filter = None;
+                shell.open_new_session(cx);
+                let state = shell.state.read(cx);
+                assert_eq!(state.selected_space.as_deref(), Some("picked"));
+                assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+
+                // A remembered project that no longer exists is skipped
+                // rather than clearing the canvas target.
+                shell.state.update(cx, |state, _| {
+                    state.apply_spaces(vec![space("open", "local")]);
+                    state.selected_chat = Some("recent-chat".into());
+                    state.selected_space = Some("open".into());
+                });
+                shell.open_new_session(cx);
+                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("open"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn projectless_new_session_restores_opt_out_and_clears_sidebar_filter(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         crate::settings::composer::ComposerDefaults {
