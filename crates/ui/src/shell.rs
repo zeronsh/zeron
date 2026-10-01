@@ -1836,6 +1836,12 @@ pub struct Shell {
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
+    /// Quote block for the side chat a selection reply is minting, keyed by
+    /// the client-minted chat id so it lands on the tab the fork opens.
+    selection_reply_quote: Option<(String, String)>,
+    /// Composer that must take focus once the next frame's layout has
+    /// mounted it (selection-bar actions run outside a window context).
+    pending_composer_focus: Option<gpui::FocusHandle>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2289,6 +2295,8 @@ impl Shell {
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
+            selection_reply_quote: None,
+            pending_composer_focus: None,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -3865,10 +3873,11 @@ impl Shell {
     }
 
     /// Spawn-chip events from the primary transcript AND from subagent-tab
-    /// transcripts (nested spawns open their own tabs).
+    /// transcripts (nested spawns open their own tabs). Selection-bar actions
+    /// resolve against the pane that owns the emitting transcript.
     fn on_transcript_event(
         &mut self,
-        _: Entity<Transcript>,
+        source: Entity<Transcript>,
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
@@ -3887,7 +3896,49 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::AddSelectionToComposer { text } => {
+                let Some(composer) = self.composer_for_transcript(&source) else {
+                    return;
+                };
+                composer.update(cx, |composer, cx| composer.insert_selection_quote(text, cx));
+                self.pending_composer_focus = Some(composer.read(cx).focus_handle(cx));
+                cx.notify();
+            }
+            TranscriptEvent::ReplyInSideChat { text, entry_id } => {
+                let Some(chat) = self.chat_for_transcript(&source, cx) else {
+                    return;
+                };
+                self.reply_in_side_chat(chat, text.clone(), entry_id.clone(), cx);
+            }
         }
+    }
+
+    /// The composer of the pane showing `source`: the main composer for the
+    /// primary transcript, a side chat's own for its tab. Subagent
+    /// transcripts have none.
+    fn composer_for_transcript(&self, source: &Entity<Transcript>) -> Option<Entity<Composer>> {
+        if *source == self.transcript {
+            return Some(self.composer.clone());
+        }
+        self.side_chats
+            .values()
+            .find(|tab| tab.transcript == *source)
+            .map(|tab| tab.composer.clone())
+    }
+
+    /// The chat a transcript instance is showing.
+    fn chat_for_transcript(
+        &self,
+        source: &Entity<Transcript>,
+        cx: &App,
+    ) -> Option<zeron_proto::Chat> {
+        if *source == self.transcript {
+            return self.state.read(cx).selected_chat_row().cloned();
+        }
+        self.side_chats
+            .values()
+            .find(|tab| tab.transcript == *source)
+            .and_then(|tab| tab.state.read(cx).selected_chat_row().cloned())
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -9281,6 +9332,30 @@ impl Shell {
         }
         if event.keystroke.key == "escape" && self.capture_escape_surface(cx) {
             cx.stop_propagation();
+            return;
+        }
+        // Escape past every overlay also drops a live transcript selection
+        // and its action bar.
+        if event.keystroke.key == "escape" && crate::markdown::selection::selected_text().is_some()
+        {
+            crate::markdown::selection::clear();
+            self.dismiss_selection_bars(cx);
+            cx.stop_propagation();
+        }
+    }
+
+    /// Drop every transcript's selection bar after the global selection was
+    /// cleared outside it.
+    fn dismiss_selection_bars(&mut self, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |transcript, cx| transcript.dismiss_selection(cx));
+        for tab in self.side_chats.values() {
+            tab.transcript
+                .update(cx, |transcript, cx| transcript.dismiss_selection(cx));
+        }
+        for tab in self.subagent_tabs.values() {
+            tab.transcript
+                .update(cx, |transcript, cx| transcript.dismiss_selection(cx));
         }
     }
 
@@ -12381,6 +12456,11 @@ impl Render for Shell {
                 .unwrap_or_else(|| self.composer.focus_handle(cx));
             window.on_next_frame(move |window, cx| window.focus(&target, cx));
         }
+        // Selection-bar actions run outside a window context. Hand the
+        // composer its focus once the frame that mounted it has laid out.
+        if let Some(target) = self.pending_composer_focus.take() {
+            window.on_next_frame(move |window, cx| window.focus(&target, cx));
+        }
         let shortcut_focus = self.shortcut_focus.clone();
         let (preferred_focus, unfocused) = self.navigation_focus_fallback(cx);
         window.defer(cx, move |window, cx| {
@@ -12951,6 +13031,52 @@ mod tests {
             Some((r"C:\Users\me\repo", r"\\?\C:\Users\me\repo")),
         );
         assert_eq!(chat_copy_path(&windows), Some(r"C:\Users\me\repo"));
+    }
+
+    /// The primary transcript's "Add to chat" appends the quoted selection to
+    /// the main composer and leaves a focus request for the mounted input.
+    #[gpui::test]
+    fn add_selection_to_composer_quotes_into_the_main_draft(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                let source = shell.transcript.clone();
+                shell.on_transcript_event(
+                    source,
+                    &TranscriptEvent::AddSelectionToComposer {
+                        text: "one\ntwo".into(),
+                    },
+                    cx,
+                );
+                assert_eq!(
+                    shell.composer.read(cx).input.read(cx).text(),
+                    "> one\n> two\n"
+                );
+                assert!(shell.pending_composer_focus.is_some());
+            })
+            .unwrap();
     }
 
     #[test]
@@ -16305,6 +16431,26 @@ impl Shell {
     pub fn fixture_appshots_transcript_start(&self, cx: &mut Context<Self>) {
         self.transcript
             .update(cx, |t, cx| t.fixture_appshots_start(cx));
+    }
+
+    pub fn fixture_appshots_transcript_end(&mut self, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |t, cx| t.fixture_appshots_end(cx));
+    }
+
+    pub fn fixture_appshots_select_range(
+        &mut self,
+        key: &str,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.transcript
+            .update(cx, |t, cx| t.fixture_appshots_select_range(key, range, cx))
+    }
+
+    pub fn fixture_appshots_add_selection(&mut self, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |t, cx| t.fixture_appshots_add_selection(cx));
     }
 }
 

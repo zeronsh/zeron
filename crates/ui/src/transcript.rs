@@ -155,6 +155,117 @@ pub(crate) fn selection_scroll_step(bounds: Bounds<Pixels>, position: Point<Pixe
         0.0
     }
 }
+
+/// Gap between the selection and its action bar.
+const SELECTION_BAR_GAP_PX: f32 = 6.0;
+/// Bar height: a 24px button inside 2px of padding on each side.
+const SELECTION_BAR_HEIGHT_PX: f32 = 28.0;
+/// Bar corner rounding, matched by the backdrop blur it floats on.
+const SELECTION_BAR_RADIUS_PX: f32 = 8.0;
+/// Flip the bar below the selection when its first line starts this close to
+/// the viewport top (gap + bar + a little slack).
+const SELECTION_BAR_FLIP_PX: f32 = 36.0;
+
+/// Where the selection bar sits, relative to the transcript viewport's
+/// top-left corner: six pixels above the first selected line, or six below
+/// the last selected line when the first one is too close to the viewport
+/// top, horizontally at the selection start and clamped inside the viewport.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SelectionBarPlacement {
+    pub x: f32,
+    pub y: f32,
+}
+
+pub(crate) fn selection_bar_placement(
+    first_line: Bounds<Pixels>,
+    last_line: Bounds<Pixels>,
+    viewport: Bounds<Pixels>,
+    bar_size: gpui::Size<Pixels>,
+) -> SelectionBarPlacement {
+    let width = f32::from(viewport.size.width);
+    let bar_width = f32::from(bar_size.width);
+    let x = (f32::from(first_line.left()) - f32::from(viewport.left()))
+        .clamp(0.0, (width - bar_width).max(0.0));
+    let first_top = f32::from(first_line.top()) - f32::from(viewport.top());
+    let y = if first_top < SELECTION_BAR_FLIP_PX {
+        f32::from(last_line.bottom()) - f32::from(viewport.top()) + SELECTION_BAR_GAP_PX
+    } else {
+        first_top - SELECTION_BAR_GAP_PX - f32::from(bar_size.height)
+    };
+    SelectionBarPlacement { x, y }
+}
+
+/// Measured size of the selection bar's fixed contents: both labels at 12px
+/// in the UI face, their 14px icons, and the padding, gaps and separator
+/// around them. The placement clamp needs the width before layout paints.
+fn selection_bar_size(window: &mut Window, theme: &Theme) -> gpui::Size<Pixels> {
+    let label_width = |text: &'static str| {
+        let run = TextRun {
+            len: text.len(),
+            font: gpui::font(theme.font_sans.clone()),
+            color: theme.text,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        f32::from(
+            window
+                .text_system()
+                .shape_line(SharedString::from(text), px(12.0), &[run], None)
+                .width(),
+        )
+    };
+    let width = 2.0
+        + 6.0
+        + 14.0
+        + 5.0
+        + label_width("Add to chat")
+        + 6.0
+        + 2.0
+        + 2.0
+        + 1.0
+        + 2.0
+        + 2.0
+        + 6.0
+        + 14.0
+        + 5.0
+        + label_width("Reply in side chat")
+        + 6.0
+        + 2.0;
+    size(px(width), px(SELECTION_BAR_HEIGHT_PX))
+}
+
+/// One action inside the selection bar: icon + label on the compact hover
+/// row every floating menu uses.
+fn selection_bar_button(
+    id: &'static str,
+    icon_path: &'static str,
+    label: &'static str,
+    theme: &Theme,
+    on_mouse_down: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let (text, muted, hover) = (theme.text, theme.text_muted, theme.ink(0.06));
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .h(px(24.0))
+        .px(px(6.0))
+        .gap(px(5.0))
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .text_color(text)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .on_mouse_down(MouseButton::Left, on_mouse_down)
+        .child(
+            crate::icons::icon(icon_path)
+                .size(px(14.0))
+                .text_color(muted),
+        )
+        .child(SharedString::from(label))
+}
 const CHIPS_TOP_PAD: f32 = 2.0;
 /// How long a user fold toggle keeps its height tween armed: the RESIZE
 /// spec's 200ms plus margin. Past this the fold renders statically — an armed
@@ -3222,6 +3333,12 @@ pub struct Transcript {
     /// One-shot timer rescheduled only while the pointer remains in an edge
     /// zone. Dropping it on mouse-up stops all selection scroll work.
     selection_scroll_task: Option<Task<()>>,
+    /// Whether the pane around this transcript has a composer the selection
+    /// bar's actions can reach. Subagent tabs read transcripts without one.
+    selection_actions: bool,
+    /// Selection text captured when a drag settled, while the action bar is
+    /// showing. Cleared by any scroll, click away, or selection change.
+    selection_bar: Option<SharedString>,
     /// MessageRail width gate (set by the shell from the container width).
     rail_enabled: bool,
     /// Height of the shell's composer/status/terminal stack overlaying the
@@ -3293,6 +3410,16 @@ pub enum TranscriptEvent {
         doc_id: String,
         title: String,
         frozen: bool,
+    },
+    /// The selection bar's "Add to chat": append the quoted selection to the
+    /// composer of the pane showing this transcript.
+    AddSelectionToComposer { text: String },
+    /// The selection bar's "Reply in side chat": fork this transcript's chat
+    /// through `entry_id` and pre-fill the new side chat's composer with the
+    /// quoted selection.
+    ReplyInSideChat {
+        text: String,
+        entry_id: Option<String>,
     },
 }
 
@@ -3443,6 +3570,7 @@ impl Transcript {
         // The rail is sized for the conversation column; a narrow right-pane
         // tab has no width gate driving it, so override instances skip it.
         let rail_enabled = doc_override.is_none();
+        let selection_actions = doc_override.is_none();
         // `follow` is the initial pin: the primary transcript always opens
         // pinned; an override instance pins only while its doc is LIVE (a
         // frozen transcript reads top-down, free-scrolling). Short content
@@ -3516,6 +3644,8 @@ impl Transcript {
             scroll_anim: None,
             selection_drag_position: None,
             selection_scroll_task: None,
+            selection_actions,
+            selection_bar: None,
             rail_enabled,
             bottom_clearance: 0.0,
             rail_hover: None,
@@ -3678,6 +3808,14 @@ impl Transcript {
         &self.state
     }
 
+    /// Shell-driven dismissal (Escape): the global selection is cleared, so
+    /// drop the bar and repaint.
+    pub(crate) fn dismiss_selection(&mut self, cx: &mut Context<Self>) {
+        self.selection_bar = None;
+        self.selection_drag_position = None;
+        cx.notify();
+    }
+
     /// Hand viewport ownership to explicit rail/navigation input before its
     /// reduced-motion or animated branch moves the list.
     pub(crate) fn begin_scroll_navigation(&mut self) {
@@ -3736,6 +3874,9 @@ impl Transcript {
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
+        // A scrolling transcript moves the selected text away from the bar's
+        // anchor, so the bar dismisses itself.
+        self.selection_bar = None;
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
@@ -3856,6 +3997,7 @@ impl Transcript {
             return;
         }
         self.selection_drag_position = Some(event.position);
+        self.selection_bar = None;
         self.discard_pending_viewport();
         self.user_collapse_scroll = None;
         self.stop_automatic_scrolling();
@@ -3871,13 +4013,25 @@ impl Transcript {
     ) {
         let was_selecting = self.selection_drag_position.is_some();
         self.stop_selection_scroll();
-        if let Some(_text) = crate::markdown::selection::end_active_drag() {
+        let ended = crate::markdown::selection::end_active_drag();
+        if let Some(_text) = &ended {
             // X11 middle-click paste parity, including the case where the
             // anchor row has virtualized away and cannot receive mouse-up.
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            cx.write_to_primary(ClipboardItem::new_string(_text));
+            cx.write_to_primary(ClipboardItem::new_string(_text.clone()));
         }
         if was_selecting {
+            // A text element's own mouse-up listener may have ended the drag
+            // already; its spans remain until the selection is cleared, so
+            // the settled text is whatever the model now holds.
+            let settled = ended.or_else(crate::markdown::selection::selected_text);
+            self.selection_bar = if self.selection_actions {
+                settled
+                    .filter(|text| !text.trim().is_empty())
+                    .map(SharedString::from)
+            } else {
+                None
+            };
             self.last_scroll_distance = self.distance_from_bottom();
             self.show_jump_button =
                 jump_visibility(self.show_jump_button, self.last_scroll_distance);
@@ -3888,6 +4042,128 @@ impl Transcript {
     fn stop_selection_scroll(&mut self) {
         self.selection_drag_position = None;
         self.selection_scroll_task = None;
+    }
+
+    /// Entry id of the row the selection ends in — the fork point for
+    /// "Reply in side chat". Rows are matched by longest id prefix against
+    /// the last selected element's key.
+    fn selection_end_entry_id(&self) -> Option<String> {
+        let key = crate::markdown::selection::end_key()?;
+        self.rows
+            .iter()
+            .filter(|row| key.starts_with(row.id.as_ref()))
+            .max_by_key(|row| row.id.len())
+            .map(|row| row.entry_id.to_string())
+    }
+
+    /// The selection action bar: quoted text is captured when the drag
+    /// settles, and the bar only paints while that exact selection is still
+    /// live. `None` when the pane has no composer, every selected element
+    /// scrolled away, or the selection changed.
+    fn render_selection_bar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.selection_actions {
+            return None;
+        }
+        let text = self.selection_bar.clone()?;
+        if crate::markdown::selection::selected_text().as_deref() != Some(text.as_ref()) {
+            return None;
+        }
+        let lines = render::selection_lines()?;
+        let viewport = self.list.viewport_bounds();
+        if f32::from(viewport.size.width) <= 0.0 {
+            return None;
+        }
+        let theme = Theme::of(cx).clone();
+        let bar_size = selection_bar_size(window, &theme);
+        let place = selection_bar_placement(lines.first, lines.last, viewport, bar_size);
+        let entry_id = self.selection_end_entry_id();
+        let add_text = text.clone();
+        let reply_text = text;
+        let bar = div()
+            .occlude()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(SELECTION_BAR_RADIUS_PX))
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .bg(crate::popover::surface_bg(&theme))
+            .p(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.selection_bar.take().is_some() {
+                    cx.notify();
+                }
+            }))
+            .child(selection_bar_button(
+                "selection-bar-add",
+                crate::icons::ADD_CIRCLE,
+                "Add to chat",
+                &theme,
+                cx.listener(move |this, _: &gpui::MouseDownEvent, _: &mut Window, cx| {
+                    this.selection_bar = None;
+                    crate::markdown::selection::clear();
+                    cx.emit(TranscriptEvent::AddSelectionToComposer {
+                        text: add_text.to_string(),
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(1.0))
+                    .h(px(14.0))
+                    .mx(px(2.0))
+                    .bg(theme.hairline(0.12)),
+            )
+            .child(selection_bar_button(
+                "selection-bar-reply",
+                crate::icons::CHAT_ROUND_LINE,
+                "Reply in side chat",
+                &theme,
+                cx.listener(move |this, _: &gpui::MouseDownEvent, _: &mut Window, cx| {
+                    let entry_id = entry_id.clone();
+                    this.selection_bar = None;
+                    crate::markdown::selection::clear();
+                    cx.emit(TranscriptEvent::ReplyInSideChat {
+                        text: reply_text.to_string(),
+                        entry_id,
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ));
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::TopLeft)
+                    // Window coordinates: the placement is computed against the
+                    // list viewport, so an explicit position keeps the bar
+                    // independent of where the deferred node sits in layout.
+                    .position(point(
+                        viewport.left() + px(place.x),
+                        viewport.top() + px(place.y),
+                    ))
+                    .child(motion::menu_in(
+                        "selection-bar",
+                        // The bar floats over transcript prose, so it needs the
+                        // same backdrop blur as every other menu; on opaque
+                        // surfaces the wrapper is a pass-through.
+                        div().child(crate::frost::frosted(
+                            SELECTION_BAR_RADIUS_PX,
+                            crate::frost::MENU_BLUR,
+                            bar,
+                        )),
+                    )),
+            )
+            .into_any_element(),
+        )
     }
 
     fn schedule_selection_scroll(&mut self, cx: &mut Context<Self>) {
@@ -4592,6 +4868,9 @@ impl Transcript {
                 self.own_turn_last_tick = None;
             }
             self.chat_id = selected;
+            self.selection_drag_position = None;
+            self.selection_bar = None;
+            crate::markdown::selection::clear();
             self.rows.clear();
             self.row_cache.clear();
             self.live_parsers.clear();
@@ -8984,6 +9263,9 @@ impl Render for Transcript {
             });
         }
         let rail = self.render_rail(cx);
+        // The selection bar floats over the rows; `deferred` keeps it out of
+        // the list's layout and above the virtualized content.
+        let selection_bar = self.render_selection_bar(window, cx);
         // The scroll-to-bottom pill is rendered by the SHELL (conversation
         // region overlay): it must float just above the composer and paint
         // OVER the bottom fade gradient, which is a later sibling of this
@@ -9034,7 +9316,8 @@ impl Render for Transcript {
                 cx.entity_id().as_u64(),
             ))
             .child(content)
-            .child(rail);
+            .child(rail)
+            .children(selection_bar);
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -9074,6 +9357,30 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    #[test]
+    fn selection_bar_flips_below_and_clamps_to_the_viewport() {
+        let viewport = Bounds::new(point(px(100.0), px(50.0)), size(px(400.0), px(600.0)));
+        let bar = size(px(160.0), px(SELECTION_BAR_HEIGHT_PX));
+        let first = Bounds::new(point(px(180.0), px(300.0)), size(px(80.0), px(20.0)));
+        let last = Bounds::new(point(px(180.0), px(420.0)), size(px(80.0), px(20.0)));
+        // Room above: six pixels over the first line, at the selection start.
+        let place = selection_bar_placement(first, last, viewport, bar);
+        assert_eq!(place.x, 80.0);
+        assert_eq!(place.y, 300.0 - 50.0 - 6.0 - SELECTION_BAR_HEIGHT_PX);
+        // Near the viewport top: below the last selected line instead.
+        let first = Bounds::new(point(px(180.0), px(70.0)), size(px(80.0), px(20.0)));
+        let place = selection_bar_placement(first, last, viewport, bar);
+        assert_eq!(place.y, 440.0 - 50.0 + 6.0);
+        // Near the right edge the bar shifts in so it stays inside.
+        let first = Bounds::new(point(px(520.0), px(300.0)), size(px(80.0), px(20.0)));
+        let place = selection_bar_placement(first, last, viewport, bar);
+        assert_eq!(place.x, 400.0 - 160.0);
+        // Starting left of the viewport clamps to its left edge.
+        let first = Bounds::new(point(px(40.0), px(300.0)), size(px(80.0), px(20.0)));
+        let place = selection_bar_placement(first, last, viewport, bar);
+        assert_eq!(place.x, 0.0);
     }
 
     #[gpui::test]
@@ -12437,6 +12744,78 @@ mod tests {
             });
         }
 
+        /// Dragging over a reply shows the action bar; clicking its first
+        /// button emits the quoted selection for the composer instead of
+        /// letting the click clear the selection first.
+        #[gpui::test]
+        fn selection_bar_add_to_chat_emits_the_quoted_selection(cx: &mut gpui::TestAppContext) {
+            let dir = tempfile::tempdir().unwrap();
+            crate::markdown::selection::clear();
+            cx.update(|cx| {
+                gpui_base::init(cx);
+                cx.set_global(Theme::dark());
+                crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            });
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            struct BarFixture(Entity<Transcript>);
+            impl Render for BarFixture {
+                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                    div().size_full().child(self.0.clone())
+                }
+            }
+            let (_fixture, cx) = cx.add_window_view(|_, _| BarFixture(transcript.clone()));
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![assistant(
+                    "reply",
+                    MessageStatus::Complete,
+                    vec![text_part("text", "Selectable response text.")],
+                )];
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            cx.run_until_parked();
+            let events: Rc<RefCell<Vec<TranscriptEvent>>> = Default::default();
+            let _events_sub = {
+                let events = events.clone();
+                cx.update(|_, cx| {
+                    cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                        events.borrow_mut().push(event.clone())
+                    })
+                })
+            };
+            let bounds = render::selection_test_bounds("reply#text.0:0");
+            let start = bounds.origin + point(px(1.0), px(8.0));
+            let end = start + point(px(60.0), px(0.0));
+            let modifiers = gpui::Modifiers::default();
+            cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+            cx.simulate_mouse_move(end, MouseButton::Left, modifiers);
+            cx.simulate_mouse_up(end, MouseButton::Left, modifiers);
+            let selected = transcript.read_with(cx, |this, _| {
+                this.selection_bar
+                    .clone()
+                    .expect("the settled selection shows the bar")
+            });
+            let add = cx
+                .debug_bounds("selection-bar-add")
+                .expect("the bar's first button is painted");
+            cx.simulate_click(add.center(), modifiers);
+            let events = events.borrow();
+            assert_eq!(events.len(), 1, "expected one action event");
+            match &events[0] {
+                TranscriptEvent::AddSelectionToComposer { text } => {
+                    // The bar hands the composer the settled selection; the
+                    // quote block is the composer's pure rule.
+                    assert_eq!(text.as_str(), selected.as_ref());
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+            assert!(crate::markdown::selection::selected_text().is_none());
+            transcript.read_with(cx, |this, _| assert!(this.selection_bar.is_none()));
+        }
+
         #[test]
         fn runway_first_echo_starts_a_glide_in_an_empty_chat() {
             with_window(|transcript, window, cx| {
@@ -14193,6 +14572,46 @@ mod tests {
 impl Transcript {
     pub fn fixture_appshots_start(&mut self, cx: &mut Context<Self>) {
         self.list.scroll_to(gpui::ListOffset::default());
+        cx.notify();
+    }
+
+    /// Scroll the list to the bottom the same way the jump-to-bottom control
+    /// does.
+    pub fn fixture_appshots_end(&mut self, cx: &mut Context<Self>) {
+        self.jump_to_bottom(cx);
+    }
+
+    /// Select a range of a painted markdown element and settle it, so the
+    /// action bar shows without pointer input.
+    pub fn fixture_appshots_select_range(
+        &mut self,
+        key: &str,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !render::fixture_select_range(key, range) {
+            return false;
+        }
+        let Some(text) = crate::markdown::selection::end_active_drag() else {
+            return false;
+        };
+        self.selection_bar = self
+            .selection_actions
+            .then_some(text)
+            .map(SharedString::from);
+        cx.notify();
+        self.selection_bar.is_some()
+    }
+
+    /// Invoke the bar's "Add to chat" without pointer input.
+    pub fn fixture_appshots_add_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self.selection_bar.take() else {
+            return;
+        };
+        crate::markdown::selection::clear();
+        cx.emit(TranscriptEvent::AddSelectionToComposer {
+            text: text.to_string(),
+        });
         cx.notify();
     }
 }

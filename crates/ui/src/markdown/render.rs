@@ -1441,6 +1441,62 @@ thread_local! {
     static PAINTED_SURFACES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
+/// The window-space bounds of the selection's first and last selected visual
+/// lines, for placing a floating action bar over the selection.
+pub(crate) struct SelectionLines {
+    pub first: gpui::Bounds<gpui::Pixels>,
+    pub last: gpui::Bounds<gpui::Pixels>,
+}
+
+/// Rects of the selected lines among the elements painted THIS frame. Spans
+/// whose elements scrolled out of the registry are skipped, so a partially
+/// virtualized selection still reports the lines that are on screen.
+pub(crate) fn selection_lines() -> Option<SelectionLines> {
+    let spans = super::selection::spans();
+    if spans.is_empty() {
+        return None;
+    }
+    REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let rects = |span: &super::selection::Span| {
+            let entry = reg.iter().find(|entry| entry.key.as_ref() == span.key)?;
+            let range = entry.offsets.as_ref().map_or_else(
+                || span.range.clone(),
+                |map| map.displayed_range(span.range.clone()),
+            );
+            Some(range_rects(&entry.layout, &range, 0.0, 0.0))
+        };
+        let first = spans
+            .iter()
+            .find_map(|span| rects(span).and_then(|rects| rects.into_iter().next()))?;
+        let last = spans
+            .iter()
+            .rev()
+            .find_map(|span| rects(span).and_then(|rects| rects.into_iter().next_back()))?;
+        Some(SelectionLines { first, last })
+    })
+}
+
+/// Fixture-only: select `range` of the painted element named `key` (clamped
+/// to its text) so visual capture can show the selection bar without pointer
+/// input. Nothing is selected when the element is not on screen.
+#[cfg(feature = "appshots-fixture")]
+pub fn fixture_select_range(key: &str, range: Range<usize>) -> bool {
+    REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let Some(entry) = reg.iter().find(|entry| entry.key.as_ref() == key) else {
+            return false;
+        };
+        let start = range.start.min(entry.text.len());
+        let end = range.end.min(entry.text.len());
+        if start >= end {
+            return false;
+        }
+        super::selection::begin_with_span(key, &entry.text, start..end);
+        true
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
     REGISTRY.with(|r| {

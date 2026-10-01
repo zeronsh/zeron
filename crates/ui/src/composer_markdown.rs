@@ -8,28 +8,128 @@ pub enum Face {
     Italic,
     Code,
     Strikethrough,
+    /// Quote content: the lowest-priority face, so bold, italic and code keep
+    /// their own weight/style/wash and only the ink is muted.
+    Quote,
+}
+
+/// Nested quote containers opened by one source line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotePrefix {
+    /// Byte offset within the line just past the `>` markers, one optional
+    /// following space included with each.
+    pub end: usize,
+    /// Number of nested containers, one per `>` marker.
+    pub depth: usize,
+}
+
+/// Preserve each quote marker and its optional separator exactly as authored.
+/// Four leading spaces belong to indented code, not another quote container.
+fn quote_prefix_end(line: &str) -> usize {
+    let mut end = 0;
+    loop {
+        let rest = &line[end..];
+        let spaces = rest.bytes().take_while(|byte| *byte == b' ').count();
+        if spaces > 3 || rest.as_bytes().get(spaces) != Some(&b'>') {
+            break;
+        }
+        end += spaces + 1;
+        if matches!(line.as_bytes().get(end), Some(b' ' | b'\t')) {
+            end += 1;
+        }
+    }
+    end
+}
+
+/// The quote container prefix of a line, when it opens at least one. Up to
+/// three leading spaces belong to the container; a fourth makes the line
+/// indented code, and an escaped `\>` stays literal.
+pub fn quote_prefix(line: &str) -> Option<QuotePrefix> {
+    let end = quote_prefix_end(line);
+    if end == 0 {
+        return None;
+    }
+    Some(QuotePrefix {
+        end,
+        depth: line[..end].bytes().filter(|byte| *byte == b'>').count(),
+    })
+}
+
+/// One byte range per physical line that renders as Markdown quote content:
+/// inside a parsed blockquote and outside a block-level code block. The `>`
+/// markers belong to the range so the active line keeps its own tone while the
+/// raw marker is visible. Inline code inside a quote stays quote content.
+fn quote_line_faces(
+    text: &str,
+    mut quotes: Vec<Range<usize>>,
+    code_blocks: &[Range<usize>],
+) -> Vec<(Range<usize>, Face)> {
+    // Nested blockquotes emit overlapping spans; a line either is quote
+    // content or is not, so fold them into a sorted, disjoint union.
+    quotes.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in quotes {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    if merged.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    for line in text.split('\n') {
+        let end = at + line.len();
+        if let Some(prefix) = quote_prefix(line) {
+            // A blank quote line (`>` alone) has no content, so the marker's
+            // own offset decides whether the blockquote reaches it.
+            let content_start = at + prefix.end;
+            let quote_ix = merged.partition_point(|range| range.end < content_start);
+            let quoted = merged
+                .get(quote_ix)
+                .is_some_and(|range| range.start <= content_start);
+            let code = code_blocks
+                .partition_point(|range| range.start < end)
+                .checked_sub(1)
+                .is_some_and(|ix| code_blocks[ix].end > content_start);
+            if quoted && !code {
+                ranges.push((at..end, Face::Quote));
+            }
+        }
+        at = end + 1;
+    }
+    ranges
 }
 
 pub fn faces(text: &str) -> Vec<(Range<usize>, Face)> {
     if text.len() > 128 * 1024 {
         return Vec::new();
     }
-    Parser::new_ext(
+    let mut faces = Vec::new();
+    let mut quotes = Vec::new();
+    let mut code_blocks: Vec<Range<usize>> = Vec::new();
+    for (event, range) in Parser::new_ext(
         text,
         Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH,
     )
     .into_offset_iter()
-    .filter_map(|(event, range)| {
-        let face = match event {
-            Event::Start(Tag::Strong | Tag::Heading { .. }) => Face::Bold,
-            Event::Start(Tag::Strikethrough) => Face::Strikethrough,
-            Event::Start(Tag::Emphasis) => Face::Italic,
-            Event::Start(Tag::CodeBlock(_)) | Event::Code(_) => Face::Code,
-            _ => return None,
-        };
-        Some((range, face))
-    })
-    .collect()
+    {
+        match event {
+            Event::Start(Tag::Strong | Tag::Heading { .. }) => faces.push((range, Face::Bold)),
+            Event::Start(Tag::Strikethrough) => faces.push((range, Face::Strikethrough)),
+            Event::Start(Tag::Emphasis) => faces.push((range, Face::Italic)),
+            Event::Start(Tag::CodeBlock(_)) => {
+                code_blocks.push(range.clone());
+                faces.push((range, Face::Code));
+            }
+            Event::Code(_) => faces.push((range, Face::Code)),
+            Event::Start(Tag::BlockQuote(_)) => quotes.push(range),
+            _ => {}
+        }
+    }
+    faces.extend(quote_line_faces(text, quotes, &code_blocks));
+    faces
 }
 
 /// Highlight fenced code with its own grammar. Running the Markdown grammar
@@ -258,24 +358,6 @@ fn is_thematic_break(line: &str) -> bool {
     marks.len() >= 3 && matches!(marks[0], '-' | '*' | '_') && marks.iter().all(|c| *c == marks[0])
 }
 
-/// Preserve each quote marker and its optional separator exactly as authored.
-/// Four leading spaces belong to indented code, not another quote container.
-fn quote_prefix_end(line: &str) -> usize {
-    let mut end = 0;
-    loop {
-        let rest = &line[end..];
-        let spaces = rest.bytes().take_while(|byte| *byte == b' ').count();
-        if spaces > 3 || rest.as_bytes().get(spaces) != Some(&b'>') {
-            break;
-        }
-        end += spaces + 1;
-        if matches!(line.as_bytes().get(end), Some(b' ' | b'\t')) {
-            end += 1;
-        }
-    }
-    end
-}
-
 pub fn list_prefix(line: &str) -> Option<ListPrefix> {
     let line = line.strip_suffix('\r').unwrap_or(line);
     let indent_start = quote_prefix_end(line);
@@ -336,6 +418,25 @@ pub fn list_prefix(line: &str) -> Option<ListPrefix> {
     })
 }
 
+/// Offset within a line where its innermost quote container marker starts.
+/// Used to leave one container when Enter ends an empty quote line.
+fn quote_prefix_inner_start(line: &str, end: usize) -> usize {
+    let mut at = 0;
+    let mut inner = 0;
+    while at < end {
+        inner = at;
+        let spaces = line[at..end]
+            .bytes()
+            .take_while(|byte| *byte == b' ')
+            .count();
+        at += spaces + 1;
+        if at < end && matches!(line.as_bytes()[at], b' ' | b'\t') {
+            at += 1;
+        }
+    }
+    inner
+}
+
 pub fn newline_edit(text: &str, cursor: usize) -> Option<(Range<usize>, String)> {
     if cursor > text.len() || !text.is_char_boundary(cursor) || in_code(text, cursor) {
         return None;
@@ -345,11 +446,32 @@ pub fn newline_edit(text: &str, cursor: usize) -> Option<(Range<usize>, String)>
     let raw_line = &text[start..end];
     let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
     let line_end = start + line.len();
-    let prefix = list_prefix(line)?;
-    if Parser::new(text).into_offset_iter().any(|(event, range)| {
-        matches!(event, Event::Start(Tag::Heading { .. }))
-            && range.contains(&(start + prefix.indent))
-    }) {
+    let newline = if raw_line.ends_with('\r') {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    // A heading spanning this line retains its source: a setext underline is
+    // an ordinary content line, not a container to continue.
+    let heading_at = |offset: usize| {
+        Parser::new(text).into_offset_iter().any(|(event, range)| {
+            matches!(event, Event::Start(Tag::Heading { .. })) && range.contains(&offset)
+        })
+    };
+    let Some(prefix) = list_prefix(line) else {
+        // Plain quote content continues every open container, and an empty
+        // quote line leaves (or outdents in) them one at a time.
+        let quoted = quote_prefix(line)?;
+        if heading_at(start) || cursor < start + quoted.end {
+            return None;
+        }
+        if line[quoted.end..].trim().is_empty() {
+            let retained = quote_prefix_inner_start(line, quoted.end);
+            return Some((start..line_end, line[..retained].to_string()));
+        }
+        return Some((cursor..cursor, format!("{newline}{}", &line[..quoted.end])));
+    };
+    if heading_at(start + prefix.indent) {
         return None;
     }
     if cursor < start + prefix.end {
@@ -361,11 +483,6 @@ pub fn newline_edit(text: &str, cursor: usize) -> Option<(Range<usize>, String)>
             prefix.indent_start + (prefix.indent - prefix.indent_start).saturating_sub(2);
         return Some((start..line_end, line[..retained].to_string()));
     }
-    let newline = if raw_line.ends_with('\r') {
-        "\r\n"
-    } else {
-        "\n"
-    };
     Some((cursor..cursor, format!("{newline}{}", prefix.next)))
 }
 
@@ -419,9 +536,14 @@ pub fn decorations(text: &str, active: Range<usize>) -> Vec<(Range<usize>, Strin
     let mut edits = Vec::new();
     let mut tasks = Vec::new();
     let mut heading_ranges = Vec::new();
-    let code_ranges: Vec<_> = faces(text)
-        .into_iter()
-        .filter_map(|(range, face)| (face == Face::Code).then_some(range))
+    let all_faces = faces(text);
+    let code_ranges: Vec<_> = all_faces
+        .iter()
+        .filter_map(|(range, face)| (*face == Face::Code).then_some(range.clone()))
+        .collect();
+    let quote_ranges: Vec<_> = all_faces
+        .iter()
+        .filter_map(|(range, face)| (*face == Face::Quote).then_some(range.clone()))
         .collect();
     for (event, range) in Parser::new_ext(
         text,
@@ -456,6 +578,24 @@ pub fn decorations(text: &str, active: Range<usize>) -> Vec<(Range<usize>, Strin
     }
     let mut at = 0;
     for line in text.split('\n') {
+        let line_end = at + line.len();
+        if let Some(prefix) = quote_prefix(line).filter(|_| {
+            // Only lines the parser actually placed in a blockquote outside
+            // code lose their marker; a literal `>` in a fence stays.
+            let ix = quote_ranges.partition_point(|range| range.end <= at);
+            quote_ranges
+                .get(ix)
+                .is_some_and(|range| range.contains(&at))
+        }) {
+            // The raw marker stays editable on the active logical line. The
+            // full line span includes the line ending so a caret at either
+            // end still counts as being on it.
+            let end = (line_end + 1).min(text.len());
+            let active_line = at <= active.end && end > active.start;
+            if !active_line {
+                edits.push((at..at + prefix.end, String::new()));
+            }
+        }
         if !is_thematic_break(line) {
             if let Some(prefix) = list_prefix(line) {
                 let marker = at + prefix.indent;
@@ -781,7 +921,7 @@ mod tests {
             }
         }
         for (text, expected) in [
-            ("> ## Café ##\n\nactive", "> Café\n\nactive"),
+            ("> ## Café ##\n\nactive", "Café\n\nactive"),
             ("- ## Café ##\n\nactive", "• Café\n\nactive"),
             ("# ###\nactive", "\nactive"),
             ("# Café ###\r\nactive", "Café\r\nactive"),
@@ -882,29 +1022,146 @@ mod tests {
     }
 
     #[test]
+    fn quote_lines_face_quoted_content_and_leave_code_literal() {
+        let text = "> quoted **bold**\n> more\n\nplain";
+        let quoted: Vec<_> = faces(text)
+            .into_iter()
+            .filter(|(_, face)| *face == Face::Quote)
+            .collect();
+        assert_eq!(
+            quoted
+                .iter()
+                .map(|(range, _)| &text[range.clone()])
+                .collect::<Vec<_>>(),
+            ["> quoted **bold**", "> more"]
+        );
+        assert!(faces(text).iter().any(|(_, face)| *face == Face::Bold));
+        // Inline code inside a quote keeps the quote tone, and the whole line
+        // (marker included) is quote content.
+        let inline = "> has `code`";
+        assert_eq!(
+            faces(inline)
+                .into_iter()
+                .filter(|(_, face)| *face == Face::Quote)
+                .collect::<Vec<_>>(),
+            vec![(0..inline.len(), Face::Quote)]
+        );
+
+        // A fence inside a quote stays literal: no Quote face on its lines,
+        // while the prose around it is quote content.
+        let fenced = "> before\n> ```rust\n> fn main() {}\n> ```\n> after\n\nplain";
+        let quoted: Vec<_> = faces(fenced)
+            .into_iter()
+            .filter(|(_, face)| *face == Face::Quote)
+            .map(|(range, _)| &fenced[range])
+            .collect();
+        assert_eq!(quoted, ["> before", "> after"]);
+        assert!(faces(fenced).iter().any(|(range, face)| {
+            *face == Face::Code && fenced[range.clone()].contains("fn main")
+        }));
+    }
+
+    #[test]
+    fn quote_markers_hide_off_the_active_line_and_report_nesting() {
+        let text = "> first\n> second that wraps\n\nquestion";
+        let question = text.rfind("question").unwrap();
+        assert_eq!(
+            rendered(text, question..text.len()),
+            "first\nsecond that wraps\n\nquestion"
+        );
+        // The caret's own line keeps its raw marker so it stays editable.
+        assert_eq!(
+            rendered(text, 0..6),
+            "> first\nsecond that wraps\n\nquestion"
+        );
+        let blank = "> first\n>\n\nquestion";
+        let caret = blank.rfind('>').unwrap();
+        assert_eq!(rendered(blank, caret..caret), "first\n>\n\nquestion");
+
+        assert_eq!(quote_prefix("> first").unwrap().depth, 1);
+        assert_eq!(quote_prefix("> > deep").unwrap().depth, 2);
+        assert_eq!(quote_prefix("  >\t> deep").unwrap().depth, 2);
+        let nested = "> outer\n> > inner\n> > > deepest\n\nquestion";
+        assert_eq!(
+            rendered(nested, nested.rfind("question").unwrap()..nested.len()),
+            "outer\ninner\ndeepest\n\nquestion"
+        );
+    }
+
+    #[test]
+    fn literal_quote_markers_in_inline_code_and_fences_stay() {
+        let text = "`> inline`\n\n> real\n\nquestion";
+        let active = text.rfind("question").unwrap()..text.len();
+        assert_eq!(rendered(text, active), "> inline\n\nreal\n\nquestion");
+
+        let inline = "> `> inline` tail\n\nquestion";
+        let question = inline.rfind("question").unwrap();
+        assert_eq!(
+            rendered(inline, question..inline.len()),
+            "> inline tail\n\nquestion"
+        );
+
+        let fenced = "> ```\n> > literal\n> ```\n\nquestion";
+        let question = fenced.rfind("question").unwrap();
+        assert_eq!(rendered(fenced, question..fenced.len()), fenced);
+    }
+
+    #[test]
+    fn quote_newline_continues_and_empty_quote_exits() {
+        for (text, next) in [
+            ("> quoted", "\n> "),
+            ("> > nested", "\n> > "),
+            (">  spaced", "\n> "),
+            (">>\tdeep", "\n>>\t"),
+        ] {
+            assert_eq!(
+                newline_edit(text, text.len()),
+                Some((text.len()..text.len(), next.into())),
+                "{text:?}"
+            );
+        }
+        for (text, retained) in [("> ", ""), (">", ""), ("> > ", "> "), (">> ", ">")] {
+            assert_eq!(
+                newline_edit(text, text.len()),
+                Some((0..text.len(), retained.into())),
+                "{text:?}"
+            );
+        }
+        let text = "> quoted\r\nnext";
+        assert_eq!(newline_edit(text, 8), Some((8..8, "\r\n> ".into())));
+        // Headings and code keep their source lines untouched.
+        assert_eq!(newline_edit("> Title\n> -", 10), None);
+        assert_eq!(newline_edit("> ```\n> code", 14), None);
+        assert_eq!(newline_edit("plain paragraph", 15), None);
+    }
+
+    #[test]
     fn quoted_lists_project_only_their_list_markers() {
         let text =
             "> - first\n> - [x] done\n> > + [ ] nested\n>> 2. [x] ordered\n>  - child\n\nactive";
         assert_eq!(
             rendered(text, text.rfind("active").unwrap()..text.len()),
-            "> • first\n> ☑ done\n> > ☐ nested\n>> 2. ☑ ordered\n>  • child\n\nactive"
+            "• first\n☑ done\n☐ nested\n2. ☑ ordered\n • child\n\nactive"
         );
         assert_eq!(rendered("> - [x] done", 0..12), "> • [x] done");
         assert_eq!(
             rendered(">\t- item\r\n\r\nactive", 14..20),
-            ">\t• item\r\n\r\nactive"
+            "• item\r\n\r\nactive"
         );
-        for text in [
-            "> ---\n\nactive",
-            "> Title\n> -\n\nactive",
-            ">     - literal\n\nactive",
-            "> ```sh\n> - [x] literal\n> ```\n\nactive",
-            "    > - literal\n\nactive",
-            "\\> - literal\n\nactive",
+        for (text, expected) in [
+            ("> ---\n\nactive", "---\n\nactive"),
+            ("> Title\n> -\n\nactive", "Title\n-\n\nactive"),
+            (">     - literal\n\nactive", ">     - literal\n\nactive"),
+            (
+                "> ```sh\n> - [x] literal\n> ```\n\nactive",
+                "> ```sh\n> - [x] literal\n> ```\n\nactive",
+            ),
+            ("    > - literal\n\nactive", "    > - literal\n\nactive"),
+            ("\\> - literal\n\nactive", "\\> - literal\n\nactive"),
         ] {
             assert_eq!(
                 rendered(text, text.rfind("active").unwrap()..text.len()),
-                text,
+                expected,
                 "{text:?}"
             );
         }
@@ -954,7 +1211,6 @@ mod tests {
         let cursor = empty.find('\r').unwrap();
         assert_eq!(newline_edit(empty, cursor), Some((0..cursor, "> ".into())));
         for text in [
-            "> ---",
             "> Title\n> -",
             ">     - literal",
             "> ```\n> - literal",
@@ -962,6 +1218,8 @@ mod tests {
         ] {
             assert_eq!(newline_edit(text, text.len()), None, "{text:?}");
         }
+        // A thematic break is ordinary quote content: Enter keeps the quote.
+        assert_eq!(newline_edit("> ---", 5), Some((5..5, "\n> ".into())));
         let prefix = list_prefix("> >   - [x] task").unwrap();
         assert_eq!((prefix.indent_start, prefix.indent, prefix.end), (4, 6, 12));
     }

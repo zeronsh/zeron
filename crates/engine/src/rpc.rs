@@ -1865,6 +1865,12 @@ impl RpcService for EngineRpc {
                     /// side chat's parent so the copy lists as a sibling.
                     #[serde(default)]
                     parent_chat_id: Option<String>,
+                    /// Reply-in-side-chat names the entry the selection
+                    /// ended in: the fork copies through the last completed
+                    /// response at or before it. Absent or unknown keeps the
+                    /// default boundary, the latest completed response.
+                    #[serde(default)]
+                    through_entry_id: Option<String>,
                 }
                 let p: ForkParams = parse_params(params)?;
                 let parent_chat_id = p
@@ -1894,17 +1900,26 @@ impl RpcService for EngineRpc {
                     .doc()
                     .read_entries()
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let boundary = entries
-                    .iter()
-                    .rposition(|entry| {
+                let latest_complete = |candidates: &[zeron_doc::SessionMessageEntry]| {
+                    candidates.iter().rposition(|entry| {
                         entry.role == zeron_doc::MessageRole::Assistant
                             && entry.status == Some(zeron_doc::MessageStatus::Complete)
                     })
-                    .ok_or_else(|| {
-                        RpcError::Failed(
-                            "Wait for a completed response before starting a side chat".into(),
-                        )
-                    })?;
+                };
+                let boundary = match p
+                    .through_entry_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                    .and_then(|through| entries.iter().position(|entry| entry.id == through))
+                {
+                    Some(end) => latest_complete(&entries[..=end]),
+                    None => latest_complete(&entries),
+                }
+                .ok_or_else(|| {
+                    RpcError::Failed(
+                        "Wait for a completed response before starting a side chat".into(),
+                    )
+                })?;
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.parent_chat_id = Some(parent_chat_id);

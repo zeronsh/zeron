@@ -309,6 +309,68 @@ pub fn selected_text() -> Option<String> {
     Some(join_spans(&sel.spans))
 }
 
+/// The live selection's spans in document order; empty when nothing is
+/// selected. Geometry callers map a span back to the text element it covers.
+pub fn spans() -> Vec<Span> {
+    state()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|sel| sel.spans.clone())
+        .unwrap_or_default()
+}
+
+/// Key of the last non-empty selected element: the document position the
+/// selection ends at, which decides the row an action belongs to.
+pub fn end_key() -> Option<String> {
+    let guard = state().lock().unwrap();
+    let sel = guard.as_ref()?;
+    sel.spans
+        .iter()
+        .rev()
+        .find(|span| !span.range.is_empty())
+        .map(|span| span.key.clone())
+}
+
+/// Drop the selection entirely, whatever owns it.
+pub fn clear() {
+    *state().lock().unwrap() = None;
+}
+
+/// Quote a transcript selection for a composer draft: trim it, prefix every
+/// line with a Markdown quote marker, and append the block to `draft` with
+/// one blank-ish separator line and a trailing newline so the caret rests
+/// below the quote. `None` when nothing but blank lines was selected.
+pub fn quoted_draft(draft: &str, selection: &str) -> Option<String> {
+    let trimmed = selection.trim_end();
+    let mut lines: Vec<&str> = trimmed
+        .lines()
+        .skip_while(|line| line.trim().is_empty())
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let block = lines
+        .iter()
+        .map(|line| {
+            if line.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(if draft.is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{draft}\n{block}\n")
+    })
+}
+
 fn join_spans(spans: &[Span]) -> String {
     spans
         .iter()
@@ -471,5 +533,37 @@ mod tests {
         // Unicode-safe (mid-char byte offsets snap down).
         let u = "héllo wörld";
         assert_eq!(&u[word_range(u, 2)], "héllo");
+    }
+
+    #[test]
+    fn quoted_draft_prefixes_every_line() {
+        assert_eq!(quoted_draft("", "answer").as_deref(), Some("> answer\n"));
+        assert_eq!(
+            quoted_draft("", "one\ntwo").as_deref(),
+            Some("> one\n> two\n")
+        );
+        // Blank interior lines keep the quote marker with no content.
+        assert_eq!(
+            quoted_draft("", "one\n\ntwo").as_deref(),
+            Some("> one\n>\n> two\n")
+        );
+        // Appending keeps the draft and separates the block.
+        assert_eq!(
+            quoted_draft("my prompt", "one\ntwo").as_deref(),
+            Some("my prompt\n> one\n> two\n")
+        );
+    }
+
+    #[test]
+    fn quoted_draft_trims_blank_edges_and_trailing_space() {
+        assert_eq!(quoted_draft("", "\n\none\n\n").as_deref(), Some("> one\n"));
+        assert_eq!(
+            quoted_draft("", "one   \ntwo  ").as_deref(),
+            Some("> one   \n> two\n")
+        );
+        // Nothing but blank lines does nothing.
+        assert_eq!(quoted_draft("draft", "\n\n  \n"), None);
+        assert_eq!(quoted_draft("", ""), None);
+        assert_eq!(quoted_draft("draft", "   \t  "), None);
     }
 }

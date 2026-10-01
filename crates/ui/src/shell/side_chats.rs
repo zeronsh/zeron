@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct SideChatTab {
     pub state: Entity<AppState>,
-    transcript: Entity<Transcript>,
+    pub(super) transcript: Entity<Transcript>,
     pub(super) composer: Entity<Composer>,
     _events: Vec<Subscription>,
 }
@@ -42,14 +42,43 @@ impl Shell {
         self.fork_chat(source, parent, cx);
     }
 
-    /// Fork `source` through its latest completed response into a new chat
-    /// hanging under `parent_id`, and open it in the right pane. A side
-    /// chat's own fork button passes its parent so the copy lists as a
-    /// sibling; the picker passes the source itself.
+    /// Fork `source` through its latest completed response and open it in the
+    /// right pane. A side chat's own fork button passes its parent so the
+    /// copy lists as a sibling; the picker passes the source itself.
     pub(super) fn fork_chat(
         &mut self,
         source: zeron_proto::Chat,
         parent_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.fork_chat_with_quote(source, parent_id, None, None, cx);
+    }
+
+    /// "Reply in side chat": fork `source` through the entry the selection
+    /// ended in and seed the new side chat's composer with the quoted
+    /// selection. A side chat's own reply lists the copy as a sibling.
+    pub(super) fn reply_in_side_chat(
+        &mut self,
+        source: zeron_proto::Chat,
+        quote: String,
+        through_entry_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let parent = source
+            .parent_chat_id
+            .clone()
+            .unwrap_or_else(|| source.id.clone());
+        self.fork_chat_with_quote(source, parent, through_entry_id, Some(quote), cx);
+    }
+
+    /// Fork `source` into a new chat hanging under `parent_id`, open it in the
+    /// right pane, and optionally pre-fill its composer with `quote`.
+    pub(super) fn fork_chat_with_quote(
+        &mut self,
+        source: zeron_proto::Chat,
+        parent_id: String,
+        through_entry_id: Option<String>,
+        quote: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if self.side_chat_creating {
@@ -60,11 +89,16 @@ impl Shell {
         };
         let key = self.panel_key(cx);
         self.side_chat_creating = true;
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        if let Some(quote) = quote {
+            self.selection_reply_quote = Some((chat_id.clone(), quote));
+        }
         let params = serde_json::json!({
-            "chatId": uuid::Uuid::new_v4().to_string(),
+            "chatId": chat_id.clone(),
             "sourceChatId": source.id,
             "parentChatId": parent_id,
             "targetDeviceId": source.device_id,
+            "throughEntryId": through_entry_id,
         });
         cx.spawn(async move |this, cx| {
             let result = engine
@@ -85,7 +119,16 @@ impl Shell {
                             this.open_side_chat(chat, key, cx);
                         }
                     }
-                    Err(error) => this.show_side_chat_error(error.to_string(), cx),
+                    Err(error) => {
+                        if this
+                            .selection_reply_quote
+                            .as_ref()
+                            .is_some_and(|(id, _)| id == &chat_id)
+                        {
+                            this.selection_reply_quote = None;
+                        }
+                        this.show_side_chat_error(error.to_string(), cx)
+                    }
                 }
                 cx.notify();
             });
@@ -192,6 +235,7 @@ impl Shell {
                 self.panels
                     .update(&key, |p| p.right_active = RightSurface::SideChat(id));
             }
+            self.apply_selection_reply_quote(&chat.id, id, cx);
             cx.notify();
             return;
         }
@@ -201,7 +245,7 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         // Workspace file links open the editor and web links honor the
         // in-app preference, resolved in this side chat's context.
-        let links = Self::session_links(Some(chat_id), cx);
+        let links = Self::session_links(Some(chat_id.clone()), cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
         });
@@ -264,7 +308,28 @@ impl Shell {
             .push(RightSurface::SideChat(id));
         self.panels
             .update(&key, |p| p.right_active = RightSurface::SideChat(id));
+        self.apply_selection_reply_quote(&chat_id, id, cx);
         cx.notify();
+    }
+
+    /// A selection reply's quote is minted before its chat exists; this hands
+    /// it to that side chat's composer (and keyboard focus) as soon as the tab
+    /// mounts. No-op for ordinary forks.
+    fn apply_selection_reply_quote(&mut self, chat_id: &str, tab_id: u64, cx: &mut Context<Self>) {
+        let Some((pending, quote)) = self.selection_reply_quote.clone() else {
+            return;
+        };
+        if pending != chat_id {
+            return;
+        }
+        self.selection_reply_quote = None;
+        let Some(composer) = self.side_chats.get(&tab_id).map(|tab| tab.composer.clone()) else {
+            return;
+        };
+        composer.update(cx, |composer, cx| {
+            composer.insert_selection_quote(&quote, cx)
+        });
+        self.pending_composer_focus = Some(composer.read(cx).focus_handle(cx));
     }
 
     fn remove_deleted_side_chats(&mut self, cx: &mut Context<Self>) {

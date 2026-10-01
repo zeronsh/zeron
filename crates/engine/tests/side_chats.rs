@@ -439,6 +439,117 @@ async fn side_turn(
     requests.lock().unwrap()[before].clone()
 }
 
+/// A reply-in-side-chat fork names the entry the selection ended in: only the
+/// history through the last completed response at or before it copies. An
+/// unknown id keeps the default boundary, like an absent one.
+#[tokio::test]
+async fn fork_through_an_entry_copies_history_up_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_chat("main", None, Some(&core.device_id), None, None)
+        .unwrap();
+    let main = core.doc_host.open("main").unwrap();
+    for entry in [
+        message("u1", MessageRole::User, "first", MessageStatus::Complete),
+        message(
+            "a1",
+            MessageRole::Assistant,
+            "first answer",
+            MessageStatus::Complete,
+        ),
+        message("u2", MessageRole::User, "second", MessageStatus::Complete),
+        message(
+            "a2",
+            MessageRole::Assistant,
+            "second answer",
+            MessageStatus::Complete,
+        ),
+    ] {
+        main.doc().push_message(&entry).unwrap();
+    }
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    // Selecting inside the second user message forks through the first answer.
+    client
+        .call_as::<zeron_proto::Chat>(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({
+                "chatId": "side-u2",
+                "sourceChatId": "main",
+                "throughEntryId": "u2",
+            }),
+        )
+        .await
+        .unwrap();
+    let copied = core
+        .doc_host
+        .open("side-u2")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    let ids: Vec<_> = copied.iter().map(|entry| entry.id.clone()).collect();
+    assert_eq!(ids, ["u1", "a1", "fork:side-u2"]);
+    // An unknown id keeps today's boundary: the latest completed response.
+    client
+        .call_as::<zeron_proto::Chat>(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({
+                "chatId": "side-unknown",
+                "sourceChatId": "main",
+                "throughEntryId": "missing",
+            }),
+        )
+        .await
+        .unwrap();
+    let copied = core
+        .doc_host
+        .open("side-unknown")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert_eq!(copied.len(), 5);
+    assert_eq!(copied[3].id, "a2");
+    // Absent param unchanged.
+    client
+        .call_as::<zeron_proto::Chat>(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "side-absent", "sourceChatId": "main" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        core.doc_host
+            .open("side-absent")
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .len(),
+        5
+    );
+    // A selection before the first completed response still has to wait.
+    let error = client
+        .call_as::<zeron_proto::Chat>(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({
+                "chatId": "side-u1",
+                "sourceChatId": "main",
+                "throughEntryId": "u1",
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Wait for a completed response"));
+}
+
 /// A native command must lead the delivered prompt so the provider routes it
 /// (Codex `command_request`, OpenCode commands): no bootstrap wrapper in front
 /// of it, and none at all when there is no prior conversation.
