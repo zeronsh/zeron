@@ -640,16 +640,15 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::CursorHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
     );
-    // Devin over ACP (`devin acp`), same lazy pattern: the static descriptor
-    // mirrors AcpHarness::devin() exactly. No steering extension (turn
-    // boundaries) and no effort ladder — Devin bakes effort into the
-    // advertised model ids instead of a `thought_level` option.
+    // Devin over ACP: the lazy descriptor matches AcpHarness::devin().
+    // Steering waits for running tools, then continues the turn.
+    // Devin has no effort ladder. Its advertised model IDs carry the effort choice.
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Devin,
             name: "Devin".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: Vec::new(),
             installed: true,
             can_install: false,
@@ -658,16 +657,15 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::devin().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
     );
-    // Grok Build over ACP, same lazy pattern: the static descriptor mirrors
-    // AcpHarness::grok() exactly. No `_session/steering` extension yet, so
-    // steers deliver at turn boundaries; the effort ladder applies per
-    // session via the `thought_level` config option.
+    // Grok over ACP: the lazy descriptor matches AcpHarness::grok().
+    // Steering waits for running tools, then continues the turn.
+    // The thought_level session option carries the effort choice.
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Grok,
             name: "Grok".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -713,17 +711,15 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::PiHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
     );
-    // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
-    // desktop app speaks — `opencode serve` + the /global/event bus), same
-    // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
-    // Turn-boundary steering; the effort ladder rides model VARIANTS (the
-    // run sends the first advertised variant id for the picked level).
+    // OpenCode uses its native HTTP/SSE protocol through opencode serve and the global event bus.
+    // The lazy descriptor matches OpencodeHarness.
+    // Steering applies at step boundaries. The model variant carries the effort choice.
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Opencode,
             name: "OpenCode".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -1206,6 +1202,21 @@ mod tests {
         let reloaded = HarnessRegistry::new();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.enabled_set(), Vec::<HarnessId>::new());
+    }
+
+    #[test]
+    fn every_lazy_steering_descriptor_matches_the_resolved_harness() {
+        let registry = default_registry();
+        let mut mismatches = Vec::new();
+        for before in registry.descriptors() {
+            let harness = registry.resolve(before.id).unwrap();
+            if before.supports_steering != harness.supports_steering()
+                || before.steering_mode != harness.steering_mode()
+            {
+                mismatches.push((before.id, before.steering_mode, harness.steering_mode()));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 
     /// The Codex lazy descriptor must be indistinguishable from `describe()`

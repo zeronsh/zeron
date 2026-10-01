@@ -4933,6 +4933,9 @@ impl Shell {
                                 ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled) => {
                                     this.settings.escape_stops_active_agent = *enabled;
                                 }
+                                ShortcutsEvent::AutoSteerChanged(enabled) => {
+                                    this.settings.auto_steer = *enabled;
+                                }
                                 ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
                                     this.settings.composer_send_behavior = *behavior;
                                 }

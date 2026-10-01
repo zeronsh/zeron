@@ -49,6 +49,7 @@ pub enum ShortcutsEvent {
     EscapeStopsActiveAgentChanged(bool),
     /// The composer send behavior changed — persist + re-apply.
     ComposerSendBehaviorChanged(ComposerSendBehavior),
+    AutoSteerChanged(bool),
     AppshotsChanged {
         enabled: bool,
         sound_enabled: bool,
@@ -65,6 +66,7 @@ pub struct ShortcutsPage {
     keymap: KeymapConfig,
     escape_stops_active_agent: bool,
     composer_send_behavior: ComposerSendBehavior,
+    auto_steer: bool,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
@@ -108,6 +110,7 @@ impl ShortcutsPage {
             keymap,
             escape_stops_active_agent,
             composer_send_behavior,
+            auto_steer: crate::settings::current(cx).auto_steer,
             recording: None,
             recording_blur: None,
             recording_interceptor: None,
@@ -187,6 +190,14 @@ impl ShortcutsPage {
         if self.escape_stops_active_agent != enabled {
             self.escape_stops_active_agent = enabled;
             cx.emit(ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled));
+            cx.notify();
+        }
+    }
+
+    fn set_auto_steer(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.auto_steer != enabled {
+            self.auto_steer = enabled;
+            cx.emit(ShortcutsEvent::AutoSteerChanged(enabled));
             cx.notify();
         }
     }
@@ -523,6 +534,7 @@ impl Render for ShortcutsPage {
         let recording = self.recording;
         let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
+        let auto_steer = self.auto_steer;
         let compact_mode = crate::settings::transcript_compact_mode(cx);
         let customized = self.keymap != KeymapConfig::default()
             || escape_stops_active_agent
@@ -561,6 +573,37 @@ impl Render for ShortcutsPage {
                     .child(widgets::row_title(&theme, "Send messages with")),
             )
             .child(send_behavior_control);
+        let auto_steer_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(&theme, "Automatically steer messages"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![div()
+                            .child("Send messages to the active run. Images and agents that cannot steer use the queue.")
+                            .into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(&theme, auto_steer, "auto-steer")
+                    .id("auto-steer-toggle")
+                    .debug_selector(|| "auto-steer-toggle".into())
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Automatically steer messages")
+                    .aria_toggled(if auto_steer { gpui::Toggled::True } else { gpui::Toggled::False })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_auto_steer(!auto_steer, cx)))
+                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "space" | "enter") {
+                            this.set_auto_steer(!auto_steer, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            );
         let compact_mode_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -693,6 +736,7 @@ impl Render for ShortcutsPage {
                                     .child(
                                         widgets::section_card(&theme)
                                             .child(send_behavior_row)
+                                            .child(auto_steer_row)
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
@@ -838,6 +882,37 @@ impl Render for ShortcutsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn automatic_steering_toggle_works_with_pointer_and_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = ShortcutsPage::new(
+                state,
+                KeymapConfig::default(),
+                false,
+                ComposerSendBehavior::Enter,
+                false,
+                false,
+                AppshotDestination::Automatic,
+                cx,
+            );
+            page.show_section(false, true);
+            page
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let toggle = cx.debug_bounds("auto-steer-toggle").unwrap();
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        page.update(cx, |page, _| assert!(page.auto_steer));
+        cx.simulate_keystrokes("space");
+        page.update(cx, |page, _| assert!(!page.auto_steer));
+        cx.simulate_keystrokes("enter");
+        page.update(cx, |page, _| assert!(page.auto_steer));
+    }
 
     #[gpui::test]
     fn conversation_controls_work_after_moving_out_of_shortcuts(cx: &mut gpui::TestAppContext) {

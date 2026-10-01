@@ -789,6 +789,7 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
+    pub auto_steer: bool,
     /// Legacy global opt-in; per-harness preferences take precedence.
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
@@ -1004,6 +1005,7 @@ impl Default for UiSettings {
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
+            auto_steer: false,
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
@@ -1853,6 +1855,21 @@ mod tests {
     }
 
     #[test]
+    fn automatic_steering_defaults_off_and_survives_a_settings_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        for document in [r#"{}"#, r#"{"sidebarWidth":300,"autoSteer":true}"#] {
+            std::fs::write(UiSettings::path(directory.path()), document).unwrap();
+            let settings = UiSettings::load(directory.path());
+            settings.save(directory.path()).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(UiSettings::path(directory.path())).unwrap())
+                    .unwrap();
+            assert_eq!(saved["autoSteer"], document.contains("true"));
+            assert_eq!(UiSettings::load(directory.path()), settings);
+        }
+    }
+
+    #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2554,6 +2571,7 @@ mod tests {
             escape_stops_active_agent: true,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
+            auto_steer: true,
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,

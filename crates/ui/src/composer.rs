@@ -486,6 +486,7 @@ pub enum SendButtonMode {
     Send,
     /// Live run with text typed: queue for the next turn.
     Queue,
+    Steer,
     /// Live run, nothing typed: red stop square.
     Stop,
 }
@@ -566,6 +567,21 @@ pub fn send_button_mode(run_live: bool, has_text: bool) -> SendButtonMode {
         (false, _) => SendButtonMode::Send,
         (true, true) => SendButtonMode::Queue,
         (true, false) => SendButtonMode::Stop,
+    }
+}
+
+fn submission_mode(
+    run_live: bool,
+    has_content: bool,
+    auto_steer: bool,
+    steers_mid_turn: bool,
+    has_attachments: bool,
+) -> SendButtonMode {
+    let mode = send_button_mode(run_live, has_content);
+    if mode == SendButtonMode::Queue && auto_steer && steers_mid_turn && !has_attachments {
+        SendButtonMode::Steer
+    } else {
+        mode
     }
 }
 
@@ -7495,7 +7511,13 @@ impl Composer {
             self.staged().len() + self.staged_appshots().len(),
             self.staged_comments(cx).len(),
         );
-        send_button_mode(self.run_live(cx), has_text)
+        submission_mode(
+            self.run_live(cx),
+            has_text,
+            crate::settings::current(cx).auto_steer,
+            self.pickers.read(cx).steers_mid_turn(cx),
+            !self.staged().is_empty() || !self.staged_appshots().is_empty(),
+        )
     }
 
     fn execute_workspace_command(
@@ -7553,9 +7575,10 @@ impl Composer {
             SendButtonMode::Stop => {}
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
-            SendButtonMode::Send => self.send(text, false, cx),
+            SendButtonMode::Send => self.send(text, SendButtonMode::Send, cx),
             // Busy: keep the message queued until the current turn ends.
-            SendButtonMode::Queue => self.send(text, true, cx),
+            SendButtonMode::Queue => self.send(text, SendButtonMode::Queue, cx),
+            SendButtonMode::Steer => self.send(text, SendButtonMode::Steer, cx),
         }
     }
 
@@ -7582,7 +7605,7 @@ impl Composer {
     /// thread the picked config in: worktree creation (when the isolated toggle
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
-    fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+    fn send(&mut self, text: String, mode: SendButtonMode, cx: &mut Context<Self>) {
         if !self.check_reference_delivery(&text, cx) {
             return;
         }
@@ -7656,7 +7679,7 @@ impl Composer {
             }
             state.unsaved_side_chat_create(&chat_id)
         });
-        if queue && !is_new {
+        if mode == SendButtonMode::Queue && !is_new {
             let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
                 capabilities::MESSAGE_QUEUE_V1
             } else {
@@ -7701,9 +7724,9 @@ impl Composer {
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
-        // Existing busy chats always queue; compatibility was checked before
-        // taking the draft, attachments, or review comments.
-        let queue = queue && !is_new;
+        // Compatibility was checked before taking the draft, attachments,
+        // or review comments.
+        let queue = mode == SendButtonMode::Queue && !is_new;
         let clean_queue_attachment_text = staged.is_empty()
             || (engine
                 .engine_info()
@@ -8186,22 +8209,29 @@ impl Composer {
                     .as_ref()
                     .and_then(|spec| spec.space_id.as_ref())
                     .is_some();
-                let command = SessionCommandPayload::Run {
-                    request: RunRequest {
-                        mcp: None,
+                let command = if mode == SendButtonMode::Steer && !is_new {
+                    SessionCommandPayload::Steer {
                         prompt: content.clone(),
-                        harness: resolved.harness,
-                        model: resolved.model.clone(),
-                        reasoning: resolved.reasoning,
-                        model_options: resolved.model_options.clone(),
-                        cwd,
-                        sandbox: SandboxLevel::WorkspaceWrite,
-                        auto_approve: false,
-                        resume: None,
-                        attachments: attachment_paths,
-                        worktree: run_worktree,
-                    },
-                    message_id: message_id.clone(),
+                        message_id: Some(message_id.clone()),
+                    }
+                } else {
+                    SessionCommandPayload::Run {
+                        request: RunRequest {
+                            mcp: None,
+                            prompt: content.clone(),
+                            harness: resolved.harness,
+                            model: resolved.model.clone(),
+                            reasoning: resolved.reasoning,
+                            model_options: resolved.model_options.clone(),
+                            cwd,
+                            sandbox: SandboxLevel::WorkspaceWrite,
+                            auto_approve: false,
+                            resume: None,
+                            attachments: attachment_paths,
+                            worktree: run_worktree,
+                        },
+                        message_id: message_id.clone(),
+                    }
                 };
                 let command = serde_json::to_value(&command)
                     .map_err(|e| format!("Send failed: {e}"))?;
@@ -8823,7 +8853,7 @@ impl Composer {
                 .tooltip(crate::settings::widgets::text_tooltip("Stop"))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
-            SendButtonMode::Send | SendButtonMode::Queue => {
+            SendButtonMode::Send | SendButtonMode::Queue | SendButtonMode::Steer => {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
@@ -8842,13 +8872,11 @@ impl Composer {
                             .hover(|s| s.opacity(0.85))
                             .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
-                    .tooltip(crate::settings::widgets::text_tooltip(
-                        if mode == SendButtonMode::Queue {
-                            "Queue message"
-                        } else {
-                            "Send message"
-                        },
-                    ))
+                    .tooltip(crate::settings::widgets::text_tooltip(match mode {
+                        SendButtonMode::Queue => "Queue message",
+                        SendButtonMode::Steer => "Steer active run",
+                        _ => "Send message",
+                    }))
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
@@ -12515,7 +12543,7 @@ mod tests {
                 })).unwrap()];
                 });
                 assert!(!composer.reference_delivery_supported(cx));
-                composer.send(draft.clone(), false, cx);
+                composer.send(draft.clone(), SendButtonMode::Send, cx);
                 assert!(
                     composer
                         .failure
@@ -13647,6 +13675,153 @@ mod tests {
         // Nothing staged at all is still the stop square.
         assert_eq!(
             send_button_mode(live, composer_has_content("", 0, 0)),
+            SendButtonMode::Stop
+        );
+    }
+
+    #[gpui::test]
+    fn automatic_steering_dispatches_a_durable_steer_without_an_interrupt(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+        let (_directory, window) = composer_focus_window(cx);
+        let (out, mut requests) = tokio::sync::mpsc::channel(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(64);
+        window
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                        zeron_rpc::RpcClient::new(out, inbound),
+                    ));
+                    state.local_device_id = Some("local".into());
+                    state.selected_chat = Some("active-chat".into());
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "active-chat", "deviceId": "local", "archived": false,
+                            "createdAt": chrono::Utc::now(), "cwd": "/tmp/fixture",
+                            "config": { "harness": "codex", "sandbox": "workspace-write" }
+                        }))
+                        .unwrap(),
+                    ];
+                });
+                composer.send("Use the updated plan".into(), SendButtonMode::Steer, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut commands = Vec::new();
+        while let Ok(frame) = requests.try_recv() {
+            let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+            if matches!(
+                frame.method.as_deref(),
+                Some(methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE)
+            ) {
+                commands.push(frame);
+            }
+        }
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].method.as_deref(), Some(methods::QUEUE_COMMAND));
+        assert_eq!(commands[0].params["chatId"], "active-chat");
+        assert_eq!(commands[0].params["command"]["kind"], "steer");
+        assert_eq!(
+            commands[0].params["command"]["prompt"],
+            "Use the updated plan"
+        );
+        assert!(
+            commands[0].params["command"]["messageId"]
+                .as_str()
+                .is_some()
+        );
+        window
+            .update(cx, |composer, _, _| assert!(composer.sending))
+            .unwrap();
+    }
+
+    #[test]
+    fn automatic_steering_covers_every_registered_provider_before_and_after_resolution() {
+        let registry = zeron_engine::registry::default_registry();
+        let expected = [
+            (HarnessId::Mock, true),
+            (HarnessId::ClaudeCode, true),
+            (HarnessId::Codex, true),
+            (HarnessId::Cursor, true),
+            (HarnessId::Devin, true),
+            (HarnessId::Grok, true),
+            (HarnessId::Hermes, false),
+            (HarnessId::Pi, true),
+            (HarnessId::Opencode, true),
+            (HarnessId::Antigravity, false),
+        ];
+        let descriptors = registry.descriptors();
+        assert_eq!(descriptors.len(), expected.len());
+        for (id, mid_turn) in expected {
+            for resolved in [false, true] {
+                if resolved {
+                    registry.resolve(id).unwrap();
+                }
+                let descriptor = registry
+                    .descriptors()
+                    .into_iter()
+                    .find(|d| d.id == id)
+                    .unwrap();
+                let capable = descriptor.steers_mid_turn();
+                assert_eq!(capable, mid_turn, "{id:?}, resolved={resolved}");
+                assert_eq!(
+                    submission_mode(true, true, true, capable, false),
+                    if mid_turn {
+                        SendButtonMode::Steer
+                    } else {
+                        SendButtonMode::Queue
+                    },
+                    "{id:?}, resolved={resolved}"
+                );
+                assert_eq!(
+                    submission_mode(true, true, false, capable, false),
+                    SendButtonMode::Queue
+                );
+                assert_eq!(
+                    submission_mode(true, true, true, capable, true),
+                    SendButtonMode::Queue
+                );
+                assert_eq!(
+                    submission_mode(false, true, true, capable, false),
+                    SendButtonMode::Send
+                );
+                assert_eq!(
+                    submission_mode(true, false, true, capable, false),
+                    SendButtonMode::Stop
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_steering_requires_opt_in_and_a_capable_text_send() {
+        assert_eq!(
+            submission_mode(true, true, true, true, false),
+            SendButtonMode::Steer
+        );
+        assert_eq!(
+            submission_mode(true, true, false, true, false),
+            SendButtonMode::Queue
+        );
+        assert_eq!(
+            submission_mode(true, true, true, false, false),
+            SendButtonMode::Queue
+        );
+        assert_eq!(
+            submission_mode(true, true, true, true, true),
+            SendButtonMode::Queue
+        );
+        assert_eq!(
+            submission_mode(false, true, true, true, false),
+            SendButtonMode::Send
+        );
+        assert_eq!(
+            submission_mode(true, false, true, true, false),
             SendButtonMode::Stop
         );
     }
