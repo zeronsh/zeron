@@ -2095,6 +2095,7 @@ impl Shell {
                     this.pending_workspace_command = Some(*command);
                     cx.notify();
                 }
+                ComposerEvent::OpenChat { chat_id } => this.open_chat(chat_id.clone(), cx),
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
@@ -2562,7 +2563,7 @@ impl Shell {
                     "Here is the screenshot of the bug.",
                     std::slice::from_ref(&pending_path),
                 );
-                let echo = zeron_doc::SessionMessageEntry {
+                let echo = zeron_doc::SessionMessageEntry { origin: None,
                     id: "demo-upload-echo".into(),
                     role: zeron_doc::MessageRole::User,
                     parts: vec![zeron_doc::MessagePart::Text {
@@ -3969,7 +3970,7 @@ impl Shell {
                     let value = reply.ok()?;
                     let entries: Vec<zeron_doc::SessionMessageEntry> =
                         serde_json::from_str(value.get("text")?.as_str()?).ok()?;
-                    let update = zeron_doc::TranscriptUpdate {
+                    let update = zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false,
                         replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
                         frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
                         context_usage: None,
@@ -16222,6 +16223,16 @@ impl Shell {
             self.open_settings(SettingsSection::Appshots, cx);
         } else {
             self.close_settings(cx);
+        }
+    }
+    /// Screenshot fixtures: open Settings → General.
+    pub fn fixture_open_general_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::General, cx);
+    }
+    /// Screenshot fixtures: Settings → General with the preset editor open.
+    pub fn fixture_open_preset_editor(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self.shortcuts_page.clone() {
+            page.update(cx, |page, cx| page.fixture_open_preset_editor(cx));
         }
     }
     pub fn fixture_appshots_composer(&self) -> Entity<Composer> {

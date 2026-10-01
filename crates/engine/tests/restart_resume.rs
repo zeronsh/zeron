@@ -37,6 +37,8 @@ type RequestLog = Arc<Mutex<Vec<RunRequest>>>;
 
 fn run_request(prompt: &str, cwd: &str) -> RunRequest {
     RunRequest {
+        instructions: None,
+        policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,
@@ -335,6 +337,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
         let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
         let doc = SessionDoc::init(CHAT).unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "msg-user-1".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -349,6 +352,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "msg-assistant-1".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Text {
@@ -583,6 +587,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
         let doc = SessionDoc::init(CHAT).unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "msg-user-1".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -597,6 +602,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "msg-assistant-1".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Text {
@@ -845,6 +851,8 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     let cwd = cwd.to_string_lossy().to_string();
 
     let real_request = |prompt: &str| RunRequest {
+        instructions: None,
+        policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,

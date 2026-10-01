@@ -82,6 +82,10 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    /// Settings → General's default permission mode card.
+    default_mode: Entity<crate::settings::permissions::DefaultModeCard>,
+    /// Settings → General's agent presets.
+    presets: Entity<crate::settings::presets::PresetsCard>,
     _state: Entity<AppState>,
 }
 
@@ -125,8 +129,22 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
+            default_mode: {
+                let state = state.clone();
+                cx.new(|cx| crate::settings::permissions::DefaultModeCard::new(state, cx))
+            },
+            presets: {
+                let state = state.clone();
+                cx.new(|cx| crate::settings::presets::PresetsCard::new(state, cx))
+            },
             _state: state,
         }
+    }
+
+    /// Screenshot fixtures: open the preset editor.
+    pub fn fixture_open_preset_editor(&mut self, cx: &mut Context<Self>) {
+        self.presets
+            .update(cx, |presets, cx| presets.fixture_open_editor(cx));
     }
 
     pub fn show_appshots(&mut self, appshots: bool) {
@@ -697,6 +715,8 @@ impl Render for ShortcutsPage {
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
                                     )
+                                    .child(self.default_mode.clone())
+                                    .child(self.presets.clone())
                                     .child(self.thread_naming.clone()),
                             ),
                     )

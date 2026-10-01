@@ -788,7 +788,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                     Arc::new(Entry {
                         id: pending.message_id.clone(),
                         rev,
-                        message: Arc::new(SessionMessageEntry {
+                        message: Arc::new(SessionMessageEntry { origin: None,
                             id: pending.message_id.clone(),
                             role: MessageRole::User,
                             parts: vec![MessagePart::Text {
@@ -1043,7 +1043,17 @@ impl SessionHandle {
                 SendOutcome::Steered { message_id }
             } else {
                 let config = chat.config.as_ref();
+                // The chat's permission policy (absent = Bypass, which is
+                // what mobile always ran with).
+                let policy = config.map(|c| c.policy.clone()).unwrap_or_default();
                 let request = RunRequest {
+                    // Older harness drivers read only this flag: keep it in
+                    // step with the policy instead of forcing it on.
+                    auto_approve: policy.mode == zeron_proto::PermissionMode::Bypass,
+                    instructions: config
+                        .and_then(|c| c.preset.as_ref())
+                        .and_then(|p| p.instructions.clone()),
+                    policy,
                     prompt: content,
                     harness: config.map(|c| c.harness),
                     model: config.and_then(|c| c.model.clone()),
@@ -1051,7 +1061,6 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),

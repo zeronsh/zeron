@@ -54,6 +54,8 @@ async fn quiet_acp_prompt_stays_working_until_response() {
         SessionCommandPayload::Run {
             message_id: "first-user".into(),
             request: RunRequest {
+                instructions: None,
+                policy: Default::default(),
                 mcp: None,
                 prompt: "tools".into(),
                 harness: None,

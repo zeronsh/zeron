@@ -41,6 +41,17 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// The device's permission defaults (`{defaultMode}`): the mode new
+    /// chats start in. Set replies with the stored settings.
+    pub const GET_POLICY_SETTINGS: &str = "GetPolicySettings";
+    pub const SET_POLICY_SETTINGS: &str = "SetPolicySettings";
+    /// Agent presets on the device (docs/agent-presets.md): `ListPresets
+    /// {path?}` → `{presets}` (the project's at `path`, its imported Claude
+    /// Code subagents, and the user's); `UpsertPreset {preset}` → `{preset}`;
+    /// `DeletePreset {id}` → `{deleted}`.
+    pub const LIST_PRESETS: &str = "ListPresets";
+    pub const UPSERT_PRESET: &str = "UpsertPreset";
+    pub const DELETE_PRESET: &str = "DeletePreset";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -59,6 +70,13 @@ pub mod methods {
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
+    /// The child ask running in a chat: the schema its `submit_result` tool
+    /// must advertise. Params `{chatId, askId}`; IPC-only (the MCP server
+    /// inside the child's harness dials the local engine).
+    pub const GET_ASK_SPEC: &str = "GetAskSpec";
+    /// `submit_result`: validate and accept (or bounce with violations) a
+    /// child ask's typed result. Params `{chatId, askId, result}`; IPC-only.
+    pub const SUBMIT_ASK_RESULT: &str = "SubmitAskResult";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.

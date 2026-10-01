@@ -244,6 +244,8 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
     // grace elapses; the entry crosses the peer link instead.
     let command = serde_json::to_value(SessionCommandPayload::Run {
         request: RunRequest {
+            instructions: None,
+            policy: Default::default(),
             mcp: None,
             prompt: "over the relay".into(),
             harness: None,

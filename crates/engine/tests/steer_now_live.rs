@@ -102,6 +102,8 @@ async fn steer_now_interrupts_a_streaming_answer() {
         .set_chat_config(
             CHAT,
             &ChatConfig {
+                preset: None,
+                policy: Default::default(),
                 harness: id,
                 model: model.clone(),
                 reasoning: None,
@@ -133,6 +135,8 @@ async fn steer_now_interrupts_a_streaming_answer() {
             SessionCommandPayload::Run {
                 message_id: "story".into(),
                 request: RunRequest {
+                    instructions: None,
+                    policy: Default::default(),
                     mcp: None,
                     prompt: "Write a long, detailed story (about 1500 words) about a lighthouse keeper. Do not use any tools."
                         .into(),

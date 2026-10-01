@@ -4,17 +4,29 @@
 //! Context occupancy is replicated per chat; billing `Usage` remains a harness passthrough.
 
 pub mod agent;
+pub mod ask;
 pub mod entities;
 pub mod file_mentions;
+pub mod goal;
 pub mod invocation;
 pub mod motion;
+pub mod policy;
+pub mod preset;
 pub mod preview;
 pub mod sidebar_pins;
 pub mod view;
 pub mod workspace;
 
 pub use agent::*;
+pub use ask::*;
 pub use entities::*;
+pub use goal::*;
+pub use policy::{
+    ActionKind, AgentPolicy, PermissionMode, PolicyCaps, PolicyRule, RuleEffect, SandboxMode,
+};
+pub use preset::{
+    AgentPreset, PresetFallback, PresetRef, PresetSource, PresetTools,
+};
 pub use preview::*;
 pub use sidebar_pins::*;
 pub use workspace::*;

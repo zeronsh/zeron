@@ -15,7 +15,7 @@ use zeron_harness::{
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
-    ToolCall, UserInputAnswer, UserInputQuestion,
+    TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 fn fixture_path() -> PathBuf {
@@ -93,6 +93,8 @@ async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_r
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        instructions: None,
+        policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,
@@ -177,6 +179,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
     let (controls, _steer, _token) = controls("Yes");
     let mut req = request("scenario:happy");
     req.cwd = "/tmp".into();
+    // A preset's instructions ride thread/start as the developer instructions.
+    req.instructions = Some("Keep diffs small.".into());
     req.model_options.insert(
         "serviceTier".into(),
         serde_json::Value::String("fast".into()),
@@ -293,14 +297,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         id: "td1".into(),
         call: ToolCall::Todo {
             items: vec![
-                TodoItem {
-                    text: "a".into(),
-                    done: true
-                },
-                TodoItem {
-                    text: "b".into(),
-                    done: false
-                },
+                TodoItem::new("a", TodoStatus::Completed),
+                TodoItem::new("b", TodoStatus::Pending),
             ]
         },
     }));
@@ -454,46 +452,17 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
 }
 
 #[tokio::test]
-async fn approvals_round_trip_as_input_requests() {
-    // Approvals must reach the ENGINE's input bridge (`request_input`) — and
-    // the harness must NOT emit its own `InputRequested`/`InputResolved`
-    // twins: the bridge owns that lifecycle (it mints the request id the
-    // resolver is parked under; a harness-emitted copy folded an unanswerable
-    // duplicate chip into the doc).
-    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
-    let (steer_tx, steer_rx) = mpsc::channel(8);
-    let _steer = steer_tx;
-    let token = CancellationToken::new();
-    let seen = asked.clone();
-    let controls = RunControls {
-        execution_lease: None,
-        request_input: Box::new(move |questions| {
-            seen.lock().unwrap().extend(questions.iter().cloned());
-            let (tx, rx) = oneshot::channel();
-            let answers: Vec<UserInputAnswer> = questions
-                .iter()
-                .map(|q| UserInputAnswer {
-                    question_id: q.id.clone(),
-                    labels: vec!["Yes".into()],
-                })
-                .collect();
-            let _ = tx.send(answers);
-            rx
-        }),
-        steering: steer_rx,
-        interrupt: token.clone(),
-    };
+async fn bypass_accepts_stray_approvals_without_asking() {
+    // Bypass (the default) keeps yolo mode: "never" on the wire, and the rare
+    // stray approval request is accepted outright — never surfaced, and the
+    // harness never emits its own `InputRequested`/`InputResolved` (the
+    // engine's bridge owns that lifecycle).
+    let (controls, asked, _steer) = answering(vec!["Deny"]);
     let mut req = request("scenario:approve");
     req.auto_approve = false;
     let events = run_to_end(&harness(), req, controls).await;
 
-    let asked = asked.lock().unwrap();
-    assert_eq!(asked.len(), 2, "{events:?}");
-    assert_eq!(asked[0].header, "Approve command");
-    assert!(asked[0].question.contains("rm -rf /tmp/x"));
-    assert_eq!(asked[0].options, vec!["Yes".to_string(), "No".to_string()]);
-    assert_eq!(asked[1].header, "Approve file change");
-    assert!(asked[1].question.contains("/tmp/a.rs"));
+    assert!(asked.lock().unwrap().is_empty());
     assert!(
         !events.iter().any(|e| matches!(
             e,
@@ -501,7 +470,6 @@ async fn approvals_round_trip_as_input_requests() {
         )),
         "harness must not emit input lifecycle events itself: {events:?}"
     );
-
     // The fake only completes the turn after seeing BOTH accept decisions.
     assert_eq!(
         events.last(),
@@ -515,12 +483,13 @@ async fn approvals_round_trip_as_input_requests() {
 }
 
 #[tokio::test]
-async fn approval_no_answer_becomes_decline() {
-    let (controls, _steer, _token) = controls("No");
+async fn a_denied_approval_becomes_decline() {
+    let (controls, asked, _steer) = answering(vec![zeron_proto::policy::APPROVAL_DENY]);
     let mut req = request("scenario:decline");
-    req.auto_approve = false;
+    req.policy = zeron_proto::AgentPolicy::with_mode(zeron_proto::PermissionMode::Ask);
     let events = run_to_end(&harness(), req, controls).await;
 
+    assert_eq!(asked.lock().unwrap().len(), 1);
     // The fake only completes the turn after seeing the decline decision.
     assert!(
         matches!(
@@ -1577,4 +1546,197 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
             "done"
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Permission modes (Zeron's policy over Codex's approval policy + sandbox)
+// ---------------------------------------------------------------------------
+
+/// Controls answering successive questions with `answers` (the last one
+/// repeats), recording every question asked.
+fn answering(
+    answers: Vec<&'static str>,
+) -> (
+    RunControls,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+    mpsc::Sender<SteerMessage>,
+) {
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::default();
+    let seen = asked.clone();
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let controls = RunControls {
+        execution_lease: None,
+        request_input: Box::new(move |questions| {
+            let mut seen = seen.lock().unwrap();
+            let label = answers[seen.len().min(answers.len() - 1)];
+            seen.extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(
+                questions
+                    .iter()
+                    .map(|q| UserInputAnswer {
+                        question_id: q.id.clone(),
+                        labels: vec![label.into()],
+                    })
+                    .collect(),
+            );
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    (controls, asked, steer_tx)
+}
+
+/// Run the gate scenario under `policy`; returns the fake's transcript (the
+/// wire policy it saw, then each request's answer) and the questions asked.
+async fn gated(
+    policy: zeron_proto::AgentPolicy,
+    answers: Vec<&'static str>,
+) -> (String, Vec<UserInputQuestion>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request("scenario:gate");
+    req.cwd = dir.path().display().to_string();
+    req.policy = policy;
+    let (controls, asked, _steer) = answering(answers);
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } if text != "\n\n" => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let asked = asked.lock().unwrap().clone();
+    (text, asked)
+}
+
+fn with_mode(mode: zeron_proto::PermissionMode) -> zeron_proto::AgentPolicy {
+    zeron_proto::AgentPolicy::with_mode(mode)
+}
+
+#[tokio::test]
+async fn bypass_is_yolo_and_accepts_everything() {
+    let (text, asked) = gated(with_mode(zeron_proto::PermissionMode::Bypass), vec!["Deny"]).await;
+    assert_eq!(
+        text,
+        "policy:never:danger-full-access:type:dangerFullAccess\
+         |301:accept|302:accept|303:accept|304:accept|305:accept"
+    );
+    assert!(asked.is_empty());
+}
+
+#[tokio::test]
+async fn ask_mode_asks_codex_to_ask_and_honours_once_deny_and_always() {
+    let (text, asked) = gated(
+        with_mode(zeron_proto::PermissionMode::Ask),
+        vec!["Allow once", "Always allow", "Deny", "Allow once"],
+    )
+    .await;
+    assert_eq!(
+        text,
+        "policy:untrusted:danger-full-access:type:dangerFullAccess\
+         |301:accept|302:accept|303:decline|304:accept|305:accept",
+        "the second identical curl rides the Always-allow rule"
+    );
+    assert_eq!(asked.len(), 4, "{asked:?}");
+    assert!(
+        asked[0]
+            .id
+            .starts_with(zeron_proto::policy::APPROVAL_QUESTION_PREFIX)
+    );
+    assert_eq!(asked[0].header, "Permission");
+    assert!(
+        asked[0].question.contains("cargo test"),
+        "{}",
+        asked[0].question
+    );
+    assert_eq!(
+        asked[0].options,
+        vec![
+            zeron_proto::policy::APPROVAL_ALLOW_ONCE.to_string(),
+            zeron_proto::policy::APPROVAL_ALLOW_ALWAYS.into(),
+            zeron_proto::policy::APPROVAL_DENY.into(),
+        ]
+    );
+    assert!(asked[1].question.contains("curl https://example.com"));
+    assert!(
+        asked[3].question.contains("src/a.rs"),
+        "patch paths come from its item: {}",
+        asked[3].question
+    );
+}
+
+#[tokio::test]
+async fn auto_mode_runs_dev_commands_asks_risky_and_refuses_destructive() {
+    let (text, asked) = gated(with_mode(zeron_proto::PermissionMode::Auto), vec!["Deny"]).await;
+    assert_eq!(
+        text,
+        "policy:untrusted:danger-full-access:type:dangerFullAccess\
+         |301:accept|302:decline|303:decline|304:accept|305:decline"
+    );
+    assert_eq!(asked.len(), 2, "only the two curls ask: {asked:?}");
+    assert!(asked.iter().all(|q| q.question.contains("curl")));
+}
+
+#[tokio::test]
+async fn accept_edits_allows_project_edits_and_sandboxes_natively() {
+    let policy = zeron_proto::AgentPolicy {
+        mode: zeron_proto::PermissionMode::AcceptEdits,
+        sandbox: zeron_proto::SandboxMode::WorkspaceWrite,
+        network: false,
+        rules: Vec::new(),
+        unattended: false,
+    };
+    let (text, asked) = gated(policy, vec!["Deny"]).await;
+    assert_eq!(
+        text,
+        "policy:untrusted:workspace-write:networkAccess:false,type:workspaceWrite\
+         |301:decline|302:decline|303:decline|304:accept|305:decline"
+    );
+    assert!(
+        !asked.iter().any(|q| q.question.contains("a.rs")),
+        "{asked:?}"
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_is_read_only_and_refuses_edits() {
+    let (text, asked) = gated(
+        with_mode(zeron_proto::PermissionMode::Plan),
+        vec!["Allow once"],
+    )
+    .await;
+    assert_eq!(
+        text,
+        "policy:untrusted:read-only:networkAccess:true,type:readOnly\
+         |301:decline|302:decline|303:decline|304:decline|305:decline"
+    );
+    assert!(asked.is_empty(), "{asked:?}");
+}
+
+#[test]
+fn codex_honours_every_mode_and_sandbox() {
+    let caps = CodexHarness::new().policy_caps();
+    assert_eq!(caps.modes, zeron_proto::PermissionMode::ALL.to_vec());
+    assert_eq!(
+        caps.sandboxes,
+        vec![
+            zeron_proto::SandboxMode::Off,
+            zeron_proto::SandboxMode::WorkspaceWrite,
+            zeron_proto::SandboxMode::ReadOnly
+        ]
+    );
+    assert!(!caps.native_plan);
+    assert!(!caps.live_mode_switch);
 }

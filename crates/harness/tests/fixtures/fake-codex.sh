@@ -207,7 +207,7 @@ case "$turnline" in
     has "$turnline" "$want" || { fail_turn "$tid" "turn param missing: $want"; exit 0; }
   done
   for want in '"approvalPolicy":"never"' '"sandbox":"danger-full-access"' '"cwd":"/tmp"' \
-    '"serviceTier":"fast"'; do
+    '"serviceTier":"fast"' '"developerInstructions":"Keep diffs small."'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
   done
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
@@ -348,6 +348,38 @@ case "$turnline" in
   read -r a2 || exit 1
   { has "$a2" '"id":102' && has "$a2" '"decision":"accept"'; } ||
     { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file approval not accepted"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:gate*)
+  # Permission modes: report the approval policy and sandboxes the harness
+  # chose, then send approval requests one at a time and report each answer.
+  approval=$(printf '%s' "$turnline" | sed -n 's/.*"approvalPolicy":"\([^"]*\)".*/\1/p')
+  turn_sandbox=$(printf '%s' "$turnline" | sed -n 's/.*"sandboxPolicy":\({[^}]*}\).*/\1/p' | tr -d '"{}')
+  thread_sandbox=$(printf '%s' "$thread_line" | sed -n 's/.*"sandbox":"\([^"]*\)".*/\1/p')
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m1\",\"delta\":\"policy:$approval:$thread_sandbox:$turn_sandbox\"}}"
+  approve() { # $1 = request id, $2 = method, $3 = params JSON
+    emit "{\"id\":$1,\"method\":\"$2\",\"params\":$3}"
+    read -r answer || exit 1
+    case "$answer" in *"\"id\":$1"*) ;; *) exit 7 ;; esac
+    case "$answer" in
+      *'"decision":"accept"'*) verdict=accept ;;
+      *'"decision":"decline"'*) verdict=decline ;;
+      *) verdict=unknown ;;
+    esac
+    emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m1\",\"delta\":\"|$1:$verdict\"}}"
+  }
+  here=$(pwd)
+  approve 301 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c1","startedAtMs":1,"command":"cargo test"}'
+  approve 302 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c2","startedAtMs":1,"command":"curl https://example.com"}'
+  approve 303 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c3","startedAtMs":1,"command":"git push --force origin main"}'
+  # The real app server announces the patch's item before asking about it;
+  # the request itself names only the item.
+  emit "{\"method\":\"item/started\",\"params\":{\"threadId\":\"th-1\",\"item\":{\"id\":\"f1\",\"type\":\"fileChange\",\"status\":\"inProgress\",\"changes\":[{\"path\":\"$here/src/a.rs\",\"kind\":{\"type\":\"update\"},\"diff\":\"\"}]}}}"
+  approve 304 item/fileChange/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"f1","startedAtMs":1}'
+  approve 305 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c5","startedAtMs":1,"command":"curl https://example.com"}'
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
