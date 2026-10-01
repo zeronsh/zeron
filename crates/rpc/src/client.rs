@@ -52,45 +52,6 @@ pub struct RpcSubscription {
     shared: Arc<Shared>,
 }
 
-/// Removes a pending unary request and asks the server to abort its task when
-/// the caller drops the request future before a response arrives.
-struct RpcCallGuard {
-    id: u64,
-    out: mpsc::Sender<String>,
-    shared: Arc<Shared>,
-}
-
-fn cancel_pending(id: u64, out: &mpsc::Sender<String>, shared: &Arc<Shared>) {
-    if shared.lock().remove(&id).is_none() {
-        return;
-    }
-    let Ok(frame) = serde_json::to_string(&ClientFrame {
-        id,
-        method: None,
-        params: serde_json::Value::Null,
-        cancel: true,
-    }) else {
-        return;
-    };
-    match out.try_send(frame) {
-        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-        Err(mpsc::error::TrySendError::Full(frame)) => {
-            let out = out.clone();
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ = out.send(frame).await;
-                });
-            }
-        }
-    }
-}
-
-impl Drop for RpcCallGuard {
-    fn drop(&mut self) {
-        cancel_pending(self.id, &self.out, &self.shared);
-    }
-}
-
 impl RpcSubscription {
     pub async fn recv(&mut self) -> Option<serde_json::Value> {
         self.items.recv().await
@@ -99,7 +60,28 @@ impl RpcSubscription {
 
 impl Drop for RpcSubscription {
     fn drop(&mut self) {
-        cancel_pending(self.id, &self.out, &self.shared);
+        if self.shared.lock().remove(&self.id).is_none() {
+            return;
+        }
+        let Ok(frame) = serde_json::to_string(&ClientFrame {
+            id: self.id,
+            method: None,
+            params: serde_json::Value::Null,
+            cancel: true,
+        }) else {
+            return;
+        };
+        match self.out.try_send(frame) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(frame)) => {
+                let out = self.out.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let _ = out.send(frame).await;
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -165,11 +147,6 @@ impl RpcClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.shared.lock().insert(id, Pending::Call(tx));
-        let _guard = RpcCallGuard {
-            id,
-            out: self.out.clone(),
-            shared: self.shared.clone(),
-        };
         self.send(ClientFrame {
             id,
             method: Some(method.into()),

@@ -194,15 +194,8 @@ pub mod methods {
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
-    /// Legacy listing method. Current engines require an explicit repository.
-    pub const LIST_OPEN_CHANGE_REQUESTS: &str = "ListOpenChangeRequests";
-    /// Repository-scoped listing. A distinct method prevents old engines from
-    /// silently ignoring the filter and issuing a global GitHub search.
-    pub const LIST_REPOSITORY_CHANGE_REQUESTS: &str = "ListRepositoryChangeRequests";
-    /// Filter-aware contract; older engines must not silently return authored results.
-    pub const LIST_FILTERED_CHANGE_REQUESTS: &str = "ListFilteredChangeRequests";
-    /// Paged filter-aware listing (`after` cursor, total count). Clients fall
-    /// back to [`LIST_FILTERED_CHANGE_REQUESTS`] when an older engine rejects it.
+    /// One page of a repository's open pull requests (`filter`, `after`
+    /// cursor), with the total count.
     pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";
     /// Resolve a selected checkout through local Git metadata only.
     pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
@@ -363,11 +356,6 @@ mod tests {
         dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     }
 
-    struct CancelAwareCallService {
-        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-        dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    }
-
     struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
     impl Drop for DropSignal {
@@ -407,27 +395,6 @@ mod tests {
                 ));
             }
             Ok(RpcReply::Stream(stream.boxed()))
-        }
-    }
-
-    #[async_trait]
-    impl RpcService for CancelAwareCallService {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<RpcReply, RpcError> {
-            match method {
-                "PendingCall" => {
-                    if let Some(started) = self.started.lock().unwrap().take() {
-                        let _ = started.send(());
-                    }
-                    let _guard = DropSignal(self.dropped.lock().unwrap().take());
-                    std::future::pending().await
-                }
-                "Echo" => Ok(RpcReply::Value(params)),
-                other => Err(RpcError::UnknownMethod(other.into())),
-            }
         }
     }
 
@@ -601,31 +568,6 @@ mod tests {
             .await
             .expect("second device's quiet stream cancelled")
             .expect("second drop signal");
-    }
-
-    #[tokio::test]
-    async fn dropping_unary_call_cancels_pending_server_task() {
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-        let client = memory_client(Arc::new(CancelAwareCallService {
-            started: Mutex::new(Some(started_tx)),
-            dropped: Mutex::new(Some(dropped_tx)),
-        }));
-        let mut call = Box::pin(client.call("PendingCall", serde_json::Value::Null));
-
-        tokio::select! {
-            result = &mut call => panic!("pending call completed unexpectedly: {result:?}"),
-            started = started_rx => started.expect("server started pending call"),
-        }
-        drop(call);
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
-            .await
-            .expect("server call cancelled")
-            .expect("drop signal");
-
-        let echoed = client.call("Echo", serde_json::json!(2)).await.unwrap();
-        assert_eq!(echoed, serde_json::json!(2));
     }
 
     #[tokio::test]

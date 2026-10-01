@@ -880,7 +880,7 @@ pub struct ChangeRequestListItem {
     pub url: String,
     pub state: ChangeRequestState,
     pub is_draft: bool,
-    /// Optional on older engines and providers that do not expose reviews.
+    /// `Unknown` when the provider reports no decision.
     #[serde(default)]
     pub review_decision: ChangeRequestReviewDecision,
     pub additions: u64,
@@ -1468,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn change_request_review_decision_round_trips_and_defaults_for_older_payloads() {
+    fn change_request_review_decision_round_trips_and_defaults_when_absent() {
         for (decision, encoded) in [
             (ChangeRequestReviewDecision::Approved, "approved"),
             (
@@ -1494,7 +1494,7 @@ mod tests {
             author: Default::default(),
             repository: "acme/zeron".into(),
             number: 1,
-            title: "Older payload".into(),
+            title: "No decision".into(),
             url: "https://github.com/acme/zeron/pull/1".into(),
             state: ChangeRequestState::Open,
             is_draft: false,

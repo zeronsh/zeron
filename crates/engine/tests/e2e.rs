@@ -31,22 +31,36 @@ struct FixedOpenChangeRequests(Vec<ChangeRequestListItem>);
 
 #[async_trait]
 impl OpenChangeRequestLookup for FixedOpenChangeRequests {
-    async fn list_authored_open(
-        &self,
-        repository: &str,
-        _refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
-        assert_eq!(repository, "acme/zeron");
-        Ok(self.0.clone())
-    }
-    async fn list_filtered_open(
+    async fn list_page(
         &self,
         repository: &str,
         filter: zeron_proto::ChangeRequestFilter,
-        refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        after: Option<&str>,
+        _refresh: bool,
+    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
+        assert_eq!(repository, "acme/zeron");
         assert_eq!(filter, zeron_proto::ChangeRequestFilter::Reviewing);
-        self.list_authored_open(repository, refresh).await
+        assert_eq!(after, None);
+        Ok(zeron_proto::ChangeRequestPage {
+            items: self.0.clone(),
+            next_cursor: None,
+            total_count: Some(self.0.len() as u64),
+        })
+    }
+    async fn post_comment(
+        &self,
+        url: &str,
+        body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+        assert_eq!(url, self.0[0].url);
+        if body == "signed out" {
+            return Err(ChangeRequestError::Authentication);
+        }
+        Ok(zeron_proto::ChangeRequestComment {
+            body: body.into(),
+            viewer_did_author: true,
+            ..Default::default()
+        })
     }
     async fn detail(
         &self,
@@ -1627,38 +1641,26 @@ async fn pull_request_list_dispatch_returns_provider_items() {
     .with_open_change_requests(Arc::new(FixedOpenChangeRequests(vec![item.clone()])));
     let client = zeron_rpc::memory_client(Arc::new(rpc));
 
-    let unscoped = client
-        .call(
-            zeron_rpc::methods::LIST_OPEN_CHANGE_REQUESTS,
-            serde_json::json!({}),
-        )
-        .await;
-    assert!(
-        unscoped.is_err(),
-        "legacy unscoped requests must never reach the provider"
-    );
-
     for invalid in [
+        serde_json::json!({}),
         serde_json::json!({ "filter": "all" }),
         serde_json::json!({ "repository": "acme/zeron", "filter": "unknown" }),
+        serde_json::json!({ "repository": "acme/zeron repo:other/repo" }),
+        serde_json::json!({ "repository": "acme/zeron", "after": "a b" }),
     ] {
+        let error = client
+            .call(
+                zeron_rpc::methods::LIST_CHANGE_REQUEST_PAGE,
+                invalid.clone(),
+            )
+            .await
+            .unwrap_err();
         assert!(
-            client
-                .call(zeron_rpc::methods::LIST_FILTERED_CHANGE_REQUESTS, invalid)
-                .await
-                .is_err()
+            error.to_string().starts_with("bad params"),
+            "{invalid} must be rejected before the provider: {error}"
         );
     }
 
-    let listed: Vec<ChangeRequestListItem> = client
-        .call_as(
-            zeron_rpc::methods::LIST_FILTERED_CHANGE_REQUESTS,
-            serde_json::json!({ "repository": "acme/zeron", "filter": "reviewing", "targetDeviceId": core.device_id }),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(listed, vec![item.clone()]);
     let page: zeron_proto::ChangeRequestPage = client
         .call_as(
             zeron_rpc::methods::LIST_CHANGE_REQUEST_PAGE,
@@ -1667,19 +1669,7 @@ async fn pull_request_list_dispatch_returns_provider_items() {
         .await
         .unwrap();
     assert_eq!(page.items, vec![item.clone()]);
-    assert_eq!(
-        page.next_cursor, None,
-        "single-page providers end the listing"
-    );
-    assert!(
-        client
-            .call(
-                zeron_rpc::methods::LIST_CHANGE_REQUEST_PAGE,
-                serde_json::json!({ "repository": "acme/zeron", "after": "a b" }),
-            )
-            .await
-            .is_err()
-    );
+    assert_eq!(page.total_count, Some(1));
     let detail: zeron_proto::ChangeRequestDetail = client
         .call_as(
             zeron_rpc::methods::GET_CHANGE_REQUEST,
@@ -1697,6 +1687,34 @@ async fn pull_request_list_dispatch_returns_provider_items() {
         .await
         .unwrap();
     assert_eq!(diff, "diff --git a/a b/a\n");
+
+    let comment: zeron_proto::ChangeRequestComment = client
+        .call_as(
+            zeron_rpc::methods::POST_CHANGE_REQUEST_COMMENT,
+            serde_json::json!({ "url": item.url, "body": "Looks good", "targetDeviceId": core.device_id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(comment.body, "Looks good");
+    assert!(comment.viewer_did_author);
+    let post = |body: String| {
+        client.call(
+            zeron_rpc::methods::POST_CHANGE_REQUEST_COMMENT,
+            serde_json::json!({ "url": item.url, "body": body }),
+        )
+    };
+    for body in ["  ".to_owned(), "x".repeat(60_001)] {
+        let error = post(body).await.unwrap_err();
+        assert!(error.to_string().starts_with("bad params"), "{error}");
+    }
+    assert!(
+        matches!(
+            post("signed out".into()).await,
+            Err(zeron_rpc::RpcError::Capability(code))
+                if code == zeron_rpc::capability_errors::PULL_REQUESTS_AUTHENTICATION
+        ),
+        "provider failures cross the wire as stable codes"
+    );
 }
 
 #[tokio::test]

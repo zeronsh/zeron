@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use zeron_proto::{
     ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestReviewDecision,
@@ -56,8 +56,10 @@ type PrFetch = futures::future::Shared<futures::future::BoxFuture<'static, PrRes
 #[derive(Default)]
 struct PrRequestCache {
     entries: Vec<(String, Instant, PrResult)>,
-    /// Reads awaiting GitHub, joined by identical requests.
-    in_flight: std::collections::HashMap<String, PrFetch>,
+    /// Reads awaiting GitHub, joined by identical requests. The id tells a
+    /// finishing read whether a write has replaced or dropped it meanwhile.
+    in_flight: std::collections::HashMap<String, (u64, PrFetch)>,
+    next_fetch: u64,
     rate_limited_at: Option<Instant>,
 }
 
@@ -130,59 +132,29 @@ pub trait ChangeRequestProvider: Send + Sync {
     ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError>;
 }
 
-/// Host-side boundary for global change request listing and inspection surfaces.
+/// Host-side boundary for the pull request board and detail view.
 #[async_trait]
 pub trait OpenChangeRequestLookup: Send + Sync {
-    async fn list_authored_open(
-        &self,
-        repository: &str,
-        refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError>;
-    async fn list_filtered_open(
-        &self,
-        repository: &str,
-        filter: zeron_proto::ChangeRequestFilter,
-        refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
-        if filter != zeron_proto::ChangeRequestFilter::Authored {
-            return Err(ChangeRequestError::UnsupportedRepository);
-        }
-        self.list_authored_open(repository, refresh).await
-    }
-    /// One page of [`Self::list_filtered_open`]. Providers without cursors
-    /// serve a single page.
-    async fn list_filtered_page(
+    /// One page of a repository's open pull requests, newest updates first.
+    async fn list_page(
         &self,
         repository: &str,
         filter: zeron_proto::ChangeRequestFilter,
         after: Option<&str>,
         refresh: bool,
-    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
-        if after.is_some() {
-            return Ok(zeron_proto::ChangeRequestPage::default());
-        }
-        let items = self.list_filtered_open(repository, filter, refresh).await?;
-        Ok(zeron_proto::ChangeRequestPage {
-            total_count: Some(items.len() as u64),
-            items,
-            next_cursor: None,
-        })
-    }
-    async fn post_comment(
-        &self,
-        _url: &str,
-        _body: &str,
-    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
-        Err(ChangeRequestError::UnsupportedRepository)
-    }
+    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError>;
+    /// The pull request's details, or its patch when `diff` is set.
     async fn detail(
         &self,
-        _url: &str,
-        _diff: bool,
-        _refresh: bool,
-    ) -> Result<serde_json::Value, ChangeRequestError> {
-        Err(ChangeRequestError::UnsupportedRepository)
-    }
+        url: &str,
+        diff: bool,
+        refresh: bool,
+    ) -> Result<serde_json::Value, ChangeRequestError>;
+    async fn post_comment(
+        &self,
+        url: &str,
+        body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError>;
 }
 
 /// Checkout inspection plus provider resolution, injectable for cache/service tests.
@@ -300,8 +272,9 @@ pub struct GitHubCli {
 
 impl GitHubCli {
     /// Shared across RPC clients on this engine. Simultaneous identical reads
-    /// share one provider call; distinct reads run side by side, so a slow
-    /// diff never queues the board behind it. Never retry here.
+    /// share one provider call; distinct reads run side by side. The read runs
+    /// detached, so it completes and is cached even when every caller has gone
+    /// away. Never retry here.
     async fn cached_pr_request<F>(&self, key: String, refresh: bool, fetch: F) -> PrResult
     where
         F: std::future::Future<Output = PrResult> + Send + 'static,
@@ -312,6 +285,8 @@ impl GitHubCli {
             let entry = cache.entries.remove(index);
             let ttl = match &entry.2 {
                 Err(ChangeRequestError::RateLimited) => Duration::from_secs(15 * 60),
+                // An explicit retry always reaches GitHub again.
+                Err(_) if refresh => Duration::ZERO,
                 Err(_) => Duration::from_secs(60),
                 Ok(_) if refresh => Duration::from_secs(15),
                 Ok(_) => Duration::from_secs(5 * 60),
@@ -330,35 +305,47 @@ impl GitHubCli {
             return Err(ChangeRequestError::RateLimited);
         }
         let pending = match cache.in_flight.get(&key) {
-            Some(pending) => pending.clone(),
+            Some((_, pending)) => pending.clone(),
             None => {
-                let pending = fetch.boxed().shared();
-                cache.in_flight.insert(key.clone(), pending.clone());
+                let id = cache.next_fetch;
+                cache.next_fetch += 1;
+                let shared = self.pr_cache.clone();
+                let task_key = key.clone();
+                let task = tokio::spawn(async move {
+                    let result = std::panic::AssertUnwindSafe(fetch)
+                        .catch_unwind()
+                        .await
+                        .unwrap_or(Err(ChangeRequestError::CommandFailed));
+                    let mut cache = shared.lock().await;
+                    if matches!(result, Err(ChangeRequestError::RateLimited)) {
+                        cache.rate_limited_at = Some(Instant::now());
+                    }
+                    if cache
+                        .in_flight
+                        .get(&task_key)
+                        .is_some_and(|(current, _)| *current == id)
+                    {
+                        cache.in_flight.remove(&task_key);
+                        cache.entries.retain(|entry| entry.0 != task_key);
+                        cache
+                            .entries
+                            .push((task_key, Instant::now(), result.clone()));
+                        if cache.entries.len() > 24 {
+                            let _ = cache.entries.remove(0);
+                        }
+                    }
+                    result
+                });
+                let pending =
+                    async move { task.await.unwrap_or(Err(ChangeRequestError::CommandFailed)) }
+                        .boxed()
+                        .shared();
+                cache.in_flight.insert(key, (id, pending.clone()));
                 pending
             }
         };
         drop(cache);
-        let result = pending.clone().await;
-        let mut cache = self.pr_cache.lock().await;
-        if matches!(result, Err(ChangeRequestError::RateLimited)) {
-            cache.rate_limited_at = Some(Instant::now());
-        }
-        // The first waiter to finish records the result. A write that
-        // invalidated this read meanwhile has already dropped it.
-        if !cache
-            .in_flight
-            .get(&key)
-            .is_some_and(|current| current.ptr_eq(&pending))
-        {
-            return result;
-        }
-        cache.in_flight.remove(&key);
-        cache.entries.retain(|entry| entry.0 != key);
-        cache.entries.push((key, Instant::now(), result.clone()));
-        if cache.entries.len() > 24 {
-            let _ = cache.entries.remove(0);
-        }
-        result
+        pending.await
     }
 
     pub async fn detail(
@@ -396,14 +383,20 @@ impl GitHubCli {
             .runner
             .run(ProcessRequest {
                 program: "gh".into(),
+                // The body travels on stdin: a long comment would not fit a
+                // Windows command line.
                 args: vec![
                     "api".into(),
                     "--method".into(),
                     "POST".into(),
                     endpoint,
-                    "-f".into(),
-                    format!("body={body}"),
+                    "--input".into(),
+                    "-".into(),
                 ],
+                stdin: Some(
+                    serde_json::to_vec(&serde_json::json!({ "body": body }))
+                        .map_err(|_| ChangeRequestError::Decode)?,
+                ),
                 cwd: None,
                 env: vec![
                     ("GH_PROMPT_DISABLED".into(), "1".into()),
@@ -465,6 +458,7 @@ impl GitHubCli {
             .run(ProcessRequest {
                 program: "gh".into(),
                 args,
+                stdin: None,
                 cwd: None,
                 env: vec![
                     ("GH_PROMPT_DISABLED".into(), "1".into()),
@@ -523,36 +517,8 @@ impl GitHubCli {
         }
     }
 
-    /// List open pull requests authored by the active GitHub CLI account.
-    pub async fn list_authored_open(
-        &self,
-        repository: &str,
-        refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
-        self.list_filtered_open(
-            repository,
-            zeron_proto::ChangeRequestFilter::Authored,
-            refresh,
-        )
-        .await
-    }
-
-    pub async fn list_filtered_open(
-        &self,
-        repository: &str,
-        filter: zeron_proto::ChangeRequestFilter,
-        refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
-        if !valid_pr_repository(repository) {
-            return Err(ChangeRequestError::UnsupportedRepository);
-        }
-        self.list_filtered_page(repository, filter, None, refresh)
-            .await
-            .map(|page| page.items)
-    }
-
     /// One page of open pull requests, 50 at a time, newest updates first.
-    pub async fn list_filtered_page(
+    pub async fn list_page(
         &self,
         repository: &str,
         filter: zeron_proto::ChangeRequestFilter,
@@ -638,6 +604,7 @@ impl GitHubCli {
                     .flat_map(|cursor| ["-f".into(), format!("after={cursor}")]),
             )
             .collect(),
+            stdin: None,
             cwd: None,
             env: vec![
                 ("GH_PROMPT_DISABLED".into(), "1".into()),
@@ -647,15 +614,17 @@ impl GitHubCli {
             output_limit: GITHUB_OUTPUT_LIMIT,
         };
         let output = self.runner.run(request).await.map_err(classify_run_error)?;
-        if !output.success {
-            return Err(classify_github_failure(&output.stderr));
-        }
-        if output.stdout_truncated {
-            return Err(ChangeRequestError::Decode);
-        }
-
-        let response: GhSearchResponse =
-            serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        let response = (!output.stdout_truncated)
+            .then(|| serde_json::from_slice::<GhSearchResponse>(&output.stdout).ok())
+            .flatten();
+        // `gh` exits non-zero whenever the response carries `errors`, including
+        // the one that accompanies results the viewer cannot read. Those pages
+        // are still usable once the repository itself resolved.
+        let response = match response {
+            Some(response) if output.success || response.data.repository.is_some() => response,
+            _ if !output.success => return Err(classify_github_failure(&output.stderr)),
+            _ => return Err(ChangeRequestError::Decode),
+        };
         let canonical = response.data.repository.map(|repo| repo.name_with_owner);
         if canonical
             .as_deref()
@@ -715,6 +684,7 @@ impl GitHubCli {
                 "--json".into(),
                 GITHUB_JSON_FIELDS.into(),
             ],
+            stdin: None,
             cwd: Some(source.checkout_root.clone()),
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             timeout: GITHUB_TIMEOUT,
@@ -751,6 +721,7 @@ impl GitHubCli {
                 "--json".into(),
                 "defaultBranchRef".into(),
             ],
+            stdin: None,
             cwd: Some(source.checkout_root.clone()),
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             timeout: GITHUB_TIMEOUT,
@@ -775,36 +746,14 @@ impl Default for GitHubCli {
 
 #[async_trait]
 impl OpenChangeRequestLookup for GitHubCli {
-    async fn list_authored_open(
-        &self,
-        repository: &str,
-        refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
-        GitHubCli::list_authored_open(self, repository, refresh).await
-    }
-    async fn list_filtered_open(
-        &self,
-        repository: &str,
-        filter: zeron_proto::ChangeRequestFilter,
-        refresh: bool,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
-        GitHubCli::list_filtered_open(self, repository, filter, refresh).await
-    }
-    async fn list_filtered_page(
+    async fn list_page(
         &self,
         repository: &str,
         filter: zeron_proto::ChangeRequestFilter,
         after: Option<&str>,
         refresh: bool,
     ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
-        GitHubCli::list_filtered_page(self, repository, filter, after, refresh).await
-    }
-    async fn post_comment(
-        &self,
-        url: &str,
-        body: &str,
-    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
-        GitHubCli::post_comment(self, url, body).await
+        GitHubCli::list_page(self, repository, filter, after, refresh).await
     }
     async fn detail(
         &self,
@@ -813,6 +762,13 @@ impl OpenChangeRequestLookup for GitHubCli {
         refresh: bool,
     ) -> Result<serde_json::Value, ChangeRequestError> {
         GitHubCli::detail(self, url, diff, refresh).await
+    }
+    async fn post_comment(
+        &self,
+        url: &str,
+        body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+        GitHubCli::post_comment(self, url, body).await
     }
 }
 
@@ -1128,6 +1084,7 @@ impl GitCheckoutInspector {
             .run(ProcessRequest {
                 program: "git".into(),
                 args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                stdin: None,
                 cwd: Some(cwd.to_owned()),
                 env: Vec::new(),
                 timeout: GIT_TIMEOUT,
@@ -1470,6 +1427,8 @@ fn classify_run_error(error: ProcessRunError) -> ChangeRequestError {
 struct ProcessRequest {
     program: String,
     args: Vec<String>,
+    /// Written to the child's standard input, which is then closed.
+    stdin: Option<Vec<u8>>,
     cwd: Option<PathBuf>,
     env: Vec<(String, String)>,
     timeout: Duration,
@@ -1516,7 +1475,11 @@ impl ProcessRunner for SystemProcessRunner {
         }
         command
             .envs(request.env)
-            .stdin(Stdio::null())
+            .stdin(if request.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -1525,16 +1488,26 @@ impl ProcessRunner for SystemProcessRunner {
             .map_err(|error| ProcessRunError::Spawn(error.kind()))?;
         let stdout = child.stdout.take().ok_or(ProcessRunError::Io)?;
         let stderr = child.stderr.take().ok_or(ProcessRunError::Io)?;
+        let input = child.stdin.take().zip(request.stdin);
         let completed = tokio::time::timeout(request.timeout, async {
             tokio::try_join!(
                 child.wait(),
                 read_capped(stdout, request.output_limit),
                 read_capped(stderr, request.output_limit),
+                async {
+                    // A child that exits without reading reports through its
+                    // status; a broken pipe here is not the failure.
+                    if let Some((mut pipe, bytes)) = input {
+                        let _ = pipe.write_all(&bytes).await;
+                    }
+                    Ok(())
+                },
             )
         })
         .await;
 
-        let (status, (stdout, stdout_truncated), (stderr, _stderr_truncated)) = match completed {
+        let (status, (stdout, stdout_truncated), (stderr, _stderr_truncated), ()) = match completed
+        {
             Ok(Ok(output)) => output,
             Ok(Err(_)) => return Err(ProcessRunError::Io),
             Err(_) => {
@@ -1722,10 +1695,33 @@ mod tests {
                 "--method",
                 "POST",
                 "repos/a/b/issues/1/comments",
-                "-f",
-                &format!("body={body}")
+                "--input",
+                "-"
             ]
         );
+        let sent: serde_json::Value =
+            serde_json::from_slice(requests[0].stdin.as_deref().unwrap()).unwrap();
+        assert_eq!(sent, serde_json::json!({ "body": body }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_feeds_standard_input_and_closes_it() {
+        let body = "x".repeat(100_000);
+        let output = SystemProcessRunner
+            .run(ProcessRequest {
+                program: "cat".into(),
+                args: Vec::new(),
+                stdin: Some(body.clone().into_bytes()),
+                cwd: None,
+                env: Vec::new(),
+                timeout: Duration::from_secs(5),
+                output_limit: GITHUB_OUTPUT_LIMIT,
+            })
+            .await
+            .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout, body.as_bytes());
     }
 
     #[tokio::test]
@@ -1887,6 +1883,22 @@ mod tests {
         .unwrap()
     }
 
+    async fn authored(
+        github: &GitHubCli,
+        repository: &str,
+        refresh: bool,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        github
+            .list_page(
+                repository,
+                zeron_proto::ChangeRequestFilter::Authored,
+                None,
+                refresh,
+            )
+            .await
+            .map(|page| page.items)
+    }
+
     async fn list_with(
         response: Result<ProcessOutput, ProcessRunError>,
     ) -> (
@@ -1895,7 +1907,7 @@ mod tests {
     ) {
         let runner = FakeProcessRunner::with_responses([response]);
         let github = GitHubCli::with_runner(runner.clone());
-        let result = github.list_authored_open("acme/zeron", false).await;
+        let result = authored(&github, "acme/zeron", false).await;
         (result, runner)
     }
 
@@ -2030,13 +2042,13 @@ mod tests {
         let github = GitHubCli::with_runner(runner.clone());
         let filter = zeron_proto::ChangeRequestFilter::All;
         let first = github
-            .list_filtered_page("acme/zeron", filter, None, false)
+            .list_page("acme/zeron", filter, None, false)
             .await
             .unwrap();
         assert_eq!(first.next_cursor.as_deref(), Some("Y3Vyc29yOjUw"));
         assert_eq!(first.total_count, Some(120));
         let second = github
-            .list_filtered_page("acme/zeron", filter, first.next_cursor.as_deref(), false)
+            .list_page("acme/zeron", filter, first.next_cursor.as_deref(), false)
             .await
             .unwrap();
         assert_eq!(second.items[0].number, 2);
@@ -2051,7 +2063,7 @@ mod tests {
         );
         assert_eq!(
             github
-                .list_filtered_page("acme/zeron", filter, Some("x repo:other/x"), false)
+                .list_page("acme/zeron", filter, Some("x repo:other/x"), false)
                 .await,
             Err(ChangeRequestError::Decode),
             "cursors cannot smuggle search qualifiers"
@@ -2082,10 +2094,7 @@ mod tests {
         ]);
         let github = GitHubCli::with_runner(runner.clone());
         for _ in 0..2 {
-            let items = github
-                .list_authored_open("acme/old-name", false)
-                .await
-                .unwrap();
+            let items = authored(&github, "acme/old-name", false).await.unwrap();
             assert_eq!(items[0].repository, "acme/new-name");
         }
         let requests = runner.requests();
@@ -2118,12 +2127,12 @@ mod tests {
         let github = GitHubCli::with_runner(runner.clone());
         for (index, filter) in [All, Authored, Reviewing].into_iter().enumerate() {
             github
-                .list_filtered_open("acme/zeron", filter, false)
+                .list_page("acme/zeron", filter, None, false)
                 .await
                 .unwrap();
             assert_eq!(runner.requests().len(), index + 1);
             github
-                .list_filtered_open("ACME/ZERON", filter, false)
+                .list_page("ACME/ZERON", filter, None, false)
                 .await
                 .unwrap();
             assert_eq!(runner.requests().len(), index + 1);
@@ -2140,7 +2149,7 @@ mod tests {
             );
         }
         github
-            .list_filtered_open("acme/zeron", All, false)
+            .list_page("acme/zeron", All, None, false)
             .await
             .unwrap();
         assert_eq!(runner.requests().len(), 3);
@@ -2155,24 +2164,21 @@ mod tests {
         ]);
         let github = GitHubCli::with_runner(runner.clone());
         let (a, b) = tokio::join!(
-            github.list_authored_open("acme/zeron", false),
-            github.list_authored_open("ACME/ZERON", false)
+            authored(&github, "acme/zeron", false),
+            authored(&github, "ACME/ZERON", false)
         );
         assert!(a.unwrap().is_empty() && b.unwrap().is_empty());
-        github.list_authored_open("acme/zeron", true).await.unwrap();
+        authored(&github, "acme/zeron", true).await.unwrap();
         assert_eq!(
             runner.requests().len(),
             1,
             "concurrent and immediate refresh calls reuse one response"
         );
         github.pr_cache.lock().await.entries[0].1 = Instant::now() - Duration::from_secs(16);
-        github.list_authored_open("acme/zeron", true).await.unwrap();
+        authored(&github, "acme/zeron", true).await.unwrap();
         assert_eq!(runner.requests().len(), 2);
         github.pr_cache.lock().await.entries[0].1 = Instant::now() - Duration::from_secs(301);
-        github
-            .list_authored_open("acme/zeron", false)
-            .await
-            .unwrap();
+        authored(&github, "acme/zeron", false).await.unwrap();
         assert_eq!(runner.requests().len(), 3);
     }
 
@@ -2206,7 +2212,7 @@ mod tests {
             tokio::join!(
                 github.detail("https://github.com/a/b/pull/1", true, false),
                 github.detail("https://github.com/a/b/pull/1", true, false),
-                github.list_authored_open("a/b", false),
+                authored(&github, "a/b", false),
             )
         })
         .await
@@ -2221,16 +2227,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pr_read_finishes_and_is_cached_after_its_only_caller_leaves() {
+        let runner = Arc::new(GatedProcessRunner {
+            gate: tokio::sync::Barrier::new(2),
+            runs: Default::default(),
+        });
+        let github = GitHubCli::with_runner(runner.clone());
+        let url = "https://github.com/a/b/pull/1";
+        let caller = tokio::spawn({
+            let github = github.clone();
+            async move { github.detail(url, true, false).await }
+        });
+        while runner.runs.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        // GitHub answers once nobody is waiting any more.
+        runner.gate.wait().await;
+        let diff = tokio::time::timeout(Duration::from_secs(5), github.detail(url, true, true))
+            .await
+            .expect("an abandoned read must not strand later ones");
+        assert_eq!(diff.unwrap(), "diff --git a/a b/a\n");
+        assert_eq!(runner.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let cache = github.pr_cache.lock().await;
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pr_refresh_retries_a_cached_failure() {
+        let runner = FakeProcessRunner::with_responses([
+            command_failure("request failed"),
+            command_success(search_response(vec![])),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        for _ in 0..2 {
+            assert_eq!(
+                authored(&github, "a/b", false).await,
+                Err(ChangeRequestError::CommandFailed)
+            );
+        }
+        assert_eq!(runner.requests().len(), 1, "a failure is held briefly");
+        assert!(authored(&github, "a/b", true).await.unwrap().is_empty());
+        assert_eq!(runner.requests().len(), 2);
+    }
+
+    #[tokio::test]
     async fn pr_rate_limit_cooldown_covers_other_repositories_and_details() {
         let runner =
             FakeProcessRunner::with_responses([command_failure("API rate limit exceeded")]);
         let github = GitHubCli::with_runner(runner.clone());
         assert_eq!(
-            github.list_authored_open("a/one", false).await,
+            authored(&github, "a/one", false).await,
             Err(ChangeRequestError::RateLimited)
         );
         assert_eq!(
-            github.list_authored_open("a/two", true).await,
+            authored(&github, "a/two", true).await,
             Err(ChangeRequestError::RateLimited)
         );
         assert_eq!(
@@ -2254,14 +2307,13 @@ mod tests {
         let github = GitHubCli::with_runner(runner.clone());
         for invalid in ["", "acme", "a/b repo:c/d", "a/*", "a/b/c", "a/.."] {
             assert_eq!(
-                github.list_authored_open(invalid, false).await,
+                authored(&github, invalid, false).await,
                 Err(ChangeRequestError::UnsupportedRepository)
             );
         }
         assert!(runner.requests().is_empty());
         for index in 0..26 {
-            github
-                .list_authored_open(&format!("a/repo-{index}"), false)
+            authored(&github, &format!("a/repo-{index}"), false)
                 .await
                 .unwrap();
         }
@@ -2271,7 +2323,13 @@ mod tests {
             cache
                 .entries
                 .iter()
-                .all(|entry| entry.0 != "list:a/repo-0:Authored")
+                .all(|entry| entry.0 != "list:a/repo-0:Authored:")
+        );
+        assert!(
+            cache
+                .entries
+                .iter()
+                .any(|entry| entry.0 == "list:a/repo-25:Authored:")
         );
     }
 
@@ -2443,6 +2501,44 @@ mod tests {
         let items = result.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].number, 3);
+    }
+
+    #[tokio::test]
+    async fn github_search_keeps_readable_results_when_gh_reports_partial_errors() {
+        let readable = search_pull_request(
+            "acme/zeron",
+            3,
+            "Readable",
+            "OPEN",
+            "MERGEABLE",
+            "2026-08-01T08:00:00Z",
+            "2026-08-19T12:00:00Z",
+            false,
+            None,
+        );
+        let partial = |repository: serde_json::Value| {
+            Ok(ProcessOutput {
+                success: false,
+                stdout: serde_json::to_vec(&serde_json::json!({
+                    "data": {"repository": repository, "search": {"nodes": [null, readable]}},
+                    "errors": [{"type": "FORBIDDEN"}],
+                }))
+                .unwrap(),
+                stderr: b"gh: Resource protected by organization SAML enforcement".to_vec(),
+                stdout_truncated: false,
+            })
+        };
+        let (result, _) = list_with(partial(serde_json::json!({
+            "nameWithOwner": "acme/zeron"
+        })))
+        .await;
+        assert_eq!(result.unwrap()[0].number, 3);
+        let (result, _) = list_with(partial(serde_json::Value::Null)).await;
+        assert_eq!(
+            result.unwrap_err(),
+            ChangeRequestError::CommandFailed,
+            "an unresolved repository is still a failure"
+        );
     }
 
     #[tokio::test]

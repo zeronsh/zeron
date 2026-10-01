@@ -2516,34 +2516,15 @@ fn response_is_current(current: u64, response: u64) -> bool {
     current == response
 }
 
-/// The first page, from the paged method or, on engines that predate it,
-/// the single-page listing.
 async fn fetch_page(
     engine: &crate::state::EngineHandle,
     params: serde_json::Value,
 ) -> Result<ChangeRequestPage, RpcError> {
-    let decode = |error: serde_json::Error| RpcError::Failed(error.to_string());
-    match engine
+    let value = engine
         .client()
-        .call(methods::LIST_CHANGE_REQUEST_PAGE, params.clone())
-        .await
-    {
-        Ok(value) => serde_json::from_value(value).map_err(decode),
-        Err(RpcError::UnknownMethod(_)) => {
-            let value = engine
-                .client()
-                .call(methods::LIST_FILTERED_CHANGE_REQUESTS, params)
-                .await?;
-            let items: Vec<ChangeRequestListItem> =
-                serde_json::from_value(value).map_err(decode)?;
-            Ok(ChangeRequestPage {
-                items,
-                next_cursor: None,
-                total_count: None,
-            })
-        }
-        Err(error) => Err(error),
-    }
+        .call(methods::LIST_CHANGE_REQUEST_PAGE, params)
+        .await?;
+    serde_json::from_value(value).map_err(|error| RpcError::Failed(error.to_string()))
 }
 
 fn settle_snapshot<T>(
@@ -3750,10 +3731,9 @@ mod tests {
         assert_eq!(single_line(&"a".repeat(200)), "a".repeat(200));
     }
 
-    /// Serves two pages from the paged method, or only the legacy listing.
+    /// Serves two pages from the paged method.
     struct PagedRpc {
         calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
-        legacy: bool,
     }
 
     #[async_trait::async_trait]
@@ -3769,9 +3749,6 @@ mod tests {
                 .unwrap()
                 .push((method.into(), after.clone()));
             match (method, after.as_deref()) {
-                (methods::LIST_CHANGE_REQUEST_PAGE, _) if self.legacy => {
-                    Err(RpcError::UnknownMethod(method.into()))
-                }
                 (methods::LIST_CHANGE_REQUEST_PAGE, None) => {
                     zeron_rpc::RpcReply::value(&ChangeRequestPage {
                         items: (1..=50)
@@ -3791,9 +3768,6 @@ mod tests {
                         total_count: Some(52),
                     })
                 }
-                (methods::LIST_FILTERED_CHANGE_REQUESTS, None) => {
-                    zeron_rpc::RpcReply::value(&vec![pull_request("owner/repo", 1, 1, 1, 1)])
-                }
                 _ => panic!("unexpected request {method} {after:?}"),
             }
         }
@@ -3808,7 +3782,6 @@ mod tests {
 
     fn paged_page(
         cx: &mut gpui::TestAppContext,
-        legacy: bool,
     ) -> (
         Entity<PullRequestsPage>,
         &mut gpui::VisualTestContext,
@@ -3818,7 +3791,6 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let client = zeron_rpc::memory_client(std::sync::Arc::new(PagedRpc {
             calls: calls.clone(),
-            legacy,
         }));
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| {
@@ -3854,7 +3826,7 @@ mod tests {
     fn pull_request_board_loads_more_pages_without_repeating_items(cx: &mut gpui::TestAppContext) {
         let runtime = runtime();
         let _guard = runtime.enter();
-        let (page, cx, calls) = paged_page(cx, false);
+        let (page, cx, calls) = paged_page(cx);
         settle(
             cx,
             &runtime,
@@ -3917,36 +3889,6 @@ mod tests {
                     methods::LIST_CHANGE_REQUEST_PAGE.to_owned(),
                     Some("Y3Vyc29yOjUw".to_owned())
                 ),
-            ]
-        );
-    }
-
-    #[gpui::test]
-    fn pull_request_board_falls_back_on_engines_without_paging(cx: &mut gpui::TestAppContext) {
-        let runtime = runtime();
-        let _guard = runtime.enter();
-        let (page, cx, calls) = paged_page(cx, true);
-        settle(
-            cx,
-            &runtime,
-            |page| page.load_state == PullRequestsLoadState::Ready,
-            &page,
-        );
-        page.read_with(cx, |page, _| {
-            assert_eq!(page.items.len(), 1);
-            assert_eq!(page.paging, Paging::default());
-        });
-        assert!(cx.debug_bounds("pull-requests-load-more").is_none());
-        assert_eq!(
-            calls
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(method, _)| method.as_str())
-                .collect::<Vec<_>>(),
-            [
-                methods::LIST_CHANGE_REQUEST_PAGE,
-                methods::LIST_FILTERED_CHANGE_REQUESTS
             ]
         );
     }

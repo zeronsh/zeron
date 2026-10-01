@@ -1485,9 +1485,6 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
-            | methods::LIST_OPEN_CHANGE_REQUESTS
-            | methods::LIST_REPOSITORY_CHANGE_REQUESTS
-            | methods::LIST_FILTERED_CHANGE_REQUESTS
             | methods::LIST_CHANGE_REQUEST_PAGE
             | methods::GET_CHANGE_REQUEST_REPOSITORY
             | methods::GET_CHANGE_REQUEST
@@ -2586,28 +2583,6 @@ impl RpcService for EngineRpc {
                     .await;
                 RpcReply::value(&repository)
             }
-            methods::LIST_OPEN_CHANGE_REQUESTS
-            | methods::LIST_REPOSITORY_CHANGE_REQUESTS
-            | methods::LIST_FILTERED_CHANGE_REQUESTS => {
-                #[derive(Deserialize)]
-                struct P {
-                    repository: String,
-                    #[serde(default)]
-                    filter: zeron_proto::ChangeRequestFilter,
-                    #[serde(default)]
-                    refresh: bool,
-                }
-                let p: P = parse_params(params)?;
-                if !crate::source_control::valid_pr_repository(&p.repository) {
-                    return Err(RpcError::BadParams("repository must be owner/repo".into()));
-                }
-                let items = self
-                    .open_change_requests
-                    .list_filtered_open(&p.repository, p.filter, p.refresh)
-                    .await
-                    .map_err(change_request_rpc_error)?;
-                RpcReply::value(&items)
-            }
             methods::LIST_CHANGE_REQUEST_PAGE => {
                 #[derive(Deserialize)]
                 struct P {
@@ -2631,7 +2606,7 @@ impl RpcService for EngineRpc {
                 }
                 let page = self
                     .open_change_requests
-                    .list_filtered_page(&p.repository, p.filter, p.after.as_deref(), p.refresh)
+                    .list_page(&p.repository, p.filter, p.after.as_deref(), p.refresh)
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&page)
@@ -4174,9 +4149,6 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
-        assert!(forwardable(methods::LIST_OPEN_CHANGE_REQUESTS));
-        assert!(forwardable(methods::LIST_REPOSITORY_CHANGE_REQUESTS));
-        assert!(forwardable(methods::LIST_FILTERED_CHANGE_REQUESTS));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));
         assert!(!is_stream_method(methods::LIST_CHANGE_REQUEST_PAGE));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_REPOSITORY));
@@ -4186,7 +4158,6 @@ mod tests {
         assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));
-        assert!(!is_stream_method(methods::LIST_OPEN_CHANGE_REQUESTS));
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —
@@ -4226,7 +4197,7 @@ mod tests {
             Duration::from_secs(30)
         );
         assert_eq!(
-            forward_deadline(methods::LIST_OPEN_CHANGE_REQUESTS),
+            forward_deadline(methods::LIST_CHANGE_REQUEST_PAGE),
             Duration::from_secs(30)
         );
     }
