@@ -7,7 +7,7 @@ fn harnesses(binary: &Path) -> Vec<Arc<dyn Harness>> {
         Arc::new(CodexHarness::new().with_executable(binary)),
         Arc::new(AcpHarness::grok().with_executable(binary)),
         Arc::new(AcpHarness::hermes().with_executable(binary)),
-        Arc::new(AcpHarness::pi().with_executable(binary)),
+        Arc::new(zeron_harness::PiHarness::new().with_executable(binary)),
         Arc::new(AcpHarness::antigravity().with_executable(binary)),
         Arc::new(AcpHarness::devin().with_executable(binary)),
     ]
@@ -32,6 +32,13 @@ if 'list' in sys.argv:
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request: continue
+    if 'type' in request:
+        data = {}
+        if request['type'] == 'get_available_models':
+            data = {'models':[] if state.get('empty') else [{'id':state['id'],'provider':'fixture','name':state['id']}]}
+        if request['type'] == 'get_available_thinking_levels': data = {'levels':['off']}
+        print(json.dumps({'id':request['id'],'type':'response','command':request['type'], 'success':not state['fail'], 'data':data,'error':state.get('error','rate limit')}),flush=True)
+        continue
     method = request['method']
     if state['fail'] and method != 'initialize':
         response = {'error':{'code':429,'message':state.get('error', 'rate limit')}}
@@ -55,7 +62,14 @@ async fn every_native_catalog_retains_last_good_and_cold_failure_stays_an_error(
         std::fs::write(&state, r#"{"fail":false,"id":"account-model"}"#).unwrap();
         let first = harness.model_catalog(true).await.unwrap();
         assert_eq!(first.source, "live", "{:?}", harness.id());
-        assert_eq!(first.models[0].id, "account-model");
+        assert_eq!(
+            first.models[0].id,
+            if harness.id() == zeron_proto::HarnessId::Pi {
+                "fixture/account-model"
+            } else {
+                "account-model"
+            }
+        );
         std::fs::write(&state, r#"{"fail":true,"id":"unused"}"#).unwrap();
         let retained = harness.model_catalog(true).await.unwrap();
         assert_eq!(retained.source, "cache");

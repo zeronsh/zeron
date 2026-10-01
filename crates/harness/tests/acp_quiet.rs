@@ -118,22 +118,41 @@ fn assert_done(events: &[AgentEvent], expected: DoneStatus) {
 
 async fn delayed_turn(scenario: &str) {
     init_env();
-    let harness = AcpHarness::pi().with_executable(fixture_path());
+    let harness = AcpHarness::grok().with_executable(fixture_path());
     assert!(harness.authoritative_prompt_end());
     let (controls, steer, token) = controls();
     let mut stream = harness.run(request(scenario), controls).await.unwrap();
     let mut early = Vec::new();
-    if scenario == "open-tool" {
-        // Steer only once the tool is visibly running.
-        while let Some(event) = stream.next().await {
-            let event = event.expect("stream event");
-            let open = matches!(&event, AgentEvent::ToolCall { id, .. } if id == "3");
+    // Observe the scenario before steering. Grok re-sends a prompt cancelled
+    // before any progress, so queuing immediately after run() races that path
+    // instead of exercising the intended text/tool/usage/reasoning state.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let event = stream
+                .next()
+                .await
+                .expect("scenario event")
+                .expect("stream event");
+            let ready = match scenario {
+                "open-tool" => matches!(&event, AgentEvent::ToolCall { id, .. } if id == "3"),
+                "tools" => matches!(&event, AgentEvent::ToolResult { id, .. } if id == "3"),
+                "usage" => matches!(&event, AgentEvent::ContextUsage { .. }),
+                "reasoning" => matches!(&event, AgentEvent::ReasoningDelta { .. }),
+                "text" => matches!(&event, AgentEvent::TextDelta { text } if text == "working"),
+                _ => panic!("unknown scenario: {scenario}"),
+            };
+            assert!(
+                !matches!(event, AgentEvent::Done { .. }),
+                "premature Done: {event:?}"
+            );
             early.push(event);
-            if open {
+            if ready {
                 break;
             }
         }
-    }
+    })
+    .await
+    .expect("scenario must start before steering");
     // Queue multiple follow-ups while the first prompt remains outstanding.
     steer
         .send(SteerMessage {
@@ -232,7 +251,7 @@ async fn open_tools_then_silence_preserves_prompt() {
 async fn cancel_quiet(scenario: &str) {
     init_env();
     let (controls, steer, token) = controls();
-    let mut stream = AcpHarness::pi()
+    let mut stream = AcpHarness::grok()
         .with_executable(fixture_path())
         .run(request(scenario), controls)
         .await
@@ -284,7 +303,7 @@ async fn unresponsive_quiet_turn_is_killed_on_cancel() {
 async fn missing_response_at_eof_is_error_not_success() {
     init_env();
     let (controls, _steer, _token) = controls();
-    let mut stream = AcpHarness::pi()
+    let mut stream = AcpHarness::grok()
         .with_executable(fixture_path())
         .run(request("eof"), controls)
         .await
@@ -295,7 +314,7 @@ async fn missing_response_at_eof_is_error_not_success() {
 #[tokio::test]
 async fn protocol_error_keeps_code_and_agent_detail() {
     let (controls, _steer, _token) = controls();
-    let mut stream = AcpHarness::pi()
+    let mut stream = AcpHarness::grok()
         .with_executable(fixture_path())
         .run(request("error"), controls)
         .await

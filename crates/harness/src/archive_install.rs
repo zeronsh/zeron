@@ -37,101 +37,207 @@ const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 
-fn install_dir(pin: &ArchivePin) -> Option<PathBuf> {
-    adapters_root().map(|root| root.join(pin.name).join(pin.version))
+/// an archive release whose integrity is proven after extraction (by a
+/// vendor code signature) rather than by a digest pinned in zeron's source.
+pub struct VerifiedRelease<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub url: &'a str,
+    pub entry: &'a str,
+    /// written as the install marker once verification passes.
+    pub marker: &'a str,
+}
+
+struct Source<'a> {
+    name: &'a str,
+    version: &'a str,
+    url: &'a str,
+    entry: &'a str,
+    sha512: Option<&'a str>,
+    marker: &'a str,
+}
+
+impl<'a> From<&'a ArchivePin> for Source<'a> {
+    fn from(pin: &'a ArchivePin) -> Self {
+        Self {
+            name: pin.name,
+            version: pin.version,
+            url: pin.url,
+            entry: pin.entry,
+            sha512: Some(pin.sha512),
+            marker: pin.sha512,
+        }
+    }
+}
+
+impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
+    fn from(release: &'a VerifiedRelease<'a>) -> Self {
+        Self {
+            name: release.name,
+            version: release.version,
+            url: release.url,
+            entry: release.entry,
+            sha512: None,
+            marker: release.marker,
+        }
+    }
+}
+
+fn install_dir(name: &str, version: &str) -> Option<PathBuf> {
+    adapters_root().map(|root| root.join(name).join(version))
+}
+
+/// the entry of a completed install whose marker matches, `None` when absent.
+pub fn installed_entry_with_marker(
+    name: &str,
+    version: &str,
+    entry: &str,
+    marker: &str,
+) -> Option<PathBuf> {
+    let dir = install_dir(name, version)?;
+    if std::fs::read_to_string(dir.join(OK_MARKER)).ok()?.trim() != marker {
+        return None;
+    }
+    let entry = dir.join(entry);
+    entry.is_file().then_some(entry)
 }
 
 /// the entry of a completed install, `None` when absent.
 pub fn installed_entry(pin: &ArchivePin) -> Option<PathBuf> {
-    let dir = install_dir(pin)?;
-    if std::fs::read_to_string(dir.join(OK_MARKER)).ok()?.trim() != pin.sha512 {
-        return None;
-    }
-    let entry = dir.join(pin.entry);
-    entry.is_file().then_some(entry)
+    installed_entry_with_marker(pin.name, pin.version, pin.entry, pin.sha512)
 }
 
-/// where the entry lives once installed, whether or not it is yet.
-pub(crate) fn entry_path(pin: &ArchivePin) -> Option<PathBuf> {
-    install_dir(pin).map(|dir| dir.join(pin.entry))
+/// the marker of every completed-looking version directory under `name`.
+pub(crate) fn installed_versions(name: &str) -> Vec<(String, String)> {
+    let Some(root) = adapters_root().map(|root| root.join(name)) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let version = entry.file_name().into_string().ok()?;
+            let marker = std::fs::read_to_string(entry.path().join(OK_MARKER)).ok()?;
+            Some((version, marker.trim().to_owned()))
+        })
+        .collect()
 }
 
 pub async fn ensure_installed(
     pin: ArchivePin,
     display_name: &str,
 ) -> Result<PathBuf, HarnessError> {
-    if let Some(entry) = installed_entry(&pin) {
+    install(Source::from(&pin), display_name, |_| async { Ok(()) }).await
+}
+
+/// install a release that has no pinned digest. `verify` inspects the
+/// extracted tree before it is committed; any error discards the download.
+pub async fn install_verified<F, Fut>(
+    release: &VerifiedRelease<'_>,
+    display_name: &str,
+    verify: F,
+) -> Result<PathBuf, HarnessError>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<(), HarnessError>>,
+{
+    install(Source::from(release), display_name, verify).await
+}
+
+async fn install<F, Fut>(
+    source: Source<'_>,
+    display_name: &str,
+    verify: F,
+) -> Result<PathBuf, HarnessError>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<(), HarnessError>>,
+{
+    let installed =
+        || installed_entry_with_marker(source.name, source.version, source.entry, source.marker);
+    if let Some(entry) = installed() {
         return Ok(entry);
     }
     let _guard = install_lock().lock().await;
-    if let Some(entry) = installed_entry(&pin) {
+    if let Some(entry) = installed() {
         return Ok(entry);
     }
 
     let root = adapters_root().ok_or_else(|| {
         HarnessError::Install("cannot locate an adapters directory (HOME is unset)".into())
     })?;
-    let final_dir = install_dir(&pin).expect("root resolved");
+    let final_dir = install_dir(source.name, source.version).expect("root resolved");
     let tmp_dir = root.join(format!(
         ".tmp-{}-{}-{}",
-        pin.name,
-        pin.version,
+        source.name,
+        source.version,
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
     tracing::info!(
         target: "zeron_harness::adapter_install",
-        url = pin.url,
+        url = source.url,
         dir = %tmp_dir.display(),
         "installing {display_name} ACP server"
     );
-    if let Err(e) = download_and_extract(&pin, &tmp_dir, display_name).await {
+    let prepared = match download_and_extract(&source, &tmp_dir, display_name).await {
+        Ok(()) => verify(tmp_dir.clone()).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = prepared {
         let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(e);
+        return Err(error);
     }
-    std::fs::write(tmp_dir.join(OK_MARKER), format!("{}\n", pin.sha512))?;
+    std::fs::write(tmp_dir.join(OK_MARKER), format!("{}\n", source.marker))?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if std::fs::rename(&tmp_dir, &final_dir).is_err() {
-        if installed_entry(&pin).is_none() {
+        if installed().is_none() {
             let _ = std::fs::remove_dir_all(&final_dir);
             std::fs::rename(&tmp_dir, &final_dir)?;
         } else {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
     }
-    installed_entry(&pin).ok_or_else(|| {
+    installed().ok_or_else(|| {
         HarnessError::Install(format!(
             "install of the {display_name} ACP server {} finished but {} did not resolve",
-            pin.version, pin.entry
+            source.version, source.entry
         ))
     })
 }
 
 async fn download_and_extract(
-    pin: &ArchivePin,
+    source: &Source<'_>,
     dir: &Path,
     display_name: &str,
 ) -> Result<(), HarnessError> {
     let archive = dir.join("download.zip");
-    download(pin, &archive, display_name).await?;
+    download(source, &archive, display_name).await?;
     extract_zip(&archive, dir).await?;
     let _ = std::fs::remove_file(&archive);
-    let entry = dir.join(pin.entry);
+    let entry = dir.join(source.entry);
     if !entry.is_file() {
         return Err(HarnessError::Install(format!(
             "the {display_name} archive ({}) has no {}",
-            pin.url, pin.entry
+            source.url, source.entry
         )));
     }
     mark_executables(dir)?;
     Ok(())
 }
 
-async fn download(pin: &ArchivePin, dest: &Path, display_name: &str) -> Result<(), HarnessError> {
-    let url = pin.url;
+async fn download(
+    source: &Source<'_>,
+    dest: &Path,
+    display_name: &str,
+) -> Result<(), HarnessError> {
+    let url = source.url;
     let failed = |detail: String| {
         HarnessError::Install(format!(
             "download of the {display_name} ACP server ({url}) failed: {detail}"
@@ -187,10 +293,11 @@ async fn download(pin: &ArchivePin, dest: &Path, display_name: &str) -> Result<(
     }
     file.flush().await?;
     let actual = format!("{:x}", digest.finalize());
-    if actual != pin.sha512 {
+    if let Some(expected) = source.sha512
+        && actual != expected
+    {
         return Err(failed(format!(
-            "SHA-512 mismatch (expected {}, got {actual})",
-            pin.sha512
+            "SHA-512 mismatch (expected {expected}, got {actual})"
         )));
     }
     Ok(())
@@ -356,6 +463,112 @@ mod tests {
         );
     }
 
+    /// runs in a child process, since installs resolve through the
+    /// process-wide `ZERON_ADAPTERS_DIR`.
+    #[test]
+    fn verified_installs_commit_only_after_verification_passes() {
+        if std::env::var_os("ZERON_TEST_VERIFIED_INSTALL").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "archive_install::tests::verified_installs_commit_only_after_verification_passes",
+                    "--nocapture",
+                ])
+                .env("ZERON_ADAPTERS_DIR", root.path())
+                .env("ZERON_TEST_VERIFIED_INSTALL", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+                zip.start_file("server", zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(b"#!/bin/sh\n").unwrap();
+                let bytes = zip.finish().unwrap().into_inner();
+                let url = serve(bytes).await;
+                let release = VerifiedRelease {
+                    name: "verified-acp",
+                    version: "2.0.0",
+                    url: &url,
+                    entry: "server",
+                    marker: "vendor-signature",
+                };
+
+                let rejected = install_verified(&release, "Test", |dir| async move {
+                    assert!(dir.join("server").is_file());
+                    Err(HarnessError::Install("not signed".into()))
+                })
+                .await
+                .unwrap_err();
+                assert!(rejected.to_string().contains("not signed"), "{rejected}");
+                let root = adapters_root().unwrap();
+                assert!(!root.join("verified-acp").exists());
+                assert!(
+                    std::fs::read_dir(&root)
+                        .unwrap()
+                        .flatten()
+                        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".tmp-")),
+                    "the rejected download is discarded"
+                );
+
+                let entry = install_verified(&release, "Test", |_| async { Ok(()) })
+                    .await
+                    .unwrap();
+                assert_eq!(entry, root.join("verified-acp/2.0.0/server"));
+                assert_eq!(
+                    installed_versions("verified-acp"),
+                    vec![("2.0.0".to_owned(), "vendor-signature".to_owned())]
+                );
+                assert_eq!(
+                    installed_entry_with_marker("verified-acp", "2.0.0", "server", "other"),
+                    None
+                );
+            });
+    }
+
+    /// answer every request with `body`, returning the url to fetch it.
+    async fn serve(body: Vec<u8>) -> String {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/archive.zip", listener.local_addr().unwrap());
+        let body = std::sync::Arc::new(body);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut headers = Vec::new();
+                    let mut buf = [0; 4096];
+                    while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => headers.extend_from_slice(&buf[..read]),
+                        }
+                    }
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        url
+    }
+
     #[test]
     fn entry_resolves_only_after_a_completed_install() {
         let pin = ArchivePin {
@@ -367,7 +580,7 @@ mod tests {
         };
         assert!(installed_entry(&pin).is_none());
         if std::env::var_os("HOME").is_some() || std::env::var_os("ZERON_ADAPTERS_DIR").is_some() {
-            let expected = entry_path(&pin).unwrap();
+            let expected = install_dir(pin.name, pin.version).unwrap().join(pin.entry);
             assert!(expected.ends_with("never-installed-acp/0.0.0-test/server"));
         }
     }

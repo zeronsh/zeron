@@ -20,7 +20,7 @@ use zeron_text::WhiteSpace;
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
 use super::markdown::{Ctx, PBlock, PText, Px, place, place_text, prepare_block, prepare_plain};
 use super::style::{Family, TYPE, Weight};
-use super::tools::{ToolGroup, place_tools};
+use super::tools::{ThoughtState, ToolGroup, place_tools};
 
 /// Row kinds the painter may style differently (e.g. context menus).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -171,6 +171,8 @@ struct EntryState {
 #[derive(Default)]
 pub(crate) struct RowBuilder {
     parts: HashMap<String, PartState>,
+    /// Reasoning parts' parse + prepared detail, keyed `{entry}#{part}`.
+    pub(crate) thoughts: HashMap<String, ThoughtState>,
     entries: HashMap<String, EntryState>,
     pending: HashMap<String, (String, Arc<RowCore>)>,
     working: Option<Arc<RowCore>>,
@@ -180,7 +182,7 @@ pub(crate) struct RowBuilder {
     pub detail_open: HashMap<u64, bool>,
 }
 
-fn quick_hash(s: &str) -> u64 {
+pub(crate) fn quick_hash(s: &str) -> u64 {
     // Change detector for a part's text: the whole text, so a same-length
     // rewrite is caught too. Only parts of messages that changed get here,
     // and re-parsing them is already linear in their length.
@@ -209,7 +211,7 @@ impl RowBuilder {
             let rows = match reuse {
                 Some(rows) => {
                     for part in &entry.parts {
-                        if matches!(part, MessagePart::Text { .. }) {
+                        if matches!(part, MessagePart::Text { .. } | MessagePart::Reasoning { .. }) {
                             live_parts.insert(format!("{}#{}", entry.id, part.id()));
                         }
                     }
@@ -235,6 +237,7 @@ impl RowBuilder {
         }
         self.entries.retain(|id, _| live_entries.contains(id.as_str()));
         self.parts.retain(|id, _| live_parts.contains(id));
+        self.thoughts.retain(|id, _| live_parts.contains(id));
 
         // Optimistic sends not yet echoed by the host.
         let mut live_pending = HashSet::new();
@@ -367,6 +370,7 @@ impl RowBuilder {
                     if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if call.is_subagent_spawn())) {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
+                    live_parts.insert(format!("{}#{}", entry.id, part.id()));
                     tools.push(part);
                 }
                 MessagePart::Reasoning { .. } => {}

@@ -3,7 +3,7 @@ import UIKit
 /// Replaces the composer while the agent asks questions: one glass card per
 /// question, large option rows, "Other…" free text, and a single-select
 /// auto-advance (220ms) so a 3-question form is three taps.
-final class QuestionPanel: UIView, UITextFieldDelegate {
+final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
     var onSubmit: (([(questionId: String, labels: [String])]) -> Void)?
     var onHeightChange: (() -> Void)?
 
@@ -12,6 +12,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
     private let question = UILabel()
     private let options = UIStackView()
     private let other = UITextField()
+    private let editor = UITextView()
     private let back = UIButton(type: .system)
     private let nextButton = UIButton(type: .system)
     private var items: [SessionChrome.Question] = []
@@ -43,6 +44,15 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
         other.heightAnchor.constraint(equalToConstant: 44).isActive = true
         other.accessibilityIdentifier = "question-other"
 
+        editor.font = Fonts.ui(.sans, 16)
+        editor.textColor = Palette.text
+        editor.backgroundColor = Palette.chip.withAlphaComponent(0.6)
+        editor.layer.cornerRadius = 12
+        editor.textContainerInset = UIEdgeInsets(top: 12, left: 8, bottom: 12, right: 8)
+        editor.delegate = self
+        editor.heightAnchor.constraint(equalToConstant: 140).isActive = true
+        editor.accessibilityIdentifier = "question-editor"
+
         var backConfig = UIButton.Configuration.plain()
         backConfig.title = "Back"
         backConfig.baseForegroundColor = Palette.secondary
@@ -59,7 +69,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
 
         let buttons = UIStackView(arrangedSubviews: [back, UIView(), nextButton])
         buttons.axis = .horizontal
-        let stack = UIStackView(arrangedSubviews: [header, question, options, other, buttons])
+        let stack = UIStackView(arrangedSubviews: [header, question, options, other, editor, buttons])
         stack.axis = .vertical
         stack.spacing = 10
         stack.setCustomSpacing(14, after: question)
@@ -91,7 +101,8 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
         page = 0
         submitted = false
         picks = [:]
-        custom = [:]
+        // Question ids arrive from agents and synced docs: never trap on a duplicate.
+        custom = Dictionary(questions.map { ($0.id, $0.prefill ?? "") }, uniquingKeysWith: { first, _ in first })
         render()
     }
 
@@ -124,7 +135,10 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
             b.addAction(UIAction { [weak self] _ in self?.pick(option) }, for: .touchUpInside)
             options.addArrangedSubview(b)
         }
+        other.isHidden = q.multiline
+        editor.isHidden = !q.multiline
         other.text = custom[q.id]
+        editor.text = custom[q.id]
         back.isHidden = page == 0
         var n = nextButton.configuration
         n?.title = page == items.count - 1 ? "Submit" : "Next"
@@ -134,7 +148,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
     }
 
     private func answered(_ q: SessionChrome.Question) -> Bool {
-        !(picks[q.id] ?? []).isEmpty || !(custom[q.id] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        q.multiline || !(picks[q.id] ?? []).isEmpty || !(custom[q.id] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     private func pick(_ option: String) {
@@ -156,6 +170,12 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
     private func customChanged() {
         guard let q = current else { return }
         custom[q.id] = other.text
+        nextButton.isEnabled = answered(q)
+    }
+
+    func textViewDidChange(_ textView: UITextView) {
+        guard let q = current else { return }
+        custom[q.id] = textView.text
         nextButton.isEnabled = answered(q)
     }
 
@@ -181,7 +201,11 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
         }
         let answers = items.map { q -> (questionId: String, labels: [String]) in
             var labels = q.options.filter { (picks[q.id] ?? []).contains($0) }
-            if let c = custom[q.id]?.trimmingCharacters(in: .whitespaces), !c.isEmpty { labels.append(c) }
+            if q.multiline {
+                labels.append(custom[q.id] ?? "")
+            } else if let c = custom[q.id]?.trimmingCharacters(in: .whitespaces), !c.isEmpty {
+                labels.append(c)
+            }
             return (q.id, labels)
         }
         submitted = true

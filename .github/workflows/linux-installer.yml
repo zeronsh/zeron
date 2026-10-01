@@ -1,0 +1,42 @@
+name: Linux installer
+
+on:
+  pull_request:
+    paths:
+      - 'edge/src/install.sh'
+      - 'scripts/package-linux.sh'
+      - 'scripts/test-linux-desktop-entry.sh'
+      - 'dist/zeron.desktop'
+      - 'dist/zeron.png'
+      - '.github/workflows/linux-installer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'edge/src/install.sh'
+      - 'scripts/package-linux.sh'
+      - 'scripts/test-linux-desktop-entry.sh'
+      - 'dist/zeron.desktop'
+      - 'dist/zeron.png'
+      - '.github/workflows/linux-installer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-entry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desktop entry validator
+        run: |
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          sudo apt-get install -y -qq desktop-file-utils
+      # Both installers, offline, under a throwaway HOME (no network, no systemd).
+      - name: Installers write a valid launcher entry
+        run: scripts/test-linux-desktop-entry.sh

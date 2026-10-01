@@ -141,6 +141,22 @@ crate's `v2` feature (mimalloc 2.3.2, ~half of v3's retention); Linux runs the
 system allocator. Purge knobs (`MIMALLOC_PURGE_DELAY=0`,
 `MIMALLOC_ABANDONED_PAGE_PURGE=1`) measurably do NOT rescue v3.
 
+**Linux arenas (2026-09-29):** glibc gives every thread its own 64MB arena
+(default cap 8 × cores = 128 on the 16-core host) and trims only the top of a
+heap, so threads that come and go — harness readers, the tokio blocking pool —
+leave freed pages resident: the headless engine reached 7.2GB RSS after a day,
+6.6GB of it in 129 anonymous ~64MB mappings. Long-running modes on
+Linux/glibc (`apps/zeron/src/main.rs`) now run a `malloc-trim` thread that calls
+`malloc_trim(0)` once a minute; unlike the automatic top-of-heap trim it
+returns the free pages inside every arena. Capping arenas was measured first
+and rejected. Bench: 8 chats × 6 rounds of a 250KB reply through the
+claude-code replay driver, 8-core sprite, RSS MB after 60s idle / engine CPU
+seconds. glibc default ~390 / 18. `M_ARENA_MAX=2` plus 128KB trim/mmap
+thresholds ~316 / **110**: futex calls went from 166k to 1.6M as threads
+queued on the two arena locks, and `M_ARENA_MAX` 4 or 8 still cost 58 or 35s.
+Thresholds alone ~354 / 20. Periodic `malloc_trim` **~265 / 18**, each pass
+~25ms. An explicit `MALLOC_*`/`GLIBC_TUNABLES` setting still applies on top.
+
 Known follow-ups: GPU atlas tiles for raw-bytes images still free only on
 window close (needs a small gpui-fork patch exposing a drop path for
 `ImageSource::Image`); UI-side full-transcript clone per frame

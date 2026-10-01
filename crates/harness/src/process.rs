@@ -49,3 +49,5 @@ mod tests {
         assert!(!result.stdout.is_empty());
     }
 }
+
+pub(crate) mod owned;

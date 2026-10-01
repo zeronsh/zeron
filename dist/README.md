@@ -10,11 +10,16 @@ PROFILE=debug scripts/package-linux.sh   # fast smoke package
 Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
 
 - `zeron` — the binary (headed by default; `zeron headless` runs the engine alone)
-- `zeron.desktop` — XDG desktop entry
+- `zeron.desktop` — XDG desktop entry template (`Exec=zeron` for packagers;
+  the installers rewrite `Exec`, `TryExec`, and `Icon` to absolute paths under
+  `~/.zeron/app/current`, since `~/.local/bin` is often not on a desktop
+  session's `PATH`)
 - `zeron.png` — 1024×1024 Zeron app icon
 - `install.sh` — installs into `~/.zeron/app/<version>` behind a `current`
-  symlink (the curl installer's layout, which the in-app updater manages) and
-  links `~/.local/bin/zeron`, the desktop entry, and the icon to it
+  symlink (the curl installer's layout, which the in-app updater manages),
+  links `~/.local/bin/zeron` to it, and writes the desktop entry and icon under
+  `$XDG_DATA_HOME` (default `~/.local/share`). The curl installer does the same
+  from the extracted tarball; `scripts/test-linux-desktop-entry.sh` checks both
 
 The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 `strip = "symbols"` for distribution builds.

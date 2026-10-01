@@ -484,6 +484,7 @@ impl Render for BrowserSurface {
                         .hover(|s| s.bg(crate::theme::wash(0.10)))
                         .on_mouse_down(MouseButton::Left, |_, w, _| w.prevent_default())
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
+                        .tooltip(crate::settings::widgets::text_tooltip("Go to address"))
                         .child(
                             icons::icon(icons::RETURN)
                                 .size(px(12.0))

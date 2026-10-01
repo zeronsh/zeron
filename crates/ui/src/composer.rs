@@ -686,12 +686,16 @@ pub struct Wizard {
 impl Wizard {
     pub fn new(request_id: String, questions: Vec<UserInputQuestion>) -> Self {
         let n = questions.len();
+        let typed = questions
+            .iter()
+            .map(|q| q.prefill.clone().unwrap_or_default())
+            .collect();
         Self {
             request_id,
             questions,
             page: 0,
             picked: vec![Vec::new(); n],
-            typed: vec![String::new(); n],
+            typed,
         }
     }
 
@@ -780,8 +784,12 @@ impl Wizard {
             .iter()
             .enumerate()
             .map(|(ix, q)| {
-                let typed = self.typed.get(ix).map(|s| s.trim()).unwrap_or("");
-                let labels = if !typed.is_empty() {
+                let typed = self
+                    .typed
+                    .get(ix)
+                    .map(|s| if q.multiline { s.as_str() } else { s.trim() })
+                    .unwrap_or("");
+                let labels = if !typed.is_empty() || q.multiline {
                     vec![typed.to_string()]
                 } else {
                     self.picked
@@ -1729,6 +1737,12 @@ pub struct ComposerInput {
     /// Key context for the binding map ("Composer", or "PaletteSearch" for
     /// palette filters whose navigation keys must bubble).
     key_context: &'static str,
+    /// Cmd+C with no input selection copies the transcript selection. Only
+    /// the message composer keeps focus while the user reads the transcript;
+    /// dialog and palette fields copy only their own selection. A flag rather
+    /// than `key_context`, which the question wizard swaps while it borrows
+    /// the message input.
+    copies_transcript_selection: bool,
     accessibility_role: Role,
     focus_handle: FocusHandle,
     content: String,
@@ -1836,6 +1850,7 @@ impl ComposerInput {
     ) -> Self {
         Self {
             key_context,
+            copies_transcript_selection: false,
             accessibility_role: Role::MultilineTextInput,
             focus_handle: cx.focus_handle(),
             content: String::new(),
@@ -2791,9 +2806,9 @@ impl ComposerInput {
                 text.clone(),
                 serde_json::json!({ "zeronComposerV1": raw, "text": text }),
             ));
-        } else if let Some(text) = crate::markdown::selection::selected_text() {
-            // The composer keeps focus while the user reads the transcript —
-            // Cmd+C with no input selection copies the markdown selection.
+        } else if self.copies_transcript_selection
+            && let Some(text) = crate::markdown::selection::selected_text()
+        {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -5453,6 +5468,7 @@ impl Composer {
             let mut input =
                 ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
             input.enable_mentions();
+            input.copies_transcript_selection = true;
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
@@ -5952,6 +5968,7 @@ impl Composer {
             let group: SharedString = format!("composer-att-{}", att.id).into();
             let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
             let remove_id = att.id.clone();
+            let remove_label: SharedString = format!("Remove {}", att.name).into();
             strip = strip.child(
                 div()
                     .group(group.clone())
@@ -6016,6 +6033,10 @@ impl Composer {
                                 cx.stop_propagation();
                                 this.remove_attachment(&remove_id, cx);
                             }))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| AppshotActionTooltip(remove_label.clone()))
+                                    .into()
+                            })
                             .child(
                                 crate::icons::icon(crate::icons::CLOSE_CIRCLE)
                                     .size(px(14.0))
@@ -7302,11 +7323,15 @@ impl Composer {
                 self.launching_new_chat && self.current_key.is_empty() && !key.is_empty();
             let returning_to_new_thread = !self.current_key.is_empty() && key.is_empty();
             self.launching_new_chat = false;
-            let old_text = self.input.read(cx).text().to_string();
-            if old_text.is_empty() {
-                self.drafts.remove(&self.current_key);
-            } else {
-                self.drafts.insert(self.current_key.clone(), old_text);
+            // A question temporarily borrows the editor. Its answer must never
+            // replace the ordinary chat draft saved when the panel opened.
+            if self.wizard.is_none() {
+                let old_text = self.input.read(cx).text().to_string();
+                if old_text.is_empty() {
+                    self.drafts.remove(&self.current_key);
+                } else {
+                    self.drafts.insert(self.current_key.clone(), old_text);
+                }
             }
             let draft = self.drafts.get(&key).cloned().unwrap_or_default();
             self.current_key = key;
@@ -7364,8 +7389,20 @@ impl Composer {
                     .as_ref()
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
+                    if self.wizard.is_none() {
+                        self.drafts.insert(
+                            self.current_key.clone(),
+                            self.input.read(cx).text().to_string(),
+                        );
+                    }
                     self.reset_mention(None, cx);
+                    let prefill = questions
+                        .first()
+                        .and_then(|q| q.prefill.clone())
+                        .unwrap_or_default();
                     self.wizard = Some(Wizard::new(request_id, questions));
+                    self.input
+                        .update(cx, |input, cx| input.set_text(prefill, cx));
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
@@ -7391,8 +7428,15 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
-                        self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                        let draft = self
+                            .drafts
+                            .get(&self.current_key)
+                            .cloned()
+                            .unwrap_or_default();
+                        self.input.update(cx, |input, cx| {
+                            input.set_text(draft, cx);
+                            input.set_placeholder("Do anything…", cx);
+                        });
                     }
                 }
             }
@@ -7492,7 +7536,7 @@ impl Composer {
         }
         if self.wizard.is_some() {
             // Enter inside the panel's free-text input submits the page.
-            let typed = self.input.read(cx).text().trim().to_string();
+            let typed = self.input.read(cx).text().to_string();
             if let Some(w) = self.wizard.as_mut() {
                 w.set_typed(typed);
             }
@@ -8429,22 +8473,28 @@ impl Composer {
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).text().to_string();
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
+        wizard.set_typed(text);
         match wizard.advance() {
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
             _ => {
-                // Moving on: clear the shared free-text input for the next page.
-                self.input.update(cx, |input, cx| input.set_text("", cx));
+                let text = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
+                self.input.update(cx, |input, cx| input.set_text(text, cx));
                 cx.notify();
             }
         }
     }
 
     fn wizard_back(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).text().to_string();
         if let Some(wizard) = self.wizard.as_mut() {
+            wizard.set_typed(text);
             wizard.back();
+            let text = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
+            self.input.update(cx, |input, cx| input.set_text(text, cx));
             cx.notify();
         }
     }
@@ -8456,8 +8506,13 @@ impl Composer {
         };
         self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
+        let draft = self
+            .drafts
+            .get(&self.current_key)
+            .cloned()
+            .unwrap_or_default();
         self.input.update(cx, |input, cx| {
-            input.set_text("", cx);
+            input.set_text(draft, cx);
             // The panel borrowed the composer input; hand back its identity.
             input.set_placeholder("Do anything…", cx);
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
@@ -8564,7 +8619,7 @@ impl Composer {
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
-        let can_advance = wizard.page_has_pick() || !typed_empty;
+        let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -8637,16 +8692,20 @@ impl Composer {
                 })
         });
 
-        div()
+        // Stands in for the composer pill, so it is the same frosted surface:
+        // without the backdrop blur the translucent fill let the transcript
+        // show through unblurred.
+        let panel = div()
             .id("question-panel")
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             }))
+            .occlude()
             .rounded(px(COMPOSER_RADIUS))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.input_glass_bg())
+            .bg(theme.composer_surface_bg())
             .when(!theme.is_frost(), |el| el.shadow_lg())
             .flex()
             .flex_col()
@@ -8751,8 +8810,8 @@ impl Composer {
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
                     ),
-            )
-            .into_any_element()
+            );
+        crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
     }
 
     fn render_send_button(
@@ -8776,6 +8835,7 @@ impl Composer {
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
+                .tooltip(crate::settings::widgets::text_tooltip("Stop"))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
@@ -8797,6 +8857,13 @@ impl Composer {
                             .hover(|s| s.opacity(0.85))
                             .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
+                    .tooltip(crate::settings::widgets::text_tooltip(
+                        if mode == SendButtonMode::Queue {
+                            "Queue message"
+                        } else {
+                            "Send message"
+                        },
+                    ))
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
@@ -9308,6 +9375,7 @@ impl Render for Composer {
             ))
             .on_hover(motion::hover_listener("composer-attach"))
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
+            .tooltip(crate::settings::widgets::text_tooltip("Attach images"))
             .child(
                 crate::icons::icon(crate::icons::PAPERCLIP)
                     // Its painted bounds are centered in the 24px viewbox;
@@ -9714,6 +9782,9 @@ impl Render for Composer {
         container
     }
 }
+
+#[cfg(test)]
+mod modal_selection_tests;
 
 #[cfg(test)]
 mod tests {
@@ -11307,6 +11378,32 @@ mod tests {
                 original,
                 "stale discovery cannot change a restored draft"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn message_composer_still_copies_transcript_selection(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        with_composer_input(cx, |input, window, cx| {
+            let key = "message-composer-copy-test";
+            let text = "Selected transcript text";
+            input.set_text("Unselected draft", cx);
+            assert_eq!(input.key_context, MESSAGE_COMPOSER_CONTEXT);
+            assert!(input.selected_range.is_empty());
+            crate::markdown::selection::begin_with_span(key, text, 0..text.len());
+            crate::markdown::selection::end_active_drag();
+            input.copy(&Copy, window, cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            // The question wizard borrows this input under the generic
+            // context; it is still the message composer.
+            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            input.set_key_context(message_input_context(true), cx);
+            input.copy(&Copy, window, cx);
+            let copied_in_wizard = cx.read_from_clipboard().and_then(|item| item.text());
+            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
+            crate::markdown::selection::clear_if_owner(key);
+            assert_eq!(copied.as_deref(), Some(text));
+            assert_eq!(copied_in_wizard.as_deref(), Some(text));
         });
     }
 
@@ -12935,6 +13032,8 @@ mod tests {
             header: "Header".into(),
             question: format!("Question {id}"),
             options: options.iter().map(|s| s.to_string()).collect(),
+            prefill: None,
+            multiline: false,
             multi_select: multi,
         }
     }
@@ -13706,6 +13805,17 @@ mod tests {
     }
 
     #[test]
+    fn wizard_editor_preserves_prefill_whitespace_and_empty_edits() {
+        let mut q = question("editor", &[], false);
+        q.multiline = true;
+        q.prefill = Some("  first\nsecond\n".into());
+        let mut w = Wizard::new("req".into(), vec![q]);
+        assert_eq!(w.answers()[0].labels, vec!["  first\nsecond\n"]);
+        w.set_typed(String::new());
+        assert_eq!(w.answers()[0].labels, vec![""]);
+    }
+
+    #[test]
     fn wizard_number_keys_and_bounds() {
         let mut w = Wizard::new("req".into(), vec![question("q", &["a", "b"], false)]);
         assert_eq!(w.press_number(9), WizardStep::Stay, "out of range ignored");
@@ -13803,6 +13913,78 @@ mod tests {
             input.undo(&Undo, window, cx);
             assert_eq!(input.text(), committed);
             assert_ranges(input);
+        });
+    }
+
+    #[gpui::test]
+    fn wizard_restores_displaced_draft_after_submit_navigation_and_timeout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let transcript = |id: &str, resolved: bool| {
+            let mut q = question("editor", &[], false);
+            q.prefill = Some("  initial\ntext\n".into());
+            q.multiline = true;
+            vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: id.into(),
+                    questions: vec![q],
+                    resolved,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }]
+        };
+        state.update(cx, |s, _| s.selected_chat = Some("a".into()));
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            c.input
+                .update(cx, |i, cx| i.set_text("ordinary draft a", cx));
+        });
+        state.update(cx, |s, _| s.transcript = transcript("submit", false));
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            assert_eq!(c.input.read(cx).text(), "  initial\ntext\n");
+            c.input.update(cx, |i, cx| i.set_text("answer", cx));
+            c.wizard_advance(cx);
+            assert_eq!(c.input.read(cx).text(), "ordinary draft a");
+        });
+        state.update(cx, |s, _| s.transcript = transcript("expires", false));
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            c.input.update(cx, |i, cx| i.set_text("partial answer", cx));
+        });
+        state.update(cx, |s, _| {
+            s.selected_chat = Some("b".into());
+            s.transcript.clear();
+        });
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            assert!(c.input.read(cx).text().is_empty());
+            c.input
+                .update(cx, |i, cx| i.set_text("ordinary draft b", cx));
+        });
+        state.update(cx, |s, _| {
+            s.selected_chat = Some("a".into());
+            s.transcript = transcript("expires", false);
+        });
+        composer.update(cx, |c, cx| c.on_state_changed(cx));
+        state.update(cx, |s, _| s.transcript = transcript("expires", true));
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            assert!(c.wizard.is_none());
+            assert_eq!(c.input.read(cx).text(), "ordinary draft a");
+            assert_eq!(
+                c.drafts.get("b").map(String::as_str),
+                Some("ordinary draft b")
+            );
         });
     }
 

@@ -620,10 +620,10 @@ mod tests {
         assert_eq!(pin.version, "1.1.14");
         assert_eq!(pin.dir_name(), "agentclientprotocol__codex-acp");
 
-        let pin = NpmPin::parse("pi-acp@0.0.33");
-        assert_eq!(pin.name, "pi-acp");
+        let pin = NpmPin::parse("example-adapter@0.0.33");
+        assert_eq!(pin.name, "example-adapter");
         assert_eq!(pin.version, "0.0.33");
-        assert_eq!(pin.dir_name(), "pi-acp");
+        assert_eq!(pin.dir_name(), "example-adapter");
     }
 
     #[test]

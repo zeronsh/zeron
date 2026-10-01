@@ -142,9 +142,11 @@ impl Shell {
         let state = self.state.read(cx);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
+        // Like the sidebar, only list top-level sessions, not side chats or MCP workers.
         let mut chats: Vec<_> = state
             .chats
             .iter()
+            .filter(|chat| chat.parent_chat_id.is_none())
             .filter(|chat| {
                 let project = state
                     .space_for_chat(chat)
@@ -565,6 +567,132 @@ pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -
 mod tests {
     use super::*;
     use crate::appearance::AppearanceMode;
+    use gpui::{AppContext, TestAppContext};
+
+    fn palette_window(cx: &mut TestAppContext) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        (window, dir)
+    }
+
+    fn chat(id: &str, parent: Option<&str>, archived: bool, age: i64) -> zeron_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "deviceId": "local", "archived": archived,
+            "parentChatId": parent,
+            "createdAt": "2026-09-20T00:00:00Z".parse::<chrono::DateTime<Utc>>().unwrap()
+                - chrono::Duration::minutes(age),
+        }))
+        .unwrap()
+    }
+
+    fn search_chats(shell: &Shell, query: &str, cx: &mut Context<Shell>) -> Vec<String> {
+        shell
+            .command_palette
+            .as_ref()
+            .unwrap()
+            .search
+            .update(cx, |input, cx| {
+                input.set_text(query, cx);
+            });
+        shell
+            .command_entries(cx)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Chat(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn history_excludes_child_chats_with_and_without_search(cx: &mut TestAppContext) {
+        let (window, _dir) = palette_window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_chats(vec![
+                        chat("manual-sidechat", Some("main-session"), false, 0),
+                        chat("mcp-worker", Some("main-session"), false, 1),
+                        chat("archived-sidechat", Some("main-session"), true, 2),
+                        chat("orphan-sidechat", Some("deleted-parent"), false, 3),
+                        chat("main-session", None, false, 4),
+                        chat("archived-session", None, true, 5),
+                    ]);
+                });
+                shell.toggle_command_palette(window, cx);
+                assert_eq!(
+                    search_chats(shell, "", cx),
+                    ["main-session", "archived-session"]
+                );
+                for query in [
+                    "manual-sidechat",
+                    "mcp-worker",
+                    "archived-sidechat",
+                    "orphan-sidechat",
+                ] {
+                    assert!(
+                        search_chats(shell, query, cx).is_empty(),
+                        "{query} must stay out of global history"
+                    );
+                }
+                assert_eq!(search_chats(shell, "main-session", cx), ["main-session"]);
+                assert_eq!(
+                    search_chats(shell, "archived-session", cx),
+                    ["archived-session"]
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn child_chats_do_not_consume_history_result_slots(cx: &mut TestAppContext) {
+        let (window, _dir) = palette_window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    let children = (0..HISTORY_RESULT_LIMIT).map(|ix| {
+                        chat(&format!("child-{ix}"), Some("session-0"), false, ix as i64)
+                    });
+                    let sessions = (0..=HISTORY_RESULT_LIMIT).map(|ix| {
+                        chat(
+                            &format!("session-{ix}"),
+                            None,
+                            false,
+                            (HISTORY_RESULT_LIMIT + ix) as i64,
+                        )
+                    });
+                    state.apply_chats(children.chain(sessions).collect());
+                });
+                shell.toggle_command_palette(window, cx);
+                let expected: Vec<_> = (0..HISTORY_RESULT_LIMIT)
+                    .map(|ix| format!("session-{ix}"))
+                    .collect();
+                assert_eq!(search_chats(shell, "", cx), expected);
+                let oldest = format!("session-{HISTORY_RESULT_LIMIT}");
+                assert_eq!(search_chats(shell, &oldest, cx), [oldest]);
+            })
+            .unwrap();
+    }
 
     #[test]
     fn x11_unflagged_enter_repeats_activate_once_until_release() {

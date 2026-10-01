@@ -445,11 +445,21 @@ impl Shell {
                         .child(header_icon_button(
                             "expand-changes",
                             right_pane_expand_icon(self.right_pane_expanded),
+                            if self.right_pane_expanded {
+                                "Collapse panel"
+                            } else {
+                                "Expand panel"
+                            },
                             &theme,
                             cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
                         )),
                 );
             }
+            let files_panel_label = if self.files_panel_open(cx) {
+                "Hide files panel"
+            } else {
+                "Show files panel"
+            };
             // The explorer slot sits over the explorer column and carries the
             // two fixed right-edge anchors — the explorer toggle and,
             // outermost, the pane toggle — which stay mounted at one position
@@ -476,17 +486,14 @@ impl Shell {
                                 header_icon_button(
                                     "toggle-files-panel",
                                     icons::FILE_TREE,
+                                    files_panel_label,
                                     &theme,
                                     cx.listener(|this, _, window, cx| {
                                         this.toggle_files_panel(window, cx)
                                     }),
                                 )
                                 .role(gpui::Role::Button)
-                                .aria_label(if self.files_panel_open(cx) {
-                                    "Hide files panel"
-                                } else {
-                                    "Show files panel"
-                                })
+                                .aria_label(files_panel_label)
                                 .when(self.files_panel_open(cx), |button| {
                                     button.bg(crate::theme::wash(0.09))
                                 }),
@@ -494,6 +501,7 @@ impl Shell {
                             .child(header_icon_button(
                                 "toggle-changes",
                                 icons::SIDEBAR_MINIMALISTIC,
+                                ShortcutId::ToggleChanges.label(),
                                 &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                             )),
@@ -518,6 +526,7 @@ impl Shell {
                     header_icon_button(
                         "session-new-side-chat",
                         icons::PLUS,
+                        "New side chat",
                         &theme,
                         cx.listener(|this, _, _, cx| this.create_child_chat(None, cx)),
                     )
@@ -529,6 +538,7 @@ impl Shell {
                     header_icon_button(
                         "session-fork",
                         icons::GIT_BRANCH,
+                        "Fork this session",
                         &theme,
                         cx.listener(|this, _, _, cx| this.create_side_chat(cx)),
                     )

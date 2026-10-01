@@ -153,6 +153,263 @@ fn toggles_expand_tool_groups_and_long_user_messages() {
     assert!(open.placement(0).unwrap().height > folded.placement(0).unwrap().height * 3.0);
 }
 
+/// Thinking renders desktop-style: markdown flattened to styled detail lines
+/// (bold/lists/code/quotes, underlined non-clickable links), not literal
+/// markers (desktop PR #220; the mobile port dropped it).
+#[test]
+fn thinking_renders_styled_markdown_not_markers() {
+    use zeron_doc::parts::{MessagePart, MessageStatus};
+    use zeron_doc::schema::{MessageRole, SessionMessageEntry};
+    let reasoning = concat!(
+        "**Planning** the `fix`\n\n",
+        "- point *one*\n",
+        "- point two with a [link](https://example.com)\n\n",
+        "```rust\n",
+        "let x = 1;\n",
+        "```\n\n",
+        "> quoted text",
+    );
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Reasoning { id: "r0".into(), text: reasoning.into() }],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let folded = w.pass();
+    let key = folded.placement(0).unwrap().key;
+    w.builder.expanded.insert(key);
+    w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+    w.builder.invalidate(key);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(!d.text.contains("**"), "{}", d.text);
+    assert!(!d.text.contains("`fix`"), "{}", d.text);
+    assert!(!d.text.contains("```"), "{}", d.text);
+    assert!(d.text.contains("Planning"), "{}", d.text);
+    assert!(d.text.contains("• point one"), "{}", d.text);
+    assert!(d.text.contains("let x = 1;"), "{}", d.text);
+    assert!(d.text.contains("│ quoted text"), "{}", d.text);
+    assert!(d.runs.iter().any(|r| r.decoration == display::Decoration::Underline), "{:?}", d.runs);
+    assert!(d.links.is_empty(), "thought links must not be clickable");
+    assert!(d.runs.iter().any(|r| r.color == display::ColorRole::TextFaint));
+    // Bold is a distinct face: "Planning" isn't painted in the regular style.
+    let slice = |r: &display::TextRun| -> String {
+        d.text.encode_utf16().skip(r.start as usize).take(r.len as usize).filter_map(|u| char::from_u32(u as u32)).collect()
+    };
+    let planning = d.runs.iter().find(|r| slice(r) == "Planning").expect("a Planning run");
+    let regular = d.runs.iter().find(|r| slice(r) == " the ").expect("a regular run");
+    assert_ne!(planning.style, regular.style, "bold uses the semibold face");
+    // Paint/measure hold across widths (display() debug-asserts equality).
+    for width in [280.0, 320.0, 430.0, 744.0, 1024.0] {
+        let mut w = worker(width);
+        w.input = TranscriptInput {
+            entries: vec![Arc::new(SessionMessageEntry {
+                id: "a".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Reasoning { id: "r0".into(), text: reasoning.into() }],
+                created_at: 0,
+                device_id: String::new(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })],
+            ..Default::default()
+        };
+        let key = w.pass().placement(0).unwrap().key;
+        w.builder.expanded.insert(key);
+        w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+        w.builder.invalidate(key);
+        let frame = w.pass();
+        let d = frame.display(0).unwrap();
+        assert!(d.text.contains("• point one"), "width {width}: {}", d.text);
+        for run in &d.runs {
+            assert!(run.x >= -0.5 && run.x + run.width <= width + 0.5, "width {width}: {run:?}");
+        }
+    }
+}
+
+/// A thought streamed through the incremental parser (live display mend)
+/// settles to exactly the frame a fresh full parse lays out.
+#[test]
+fn streaming_thought_markdown_settles_to_the_fresh_parse() {
+    use zeron_doc::parts::{MessagePart, MessageStatus};
+    use zeron_doc::schema::{MessageRole, SessionMessageEntry};
+    let text = "**Checking** the `parser`\n\n1. first step\n2. second with [docs](https://example.com)\n\n> note\n\n```rust\nfn main() {}\n```";
+    let entry = |status: MessageStatus, text: &str| {
+        Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Reasoning { id: "r0".into(), text: text.to_owned() }],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(status),
+            continuation_of: None,
+            duration_ms: None,
+        })
+    };
+    let mut live = worker(390.0);
+    let mut shown = String::new();
+    let mut key = 0;
+    for chunk in text.chars().collect::<Vec<_>>().chunks(5) {
+        shown.extend(chunk);
+        live.input = TranscriptInput { entries: vec![entry(MessageStatus::Streaming, &shown)], ..Default::default() };
+        let frame = live.pass();
+        key = frame.placement(0).unwrap().key;
+        assert!(!frame.display(0).unwrap().text.contains("**"), "mend holds while streaming");
+    }
+    live.builder.expanded.insert(key);
+    live.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+    live.builder.invalidate(key);
+    live.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
+    let streamed = live.pass();
+
+    let mut fresh = worker(390.0);
+    fresh.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
+    let folded = fresh.pass();
+    let fresh_key = folded.placement(0).unwrap().key;
+    assert_eq!(key, fresh_key);
+    fresh.builder.expanded.insert(fresh_key);
+    fresh.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+    fresh.builder.invalidate(fresh_key);
+    let settled = fresh.pass();
+
+    assert_eq!(streamed.row_count(), settled.row_count());
+    for i in 0..settled.row_count() {
+        let a = streamed.display(i).unwrap();
+        let b = settled.display(i).unwrap();
+        assert_eq!(a.text, b.text, "row {i} text");
+        assert!((a.height - b.height).abs() < 0.01, "row {i} height");
+    }
+}
+
+fn thought_input(text: &str, streaming: bool) -> TranscriptInput {
+    use zeron_doc::parts::{MessagePart, MessageStatus};
+    use zeron_doc::schema::{MessageRole, SessionMessageEntry};
+    TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Reasoning { id: "r0".into(), text: text.to_owned() }],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(if streaming { MessageStatus::Streaming } else { MessageStatus::Complete }),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    }
+}
+
+/// A settled one-thought reply with its group and thought detail opened.
+fn open_thought(width: f32, text: &str) -> RowDisplay {
+    let mut w = worker(width);
+    w.input = thought_input(text, false);
+    let key = w.pass().placement(0).unwrap().key;
+    w.builder.expanded.insert(key);
+    w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+    w.builder.invalidate(key);
+    w.pass().display(0).unwrap()
+}
+
+fn run_text(d: &RowDisplay, r: &display::TextRun) -> String {
+    String::from_utf16_lossy(&d.text.encode_utf16().skip(r.start as usize).take(r.len as usize).collect::<Vec<_>>())
+}
+
+/// Code keeps its indentation; nested items step right; a wrapped list item
+/// hangs under its first word and a wrapped quote keeps its bar on every
+/// line (desktop's re-indented wrap), at every width.
+#[test]
+fn thought_code_indents_and_wrapped_lines_hang() {
+    let alpha = "alpha ".repeat(20);
+    let omega = "omega ".repeat(20);
+    let text = format!("```\nfn f() {{\n    let x = 1;\n}}\n```\n\n- top\n  - nested\n- {alpha}\n\n> {omega}");
+    for width in [280.0, 320.0, 390.0] {
+        let d = open_thought(width, &text);
+        assert!(d.text.contains("    let x = 1;"), "code indentation survives: {}", d.text);
+        let x_of = |needle: &str| d.runs.iter().find(|r| run_text(&d, r) == needle).unwrap_or_else(|| panic!("{needle}: {:?}", d.runs)).x;
+        let top = x_of("top");
+        assert!(x_of("nested") > top + 1.0, "nested item indents");
+        let lines = |word: &str| {
+            let runs: Vec<_> = d.runs.iter().filter(|r| run_text(&d, r).contains(word)).collect();
+            let mut baselines: Vec<f32> = runs.iter().map(|r| r.baseline).collect();
+            baselines.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+            (runs, baselines.len())
+        };
+        let (alpha_runs, alpha_lines) = lines("alpha");
+        assert!(alpha_lines > 1, "width {width}: the long item wraps");
+        for r in &alpha_runs {
+            assert!((r.x - top).abs() < 0.5, "width {width}: wrapped item hangs under its text: {r:?}");
+        }
+        let (omega_runs, omega_lines) = lines("omega");
+        assert!(omega_lines > 1, "width {width}: the long quote wraps");
+        let bar_x = omega_runs[0].x;
+        for r in &omega_runs {
+            assert!((r.x - bar_x).abs() < 0.5, "width {width}: wrapped quote hangs: {r:?}");
+        }
+        let bars = d.runs.iter().filter(|r| run_text(&d, r).contains('│')).count();
+        assert_eq!(bars, omega_lines, "width {width}: one bar per quoted line");
+        for run in &d.runs {
+            assert!(run.x >= -0.5 && run.x + run.width <= width + 0.5, "width {width}: {run:?}");
+        }
+    }
+}
+
+/// A long thought streaming past the visible cap stops growing, fades its
+/// last line, and stops re-preparing: deltas below the fold reuse the body.
+#[test]
+fn long_streaming_thought_is_capped_and_reuses_its_body() {
+    let mut w = worker(390.0);
+    let mut text = String::new();
+    let mut heights = Vec::new();
+    let mut bodies = Vec::new();
+    for i in 0..80 {
+        text.push_str(&format!("Step {i}: **check** the `thing` and keep going.\n\n"));
+        // Streaming: the group auto-expands and the tail thought auto-opens.
+        w.input = thought_input(&text, true);
+        let frame = w.pass();
+        let d = frame.display(0).unwrap();
+        assert!(!d.text.contains("**"));
+        heights.push(d.height);
+        bodies.push(w.builder.thought_body_for_test("a#r0").expect("thought prepared"));
+        if i == 79 {
+            assert!(d.fades.iter().any(|f| f.edge == display::FadeEdge::Bottom), "cut thought fades");
+        }
+    }
+    let settled = heights[heights.len() - 1];
+    assert!(heights[..5].windows(2).all(|p| p[1] > p[0]), "grows while short: {heights:?}");
+    assert!(heights[40..].iter().all(|h| (h - settled).abs() < 0.01), "capped: {heights:?}");
+    assert!(bodies[40..].windows(2).all(|p| Arc::ptr_eq(&p[0], &p[1])), "past the cap, deltas reuse the prepared body");
+}
+
+/// One huge paragraph (no line breaks for the line cap to act on) streaming
+/// in: the visible text is clipped, so the body stops re-preparing too.
+#[test]
+fn huge_single_paragraph_thought_stops_reshaping() {
+    let mut w = worker(390.0);
+    let mut text = String::new();
+    let mut heights = Vec::new();
+    let mut bodies = Vec::new();
+    for _ in 0..120 {
+        text.push_str(&"streaming thought words ".repeat(10));
+        w.input = thought_input(&text, true);
+        let frame = w.pass();
+        heights.push(frame.display(0).unwrap().height);
+        bodies.push(w.builder.thought_body_for_test("a#r0").expect("thought prepared"));
+    }
+    assert!(text.len() > 25_000);
+    let settled = heights[heights.len() - 1];
+    assert!(heights[80..].iter().all(|h| (h - settled).abs() < 0.01), "capped: {heights:?}");
+    assert!(bodies[80..].windows(2).all(|p| Arc::ptr_eq(&p[0], &p[1])), "past the budget, deltas reuse the prepared body");
+}
+
 /// Release-mode timings (run with `cargo test --release -p zeron-mobile -- --ignored --nocapture`).
 #[test]
 #[ignore]

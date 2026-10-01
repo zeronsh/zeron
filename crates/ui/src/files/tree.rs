@@ -114,6 +114,13 @@ fn tree_rail_geometry(
     Some((metrics, bounds.top()))
 }
 
+fn tree_scroll_overflow(list: &gpui::ListState) -> (bool, bool) {
+    // ListState reports a negative offset as content scrolls upward.
+    let offset = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    let max = f32::from(list.max_offset_for_scrollbar().y);
+    (offset > 0.5, offset < max - 0.5)
+}
+
 /// The file tree's share of the shared floating rail: it owns no scroll
 /// handle, so geometry comes from the list state's own accessors and drags
 /// land through the list state's scrollbar offset setter.
@@ -218,11 +225,7 @@ impl FilesSurface {
                         .min_h_0()
                         .with_sizing_behavior(ListSizingBehavior::Auto),
                 )
-                .fade_overflow_y_with(move |_| {
-                    let offset = f32::from(overflow.scroll_px_offset_for_scrollbar().y);
-                    let max = f32::from(overflow.max_offset_for_scrollbar().y);
-                    (offset > 0.5, offset < max - 0.5)
-                })
+                .fade_overflow_y_with(move |_| tree_scroll_overflow(&overflow))
             })
             .children(scrollbar)
             .into_any_element()
@@ -627,7 +630,7 @@ fn status_row(
 mod tests {
     use super::super::model::VisibleTreeRow;
     use super::*;
-    use gpui::{ListAlignment, ListOffset, ListState};
+    use gpui::{AppContext, ListAlignment, ListOffset, ListState};
 
     fn rows(paths: &[&str]) -> Vec<VisibleTreeRow> {
         paths
@@ -638,6 +641,57 @@ mod tests {
                 kind: VisibleRowKind::Entry,
             })
             .collect()
+    }
+
+    #[gpui::test]
+    fn tree_fades_only_at_edges_with_hidden_rows(cx: &mut gpui::TestAppContext) {
+        struct TestTree(ListState);
+        impl gpui::Render for TestTree {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(TREE_ROW_HEIGHT)).w_full().into_any_element()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let state = ListState::new(10, ListAlignment::Top, px(0.0)).measure_all();
+        let view = cx.update(|_, cx| cx.new(|_| TestTree(state.clone())));
+        let mut draw = |height| {
+            cx.draw(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(200.0), px(height)),
+                |_, _| view.clone().into_any_element(),
+            );
+        };
+
+        draw(100.0);
+        assert_eq!(state.max_offset_for_scrollbar().y, px(170.0));
+        assert_eq!(tree_scroll_overflow(&state), (false, true));
+
+        state.set_offset_from_scrollbar(gpui::point(px(0.0), px(-85.0)));
+        draw(100.0);
+        assert_eq!(tree_scroll_overflow(&state), (true, true));
+
+        state.scroll_to_reveal_item(9);
+        draw(100.0);
+        assert_eq!(tree_scroll_overflow(&state), (true, false));
+        let last = state.bounds_for_item(9).unwrap();
+        let viewport = state.viewport_bounds();
+        assert!(last.top() >= viewport.top() && last.bottom() <= viewport.bottom());
+
+        // A taller viewport or removed rows clamps scrolling during layout;
+        // the fade must disappear in that same frame.
+        draw(400.0);
+        assert_eq!(tree_scroll_overflow(&state), (false, false));
+        draw(100.0);
+        state.scroll_to_reveal_item(9);
+        draw(100.0);
+        state.splice(2..10, 0);
+        draw(100.0);
+        assert_eq!(tree_scroll_overflow(&state), (false, false));
     }
 
     #[test]

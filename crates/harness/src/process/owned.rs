@@ -1,4 +1,4 @@
-//! ACP process ownership, including descendants that outlive their adapter.
+//! Process ownership, including descendants that outlive their agent.
 use std::ops::{Deref, DerefMut};
 
 use crate::process::{Child as ProcessChild, Command};
@@ -26,7 +26,7 @@ impl Child {
     pub(crate) fn new(inner: ProcessChild) -> Self {
         Self {
             #[cfg(unix)]
-            group: Some(-(inner.id().expect("newly spawned ACP child") as i32)),
+            group: Some(-(inner.id().expect("newly spawned child") as i32)),
             inner,
         }
     }

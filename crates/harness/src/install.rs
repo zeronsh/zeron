@@ -185,7 +185,7 @@ pub fn installed(id: HarnessId) -> bool {
         Codex => crate::CodexHarness::new().installed(),
         Cursor => crate::CursorHarness::new().installed(),
         Opencode => crate::OpencodeHarness::new().installed(),
-        Pi => crate::AcpHarness::pi().installed(),
+        Pi => crate::PiHarness::new().installed(),
         Grok => crate::AcpHarness::grok().installed(),
         Hermes => crate::AcpHarness::hermes().installed(),
         Devin => crate::AcpHarness::devin().installed(),

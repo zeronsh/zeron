@@ -19,6 +19,8 @@
 //! repeating ones to their start state, and no frames are scheduled. The
 //! [`set_reduced_motion`]/[`reduced_motion`] wrappers make it a single global
 //! switch; pure helpers take the flag explicitly where they run outside elements.
+//! [`ReduceMotion`] drives that switch from the OS accessibility setting or the
+//! user's override, and optionally from main-window focus.
 //!
 //! translateY is implemented as a relative-position `top` inset: taffy applies
 //! relative insets after layout, so — like a CSS transform — siblings never move.
@@ -34,6 +36,7 @@ use gpui::{
     Animation, AnimationElement, App, ElementId, EntityId, Global, Hsla, IntoElement, Rgba,
     SharedString, Styled, Window, px,
 };
+use serde::{Deserialize, Serialize};
 
 pub use gpui::AnimationExt;
 
@@ -833,6 +836,213 @@ pub fn reduced_motion(cx: &App) -> bool {
     cx.reduce_motion()
 }
 
+/// The user's reduced-motion preference. Persisted in `ui-settings.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReduceMotion {
+    /// Follow the OS accessibility setting.
+    #[default]
+    System,
+    On,
+    Off,
+}
+
+impl ReduceMotion {
+    pub const ALL: [Self; 3] = [Self::System, Self::On, Self::Off];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::On => "On",
+            Self::Off => "Off",
+        }
+    }
+}
+
+/// Inputs to the global flag: the persisted choices, plus what the OS and the
+/// main window last reported. Kept apart so a system change while the user has
+/// pinned On/Off still lands, and takes effect when they return to System.
+struct MotionState {
+    preference: ReduceMotion,
+    pause_in_background: bool,
+    system: bool,
+    active: bool,
+}
+
+impl Global for MotionState {}
+
+fn state_mut(cx: &mut App) -> Option<&mut MotionState> {
+    cx.has_global::<MotionState>()
+        .then(|| cx.global_mut::<MotionState>())
+}
+
+/// Combine the preference with the OS setting and window focus.
+pub fn resolve(
+    preference: ReduceMotion,
+    system: bool,
+    pause_in_background: bool,
+    active: bool,
+) -> bool {
+    let reduced = match preference {
+        ReduceMotion::System => system,
+        ReduceMotion::On => true,
+        ReduceMotion::Off => false,
+    };
+    reduced || (pause_in_background && !active)
+}
+
+/// Install the motion state and set the flag before the first window opens,
+/// so boot animations already honor it.
+pub fn init(preference: ReduceMotion, pause_in_background: bool, cx: &mut App) {
+    cx.set_global(MotionState {
+        preference,
+        pause_in_background,
+        system: false,
+        active: true,
+    });
+    refresh_system(cx);
+    apply(cx);
+}
+
+pub fn preference(cx: &App) -> ReduceMotion {
+    cx.try_global::<MotionState>()
+        .map(|state| state.preference)
+        .unwrap_or_default()
+}
+
+pub fn pause_in_background(cx: &App) -> bool {
+    cx.try_global::<MotionState>()
+        .is_some_and(|state| state.pause_in_background)
+}
+
+/// The OS setting as last read; drives the Settings helper text.
+pub fn system_reduces_motion(cx: &App) -> bool {
+    cx.try_global::<MotionState>()
+        .is_some_and(|state| state.system)
+}
+
+pub fn set_preference(preference: ReduceMotion, cx: &mut App) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    if state.preference == preference {
+        return;
+    }
+    state.preference = preference;
+    apply(cx);
+    crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+        settings.reduce_motion = preference;
+    });
+}
+
+pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    if state.pause_in_background == enabled {
+        return;
+    }
+    state.pause_in_background = enabled;
+    apply(cx);
+    crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+        settings.pause_animations_in_background = enabled;
+    });
+}
+
+/// Main-window focus moved. Regaining focus also re-reads the OS setting:
+/// changing it means visiting System Settings, so coming back is the moment
+/// it can have moved, without holding a platform notification observer.
+pub fn window_activation_changed(active: bool, cx: &mut App) {
+    // Only the app installs motion state. Test windows activate too, and the
+    // Linux portal read would wake the deterministic scheduler from a D-Bus
+    // thread.
+    if !cx.has_global::<MotionState>() {
+        return;
+    }
+    if active {
+        refresh_system(cx);
+    }
+    set_window_active(active, cx);
+}
+
+fn set_window_active(active: bool, cx: &mut App) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    state.active = active;
+    apply(cx);
+}
+
+fn set_system(system: bool, cx: &mut App) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    state.system = system;
+    apply(cx);
+}
+
+fn apply(cx: &mut App) {
+    let Some(state) = cx.try_global::<MotionState>() else {
+        return;
+    };
+    let reduced = resolve(
+        state.preference,
+        state.system,
+        state.pause_in_background,
+        state.active,
+    );
+    // gpui refreshes every window only when the flag actually flips.
+    set_reduced_motion(cx, reduced);
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_system(cx: &mut App) {
+    use objc::runtime::{NO, Object};
+    use objc::{class, msg_send, sel, sel_impl};
+    let reduce = unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let reduce: objc::runtime::BOOL =
+            msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+        reduce != NO
+    };
+    set_system(reduce, cx);
+}
+
+/// "Show animations in Windows" (Settings → Accessibility → Visual effects).
+#[cfg(windows)]
+fn refresh_system(cx: &mut App) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
+    let mut enabled: windows_sys::core::BOOL = 1;
+    let read = unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
+    };
+    set_system(read != 0 && enabled == 0, cx);
+}
+
+/// The desktop portal's `reduced-motion` key, which GNOME and KDE map from
+/// their own animation settings. A D-Bus round trip, so it stays off the
+/// foreground; portals without the key read as no preference.
+#[cfg(target_os = "linux")]
+fn refresh_system(cx: &mut App) {
+    use ashpd::desktop::settings::{ReducedMotion, Settings};
+    use gpui::AppContext as _;
+    let read = cx.background_spawn(async {
+        let settings = Settings::new().await.ok()?;
+        let motion = settings.reduced_motion().await.ok()?;
+        Some(motion == ReducedMotion::ReducedMotion)
+    });
+    cx.spawn(async move |cx| {
+        let reduce = read.await.unwrap_or(false);
+        cx.update(|cx| set_system(reduce, cx));
+    })
+    .detach();
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+fn refresh_system(_cx: &mut App) {}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1159,6 +1369,50 @@ mod tests {
         assert!(mid_fall > 0.1 && mid_fall < 1.0, "eases down");
         let mid_rise = gspin_opacity(0.96, 0.1);
         assert!(mid_rise > 0.1 && mid_rise < 1.0, "eases up");
+    }
+
+    #[test]
+    fn reduce_motion_follows_system_unless_pinned() {
+        use ReduceMotion::*;
+        assert!(resolve(System, true, false, true));
+        assert!(!resolve(System, false, false, true));
+        assert!(resolve(On, false, false, true));
+        assert!(!resolve(Off, true, false, true), "Off overrides the system");
+    }
+
+    #[test]
+    fn background_pause_only_applies_when_enabled_and_unfocused() {
+        use ReduceMotion::*;
+        assert!(resolve(Off, false, true, false));
+        assert!(!resolve(Off, false, true, true), "focused window animates");
+        assert!(!resolve(Off, false, false, false), "opt-in only");
+        assert!(resolve(On, false, false, false));
+    }
+
+    #[gpui::test]
+    fn focus_and_preference_drive_the_global_flag(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(MotionState {
+                preference: ReduceMotion::Off,
+                pause_in_background: false,
+                system: true,
+                active: true,
+            });
+            apply(cx);
+            assert!(!reduced_motion(cx), "Off ignores the system");
+
+            set_window_active(false, cx);
+            assert!(!reduced_motion(cx), "pause is opt-in");
+            set_pause_in_background(true, cx);
+            assert!(reduced_motion(cx), "unfocused window pauses");
+            set_window_active(true, cx);
+            assert!(!reduced_motion(cx), "refocus resumes");
+
+            set_preference(ReduceMotion::System, cx);
+            assert!(reduced_motion(cx), "System follows the recorded OS value");
+            set_system(false, cx);
+            assert!(!reduced_motion(cx));
+        });
     }
 }
 

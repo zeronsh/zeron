@@ -39,6 +39,7 @@ struct Preferences {
 
 #[derive(Clone, Copy)]
 enum LatestSource {
+    AntigravityAcp,
     Claude,
     Npm(&'static str),
     Opencode,
@@ -71,12 +72,41 @@ struct CodexStandaloneInstall {
     target: String,
 }
 
+/// A Homebrew cask or formula that owns the resolved CLI. The token is taken
+/// from the `Caskroom` or `Cellar` directory, never from installer output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomebrewPackage {
+    brew: PathBuf,
+    cask: bool,
+    token: String,
+}
+
+impl HomebrewPackage {
+    fn upgrade_command(&self) -> String {
+        if self.cask {
+            format!("brew upgrade --cask {}", self.token)
+        } else {
+            format!("brew upgrade --formula {}", self.token)
+        }
+    }
+
+    fn upgrade_args(&self) -> Vec<&str> {
+        if self.cask {
+            vec!["upgrade", "--cask", self.token.as_str()]
+        } else {
+            vec!["upgrade", "--formula", self.token.as_str()]
+        }
+    }
+}
+
 enum UpdatePlan {
     Command {
         executable: PathBuf,
         args: &'static [&'static str],
     },
+    AntigravityArchive,
     CodexStandalone(CodexStandaloneInstall),
+    Homebrew(HomebrewPackage),
 }
 
 struct ReleaseAsset {
@@ -193,9 +223,8 @@ fn provider(id: HarnessId) -> ProviderSpec {
                 repository: "openai/codex",
                 tag_prefix: "rust-v",
             },
-            // Codex has no self-update command. npm/Homebrew remain manual;
-            // `update_plan` separately recognizes the official standalone
-            // release layout, where an atomic in-place update is unambiguous.
+            // npm stays manual. Homebrew casks and formulae are upgraded with
+            // `brew upgrade`; the official standalone layout is updated in place.
             update_args: None,
             manual_command: "Update Codex with its original installer or package manager",
         },
@@ -237,11 +266,11 @@ fn provider(id: HarnessId) -> ProviderSpec {
         },
         HarnessId::Antigravity => ProviderSpec {
             version_args: &["--version"],
-            latest: LatestSource::Manual,
+            latest: LatestSource::AntigravityAcp,
             // Zeron installs a pinned ACP server archive. It has no registered
             // self-update command; custom binaries remain installer-managed.
             update_args: None,
-            manual_command: "Update Zeron or replace the configured Antigravity ACP server",
+            manual_command: "Update the configured Antigravity ACP server",
         },
         HarnessId::Mock => ProviderSpec {
             version_args: &["--version"],
@@ -253,6 +282,9 @@ fn provider(id: HarnessId) -> ProviderSpec {
 }
 
 fn update_plan(harness: HarnessId, executable: &Path) -> Result<UpdatePlan, String> {
+    if let Some(package) = homebrew_package(executable) {
+        return Ok(UpdatePlan::Homebrew(package));
+    }
     if harness == HarnessId::ClaudeCode && claude_package_manager_command(executable).is_some() {
         return Err("update Claude Code with its package manager".into());
     }
@@ -267,11 +299,32 @@ fn update_plan(harness: HarnessId, executable: &Path) -> Result<UpdatePlan, Stri
     {
         return Ok(UpdatePlan::CodexStandalone(install));
     }
+    if harness == HarnessId::Antigravity
+        && zeron_harness::acp::is_managed_antigravity_server(executable)
+    {
+        return Ok(UpdatePlan::AntigravityArchive);
+    }
     Err("this provider requires a manual update".into())
 }
 
 fn can_apply_update(harness: HarnessId, executable: &Path) -> bool {
     update_plan(harness, executable).is_ok()
+}
+
+fn manual_update_command(harness: HarnessId, executable: &Path, can_apply: bool) -> Option<String> {
+    if can_apply {
+        return None;
+    }
+    if harness == HarnessId::Antigravity
+        && zeron_harness::acp::is_managed_antigravity_server(executable)
+    {
+        return Some("Update Zeron to install this release".into());
+    }
+    Some(
+        claude_package_manager_command_for(harness, executable)
+            .unwrap_or_else(|| provider(harness).manual_command.to_string()),
+    )
+    .filter(|command| !command.is_empty())
 }
 
 struct ActiveUpdate {
@@ -293,6 +346,9 @@ struct Inner {
     shutdown: CancellationToken,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     client: reqwest::Client,
+    /// the registry release the last check reported, installed verbatim by
+    /// apply so a registry change in between cannot swap what gets installed.
+    antigravity_release: Mutex<Option<zeron_harness::acp::AntigravityRelease>>,
 }
 
 /// Cloneable engine service exposed to RPC and the periodic worker.
@@ -406,6 +462,7 @@ impl HarnessUpdateCoordinator {
                 check_slots: tokio::sync::Semaphore::new(2),
                 shutdown: CancellationToken::new(),
                 worker: Mutex::new(None),
+                antigravity_release: Mutex::new(None),
                 client: reqwest::Client::builder()
                     .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
                     .timeout(COMMAND_TIMEOUT)
@@ -507,6 +564,13 @@ impl HarnessUpdateCoordinator {
             && status.policy == HarnessUpdatePolicy::AutoWhenIdle
             && status.phase == HarnessUpdatePhase::Available
             && status.can_apply
+            // The Update button can still run `brew upgrade` when Homebrew has
+            // not published the upstream release. Automatic installs wait until
+            // Homebrew itself reports a newer package.
+            && !status
+                .manual_command
+                .as_deref()
+                .is_some_and(unpublished_homebrew_upgrade)
     }
 
     fn schedule_automatic_update(&self, harness: HarnessId) {
@@ -566,7 +630,7 @@ impl HarnessUpdateCoordinator {
         };
         let spec = provider(harness);
         let version_lease = self.inner.registry.execution_lease(harness).await;
-        let installed = run_version_command(&executable, spec.version_args).await;
+        let installed = run_version_command(harness, &executable, spec.version_args).await;
         drop(version_lease);
         let installed = match installed {
             Ok(version) => version,
@@ -579,16 +643,19 @@ impl HarnessUpdateCoordinator {
         };
         let source = classify_source(&executable);
         let can_apply = can_apply_update(harness, &executable);
-        let manual_command = (!can_apply)
-            .then(|| {
-                claude_package_manager_command_for(harness, &executable)
-                    .unwrap_or_else(|| provider(harness).manual_command.to_string())
-            })
-            .filter(|command| !command.is_empty());
         if self.settle_if_unmonitored(harness) {
             return Ok(());
         }
+        if let Some(package) = homebrew_package(&executable) {
+            return self
+                .finish_homebrew_check(harness, &executable, installed, source, package)
+                .await;
+        }
         let latest = match spec.latest {
+            LatestSource::AntigravityAcp => self
+                .antigravity_acp_latest()
+                .await
+                .map(UpdateCheck::Version),
             LatestSource::Claude => {
                 let channel = if let Some(channel) = claude_cask_channel(&executable) {
                     Some(channel)
@@ -676,8 +743,8 @@ impl HarnessUpdateCoordinator {
                     status.channel = None;
                     status.source = source;
                     status.can_apply = can_apply;
-                    status.manual_command =
-                        manual_command.or_else(|| Some(spec.manual_command.into()));
+                    status.manual_command = manual_update_command(harness, &executable, can_apply)
+                        .or_else(|| Some(spec.manual_command.into()));
                     status.phase = if status.policy == HarnessUpdatePolicy::Off
                         || !registry.enabled_set().contains(&harness)
                     {
@@ -695,6 +762,14 @@ impl HarnessUpdateCoordinator {
                 return self.fail_check_with_installed(harness, installed, source, error);
             }
         };
+        // zeron can only install the archive it has pinned and verified; a
+        // newer registry release waits for a zeron update that pins it.
+        let can_apply = can_apply
+            && (harness != HarnessId::Antigravity
+                || lock(&self.inner.antigravity_release)
+                    .as_ref()
+                    .is_some_and(|release| release.installable()));
+        let manual_command = manual_update_command(harness, &executable, can_apply);
         let registry = self.inner.registry.clone();
         self.mutate(harness, |status| {
             status.installed_version = Some(installed);
@@ -715,6 +790,148 @@ impl HarnessUpdateCoordinator {
             status.error = None;
         });
         Ok(())
+    }
+
+    /// Homebrew owns this binary, so the installable release is the cask or
+    /// formula version. An upstream release that Homebrew has not published yet
+    /// still gets an Update button — it runs `brew upgrade` — but is not
+    /// installed automatically.
+    async fn finish_homebrew_check(
+        &self,
+        harness: HarnessId,
+        executable: &Path,
+        installed: String,
+        source: HarnessInstallSource,
+        package: HomebrewPackage,
+    ) -> Result<(), String> {
+        let brew_version = match self.homebrew_latest(&package).await {
+            Ok(version) => version,
+            Err(error) => {
+                return self.fail_check_with_installed(harness, installed, source, error);
+            }
+        };
+        let upstream = self
+            .upstream_version(harness, &installed)
+            .await
+            .ok()
+            .filter(|version| version_is_newer(version, &installed));
+        let brew_newer = version_is_newer(&brew_version, &installed);
+        let (latest, note) = if brew_newer {
+            (brew_version, None)
+        } else if let Some(upstream) =
+            upstream.filter(|version| version_is_newer(version, &brew_version))
+        {
+            (upstream, Some(package.upgrade_command()))
+        } else {
+            (brew_version, None)
+        };
+        if self.settle_if_unmonitored(harness) {
+            return Ok(());
+        }
+        let dismissed = lock(&self.inner.prefs)
+            .dismissed_versions
+            .get(&harness)
+            .is_some_and(|dismissed| dismissed == &latest);
+        let available = version_is_newer(&latest, &installed) && !dismissed;
+        let manual_command = if available { note } else { None };
+        let channel = (harness == HarnessId::ClaudeCode)
+            .then(|| claude_cask_channel(executable))
+            .flatten()
+            .map(str::to_owned);
+        let registry = self.inner.registry.clone();
+        self.mutate(harness, |status| {
+            status.installed_version = Some(installed);
+            status.latest_version = Some(latest);
+            if channel.is_some() {
+                status.channel = channel.clone();
+            }
+            status.source = source;
+            status.can_apply = true;
+            status.manual_command = manual_command;
+            status.phase = if status.policy == HarnessUpdatePolicy::Off
+                || !registry.enabled_set().contains(&harness)
+            {
+                HarnessUpdatePhase::Dormant
+            } else if available {
+                HarnessUpdatePhase::Available
+            } else {
+                HarnessUpdatePhase::Current
+            };
+            status.checked_at = Some(now_ms());
+            status.error = None;
+        });
+        Ok(())
+    }
+
+    async fn homebrew_latest(&self, package: &HomebrewPackage) -> Result<String, String> {
+        let api = self.homebrew_api_version(package).await;
+        let local = self.homebrew_local_version(package).await;
+        match (api, local) {
+            (Ok(api), Ok(local)) => Ok(if version_is_newer(&local, &api) {
+                local
+            } else {
+                api
+            }),
+            (Ok(version), Err(_)) | (Err(_), Ok(version)) => Ok(version),
+            (Err(api), Err(local)) => Err(format!("{api}; {local}")),
+        }
+    }
+
+    async fn homebrew_api_version(&self, package: &HomebrewPackage) -> Result<String, String> {
+        let kind = if package.cask { "cask" } else { "formula" };
+        let url = format!(
+            "https://formulae.brew.sh/api/{kind}/{}.json",
+            homebrew_url_component(&package.token)
+        );
+        let response = self
+            .inner
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("Homebrew version check failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("Homebrew version check failed: {error}"))?;
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Homebrew version response was invalid: {error}"))?;
+        parse_homebrew_version(package.cask, &body)
+    }
+
+    async fn homebrew_local_version(&self, package: &HomebrewPackage) -> Result<String, String> {
+        let brew = resolve_brew(&package.brew)?;
+        let token = package.token.as_str();
+        let args: &[&str] = if package.cask {
+            &["info", "--cask", "--json=v2", token]
+        } else {
+            &["info", "--formula", "--json=v2", token]
+        };
+        // Don't refresh taps on a probe. `brew upgrade` does that when applying.
+        let output = run_command_output_env(&brew, args, COMMAND_TIMEOUT, BREW_INFO_ENV).await?;
+        parse_homebrew_version(package.cask, &output)
+    }
+
+    /// Release feeds that do not spawn the CLI. A failure here only hides the
+    /// "published upstream, not yet in Homebrew" note.
+    async fn upstream_version(
+        &self,
+        harness: HarnessId,
+        installed: &str,
+    ) -> Result<String, String> {
+        match provider(harness).latest {
+            LatestSource::Github {
+                repository,
+                tag_prefix,
+            } => self.github_latest(repository, tag_prefix).await,
+            LatestSource::Npm(package) => self.npm_latest(package).await,
+            LatestSource::Opencode => self.npm_latest(opencode_release_package(installed)).await,
+            LatestSource::AntigravityAcp => self.antigravity_acp_latest().await,
+            LatestSource::Claude
+            | LatestSource::Command(_)
+            | LatestSource::Hermes
+            | LatestSource::Manual => Err("no separate upstream feed".into()),
+        }
     }
 
     /// Apply one known release. Cancellation is honored while waiting for the
@@ -756,6 +973,9 @@ impl HarnessUpdateCoordinator {
             HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
         ) {
             return Err("no applicable harness update".into());
+        }
+        if !current.can_apply {
+            return Err("this provider requires a manual update".into());
         }
         let executable = self.executable(harness)?;
         let plan = update_plan(harness, &executable)?;
@@ -821,10 +1041,39 @@ impl HarnessUpdateCoordinator {
                     Err(error) => Err(error),
                 }
             }
+            UpdatePlan::AntigravityArchive => {
+                let release = lock(&self.inner.antigravity_release)
+                    .clone()
+                    .filter(|release| current.latest_version.as_ref() == Some(&release.version));
+                match release {
+                    Some(release) => match self.begin_install(harness, &cancel) {
+                        Ok(()) => zeron_harness::acp::install_antigravity_release(&release)
+                            .await
+                            .map(drop)
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    },
+                    None => Err("the Antigravity release changed; check for updates again".into()),
+                }
+            }
             UpdatePlan::CodexStandalone(install) => {
                 self.install_codex_standalone(harness, &current, install, &cancel)
                     .await
             }
+            UpdatePlan::Homebrew(package) => match resolve_brew(&package.brew) {
+                Ok(brew) => {
+                    let args = package.upgrade_args();
+                    match self.begin_install(harness, &cancel) {
+                        Ok(()) => {
+                            run_command_output_env(&brew, &args, UPDATE_TIMEOUT, BREW_UPGRADE_ENV)
+                                .await
+                                .map(drop)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            },
         };
         if let Err(error) = applied {
             drop(lease);
@@ -840,15 +1089,34 @@ impl HarnessUpdateCoordinator {
         self.mutate(harness, |status| {
             status.phase = HarnessUpdatePhase::Verifying
         });
-        let verified = run_version_command(&executable, provider(harness).version_args).await;
+        let verified = match self.executable(harness) {
+            Ok(executable) => {
+                run_version_command(harness, &executable, provider(harness).version_args)
+                    .await
+                    .map(|version| (version, executable))
+            }
+            Err(error) => Err(error),
+        };
         let result = match verified {
-            Ok(version) => {
+            Ok((version, executable)) => {
                 let expected = current.latest_version.as_deref();
-                if expected.is_some_and(|latest| version_is_newer(latest, &version)) {
-                    Err(format!(
-                        "verification returned {version}, older than expected {}",
-                        expected.unwrap_or_default()
-                    ))
+                if let Some(latest) = expected.filter(|latest| version_is_newer(latest, &version)) {
+                    let lag = current
+                        .manual_command
+                        .as_deref()
+                        .is_some_and(unpublished_homebrew_upgrade);
+                    Err(match homebrew_package(&executable) {
+                        Some(package) if lag => format!(
+                            "Homebrew is still on {version}. {latest} is not available from `{}` yet",
+                            package.upgrade_command()
+                        ),
+                        Some(_) => format!(
+                            "Homebrew upgrade left the CLI on {version}, older than expected {latest}"
+                        ),
+                        None => {
+                            format!("verification returned {version}, older than expected {latest}")
+                        }
+                    })
                 } else {
                     lock(&self.inner.prefs).dismissed_versions.remove(&harness);
                     self.persist_preferences();
@@ -863,6 +1131,14 @@ impl HarnessUpdateCoordinator {
             }
             Err(error) => Err(format!("post-update verification failed: {error}")),
         };
+        if harness == HarnessId::Antigravity && result.is_ok() {
+            // pruning runs under the update lease, so none of this engine's
+            // sessions can be launching the superseded server meanwhile.
+            let _ = tokio::task::spawn_blocking(
+                zeron_harness::acp::prune_superseded_antigravity_installs,
+            )
+            .await;
+        }
         drop(lease);
         lock(&self.inner.cancellations).remove(&harness);
         self.inner.registry.end_update(harness);
@@ -1125,6 +1401,27 @@ impl HarnessUpdateCoordinator {
 
     async fn npm_latest(&self, package: &str) -> Result<String, String> {
         self.npm_release(package, "latest").await
+    }
+
+    async fn antigravity_acp_latest(&self) -> Result<String, String> {
+        let response = self
+            .inner
+            .client
+            .get(zeron_harness::acp::ANTIGRAVITY_REGISTRY_URL)
+            .send()
+            .await
+            .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?;
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Antigravity ACP release response was invalid: {error}"))?;
+        let release = zeron_harness::acp::antigravity_release(&json)
+            .ok_or("Antigravity ACP release response contained no valid version")?;
+        let version = release.version.clone();
+        *lock(&self.inner.antigravity_release) = Some(release);
+        Ok(version)
     }
 
     async fn npm_release(&self, package: &str, channel: &str) -> Result<String, String> {
@@ -1612,6 +1909,134 @@ fn activate_codex_release(
     Err("automatic Codex standalone updates are not supported on this platform".into())
 }
 
+fn unpublished_homebrew_upgrade(command: &str) -> bool {
+    command
+        .trim()
+        .trim_matches('`')
+        .starts_with("brew upgrade ")
+}
+
+fn homebrew_token_ok(token: &str) -> bool {
+    let Some(first) = token.chars().next() else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && token.len() <= 128
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '_' | '.' | '@'))
+        // brew loads a `.rb` or `.json` argument as a local package file.
+        && !token.ends_with(".rb")
+        && !token.ends_with(".json")
+}
+
+fn homebrew_url_component(token: &str) -> String {
+    let mut encoded = String::new();
+    for byte in token.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// `Caskroom/<token>/<version>/…` and `Cellar/<token>/<version>/{bin,libexec}/…`
+/// are Homebrew's own layout. Anything else under a Homebrew prefix is not a
+/// Homebrew-owned CLI: npm packages in `lib/node_modules`, including globals
+/// that a keg-only runtime such as `node@20` keeps inside its own keg, belong
+/// to that package manager, and upgrading the runtime would not update them.
+fn homebrew_package(path: &Path) -> Option<HomebrewPackage> {
+    // Homebrew runs only on macOS and Linux.
+    if !cfg!(unix) {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let components: Vec<_> = canonical.components().collect();
+    let (index, cask) =
+        components
+            .iter()
+            .enumerate()
+            .find_map(|(index, component)| match component.as_os_str().to_str()? {
+                "Caskroom" => Some((index, true)),
+                "Cellar" => Some((index, false)),
+                _ => None,
+            })?;
+    let token = components.get(index + 1)?.as_os_str().to_str()?;
+    if !homebrew_token_ok(token) {
+        return None;
+    }
+    let is_normal = |offset: usize| {
+        matches!(
+            components.get(index + offset),
+            Some(std::path::Component::Normal(_))
+        )
+    };
+    // The executable must live inside a versioned install of the package.
+    if !is_normal(2) || !is_normal(3) {
+        return None;
+    }
+    if !cask
+        && !matches!(
+            components[index + 3].as_os_str().to_str(),
+            Some("bin" | "libexec")
+        )
+    {
+        return None;
+    }
+    let mut prefix = PathBuf::new();
+    for component in &components[..index] {
+        prefix.push(component);
+    }
+    if prefix.as_os_str().is_empty() {
+        return None;
+    }
+    Some(HomebrewPackage {
+        brew: prefix.join("bin").join("brew"),
+        cask,
+        token: token.to_string(),
+    })
+}
+
+fn resolve_brew(preferred: &Path) -> Result<PathBuf, String> {
+    if preferred.is_file() {
+        Ok(preferred.to_path_buf())
+    } else {
+        // A different prefix's brew would upgrade the wrong install.
+        Err(format!("Homebrew was not found at {}", preferred.display()))
+    }
+}
+
+fn parse_homebrew_version(cask: bool, body: &str) -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("Homebrew version response was invalid: {error}"))?;
+    let version = if cask {
+        json.get("version")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                json.pointer("/casks/0/version")
+                    .and_then(serde_json::Value::as_str)
+            })
+    } else {
+        json.pointer("/versions/stable")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                json.pointer("/formulae/0/versions/stable")
+                    .and_then(serde_json::Value::as_str)
+            })
+    }
+    .map(str::trim)
+    .filter(|version| !version.is_empty())
+    .ok_or_else(|| "Homebrew version response contained no version".to_string())?;
+    let comparable = version.split(',').next().unwrap_or(version).trim();
+    if version_numbers(comparable).is_none() {
+        return Err(format!("Homebrew version {version} is not comparable"));
+    }
+    Ok(comparable.to_string())
+}
+
 fn classify_source(path: &Path) -> HarnessInstallSource {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let text = format!("{}\n{}", path.display(), canonical.display()).to_ascii_lowercase();
@@ -1639,17 +2064,14 @@ fn claude_package_manager_command_for(harness: HarnessId, path: &Path) -> Option
 }
 
 fn claude_package_manager_command(path: &Path) -> Option<String> {
+    if let Some(package) = homebrew_package(path) {
+        return Some(package.upgrade_command());
+    }
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let text = format!("{}\n{}", path.display(), canonical.display())
         .replace('\\', "/")
         .to_ascii_lowercase();
-    if let Some(channel) = claude_cask_channel(path) {
-        Some(if channel == "latest" {
-            "brew upgrade claude-code@latest".into()
-        } else {
-            "brew upgrade claude-code".into()
-        })
-    } else if text.contains("/winget/") || text.contains("/microsoft/winget/") {
+    if text.contains("/winget/") || text.contains("/microsoft/winget/") {
         Some("winget upgrade Anthropic.ClaudeCode".into())
     } else if canonical.starts_with("/usr/bin")
         || canonical.starts_with("/nix/store")
@@ -1705,9 +2127,14 @@ fn parse_hermes_update_check(output: &str) -> Result<UpdateCheck, String> {
     Err("Hermes update check returned no recognizable verdict".into())
 }
 
-async fn run_version_command(executable: &Path, args: &[&str]) -> Result<String, String> {
+async fn run_version_command(
+    harness: HarnessId,
+    executable: &Path,
+    args: &[&str],
+) -> Result<String, String> {
     let output = run_command_output(executable, args, COMMAND_TIMEOUT).await?;
-    extract_version(&output).ok_or_else(|| "command returned no recognizable version".into())
+    installed_version(harness, &output)
+        .ok_or_else(|| "command returned no recognizable version".into())
 }
 
 async fn run_command(executable: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
@@ -1715,6 +2142,21 @@ async fn run_command(executable: &Path, args: &[&str], timeout: Duration) -> Res
         .await
         .map(drop)
 }
+
+const BREW_UPGRADE_ENV: &[(&str, &str)] = &[
+    ("NONINTERACTIVE", "1"),
+    ("HOMEBREW_NO_ANALYTICS", "1"),
+    ("HOMEBREW_NO_ENV_HINTS", "1"),
+    ("HOMEBREW_NO_EMOJI", "1"),
+];
+
+const BREW_INFO_ENV: &[(&str, &str)] = &[
+    ("NONINTERACTIVE", "1"),
+    ("HOMEBREW_NO_ANALYTICS", "1"),
+    ("HOMEBREW_NO_ENV_HINTS", "1"),
+    ("HOMEBREW_NO_EMOJI", "1"),
+    ("HOMEBREW_NO_AUTO_UPDATE", "1"),
+];
 
 /// Unix updaters can delegate installation to npm, pip, or a shell. Own
 /// their process group as well as the leader, including on future cancellation.
@@ -1734,6 +2176,15 @@ async fn run_command_output(
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
+    run_command_output_env(executable, args, timeout, &[]).await
+}
+
+async fn run_command_output_env(
+    executable: &Path,
+    args: &[&str],
+    timeout: Duration,
+    env: &[(&str, &str)],
+) -> Result<String, String> {
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -1742,6 +2193,9 @@ async fn run_command_output(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env("NO_COLOR", "1");
+    for (key, value) in env {
+        command.env(*key, *value);
+    }
     zeron_harness::compose_child_path(&mut command, executable);
     #[cfg(unix)]
     command.process_group(0);
@@ -1815,6 +2269,14 @@ fn extract_version(text: &str) -> Option<String> {
     version_tokens(text).next()
 }
 
+fn installed_version(harness: HarnessId, output: &str) -> Option<String> {
+    if harness == HarnessId::Antigravity {
+        return zeron_harness::acp::antigravity_build_version(output)
+            .or_else(|| output.lines().next().and_then(extract_version));
+    }
+    extract_version(output)
+}
+
 /// Update checks name the installed release before the candidate
 /// (`available: 1.0.4 -> 1.0.41`), so the release is the final version.
 fn extract_latest_version(text: &str) -> Option<String> {
@@ -1862,8 +2324,8 @@ fn version_is_newer(latest: &str, installed: &str) -> bool {
 mod tests {
     use super::{
         LatestSource, activate_codex_release, codex_standalone_install, extract_latest_version,
-        extract_version, opencode_release_package, provider, validate_codex_package,
-        version_is_newer,
+        extract_version, installed_version, opencode_release_package, provider,
+        validate_codex_package, version_is_newer,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2012,6 +2474,36 @@ mod tests {
             Some("1.4.0".into())
         );
         assert_eq!(extract_version("no release here"), None);
+    }
+
+    #[test]
+    fn antigravity_version_uses_the_build_label_instead_of_the_branch_revision() {
+        let output = "Built on Wed Sep  2 19:52:52 2026 (1788375172)\nBuilt from changelist 975248206 in a mint client based on //depot/branches/agy_acp_server_release_branch/973763860.1/google3\nBuild label: agy_acp_server_1.1.1\nBuild platform: darwin_arm64";
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, output),
+            Some("1.1.1".into())
+        );
+        let output = "Built on Wed Sep 23 17:09:50 2026 (1790179790)\nBuilt from changelist 986799458 in a mint client based on //depot/branches/agy_acp_server_release_branch/982565062.1/google3\nBuild label: 1.2.1\nBuild platform: darwin_arm64";
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, output),
+            Some("1.2.1".into())
+        );
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, "agy_acp_server 1.2.3"),
+            Some("1.2.3".into())
+        );
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, "Built on Sep 2"),
+            None
+        );
+    }
+
+    #[test]
+    fn antigravity_checks_the_acp_registry() {
+        assert!(matches!(
+            provider(HarnessId::Antigravity).latest,
+            LatestSource::AntigravityAcp
+        ));
     }
 
     #[test]
@@ -2975,22 +3467,25 @@ esac
         for (path, command, channel) in [
             (
                 "/opt/homebrew/Caskroom/claude-code/2.1.100/claude",
-                "brew upgrade claude-code",
+                "brew upgrade --cask claude-code",
                 "stable",
             ),
             (
                 "/opt/homebrew/Caskroom/claude-code@latest/2.1.110/claude",
-                "brew upgrade claude-code@latest",
+                "brew upgrade --cask claude-code@latest",
                 "latest",
             ),
         ] {
             let path = std::path::Path::new(path);
-            assert!(!super::can_apply_update(HarnessId::ClaudeCode, path));
-            assert_eq!(
-                super::claude_package_manager_command(path).as_deref(),
-                Some(command)
-            );
             assert_eq!(super::claude_cask_channel(path).unwrap(), channel);
+            // Homebrew runs only on macOS and Linux.
+            if cfg!(unix) {
+                assert!(super::can_apply_update(HarnessId::ClaudeCode, path));
+                assert_eq!(
+                    super::claude_package_manager_command(path).as_deref(),
+                    Some(command)
+                );
+            }
         }
         assert!(!super::can_apply_update(
             HarnessId::ClaudeCode,
@@ -3050,5 +3545,145 @@ esac
                 .update_pending(HarnessId::ClaudeCode)
         );
         coordinator.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn homebrew_layout_selects_cask_or_formula_upgrade() {
+        let codex = super::homebrew_package(std::path::Path::new(
+            "/opt/homebrew/Caskroom/codex/0.159.0/bin/codex",
+        ))
+        .unwrap();
+        assert!(codex.cask);
+        assert_eq!(codex.token, "codex");
+        assert_eq!(
+            codex.brew,
+            std::path::PathBuf::from("/opt/homebrew/bin/brew")
+        );
+        assert_eq!(codex.upgrade_command(), "brew upgrade --cask codex");
+        assert_eq!(codex.upgrade_args(), ["upgrade", "--cask", "codex"]);
+        assert!(super::can_apply_update(
+            HarnessId::Codex,
+            std::path::Path::new("/opt/homebrew/Caskroom/codex/0.159.0/bin/codex")
+        ));
+
+        let devin = super::homebrew_package(std::path::Path::new(
+            "/opt/homebrew/Caskroom/devin-cli/3000.10.21/bin/devin",
+        ))
+        .unwrap();
+        assert_eq!(devin.upgrade_command(), "brew upgrade --cask devin-cli");
+
+        let formula = super::homebrew_package(std::path::Path::new(
+            "/home/linuxbrew/.linuxbrew/Cellar/pi-coding-agent/1.2.3/bin/pi",
+        ))
+        .unwrap();
+        assert!(!formula.cask);
+        assert_eq!(formula.token, "pi-coding-agent");
+        assert_eq!(
+            formula.upgrade_command(),
+            "brew upgrade --formula pi-coding-agent"
+        );
+        assert_eq!(
+            formula.upgrade_args(),
+            ["upgrade", "--formula", "pi-coding-agent"]
+        );
+        assert_eq!(
+            formula.brew,
+            std::path::PathBuf::from("/home/linuxbrew/.linuxbrew/bin/brew")
+        );
+
+        assert!(
+            super::homebrew_package(std::path::Path::new(
+                "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex"
+            ))
+            .is_none()
+        );
+        assert!(
+            super::homebrew_package(std::path::Path::new(
+                "/opt/homebrew/Caskroom/../not-a-real-codex"
+            ))
+            .is_none()
+        );
+        // npm globals of a keg-only Node live inside the runtime's keg. Brew
+        // must never upgrade node@20 on behalf of the CLI installed with it.
+        assert!(
+            super::homebrew_package(std::path::Path::new(
+                "/opt/homebrew/Cellar/node@20/20.18.0/lib/node_modules/@openai/codex/bin/codex.js"
+            ))
+            .is_none()
+        );
+        assert!(
+            super::homebrew_package(std::path::Path::new(
+                "/usr/local/Cellar/python@3.12/3.12.7/Frameworks/Python.framework/Versions/3.12/bin/hermes"
+            ))
+            .is_none()
+        );
+        // Formulae that vendor a Node package keep it under libexec.
+        let gemini = super::homebrew_package(std::path::Path::new(
+            "/usr/local/Cellar/gemini-cli/0.9.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js",
+        ))
+        .unwrap();
+        assert_eq!(
+            gemini.upgrade_args(),
+            ["upgrade", "--formula", "gemini-cli"]
+        );
+        assert_eq!(gemini.brew, std::path::PathBuf::from("/usr/local/bin/brew"));
+        for unversioned in [
+            "/opt/homebrew/Caskroom/codex",
+            "/opt/homebrew/Cellar/codex/bin",
+        ] {
+            assert!(super::homebrew_package(std::path::Path::new(unversioned)).is_none());
+        }
+        // A leading dash would be read as a brew option.
+        assert!(
+            super::homebrew_package(std::path::Path::new(
+                "/opt/homebrew/Caskroom/--force/1.0.0/codex"
+            ))
+            .is_none()
+        );
+        // brew would load these as local package files.
+        for token in ["codex.rb", "codex.json"] {
+            assert!(
+                super::homebrew_package(
+                    &std::path::Path::new("/opt/homebrew/Cellar")
+                        .join(token)
+                        .join("1.0.0/bin/codex")
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            !super::can_apply_update(
+                HarnessId::Codex,
+                std::path::Path::new("/tmp/zeron-not-installed/codex")
+            ),
+            "an unclassified codex binary stays manual"
+        );
+
+        assert_eq!(
+            super::parse_homebrew_version(true, r#"{"version":"0.159.1"}"#).unwrap(),
+            "0.159.1"
+        );
+        assert_eq!(
+            super::parse_homebrew_version(true, r#"{"casks":[{"version":"0.159.1"}]}"#).unwrap(),
+            "0.159.1"
+        );
+        assert_eq!(
+            super::parse_homebrew_version(false, r#"{"versions":{"stable":"1.2.3"}}"#).unwrap(),
+            "1.2.3"
+        );
+        assert_eq!(
+            super::parse_homebrew_version(
+                false,
+                r#"{"formulae":[{"versions":{"stable":"1.2.3"}}]}"#
+            )
+            .unwrap(),
+            "1.2.3"
+        );
+        assert!(super::parse_homebrew_version(true, r#"{"version":"latest"}"#).is_err());
+        assert_eq!(
+            super::homebrew_url_component("claude-code@latest"),
+            "claude-code%40latest"
+        );
     }
 }

@@ -49,7 +49,7 @@ struct ProbeOutcome {
     started_err: Option<String>,
 }
 
-async fn probe_once(harness: AcpHarness) -> ProbeOutcome {
+async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
     let (controls, steer_tx, _token) = controls();
     let req = RunRequest {
         mcp: None,
@@ -196,11 +196,11 @@ async fn real_all_harnesses_quiet_survey() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
-    let agents: Vec<(&str, fn() -> AcpHarness)> = vec![
-        ("devin", AcpHarness::devin),
-        ("grok", AcpHarness::grok),
-        ("hermes", AcpHarness::hermes),
-        ("pi", AcpHarness::pi),
+    let agents: Vec<(&str, fn() -> Box<dyn Harness>)> = vec![
+        ("devin", || Box::new(AcpHarness::devin())),
+        ("grok", || Box::new(AcpHarness::grok())),
+        ("hermes", || Box::new(AcpHarness::hermes())),
+        ("pi", || Box::new(zeron_harness::PiHarness::new())),
     ];
     let mut failures: Vec<String> = Vec::new();
     for (name, ctor) in agents {

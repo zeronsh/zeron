@@ -3,9 +3,11 @@
 //! Agents name files in code spans — "all under `dir/`:" followed by bare
 //! `SOURCES.md`, `DESCRIPTION.txt` — which the block parser has no link for.
 //! A span whose text resolves to an existing file on this device is rewritten
-//! into the Markdown link it stands for, so it renders, opens and menus
-//! exactly like `[SOURCES.md](path)`; spans with nothing behind them keep the
-//! inline-code look.
+//! into the Markdown link it stands for, shown under its file name because
+//! the span's text was the path rather than a label the author wrote; spans
+//! with nothing behind them keep the inline-code look. Where two different
+//! paths in one part end in the same name, each shows as many trailing
+//! components as it takes to tell them apart.
 //!
 //! The rewrite walks a whole text part in document order, once per
 //! (link-roots revision, part): every probe is memoized for the revision, and
@@ -13,11 +15,14 @@
 //! but it becomes the context a later bare name in the same part resolves
 //! against.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::parser::{Block, BlockTree, InlineRun, TopBlock};
-use crate::workspace_links::{FileLinkRoot, InlineCodePath, PathProbes, resolve_inline_code_path};
+use crate::workspace_links::{
+    FileLinkRoot, InlineCodePath, PathProbes, resolve_inline_code_path, without_location,
+};
 
 /// How many text parts stay memoized, least recently used evicted first. A
 /// viewport can hold many short parts at once, and a streaming reply
@@ -92,13 +97,21 @@ impl InlineCodeLinkCache {
     }
 }
 
+/// A code span's text → the label it shows once it links.
+type Labels<'a> = HashMap<&'a str, &'a str>;
+
 fn link_tree(tree: &BlockTree, roots: &[FileLinkRoot], probes: &mut PathProbes) -> BlockTree {
+    let mut spans = Vec::new();
+    for top in &tree.blocks {
+        code_spans(&top.block, &mut spans);
+    }
+    let labels = span_labels(&spans);
     let mut dirs = Vec::new();
     let blocks = tree
         .blocks
         .iter()
         .map(
-            |top| match link_block(&top.block, roots, probes, &mut dirs) {
+            |top| match link_block(&top.block, roots, probes, &mut dirs, &labels) {
                 Some(block) => Arc::new(TopBlock {
                     range: top.range.clone(),
                     block,
@@ -117,18 +130,19 @@ fn link_block(
     roots: &[FileLinkRoot],
     probes: &mut PathProbes,
     dirs: &mut Vec<PathBuf>,
+    labels: &Labels<'_>,
 ) -> Option<Block> {
     match block {
         Block::Paragraph { runs } => {
-            link_runs(runs, roots, probes, dirs).map(|runs| Block::Paragraph { runs })
+            link_runs(runs, roots, probes, dirs, labels).map(|runs| Block::Paragraph { runs })
         }
         Block::Heading { level, runs } => {
-            link_runs(runs, roots, probes, dirs).map(|runs| Block::Heading {
+            link_runs(runs, roots, probes, dirs, labels).map(|runs| Block::Heading {
                 level: *level,
                 runs,
             })
         }
-        Block::BlockQuote { children } => link_blocks(children, roots, probes, dirs)
+        Block::BlockQuote { children } => link_blocks(children, roots, probes, dirs, labels)
             .map(|children| Block::BlockQuote { children }),
         Block::List {
             ordered_start,
@@ -140,7 +154,7 @@ fn link_block(
                 .map(|item| {
                     let mut linked = Vec::with_capacity(item.len());
                     for child in item {
-                        match link_block(child, roots, probes, dirs) {
+                        match link_block(child, roots, probes, dirs, labels) {
                             Some(block) => {
                                 changed = true;
                                 linked.push(block);
@@ -162,13 +176,14 @@ fn link_block(
             align,
         } => {
             let mut changed = false;
-            let mut link_cell = |cell: &[InlineRun]| match link_runs(cell, roots, probes, dirs) {
-                Some(runs) => {
-                    changed = true;
-                    runs
-                }
-                None => cell.to_vec(),
-            };
+            let mut link_cell =
+                |cell: &[InlineRun]| match link_runs(cell, roots, probes, dirs, labels) {
+                    Some(runs) => {
+                        changed = true;
+                        runs
+                    }
+                    None => cell.to_vec(),
+                };
             let header = header.iter().map(|cell| link_cell(cell)).collect();
             let rows = rows
                 .iter()
@@ -189,17 +204,20 @@ fn link_blocks(
     roots: &[FileLinkRoot],
     probes: &mut PathProbes,
     dirs: &mut Vec<PathBuf>,
+    labels: &Labels<'_>,
 ) -> Option<Vec<Block>> {
     let mut changed = false;
     let linked = blocks
         .iter()
-        .map(|block| match link_block(block, roots, probes, dirs) {
-            Some(block) => {
-                changed = true;
-                block
-            }
-            None => block.clone(),
-        })
+        .map(
+            |block| match link_block(block, roots, probes, dirs, labels) {
+                Some(block) => {
+                    changed = true;
+                    block
+                }
+                None => block.clone(),
+            },
+        )
         .collect();
     changed.then_some(linked)
 }
@@ -212,16 +230,11 @@ fn link_runs(
     roots: &[FileLinkRoot],
     probes: &mut PathProbes,
     dirs: &mut Vec<PathBuf>,
+    labels: &Labels<'_>,
 ) -> Option<Vec<InlineRun>> {
     let mut linked: Option<Vec<InlineRun>> = None;
     for (ix, run) in runs.iter().enumerate() {
-        // Only a plain code span stands for a file: an author's link, image,
-        // task marker or chat mention already means something else.
-        if !run.style.code
-            || run.style.link.is_some()
-            || run.style.image.is_some()
-            || run.style.task.is_some()
-        {
+        if !is_plain_code_span(run) {
             continue;
         }
         match resolve_inline_code_path(&run.text, roots, dirs, probes) {
@@ -229,12 +242,106 @@ fn link_runs(
                 let linked = linked.get_or_insert_with(|| runs.to_vec());
                 linked[ix].style.code = false;
                 linked[ix].style.link = Some(target);
+                // The span's text is the path, not a label the author wrote:
+                // show the file name while the text stays the copy source.
+                let label = labels.get(run.text.as_str()).copied();
+                linked[ix].style.file_label =
+                    Some(label.unwrap_or_else(|| file_name(&run.text)).to_owned());
             }
             Some(InlineCodePath::Directory(dir)) => dirs.push(dir),
             None => {}
         }
     }
     linked
+}
+
+/// Only a plain code span stands for a file: an author's link, image, task
+/// marker or chat mention already means something else.
+fn is_plain_code_span(run: &InlineRun) -> bool {
+    run.style.code
+        && run.style.link.is_none()
+        && run.style.image.is_none()
+        && run.style.task.is_none()
+}
+
+/// Every plain code span's text in `block`, in document order.
+fn code_spans<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
+    let mut push = |runs: &'a [InlineRun]| {
+        out.extend(
+            runs.iter()
+                .filter(|run| is_plain_code_span(run))
+                .map(|run| run.text.as_str()),
+        )
+    };
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => push(runs),
+        Block::Table { header, rows, .. } => {
+            header.iter().for_each(|cell| push(cell));
+            rows.iter().flatten().for_each(|cell| push(cell));
+        }
+        Block::BlockQuote { children } => children.iter().for_each(|child| code_spans(child, out)),
+        Block::List { items, .. } => items
+            .iter()
+            .flatten()
+            .for_each(|child| code_spans(child, out)),
+        Block::CodeBlock { .. } | Block::Rule => {}
+    }
+}
+
+/// The last `components` path components of `span` (all of it when it has
+/// fewer); one component is the file name, with any `:line` suffix.
+fn trailing(span: &str, components: usize) -> &str {
+    span.rmatch_indices('/')
+        .nth(components - 1)
+        .map_or(span, |(at, _)| &span[at + 1..])
+}
+
+fn file_name(span: &str) -> &str {
+    trailing(span, 1)
+}
+
+/// Labels for spans whose file name a different path in the same part
+/// shares: each grows trailing components until no other path ends the same
+/// way (`ui/src/lib.rs` beside `engine/src/lib.rs`), keeping its `:line`
+/// suffix. Spans of one path at different lines do not collide. Every other
+/// span shows its file name.
+fn span_labels<'a>(spans: &[&'a str]) -> Labels<'a> {
+    let mut by_name: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+    for &span in spans {
+        let path = without_location(span);
+        let same = by_name.entry(file_name(path)).or_default();
+        if !same.contains(&path) {
+            same.push(path);
+        }
+    }
+    let mut labels = Labels::new();
+    for &span in spans {
+        let path = without_location(span);
+        let same = &by_name[file_name(path)];
+        if same.len() < 2 {
+            continue;
+        }
+        // Another path ends the same way when it is the tail itself or ends
+        // in `/tail`.
+        let shared = |tail: &str| {
+            same.iter().any(|&other| {
+                other != path
+                    && other
+                        .strip_suffix(tail)
+                        .is_some_and(|rest| rest.is_empty() || rest.ends_with('/'))
+            })
+        };
+        let components = (1..)
+            .find(|&components| {
+                let tail = trailing(path, components);
+                tail == path || !shared(tail)
+            })
+            .unwrap_or(1);
+        // The location suffix holds no `/`, so the span's own tail is the
+        // path's tail with the suffix still on it.
+        labels.insert(span, trailing(span, components));
+    }
+    labels
 }
 
 #[cfg(test)]
@@ -457,6 +564,97 @@ mod tests {
         assert_eq!(from_code.links, from_link.links);
         assert_eq!(from_code.code_ranges, from_link.code_ranges);
         assert_eq!(from_code.runs, from_link.runs);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_path_span_shows_its_file_name_and_keeps_the_path_for_copy() {
+        use crate::markdown::render::flatten_runs;
+        use crate::theme::Theme;
+        let fixture = Fixture::new();
+        for (source, shown) in [
+            ("`2026-09-28/Some Title/SOURCES.md`", "SOURCES.md"),
+            ("`top.md:12`", "top.md:12"),
+        ] {
+            let linked = fixture.linked(&fixture.tree(source), &fixture.roots(true), true);
+            let flat = flatten_runs(&runs(&linked), &Theme::dark(), false);
+            assert_eq!(flat.text, shown);
+            if shown != source.trim_matches('`') {
+                // The display name stands in for the path; the raw span stays
+                // the copy source.
+                let original = flat
+                    .original
+                    .as_ref()
+                    .expect("the raw span stays the copy source");
+                assert_eq!(original.text.as_ref(), source.trim_matches('`'));
+                assert_eq!(original.offsets.original(0), 0);
+                assert_eq!(
+                    original.offsets.original(flat.text.len()),
+                    original.text.len()
+                );
+            } else {
+                // Already the file name: what shows IS the source text.
+                assert!(flat.original.is_none());
+            }
+            assert_eq!(&flat.text[flat.links[0].0.clone()], shown);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_sharing_a_file_name_show_enough_of_the_path_to_differ() {
+        use crate::markdown::render::flatten_runs;
+        use crate::theme::Theme;
+        let fixture = Fixture::new();
+        for dir in ["crates/ui/src", "crates/engine/src"] {
+            std::fs::create_dir_all(fixture.root.join(dir)).unwrap();
+            std::fs::write(fixture.root.join(dir).join("lib.rs"), "x").unwrap();
+        }
+        let tree = fixture.tree(
+            "- `crates/ui/src/lib.rs`\n\
+             - `crates/engine/src/lib.rs:40`\n\
+             - `crates/engine/src/lib.rs`\n\
+             - `2026-09-28/Some Title/SOURCES.md`\n",
+        );
+        let linked = fixture.linked(&tree, &fixture.roots(true), true);
+        let shown: Vec<String> = runs(&linked)
+            .iter()
+            .map(|run| flatten_runs(std::slice::from_ref(run), &Theme::dark(), false).text)
+            .map(|text| text.to_string())
+            .collect();
+        // Two paths ending in `lib.rs` show as much as tells them apart,
+        // line suffix included; a name nothing else shares shows alone.
+        assert_eq!(
+            shown,
+            [
+                "ui/src/lib.rs",
+                "engine/src/lib.rs:40",
+                "engine/src/lib.rs",
+                "SOURCES.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn span_labels_grow_only_as_far_as_a_collision_needs() {
+        let labels = span_labels(&[
+            "a/x/mod.rs",
+            "b/x/mod.rs",
+            "mod.rs",
+            "a/x/mod.rs:3",
+            "/abs/c/mod.rs",
+            "README.md",
+            "README.md#L4",
+        ]);
+        assert_eq!(labels.get("a/x/mod.rs"), Some(&"a/x/mod.rs"));
+        assert_eq!(labels.get("a/x/mod.rs:3"), Some(&"a/x/mod.rs:3"));
+        assert_eq!(labels.get("b/x/mod.rs"), Some(&"b/x/mod.rs"));
+        // A span with nothing more to show stays as written.
+        assert_eq!(labels.get("mod.rs"), Some(&"mod.rs"));
+        assert_eq!(labels.get("/abs/c/mod.rs"), Some(&"c/mod.rs"));
+        // One file at two locations is no collision: the plain file name.
+        assert_eq!(labels.get("README.md"), None);
+        assert_eq!(labels.get("README.md#L4"), None);
     }
 
     #[test]

@@ -1,7 +1,4 @@
-// pi-acp 0.0.33 ignores session mcpServers. Loaded only into this run's pi
-// process via --extension; no project/global settings or packages are changed.
-// It also reports provider failures, which pi-acp otherwise ends as a silent
-// end_turn with no output.
+// Per-run Zeron delegation bridge. No global settings or packages are modified.
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
@@ -85,12 +82,6 @@ export default function (pi) {
     } catch (error) {
       close();
       throw error;
-    }
-  });
-  pi.on("message_end", (event, ctx) => {
-    const {message} = event;
-    if (message?.role === "assistant" && message.stopReason === "error") {
-      ctx.ui.notify(message.errorMessage || "Pi request failed", "error");
     }
   });
   pi.on("session_shutdown", close);

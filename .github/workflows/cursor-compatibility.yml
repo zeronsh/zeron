@@ -16,7 +16,7 @@ permissions:
 jobs:
   cursor-compatibility:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,3 +38,7 @@ jobs:
           cargo test --locked -p zeron-doc
           cargo test --locked -p zeron-engine --test message_queue
           cargo test --locked -p zeron-engine --lib sessions::tests
+      - name: Native Pi RPC driver
+        run: |
+          cargo test --locked -p zeron-harness --features native-fixture --test pi_rpc
+          cargo test --locked -p zeron-engine --test pi_resume

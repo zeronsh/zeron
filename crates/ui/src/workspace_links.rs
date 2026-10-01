@@ -403,6 +403,14 @@ fn classify_file_link(target: &str) -> Option<ClassifiedLink> {
     })
 }
 
+/// `target` without its `#L12` fragment or `:12` line suffix: the path a
+/// location link points into. A target that is not a location stays whole.
+pub(crate) fn without_location(target: &str) -> &str {
+    split_line_fragment(target)
+        .and_then(|(path, _)| split_line_suffix(path))
+        .map_or(target, |(path, _)| path)
+}
+
 /// A line reference merged across `#` fragment and `:` suffix: the fragment
 /// wins each field it provides.
 #[derive(Default)]

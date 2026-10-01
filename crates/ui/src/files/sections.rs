@@ -219,8 +219,9 @@ impl SubagentRow {
     }
 }
 
-/// The active chat's subagents, most recently updated first (later spawns
-/// lead within one turn), one row per subagent doc.
+/// The active chat's subagents, one row per subagent doc: running ones first,
+/// longest-running leading, then the settled ones most recently updated first
+/// (later spawns lead within one turn).
 /// Only genuine spawn chips with a stamped doc ref qualify — the chip IS the
 /// index (there is no listing endpoint), and a stray ref on a non-Agent tool
 /// must not surface as a phantom subagent.
@@ -262,7 +263,18 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
     // on top.
     rows.reverse();
     rows.sort_by_key(|row| std::cmp::Reverse(row.spawned_at));
-    rows
+    // Running subagents lead, longest-running first: one started long ago is
+    // buried under everything spawned since, and is the one to find and steer.
+    // Oldest-first also keeps the group still as new subagents join at its
+    // foot. The settled tail keeps the newest-first order above.
+    let (mut running, settled): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|row| row.status == Some(SubagentStatus::Running));
+    // Ties keep spawn order, like the group's oldest-first order.
+    running.reverse();
+    running.sort_by_key(|row| row.spawned_at);
+    running.extend(settled);
+    running
 }
 
 /// A side chat of the active chat, as the footer lists it.
@@ -863,6 +875,7 @@ fn header_action(
         .cursor_pointer()
         .hover(|s| s.bg(crate::theme::wash(0.09)))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .tooltip(crate::settings::widgets::text_tooltip(label))
         // Icons take their color on the element itself, never inherited.
         .child(
             icon(icon_path)
@@ -1117,14 +1130,14 @@ mod tests {
         let rows = subagent_rows(&state, "main");
         assert_eq!(
             rows.iter().map(|r| r.doc_id.as_str()).collect::<Vec<_>>(),
-            ["main--sub--t4", "main--sub--t1"]
+            ["main--sub--t1", "main--sub--t4"]
         );
         // The bare task, genus stripped — the same title the tab wears.
-        assert_eq!(rows[1].title.as_ref(), "verify");
-        assert!(rows[0].frozen());
-        assert!(!rows[1].frozen());
+        assert_eq!(rows[0].title.as_ref(), "verify");
+        assert!(rows[1].frozen());
+        assert!(!rows[0].frozen());
         // Spawn time comes from the turn that carried the chip.
-        assert!((Utc::now() - rows[1].spawned_at).num_minutes() >= 2);
+        assert!((Utc::now() - rows[0].spawned_at).num_minutes() >= 2);
         // Another chat's explorer sees nothing of this transcript.
         assert!(subagent_rows(&state, "other").is_empty());
     }
@@ -1185,6 +1198,50 @@ mod tests {
             ["main--sub--a", "main--sub--c", "main--sub--b"]
         );
         assert_eq!(rows[0].status, Some(SubagentStatus::Running));
+    }
+
+    #[test]
+    fn running_subagents_lead_longest_running_first() {
+        let at = |id: &str, minutes_ago: i64, parts| SessionMessageEntry {
+            id: id.into(),
+            created_at: (Utc::now() - chrono::Duration::minutes(minutes_ago)).timestamp_millis(),
+            ..entry(parts)
+        };
+        let sub = |id: &str, status| {
+            spawn(
+                id,
+                &format!("Agent: {id}"),
+                Some(&format!("main--sub--{id}")),
+                Some(status),
+            )
+        };
+        let mut state = AppState::new();
+        state.selected_chat = Some("main".into());
+        state.transcript = vec![
+            at("e1", 90, vec![sub("old-run", SubagentStatus::Running)]),
+            at("e2", 60, vec![sub("old-done", SubagentStatus::Done)]),
+            at("e3", 30, vec![sub("mid-run", SubagentStatus::Running)]),
+            at("e4", 20, vec![sub("mid-fail", SubagentStatus::Failed)]),
+            at("e5", 10, vec![sub("new-done", SubagentStatus::Done)]),
+            at("e6", 5, vec![sub("new-run", SubagentStatus::Running)]),
+        ];
+        let ids: Vec<_> = subagent_rows(&state, "main")
+            .into_iter()
+            .map(|r| r.doc_id)
+            .collect();
+        // Running first, longest-running leading; the settled tail keeps the
+        // newest-first order it always had.
+        assert_eq!(
+            ids,
+            [
+                "main--sub--old-run",
+                "main--sub--mid-run",
+                "main--sub--new-run",
+                "main--sub--new-done",
+                "main--sub--mid-fail",
+                "main--sub--old-done",
+            ]
+        );
     }
 
     #[test]

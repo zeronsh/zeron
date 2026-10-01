@@ -33,16 +33,15 @@ pub(crate) struct SystemFrame {
     pub cwd: String,
     #[serde(default)]
     pub session_id: String,
-    /// `task_notification` (a background subagent settling): the spawning
-    /// Agent tool's id — the only TAGGED terminal signal the 2.1.x wire has
-    /// for a background subagent (its frames otherwise just stop).
+    /// `task_notification`: the spawning Agent tool's id, or the latest
+    /// SendMessage id after a resume. Stop notifications may omit it.
     #[serde(default, alias = "toolUseId")]
     pub tool_use_id: Option<String>,
     /// `task_notification` terminal status (`completed`/`failed`/`killed`…).
     #[serde(default)]
     pub status: Option<String>,
-    /// `task_started`: the agent/task id (`SendMessage`'s `to:` address) —
-    /// with `tool_use_id`, the agentId→spawn mapping steers need.
+    /// `task_started` / `task_notification`: stable agent/task id
+    /// (`SendMessage`'s `to:` address), used to retain spawn identity.
     #[serde(default, alias = "taskId")]
     pub task_id: Option<String>,
     /// `task_started`: present only for AGENT tasks (a subagent spawning),

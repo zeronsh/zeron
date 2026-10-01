@@ -19,6 +19,8 @@ struct SessionChrome: Equatable {
         let text: String
         let options: [String]
         let multiSelect: Bool
+        var prefill: String? = nil
+        var multiline: Bool = false
     }
 
     /// Attachment upload progress (0…1) while images are escorted to the

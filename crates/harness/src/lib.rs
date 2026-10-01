@@ -6,8 +6,8 @@
 //! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
 //! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
-//! (`devin acp`), Grok (`grok agent stdio`) and Hermes (`hermes acp`) — plus
-//! pi via the community `pi-acp` adapter until a native driver exists.
+//! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
+//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -172,6 +172,7 @@ pub(crate) mod adapter_install;
 pub mod archive_install;
 mod catalog;
 mod catalog_failure;
+pub(crate) mod code_signature;
 pub mod redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
@@ -183,6 +184,7 @@ pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;
 pub mod opencode;
+pub mod pi;
 pub mod process;
 mod scratch;
 pub mod shell_env;
@@ -389,6 +391,7 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
+pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)

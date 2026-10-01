@@ -38,13 +38,8 @@
   `_session/steering` extension and no effort config advertised (Hermes 4's
   hybrid reasoning is model-internal) → turn-boundary steering, empty ladder;
   the model list is discovered over ACP (below), with the Nous flagships as
-  the static fallback. `AcpHarness::pi()` runs the pi coding
-  agent (pi.dev) through the community `pi-acp` adapter (pinned 0.0.33,
-  managed-install fallback; requires the pi CLI itself,
-  `@earendil-works/pi-coding-agent`; `PI_ACP_EXECUTABLE` overrides). Models
-  ride pi's own provider config (catalog advertises a `default` pass-through
-  entry); thinking ladder minimal→max maps onto zeron's levels via the
-  generic `thought_level` preference ladder ("off" has no zeron tier).
+  the static fallback. Pi migrated to native RPC on 2026-09-29; see
+  [Pi integration](../pi.md). Its former ACP adapter is no longer installed or launched.
 - **Devin registered** (2026-08-15): `AcpHarness::devin()` runs Cognition's
   native ACP server (`devin acp`; install via
   `curl -fsSL https://cli.devin.ai/install.sh | bash` or
@@ -210,13 +205,13 @@ results or synthesize an ACP completion. Then run:
 
 ```sh
 PI_CODING_AGENT_DIR=/path/to/isolated/pi-agent \
-PI_ACP_PI_COMMAND=/path/to/pi \
+PI_EXECUTABLE=/path/to/pi \
 ACP_TEST_RUNS=3 \
 cargo test -p zeron-harness --test real_acp_lifecycle -- --ignored --nocapture
 ```
 
 These tests require successful real calls; missing authentication or an unloaded
-delay extension fails rather than skips. Verified locally with pi-acp 0.0.33,
+delay extension fails rather than skips. Historical ACP verification used pi-acp 0.0.33,
 Pi 0.85.1, and `gpt-5.6-luna`: three sessions each completed the original turn and
 two queued follow-ups after 36.6–36.8-second post-tool gaps; cancellation during a
 32-second post-tool gap also completed as Interrupted.

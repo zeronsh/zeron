@@ -131,15 +131,13 @@ fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedS
                 Some(latest) => format!("{installed} · v{latest} available"),
                 None => format!("{installed} · Update available"),
             };
-            if status.can_apply {
-                available
-            } else {
-                status
-                    .manual_command
-                    .as_deref()
-                    .map(|instruction| format!("{available} · {instruction}"))
-                    .unwrap_or(available)
-            }
+            // Applicable Homebrew updates still name the brew command when the
+            // cask or formula has not published the upstream release yet.
+            status
+                .manual_command
+                .as_deref()
+                .map(|instruction| format!("{available} · {instruction}"))
+                .unwrap_or(available)
         }
         HarnessUpdatePhase::WaitingForIdle => format!("{installed} · Waiting for agent to be idle"),
         HarnessUpdatePhase::Preparing => format!("{installed} · Preparing update…"),
@@ -870,7 +868,7 @@ impl HarnessesPage {
                     HarnessId::Pi => meta.push(
                         div()
                             .text_color(theme.text_muted.opacity(0.65))
-                            .child("pi-acp bridge · Managed by Zeron")
+                            .child("Pi RPC · Native connection")
                             .into_any_element(),
                     ),
                     _ => {}

@@ -36,7 +36,8 @@ Typing an unselected inline `/word` does not execute a local action.
 | Codex | Native `/compact` and `/review`; eleven total entries in an existing chat before skills |
 | Claude Code | Project-scoped commands from its initialize catalog |
 | OpenCode | Project-scoped server command catalog |
-| Devin, Grok, Hermes, Pi, Antigravity | Advertised ACP commands, including session command updates |
+| Pi | Native `get_commands`, including extension commands and `skill:*` invocations |
+| Devin, Grok, Hermes, Antigravity | Advertised ACP commands, including session command updates |
 | Cursor | Workspace actions; its SDK adapter has no native command catalog |
 
 This does not imply that every command in a provider's terminal UI can execute

@@ -6,7 +6,7 @@ async fn mcp_injection_pi_discovers_calls_cancels_and_reaps() {
         std::time::Duration::from_secs(15),
         tokio::process::Command::new("node")
             .arg(root.join("tests/fixtures/pi-mcp-test.mjs"))
-            .arg(root.join("src/acp/pi_mcp.mjs"))
+            .arg(root.join("src/pi/mcp.mjs"))
             .kill_on_drop(true)
             .output(),
     )

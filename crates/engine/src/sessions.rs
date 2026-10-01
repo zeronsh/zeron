@@ -556,12 +556,25 @@ impl SessionsEngine {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
-                let (tx, rx) = oneshot::channel();
+                let (mut tx, rx) = oneshot::channel();
+                let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), tx);
+                lock(&pending).insert(request_id.clone(), answer_tx);
                 let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
+                    request_id: request_id.clone(),
                     questions,
+                });
+                let pending = pending.clone();
+                let engine_tx = engine_tx.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        // A dropped resolver stays an error for the harness, as before.
+                        answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+                        _ = tx.closed() => {
+                            lock(&pending).remove(&request_id);
+                            let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                        }
+                    }
                 });
                 rx
             })
@@ -1949,7 +1962,20 @@ async fn drive_run(
     // routes into a live run) starts the next turn with zero respawn/resume
     // latency. `Some(when)` = idle since then; the 30-min reaper below ends
     // a session nobody comes back to (zeron SESSION_IDLE_MS).
-    const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    // `ZERON_SESSION_IDLE_MS` overrides the window (tests).
+    let session_idle = std::env::var("ZERON_SESSION_IDLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(30 * 60));
+    // A live subagent stretches the window, but never unbounded: every
+    // driver's subagent terminal is a best-effort vendor signal (claude's
+    // untagged task_notification, grok's subagent_finished, codex thread
+    // closure), and one lost signal would otherwise pin the child — and this
+    // loop's registry heartbeat — until the chat is archived. A subagent
+    // silent this long (4h by default) is presumed lost; the reap stamps its
+    // chip failed.
+    let subagent_silence = session_idle * 8;
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
     // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
@@ -2014,6 +2040,10 @@ async fn drive_run(
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
+    // Last tagged subagent event. A background subagent outlives the turn that
+    // spawned it, and its traffic never un-parks the chat, so the idle reaper
+    // measures from here as well as from the park.
+    let mut last_subagent_activity: Option<tokio::time::Instant> = None;
 
     let mut final_completed_turn = None;
     let final_status = loop {
@@ -2061,10 +2091,22 @@ async fn drive_run(
                 // Idle reaper (zeron SESSION_IDLE_MS): a parked persistent session
                 // nobody returned to in 30 minutes releases its child. The turn
                 // was finalized at Done, so this end is clean — no aborted stamp.
+                // A live background subagent is somebody still using the child:
+                // the window counts from its last activity, and stretches to
+                // `subagent_silence` while its sink is open.
                 _ = tokio::time::sleep_until(
-                    idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
+                    idle_since
+                        .map(|at| {
+                            at.max(last_subagent_activity.unwrap_or(at))
+                                + if subagents.is_empty() { session_idle } else { subagent_silence }
+                        })
+                        .unwrap_or_else(tokio::time::Instant::now)
                 ), if idle_since.is_some() => {
-                    tracing::info!(chat = %chat_id, "reaping idle persistent session");
+                    tracing::info!(
+                        chat = %chat_id,
+                        live_subagents = subagents.len(),
+                        "reaping idle persistent session"
+                    );
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
                         .filter(|h| h.run_id == run_id)
@@ -2220,6 +2262,7 @@ async fn drive_run(
         } = &event
         {
             inner.publish(&chat_id, &event);
+            last_subagent_activity = Some(tokio::time::Instant::now());
             let is_steer = matches!(
                 sub_event.as_ref(),
                 AgentEvent::UserMessage { .. } | AgentEvent::Steered { .. }
@@ -2307,6 +2350,17 @@ async fn drive_run(
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if done {
                 settled_subagents.insert(parent_tool_use_id.clone());
+                if !chip_streaming {
+                    // A resumed run can finish an older chip without ever
+                    // opening a sink. The chip's lifecycle is independent of
+                    // whether this run received transcript content.
+                    let _ = doc_ref.update_subagent_chip(
+                        parent_tool_use_id,
+                        None,
+                        subagent_chip_update(sub_event),
+                        None,
+                    );
+                }
             }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
@@ -2326,16 +2380,6 @@ async fn drive_run(
                 if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
                     flush_at = tokio::time::Instant::now()
                         + std::time::Duration::from_millis(STREAM_COMMIT_MS);
-                }
-                if !chip_streaming && done {
-                    // In-place chip refresh on lifecycle transitions only —
-                    // content never rewrites the parent doc.
-                    let _ = doc_ref.update_subagent_chip(
-                        parent_tool_use_id,
-                        None,
-                        subagent_chip_update(sub_event),
-                        None,
-                    );
                 }
                 if done {
                     let status = match sub_event.as_ref() {

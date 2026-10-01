@@ -1538,6 +1538,7 @@ impl TerminalPanel {
                                 cx.stop_propagation();
                                 this.close_tab(&chat_close2, key, window, cx);
                             }))
+                            .tooltip(crate::settings::widgets::text_tooltip("Close terminal"))
                             .child(
                                 crate::icons::icon(crate::icons::CLOSE)
                                     .size(px(12.0))
@@ -1646,6 +1647,7 @@ impl TerminalPanel {
                         this.open_tab(chat, cx);
                         this.request_focus(cx);
                     }))
+                    .tooltip(crate::settings::widgets::text_tooltip("New terminal"))
                     .child(
                         crate::icons::icon(crate::icons::PLUS)
                             .size(px(16.0))
@@ -1673,6 +1675,7 @@ impl TerminalPanel {
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleTerminal), cx);
                     })
+                    .tooltip(crate::settings::widgets::text_tooltip("Hide terminal"))
                     .child(
                         crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
                             .size(px(13.0))

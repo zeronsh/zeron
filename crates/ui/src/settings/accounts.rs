@@ -1265,6 +1265,7 @@ impl AccountsPage {
             .tab_index(0)
             .role(gpui::Role::Button)
             .aria_label(format!("Actions for {email}"))
+            .tooltip(widgets::text_tooltip("Account actions"))
             .aria_expanded(menu_open)
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .on_mouse_down(

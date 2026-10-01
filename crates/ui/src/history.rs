@@ -1796,6 +1796,13 @@ impl Render for GitHistorySearchControl {
                         cx.stop_propagation();
                         control.update(cx, |control, cx| control.clear(cx)).ok();
                     })
+                    .tooltip(|_, cx| {
+                        cx.new(|_| HistoryRefTooltip {
+                            descriptions: vec!["Close search".into()],
+                        })
+                        .into()
+                    })
+                    .tooltip_show_delay(Duration::from_millis(350))
                     .child(
                         crate::icons::icon(crate::icons::CLOSE)
                             .size(px(9.0))
@@ -4223,6 +4230,13 @@ impl Render for GitHistory {
                     this.open_column_menu(event.position, cx);
                 }),
             )
+            .tooltip(|_, cx| {
+                cx.new(|_| HistoryRefTooltip {
+                    descriptions: vec!["Columns".into()],
+                })
+                .into()
+            })
+            .tooltip_show_delay(Duration::from_millis(350))
             .child(
                 crate::icons::icon(crate::icons::CHECKLIST)
                     .size(px(12.0))

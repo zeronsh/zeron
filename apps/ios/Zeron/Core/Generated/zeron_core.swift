@@ -7933,15 +7933,19 @@ public struct UserInputQuestion: Equatable, Hashable {
     public var question: String
     public var options: [String]
     public var multiSelect: Bool
+    public var prefill: String?
+    public var multiline: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, header: String, question: String, options: [String], multiSelect: Bool) {
+    public init(id: String, header: String, question: String, options: [String], multiSelect: Bool, prefill: String?, multiline: Bool) {
         self.id = id
         self.header = header
         self.question = question
         self.options = options
         self.multiSelect = multiSelect
+        self.prefill = prefill
+        self.multiline = multiline
     }
 
     
@@ -7964,7 +7968,9 @@ public struct FfiConverterTypeUserInputQuestion: FfiConverterRustBuffer {
                 header: FfiConverterString.read(from: &buf), 
                 question: FfiConverterString.read(from: &buf), 
                 options: FfiConverterSequenceString.read(from: &buf), 
-                multiSelect: FfiConverterBool.read(from: &buf)
+                multiSelect: FfiConverterBool.read(from: &buf), 
+                prefill: FfiConverterOptionString.read(from: &buf), 
+                multiline: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7974,6 +7980,8 @@ public struct FfiConverterTypeUserInputQuestion: FfiConverterRustBuffer {
         FfiConverterString.write(value.question, into: &buf)
         FfiConverterSequenceString.write(value.options, into: &buf)
         FfiConverterBool.write(value.multiSelect, into: &buf)
+        FfiConverterOptionString.write(value.prefill, into: &buf)
+        FfiConverterBool.write(value.multiline, into: &buf)
     }
 }
 

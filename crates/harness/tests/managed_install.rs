@@ -1,10 +1,10 @@
-//! Real-world E2E for the managed adapter install: with no `pi-acp`
+//! Real-world E2E for the managed adapter install: with no `grok`
 //! binary anywhere, `run()` must npm-install the pinned adapter into
 //! `$ZERON_ADAPTERS_DIR`, spawn it via node, and reach SessionStarted (the
 //! full initialize → session/new handshake) — the exact path that used to be
 //! `npx -y` at chat time (zeronsh/comet#95).
 //!
-//! Ignored: needs network, npm, and the pi CLI on the machine. Run with
+//! Ignored: needs network and npm. Run with
 //! `cargo test -p zeron-harness --test managed_install -- --ignored`.
 //!
 //! Single-test binary: it mutates ZERON_ADAPTERS_DIR process-wide.
@@ -16,16 +16,16 @@ use zeron_harness::{AcpHarness, Harness, RunControls};
 use zeron_proto::{AgentEvent, RunRequest};
 
 #[tokio::test]
-#[ignore = "network + npm + codex CLI; installs the pinned adapter for real"]
+#[ignore = "network + npm; installs the pinned Grok CLI for real"]
 async fn managed_install_reaches_session_started() {
     let adapters = tempfile::tempdir().unwrap();
     // SAFETY: single-test binary — nothing else reads env concurrently.
     unsafe {
         std::env::set_var("ZERON_ADAPTERS_DIR", adapters.path());
-        std::env::remove_var("PI_ACP_EXECUTABLE");
+        std::env::remove_var("GROK_EXECUTABLE");
     }
 
-    let harness = AcpHarness::pi();
+    let harness = AcpHarness::grok();
     let (_steer_tx, steering) = mpsc::channel(1);
     let interrupt = CancellationToken::new();
     let controls = RunControls {
@@ -85,7 +85,7 @@ async fn managed_install_reaches_session_started() {
 
     // The install landed in the managed dir (not the user's npm state) and
     // is marked complete, so the next launch skips npm entirely.
-    let root = adapters.path().join("agentclientprotocol__pi-acp");
+    let root = adapters.path().join("xai-official__grok");
     let version_dir = std::fs::read_dir(&root)
         .expect("managed install dir exists")
         .flatten()

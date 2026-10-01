@@ -106,17 +106,19 @@ impl Harness for HeldHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
         self.requests.lock().unwrap().push(request.clone());
-        if self.asks {
+        let answer = self.asks.then(|| {
             // Only the engine can mint a request id it will honour, so the
             // question has to go through controls rather than the stream.
-            let _answer = (controls.request_input)(vec![UserInputQuestion {
+            (controls.request_input)(vec![UserInputQuestion {
                 id: "q1".into(),
                 header: "Choose".into(),
                 question: "which one?".into(),
                 options: vec!["a".into(), "b".into()],
+                prefill: None,
+                multiline: false,
                 multi_select: false,
-            }]);
-        }
+            }])
+        });
         let finish = self.finish.subscribe();
         let steering = controls.steering;
         let prompts = self.prompts.clone();
@@ -155,7 +157,14 @@ impl Harness for HeldHarness {
             done
         })
         .flatten();
-        Ok(started.chain(gated).boxed())
+        // A live question owns its receiver until the run finishes. Dropping it
+        // now explicitly cancels the engine-owned input lifecycle.
+        Ok(started
+            .chain(gated)
+            .inspect(move |_| {
+                let _ = &answer;
+            })
+            .boxed())
     }
 }
 

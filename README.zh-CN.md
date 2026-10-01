@@ -15,7 +15,7 @@ curl -fsSL https://zeron.sh/install.sh | sh
 zeron status
 ```
 
-安装脚本会马上把守护进程拉起来，重启之后也会自己回来。不需要登录，也不需要配置同步。
+安装脚本会马上把守护进程拉起来，重启之后也会自己回来。不需要登录，也不需要配置同步。它还会把 Zeron 加入应用启动器：在 `~/.local/share`（或 `$XDG_DATA_HOME`）下写入用户级的 `zeron.desktop` 和图标，每次运行安装脚本都会重写。
 
 日常命令：
 

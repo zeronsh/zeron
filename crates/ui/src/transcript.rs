@@ -6523,9 +6523,18 @@ impl Transcript {
                 // Baseline rows (text already streamed when the transcript
                 // attached) start seeded: the existing reply must not fade in
                 // on a session switch — only fresh appends animate.
+                let reduced_motion = motion::reduced_motion(cx);
+                if reduced_motion {
+                    // Motion can resume mid-stream (background pause, or the OS
+                    // setting flipping back). Text painted meanwhile is already
+                    // on screen, so the next veil seeds it rather than
+                    // dissolving the reply in again.
+                    self.veils.remove(&row.id);
+                    self.veil_baseline.insert(row.id.clone());
+                }
                 let seed_history = !self.veils.contains_key(&row.id)
                     && self.historical_markdown.contains_key(&row.id);
-                let veil = (!motion::reduced_motion(cx)).then(|| {
+                let veil = (!reduced_motion).then(|| {
                     self.veils
                         .entry(row.id.clone())
                         .or_insert_with(|| {
@@ -6667,6 +6676,7 @@ impl Transcript {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
+                    .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
                     .child(
                         crate::icons::icon(if copied_message {
                             crate::icons::CHECK
@@ -7769,8 +7779,8 @@ fn user_bubble_text(
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let underlay = canvas(
-        |_, _, _| (),
-        move |_, _, window, cx| {
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, cx| {
             for span in mentions.iter() {
                 for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
                     window.paint_quad(quad(
@@ -7783,7 +7793,7 @@ fn user_bubble_text(
                     ));
                 }
             }
-            render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);
+            render::paint_text_selection(window, hitbox, &sel_key, &text, &layout, &sel_theme);
             // Passive geometry cache only: no entity update and no notify.
             // `bounds().height` can be the collapsed clip height, so derive
             // the full text height from the wrapped line layouts instead. The
@@ -9015,10 +9025,14 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
-            // FIRST child ⇒ paints first: clears the frame's markdown text-
-            // selection registry before any row's text elements re-register
-            // (document paint order = selection order; see markdown/render.rs).
-            .child(crate::markdown::render::selection_frame_reset())
+            // FIRST child ⇒ paints first: clears this transcript's slice of the
+            // frame's markdown text-selection registry before any row's text
+            // elements re-register (document paint order = selection order;
+            // see markdown/render.rs). Keyed by entity so a side chat or
+            // subagent tab painted in the same frame can't wipe it.
+            .child(crate::markdown::render::selection_frame_reset_for(
+                cx.entity_id().as_u64(),
+            ))
             .child(content)
             .child(rail);
         // Full-size viewer for a clicked user-bubble thumbnail
@@ -11992,6 +12006,73 @@ mod tests {
                         &this.veils[&SharedString::from("reply#body.0")]
                     ));
                 });
+            });
+        }
+
+        #[test]
+        fn text_streamed_under_reduced_motion_does_not_fade_in_when_motion_resumes() {
+            fn render_rows(
+                transcript: &Entity<Transcript>,
+                window: gpui::WindowHandle<CachedTranscript>,
+                cx: &mut gpui::App,
+            ) {
+                cx.update_window(window.into(), |_, window, cx| {
+                    transcript.update(cx, |this, cx| {
+                        for ix in 0..this.list.item_count() {
+                            let _ = this.render_row(ix, window, cx);
+                        }
+                    });
+                })
+                .unwrap();
+            }
+            fn streaming(text: &str) -> Vec<SessionMessageEntry> {
+                vec![
+                    prompt("ask"),
+                    assistant(
+                        "reply",
+                        MessageStatus::Streaming,
+                        vec![text_part("body", text)],
+                    ),
+                ]
+            }
+            with_window(|transcript, window, cx| {
+                let body = SharedString::from("reply#body.0");
+                // Attach on the prompt alone, so the reply is live text rather
+                // than an attach-time baseline.
+                transcript.update(cx, |this, cx| feed(this, vec![prompt("ask")], cx));
+                render_rows(&transcript, window, cx);
+
+                // A row that first streams while motion is reduced.
+                cx.set_reduce_motion(true);
+                transcript.update(cx, |this, cx| feed(this, streaming("uno"), cx));
+                render_rows(&transcript, window, cx);
+                assert!(!transcript.read(cx).veils.contains_key(&body));
+                cx.set_reduce_motion(false);
+                render_rows(&transcript, window, cx);
+                let veil = transcript.read(cx).veils[&body].clone();
+                assert!(
+                    veil.borrow_mut()
+                        .advance(0, "uno", Instant::now())
+                        .is_empty(),
+                    "text painted under reduced motion must not dissolve in"
+                );
+
+                // A row already fading when motion pauses, then resumes.
+                cx.set_reduce_motion(true);
+                transcript.update(cx, |this, cx| feed(this, streaming("uno dos"), cx));
+                render_rows(&transcript, window, cx);
+                cx.set_reduce_motion(false);
+                render_rows(&transcript, window, cx);
+                let veil = transcript.read(cx).veils[&body].clone();
+                assert!(
+                    veil.borrow_mut()
+                        .advance(0, "uno dos", Instant::now())
+                        .is_empty(),
+                    "text streamed while paused is already on screen"
+                );
+                let spans = veil.borrow_mut().advance(0, "uno dos tres", Instant::now());
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].0, "uno dos".len().."uno dos tres".len());
             });
         }
 

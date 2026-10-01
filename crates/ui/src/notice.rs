@@ -119,6 +119,7 @@ pub fn notice_chip(
                             copy_message.to_string(),
                         ));
                     })
+                    .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
                     .child(
                         crate::icons::icon(crate::icons::COPY)
                             .size(px(12.0))

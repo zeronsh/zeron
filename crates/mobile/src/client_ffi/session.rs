@@ -194,6 +194,8 @@ pub struct UserInputQuestion {
     pub question: String,
     pub options: Vec<String>,
     pub multi_select: bool,
+    pub prefill: Option<String>,
+    pub multiline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -333,6 +335,8 @@ impl From<&zc::ComposerState> for ComposerState {
                         question: q.question.clone(),
                         options: q.options.clone(),
                         multi_select: q.multi_select,
+                        prefill: q.prefill.clone(),
+                        multiline: q.multiline,
                     })
                     .collect(),
             }),

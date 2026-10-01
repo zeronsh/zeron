@@ -15,7 +15,7 @@ curl -fsSL https://zeron.sh/install.sh | sh
 zeron status
 ```
 
-The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
+The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required. It also adds Zeron to your application launcher: a per-user `zeron.desktop` and icon under `~/.local/share` (or `$XDG_DATA_HOME`), rewritten each time the installer runs.
 
 The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
 

@@ -62,7 +62,7 @@ dialect and leaves the user's configured servers alone:
 | ------- | ----- |
 | Claude  | `--mcp-config <inline json>` (no `--strict-mcp-config`)             |
 | ACP (Devin, Grok, Hermes, Antigravity) | `session/new` and `session/load` → `mcpServers: [{name, command, args, env}]` |
-| Pi | Per-run `--extension` bridges stdio MCP into Pi tools (`pi-acp` 0.0.33 ignores `mcpServers`) |
+| Pi | Per-run `--extension` bridges stdio MCP into Pi tools in the native RPC process |
 | OpenCode | Child-only `OPENCODE_CONFIG_CONTENT`: `mcp.zeron` on 1.x, `mcp.servers.zeron` on 2.x |
 | Codex   | `thread/start` config overrides `mcp_servers.zeron.{command,args,env}` |
 | Cursor  | SDK `Agent.create` / `Agent.resume` → inline `mcpServers.zeron`, plus `local.settingSources: ["user", "team", "mdm", "plugins"]` so `~/.cursor/mcp.json` and plugin servers load (not `project`: the SDK skips MCP approvals, so repo-defined servers would run unprompted) |
@@ -72,7 +72,7 @@ shape follows the installed binary's major version. Cursor uses the SDK's
 [inline MCP configuration](https://cursor.com/docs/sdk/typescript); OpenCode's
 [1.x config layer](https://opencode.ai/docs/config/) and
 [2.x MCP format](https://opencode.ai/v2/docs/mcp-servers) differ.
-Pi's private wrapper and extension live only for the ACP process lifetime;
+Pi's temporary extension lives only for the native RPC process lifetime;
 user settings, extensions, and session arguments remain intact. The bridge
 registers `zeron_<tool>` tools, propagates cancellation and errors, and closes
 the MCP child when the Pi session shuts down.

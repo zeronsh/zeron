@@ -3542,6 +3542,8 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        prefill: None,
+                        multiline: false,
                         multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
                     })
                 })
@@ -3657,13 +3659,41 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
 /// - tools: `session.tool.input.started` (carries the NAME),
 ///   `.input.ended` (args as text), `.called` (args as object),
 ///   `.success` (content array) / `.error`.
-/// - usage: `session.usage.updated` with the cumulative token totals.
+/// - usage: `session.step.ended` carries the step's own tokens; the
+///   cumulative `session.usage.updated` totals are ignored.
 ///
 /// `tool_names` tracks pending calls by session, message, and provider call id.
+/// `session_models` remembers the latest model for step.ended, which omits it.
 type V2ToolKey = (String, String, String);
 const MAX_PENDING_V2_TOOLS: usize = 4096;
+/// Cache cap; overflow clears the cache instead of failing the run.
+const MAX_V2_SESSION_MODELS: usize = 4096;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct V2ModelIdentity {
+    provider_id: String,
+    model_id: String,
+}
+
+fn v2_model_identity(model: &Value) -> Option<V2ModelIdentity> {
+    let provider_id = model.get("providerID")?.as_str()?;
+    let model_id = model.get("id")?.as_str()?;
+    (!provider_id.is_empty() && !model_id.is_empty()).then(|| V2ModelIdentity {
+        provider_id: provider_id.to_owned(),
+        model_id: model_id.to_owned(),
+    })
+}
+
+#[cfg(test)]
 fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>) -> Vec<Value> {
+    normalize_v2_frame_with_session_models(event, tool_names, &mut HashMap::new())
+}
+
+fn normalize_v2_frame_with_session_models(
+    event: Value,
+    tool_names: &mut HashMap<V2ToolKey, String>,
+    session_models: &mut HashMap<String, V2ModelIdentity>,
+) -> Vec<Value> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let data = event.get("data").cloned().unwrap_or(Value::Null);
     if data
@@ -3761,12 +3791,20 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
             warning["type"] = json!("session.warning");
             vec![warning]
         }
-        "session.step.started" => vec![json!({
-            "type": "message.updated",
-            "properties": {
-                "info": { "sessionID": session(), "id": message(), "role": "assistant" }
+        "session.step.started" => {
+            if let (Some(session_id), Some(model)) = (
+                data.get("sessionID").and_then(Value::as_str),
+                data.get("model").and_then(v2_model_identity),
+            ) {
+                session_models.insert(session_id.to_owned(), model);
             }
-        })],
+            vec![json!({
+                "type": "message.updated",
+                "properties": {
+                    "info": { "sessionID": session(), "id": message(), "role": "assistant" }
+                }
+            })]
+        }
         "session.text.started" | "session.text.ended" => {
             vec![v2_stream_part(
                 &data,
@@ -3850,27 +3888,37 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
                 &json!({ "status": "error", "error": message }),
             )]
         }
-        "session.usage.updated" => {
+        "session.step.ended" => {
             let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
-            if tokens.is_null() {
+            if !tokens.is_object() {
                 return Vec::new();
             }
-            // Cumulative totals keyed to a synthetic message: registers
-            // Usage + ContextUsage exactly like the 1.x assistant
-            // message.updated did. (No providerID/modelID on this frame —
-            // the context window is dropped.)
+            // One step's tokens are the prompt it sent plus its reply, which
+            // is what the 1.x assistant message carried. The frame omits the
+            // model, so the session's latest step supplies it and the
+            // advertised context limit resolves.
+            let mut info = json!({
+                "sessionID": session(),
+                "id": "usage",
+                "role": "assistant",
+                "tokens": tokens,
+            });
+            if let Some(model) = data
+                .get("sessionID")
+                .and_then(Value::as_str)
+                .and_then(|id| session_models.get(id))
+            {
+                info["providerID"] = json!(model.provider_id);
+                info["modelID"] = json!(model.model_id);
+            }
             vec![json!({
                 "type": "message.updated",
-                "properties": {
-                    "info": {
-                        "sessionID": session(),
-                        "id": "usage",
-                        "role": "assistant",
-                        "tokens": tokens,
-                    }
-                }
+                "properties": { "info": info }
             })]
         }
+        // Cumulative session totals (every step, title, and compaction
+        // summed), so they measure spend, not context occupancy.
+        "session.usage.updated" => Vec::new(),
         "session.created" => {
             let Some(id) = data.get("sessionID").and_then(Value::as_str) else {
                 return Vec::new();
@@ -4000,6 +4048,8 @@ async fn bus_task(
         Protocol::V2 => format!("{base}/api/event"),
     };
     let mut failures: u32 = 0;
+    let mut v2_tool_names: HashMap<V2ToolKey, String> = HashMap::new();
+    let mut v2_session_models: HashMap<String, V2ModelIdentity> = HashMap::new();
     loop {
         if tx.is_closed() {
             return;
@@ -4013,7 +4063,14 @@ async fn bus_task(
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 failures = 0;
-                stream_bus(&tx, resp, protocol).await;
+                stream_bus(
+                    &tx,
+                    resp,
+                    protocol,
+                    &mut v2_tool_names,
+                    &mut v2_session_models,
+                )
+                .await;
                 if tx.is_closed() {
                     return;
                 }
@@ -4031,13 +4088,16 @@ async fn bus_task(
     }
 }
 
-async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol: Protocol) {
+async fn stream_bus(
+    tx: &mpsc::Sender<BusMsg>,
+    resp: reqwest::Response,
+    protocol: Protocol,
+    v2_tool_names: &mut HashMap<V2ToolKey, String>,
+    v2_session_models: &mut HashMap<String, V2ModelIdentity>,
+) {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut announced = false;
-    // 2.x names a tool only when its input starts streaming; the later
-    // called/success frames carry the call id alone.
-    let mut v2_tool_names: HashMap<V2ToolKey, String> = HashMap::new();
     while let Some(chunk) = stream.next().await {
         let Ok(bytes) = chunk else {
             return;
@@ -4066,10 +4126,22 @@ async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol
                     continue;
                 };
                 if protocol == Protocol::V2 {
-                    let payloads = normalize_v2_frame(event, &mut v2_tool_names);
+                    let payloads = normalize_v2_frame_with_session_models(
+                        event,
+                        v2_tool_names,
+                        v2_session_models,
+                    );
                     if v2_tool_names.len() > MAX_PENDING_V2_TOOLS {
                         let _ = tx.send(BusMsg::Disconnected).await;
                         return;
+                    }
+                    // Model identity only feeds usage frames. Dropping the
+                    // cache degrades to "window preserved" and refills on the
+                    // next step.started, so — unlike leaked pending tools — it
+                    // must not fail the run, especially now that the cache
+                    // survives reconnects.
+                    if v2_session_models.len() > MAX_V2_SESSION_MODELS {
+                        v2_session_models.clear();
                     }
                     for payload in payloads {
                         if tx.send(BusMsg::Event(payload)).await.is_err() {
@@ -4114,6 +4186,48 @@ mod context_tests {
             ),
             Some(AgentEvent::ContextUsage {
                 tokens: Some(0),
+                window: None
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_usage_is_ignored_without_panicking() {
+        let windows = HashMap::from([("provider/model".to_owned(), 200_000)]);
+        for info in [
+            json!({}),
+            json!({"tokens": null}),
+            json!({"tokens": "12"}),
+            json!({"tokens": [1, 2]}),
+            json!({"tokens": {"input": -1, "output": 1.5, "cache": "x"}}),
+            json!({"providerID": 1, "modelID": null, "tokens": {"input": "3"}}),
+        ] {
+            assert_eq!(context_usage_event(&info, &windows), None, "{info}");
+        }
+        // Unexpected model fields drop only the window, never the count.
+        assert_eq!(
+            context_usage_event(
+                &json!({"providerID": ["provider"], "modelID": "model",
+                        "tokens": {"input": 7, "cache": {"read": "x", "write": 3}}}),
+                &windows
+            ),
+            Some(AgentEvent::ContextUsage {
+                tokens: Some(10),
+                window: None
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_model_preserves_the_previous_window() {
+        // A catalog that failed to load (or lags the 2.x model sync)
+        // advertises nothing; an absent model must not read as "no limit".
+        let info = json!({"providerID":"provider","modelID":"unknown",
+                          "tokens":{"input":10,"output":2}});
+        assert_eq!(
+            context_usage_event(&info, &HashMap::new()),
+            Some(AgentEvent::ContextUsage {
+                tokens: Some(12),
                 window: None
             })
         );

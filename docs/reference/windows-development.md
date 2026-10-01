@@ -45,7 +45,7 @@ ACP, Claude, Codex, and opencode search PATH and known native installation
 directories. Discovery is PATHEXT-aware: npm's `.cmd` shims (and any `.bat`)
 resolve like `cmd.exe` would — per directory, extensions in PATHEXT order —
 and spawn through `cmd.exe /e:ON /v:OFF /d /c` inside the same Job Object, so npm-
-installed agents (`codex`, `opencode`, `pi-acp`, a bare `npm i -g grok`)
+installed agents (`codex`, `opencode`, `pi`, a bare `npm i -g grok`)
 work without following `node_modules` payloads. Batch arguments containing
 CR/LF and batch executable paths containing percent expansion syntax are rejected.
 GUI launches additionally

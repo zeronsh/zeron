@@ -544,6 +544,15 @@ impl ClaudeHarness {
             // config with settings-sourced ones.
             cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
         }
+        let normalizer = if let Some(session_id) = &request.resume {
+            let config = crate::model_context::root(
+                "CLAUDE_CONFIG_DIR",
+                crate::executable::home_or_current_dir().join(".claude"),
+            );
+            Normalizer::for_resume(&config, session_id).await
+        } else {
+            Normalizer::new()
+        };
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
@@ -590,6 +599,7 @@ impl ClaudeHarness {
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
+            normalizer,
             title_only,
             child,
             stdout_lines: BufReader::new(stdout).lines(),
@@ -714,6 +724,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 }
 
 struct Session {
+    normalizer: Normalizer,
     title_only: bool,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
@@ -731,6 +742,7 @@ struct Session {
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        normalizer: mut norm,
         title_only,
         mut child,
         mut stdout_lines,
@@ -750,7 +762,6 @@ async fn run_session(session: Session) {
     } = controls;
     let request_input = Arc::new(request_input);
 
-    let mut norm = Normalizer::new();
     let mut pending_steers = std::collections::VecDeque::new();
     // Top-level tool calls in flight: a steer must not abort them (see
     // `wire::steer_message_line`).
@@ -1025,6 +1036,8 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),
                 question: field(["question", "prompt"]).unwrap_or("").into(),
+                prefill: None,
+                multiline: false,
                 multi_select: ["multiSelect", "multi_select"]
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
