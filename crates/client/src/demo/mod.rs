@@ -111,6 +111,7 @@ pub(crate) struct DemoHost {
     client: Weak<ClientInner>,
     server: Mutex<DemoServer>,
     refs: Mutex<HashMap<String, Vec<RepoRef>>>,
+    folders: Mutex<HashMap<(String, String), Vec<FolderEntry>>>,
     /// Running turn per chat: (turn id, cancel token).
     turns: Mutex<HashMap<String, (u64, CancellationToken)>>,
     turn_seq: AtomicU64,
@@ -134,6 +135,7 @@ impl DemoHost {
             client: Arc::downgrade(client),
             server: Mutex::new(DemoServer::default()),
             refs: Mutex::new(HashMap::new()),
+            folders: Mutex::new(HashMap::new()),
             turns: Mutex::new(HashMap::new()),
             turn_seq: AtomicU64::new(1),
             turn_gates: Mutex::new(HashMap::new()),
@@ -1075,18 +1077,63 @@ impl DemoHost {
             "edge",
             "landing",
         ];
+        let mut entries: Vec<_> = names
+            .iter()
+            .map(|name| FolderEntry {
+                name: (*name).into(),
+                is_dir: true,
+                is_repo: REPOS.contains(name),
+            })
+            .collect();
+        entries.extend(
+            lock(&self.folders)
+                .get(&(device_id.to_owned(), path.clone()))
+                .cloned()
+                .unwrap_or_default(),
+        );
+        entries.sort_by_key(|entry| entry.name.to_lowercase());
         Ok(FolderListing {
             path,
-            entries: names
-                .iter()
-                .map(|name| FolderEntry {
-                    name: (*name).into(),
-                    is_dir: true,
-                    is_repo: REPOS.contains(name),
-                })
-                .collect(),
+            entries,
             truncated: false,
         })
+    }
+
+    pub(crate) async fn create_folder(
+        &self,
+        device_id: &str,
+        parent_path: &str,
+        name: &str,
+    ) -> Result<String> {
+        if name.trim().is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\', '\0'])
+        {
+            return Err(ClientError::InvalidArgument(
+                "Enter a folder name without path separators.".into(),
+            ));
+        }
+        let listing = self
+            .list_folders(device_id, Some(parent_path.to_owned()))
+            .await?;
+        let mut folders = lock(&self.folders);
+        let entries = folders
+            .entry((device_id.to_owned(), parent_path.to_owned()))
+            .or_default();
+        if listing
+            .entries
+            .iter()
+            .chain(entries.iter())
+            .any(|entry| entry.name == name)
+        {
+            return Err(ClientError::HostError(
+                "A file or folder with that name already exists.".into(),
+            ));
+        }
+        entries.push(FolderEntry {
+            name: name.to_owned(),
+            is_dir: true,
+            is_repo: false,
+        });
+        Ok(format!("{}/{name}", parent_path.trim_end_matches('/')))
     }
 
     pub(crate) async fn upload(

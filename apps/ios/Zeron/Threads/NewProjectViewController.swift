@@ -8,10 +8,12 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
     private var listing: FolderListing?
     private var path: String?
     private var loading = false
+    private var submitting = false
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
     private let status = UILabel()
     private let useButton = UIButton(type: .system)
+    private let newFolderButton = UIButton(type: .system)
 
     /// Called with the new project's id (the new-session canvas selects it).
     var onCreated: ((String) -> Void)?
@@ -70,7 +72,15 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         status.textColor = Palette.secondary
         status.numberOfLines = 2
         status.textAlignment = .center
-        let bottom = UIStackView(arrangedSubviews: [status, useButton])
+        var newFolder = UIButton.Configuration.plain()
+        newFolder.title = "New Folder…"
+        newFolder.image = UIImage(systemName: "folder.badge.plus")
+        newFolder.imagePadding = 8
+        newFolder.baseForegroundColor = Palette.text
+        newFolderButton.configuration = newFolder
+        newFolderButton.accessibilityIdentifier = "new-folder"
+        newFolderButton.addAction(UIAction { [weak self] _ in self?.promptForFolder() }, for: .touchUpInside)
+        let bottom = UIStackView(arrangedSubviews: [status, newFolderButton, useButton])
         bottom.axis = .vertical
         bottom.spacing = 8
         bottom.translatesAutoresizingMaskIntoConstraints = false
@@ -80,7 +90,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             bottom.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
             bottom.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ])
-        collectionView.contentInset.bottom = 110
+        collectionView.contentInset.bottom = 160
 
         // Host picker lives in the navigation bar.
         let hosts = app.hostOptions
@@ -103,12 +113,14 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         guard let device else {
             status.text = "No desktop devices yet — open Zeron on a computer to add one."
             useButton.isEnabled = false
+            newFolderButton.isEnabled = false
             return
         }
         loading = true
         status.text = "Loading…"
         // Until this device answers, nothing from the last one can be used.
         useButton.isEnabled = false
+        newFolderButton.isEnabled = false
         loadGeneration += 1
         let generation = loadGeneration
         Task { @MainActor in
@@ -120,6 +132,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
                 status.text = device.online ? "Couldn't read that folder." : "\(device.name) is offline."
                 // Keep browsing the last good folder only on the same device.
                 useButton.isEnabled = self.listing != nil && self.listingDevice == device.id
+                newFolderButton.isEnabled = useButton.isEnabled
                 return
             }
             self.listingDevice = device.id
@@ -137,6 +150,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             c?.title = "Use “\(name.isEmpty ? listing.path : name)”"
             useButton.configuration = c
             useButton.isEnabled = true
+            newFolderButton.isEnabled = true
             status.text = listing.path
             title = name.isEmpty ? "New Project" : name
         }
@@ -144,7 +158,8 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: true)
-        guard !loading, let name = dataSource.itemIdentifier(for: indexPath), let listing else { return }
+        guard !loading, !submitting, listingDevice == device?.id,
+              let name = dataSource.itemIdentifier(for: indexPath), let listing else { return }
         if name == ".." {
             load(Self.parent(of: listing.path))
         } else {
@@ -159,16 +174,80 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         return up.isEmpty ? "/" : up
     }
 
+    private func promptForFolder(name: String = "", error: String? = nil) {
+        guard !loading, !submitting, let device, let path, listingDevice == device.id else { return }
+        // A fast failure can arrive while the original name alert is still
+        // dismissing. Finish that transition before presenting the retry.
+        if let presented = presentedViewController {
+            presented.dismiss(animated: true) { [weak self] in self?.promptForFolder(name: name, error: error) }
+            return
+        }
+        let alert = UIAlertController(title: "New Folder", message: error ?? "Create a folder in \(path) on \(device.name).", preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "Folder name"
+            field.text = name
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+            field.accessibilityIdentifier = "new-folder-name"
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        let create = UIAlertAction(title: "Create", style: .default) { [weak self, weak alert] _ in
+            guard let self, let name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return }
+            self.setSubmitting(true)
+            self.status.text = "Creating folder…"
+            Task { @MainActor in
+                do {
+                    let created = try await self.app.createFolder(deviceId: device.id, parentPath: path, name: name)
+                    self.setSubmitting(false)
+                    self.load(created)
+                } catch {
+                    self.setSubmitting(false)
+                    self.status.text = path
+                    self.promptForFolder(name: name, error: "Couldn't create the folder. \(Self.folderErrorMessage(error))")
+                }
+            }
+        }
+        create.isEnabled = !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        alert.textFields?.first?.addAction(UIAction { [weak alert, weak create] _ in
+            create?.isEnabled = !(alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }, for: .editingChanged)
+        alert.addAction(create)
+        present(alert, animated: true)
+    }
+
+    private static func folderErrorMessage(_ error: Error) -> String {
+        guard let error = error as? CoreError else { return error.localizedDescription }
+        switch error {
+        case .NotFound(let message), .InvalidArgument(let message), .HostUnavailable(let message),
+             .Unsupported(let message), .HostError(let message), .Network(let message),
+             .Auth(let message), .Storage(let message), .NotImplemented(let message), .Internal(let message):
+            return message
+        case .Closed:
+            return "Zeron is disconnected."
+        }
+    }
+
+    private func setSubmitting(_ busy: Bool) {
+        submitting = busy
+        useButton.isEnabled = !busy
+        newFolderButton.isEnabled = !busy
+        navigationItem.rightBarButtonItem?.isEnabled = !busy
+        navigationItem.leftBarButtonItem?.isEnabled = !busy
+        isModalInPresentation = busy
+    }
+
     private func create() {
         // The path must be one this device listed.
-        guard let device, let path, listingDevice == device.id else { return }
+        guard !loading, !submitting, let device, let path, listingDevice == device.id else { return }
         let git = listing?.entries.contains { $0.name == ".git" } ?? false
         useButton.configuration?.showsActivityIndicator = true
+        setSubmitting(true)
         Task { @MainActor in
             let created = await app.createProject(deviceId: device.id, path: path, gitDetected: git)
             let ok = created != nil
             if let created { onCreated?(created) }
             useButton.configuration?.showsActivityIndicator = false
+            setSubmitting(false)
             if ok { dismiss(animated: true) } else { status.text = "Couldn't create the project on \(device.name)." }
         }
     }

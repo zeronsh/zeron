@@ -428,6 +428,17 @@ impl CoreClient {
         )
     }
 
+    /// Create a child folder on the selected computer, not on the phone.
+    pub async fn create_folder(
+        &self,
+        device_id: String,
+        parent_path: String,
+        name: String,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.create_folder(&device_id, &parent_path, &name).await }).await
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(
         &self,

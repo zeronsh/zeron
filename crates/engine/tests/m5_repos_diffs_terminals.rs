@@ -23,6 +23,139 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 // ---------------------------------------------------------------------------
+// Folder creation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_folder_rpc_creates_only_a_new_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = assemble(&tmp.path().join("engine"));
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let parent = tmp.path().join("projects");
+    std::fs::create_dir(&parent).unwrap();
+    let params = serde_json::json!({ "parentPath": parent, "name": "My 新 project" });
+    let created = client
+        .call(methods::CREATE_FOLDER, params.clone())
+        .await
+        .unwrap();
+    let expected = parent.join("My 新 project");
+    assert_eq!(created["path"], expected.to_string_lossy().as_ref());
+    assert!(expected.is_dir());
+    assert!(std::fs::read_dir(&expected).unwrap().next().is_none());
+    let duplicate = client
+        .call(methods::CREATE_FOLDER, params)
+        .await
+        .unwrap_err();
+    assert!(duplicate.to_string().contains("already exists"));
+    std::fs::write(parent.join("file"), "keep me").unwrap();
+    assert!(
+        client
+            .call(
+                methods::CREATE_FOLDER,
+                serde_json::json!({ "parentPath": parent, "name": "file" })
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent.join("file")).unwrap(),
+        "keep me"
+    );
+    for name in [
+        "",
+        "  ",
+        ".",
+        "..",
+        "../escape",
+        "a/b",
+        "a\\b",
+        "/absolute",
+        "C:\\absolute",
+        "nul\0name",
+    ] {
+        assert!(
+            client
+                .call(
+                    methods::CREATE_FOLDER,
+                    serde_json::json!({ "parentPath": parent, "name": name })
+                )
+                .await
+                .is_err(),
+            "accepted {name:?}"
+        );
+    }
+    assert!(
+        client
+            .call(
+                methods::CREATE_FOLDER,
+                serde_json::json!({ "parentPath": "relative", "name": "child" })
+            )
+            .await
+            .is_err()
+    );
+    let missing = parent.join("missing");
+    assert!(
+        client
+            .call(
+                methods::CREATE_FOLDER,
+                serde_json::json!({ "parentPath": missing, "name": "child" })
+            )
+            .await
+            .is_err()
+    );
+    assert!(!missing.exists(), "must not create missing parents");
+    #[cfg(windows)]
+    assert!(
+        client
+            .call(
+                methods::CREATE_FOLDER,
+                serde_json::json!({ "parentPath": parent, "name": "C:drive-relative" })
+            )
+            .await
+            .is_err()
+    );
+    let race = serde_json::json!({ "parentPath": parent, "name": "race" });
+    let (first, second) = tokio::join!(
+        client.call(methods::CREATE_FOLDER, race.clone()),
+        client.call(methods::CREATE_FOLDER, race),
+    );
+    assert_ne!(
+        first.is_ok(),
+        second.is_ok(),
+        "only one concurrent creation can succeed"
+    );
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = parent.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let denied = client
+            .call(
+                methods::CREATE_FOLDER,
+                serde_json::json!({ "parentPath": locked, "name": "child" }),
+            )
+            .await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(denied.unwrap_err().to_string().contains("permission"));
+        assert!(!locked.join("child").exists());
+    }
+    let listing = client
+        .call(methods::LIST_FOLDERS, serde_json::json!({ "path": parent }))
+        .await
+        .unwrap();
+    assert!(
+        listing["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "My 新 project"
+                && entry["isDir"] == true
+                && entry["isRepo"] == false)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 

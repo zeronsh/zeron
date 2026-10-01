@@ -796,6 +796,24 @@ async fn target_device_id_routes_over_the_relay() {
         "remote folder listing must come from B's filesystem: {names:?}"
     );
 
+    // The folder action follows the same device targeting as browsing.
+    let created = client
+        .call(
+            methods::CREATE_FOLDER,
+            serde_json::json!({
+                "parentPath": browse_dir,
+                "name": "created-from-a",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote CreateFolder");
+    assert_eq!(
+        created["path"],
+        browse_dir.join("created-from-a").to_string_lossy().as_ref()
+    );
+    assert!(browse_dir.join("created-from-a").is_dir());
+
     // Streaming proxy: WatchDocMessages against B's doc from A's IPC surface.
     let mut stream = client
         .subscribe_scoped(

@@ -11,6 +11,11 @@ final class SessionFlowTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-demo"] + (fast ? ["-fast"] : []) + args
         app.launch()
+        // A fresh simulator can show the system keyboard introduction when
+        // the new-session route focuses its composer.
+        if args.contains("new"), app.buttons["Continue"].exists {
+            app.buttons["Continue"].tap()
+        }
         return app
     }
 
@@ -282,6 +287,48 @@ final class SessionFlowTests: XCTestCase {
         use.tap()
         XCTAssertTrue(chip.waitForExistence(timeout: 10), "sheet dismissed after creating")
         XCTAssertFalse(use.exists)
+    }
+
+    func testNewProjectCreatesFolderAndRetriesInvalidName() {
+        let app = launch(["-route", "new"])
+        let chip = app.buttons["composer-chip-project"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10))
+        chip.tap()
+        app.buttons["New Project…"].tap()
+        let newFolder = app.buttons["new-folder"]
+        XCTAssertTrue(newFolder.waitForExistence(timeout: 5))
+        let enabled = NSPredicate(format: "enabled == true")
+        expectation(for: enabled, evaluatedWith: newFolder)
+        waitForExpectations(timeout: 5)
+        newFolder.tap()
+        XCTAssertFalse(app.alerts.buttons["Create"].isEnabled)
+        app.alerts.buttons["Cancel"].tap()
+        XCTAssertTrue(app.buttons["use-folder"].exists)
+        newFolder.tap()
+        let field = app.textFields["new-folder-name"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let invalid = "../outside"
+        field.typeText(invalid)
+        app.alerts.buttons["Create"].tap()
+        let error = app.alerts.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Couldn't create the folder.")).firstMatch
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
+        XCTAssertTrue(error.label.contains("Enter a folder name"))
+        XCTAssertFalse(error.label.contains("CoreError"), "error shows a readable message")
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "failed creation allows retry")
+        XCTAssertEqual(field.value as? String, invalid, "name survives the error")
+        snapshot(app, "new-folder-invalid-name")
+        field.tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: invalid.count) + "My new project")
+        snapshot(app, "new-folder-name")
+        app.alerts.buttons["Create"].tap()
+        XCTAssertTrue(app.navigationBars["My new project"].waitForExistence(timeout: 5), "browser opens the created folder")
+        let use = app.buttons["use-folder"]
+        expectation(for: enabled, evaluatedWith: use)
+        waitForExpectations(timeout: 5)
+        snapshot(app, "new-folder-created")
+        use.tap()
+        XCTAssertTrue(use.waitForNonExistence(timeout: 10), "new folder becomes the project")
+        XCTAssertTrue(chip.exists)
     }
 
     func testToolGroupExpandsAndShowsDetail() {

@@ -2182,7 +2182,14 @@ pub(super) struct AddSpaceFlow {
     load_task: Option<Task<()>>,
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
+    new_folder: Option<NewFolderDialog>,
     _search_events: Subscription,
+}
+
+struct NewFolderDialog {
+    input: Entity<ComposerInput>,
+    focus_pending: bool,
+    _events: Subscription,
 }
 
 /// Folder crumbs shown before the middle folds into `…`, and how many of the
@@ -5227,6 +5234,7 @@ impl Shell {
             load_task: None,
             drives_task: None,
             submit_task: None,
+            new_folder: None,
             _search_events: search_events,
         });
         cx.notify();
@@ -5639,6 +5647,183 @@ impl Shell {
         }));
     }
 
+    fn open_new_project_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_ref() else {
+            return;
+        };
+        if flow.submit_busy || flow.browser.ready().is_none() {
+            return;
+        }
+        let input = cx.new(|cx| ComposerInput::new("Folder name", cx));
+        let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                this.submit_new_project_folder(cx);
+            } else if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
+        let flow = self.add_space.as_mut().unwrap();
+        flow.error = None;
+        flow.new_folder = Some(NewFolderDialog {
+            input,
+            focus_pending: true,
+            _events: events,
+        });
+        self.project_crumb_menu = popover::Popup::default();
+        cx.notify();
+    }
+
+    fn cancel_new_project_folder(&mut self, cx: &mut Context<Self>) {
+        if let Some(flow) = self.add_space.as_mut()
+            && !flow.submit_busy
+        {
+            flow.new_folder = None;
+            flow.error = None;
+            flow.focus_pending = true;
+            cx.notify();
+        }
+    }
+
+    fn submit_new_project_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        if flow.submit_busy {
+            return;
+        }
+        let (Some(dialog), Some(device), Some(listing)) =
+            (&flow.new_folder, &flow.device, flow.browser.ready())
+        else {
+            return;
+        };
+        let name = dialog.input.read(cx).text().trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        let mut params = serde_json::json!({ "parentPath": listing.path, "name": name });
+        if local.as_deref() != Some(device.id.as_str()) {
+            params["targetDeviceId"] = device.id.clone().into();
+        }
+        flow.submit_busy = true;
+        flow.error = None;
+        flow.submit_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CREATE_FOLDER, params)
+                .await
+                .and_then(|value| {
+                    value["path"].as_str().map(str::to_owned).ok_or_else(|| {
+                        zeron_rpc::RpcError::Failed("Missing created folder path".into())
+                    })
+                });
+            this.update(cx, |shell, cx| {
+                let Some(flow) = shell.add_space.as_mut() else {
+                    return;
+                };
+                flow.submit_busy = false;
+                match result {
+                    Ok(path) => {
+                        flow.new_folder = None;
+                        shell.add_space_descend(path, false, cx);
+                    }
+                    Err(error) => flow.error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_new_project_folder(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).for_popup();
+        let flow = self.add_space.as_mut()?;
+        let dialog = flow.new_folder.as_mut()?;
+        if std::mem::take(&mut dialog.focus_pending) {
+            window.focus(&dialog.input.focus_handle(cx), cx);
+        }
+        let input = dialog.input.clone();
+        let busy = flow.submit_busy;
+        let can_create = !busy && !input.read(cx).text().trim().is_empty();
+        let path = flow.browser.ready()?.path.clone();
+        let device_name = flow.device.as_ref()?.name.clone();
+        let error = flow.error.clone();
+        let card = popover::dialog_card(&theme)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.cancel_new_project_folder(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(popover::dialog_title(&theme, "New folder"))
+            .child(
+                div()
+                    .mt(px(8.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "Create in {path} on {device_name}"
+                    ))),
+            )
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .child(popover::dialog_field(input.into_any_element())),
+            )
+            .when_some(error, |el, error| {
+                el.child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "new-folder-cancel")
+                            .id("new-folder-cancel")
+                            .when(!busy, |el| {
+                                el.on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.cancel_new_project_folder(cx)
+                                    }),
+                                )
+                            })
+                            .when(busy, |el| el.opacity(0.5)),
+                    )
+                    .child(
+                        popover::btn_primary(
+                            &theme,
+                            if busy { "Creating…" } else { "Create folder" },
+                        )
+                        .id("new-folder-create")
+                        .when(can_create, |el| {
+                            el.on_click(
+                                cx.listener(|this, _, _, cx| this.submit_new_project_folder(cx)),
+                            )
+                        })
+                        .when(!can_create, |el| el.opacity(0.5)),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("new-project-folder-dialog", viewport, card))
+    }
+
     /// Create the space for the browser's current folder.
     fn submit_add_space(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -5893,6 +6078,13 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if self
+            .add_space
+            .as_ref()
+            .is_some_and(|flow| flow.new_folder.is_some())
+        {
+            return self.render_new_project_folder(viewport, window, cx);
+        }
         let theme = Theme::of(cx).for_popup();
         let flow = self.add_space.as_mut()?;
         if std::mem::take(&mut flow.focus_pending) {
@@ -6351,6 +6543,18 @@ impl Shell {
         };
         let can_add = !busy && listing.is_some();
         let footer = command_palette::palette_footer()
+            .when(step == ProjectStep::Folders, |el| {
+                el.child(
+                    popover::btn_ghost(&theme, "New folder…", "project-new-folder")
+                        .id("project-new-folder")
+                        .when(can_add, |el| {
+                            el.on_click(
+                                cx.listener(|this, _, _, cx| this.open_new_project_folder(cx)),
+                            )
+                        })
+                        .when(!can_add, |el| el.opacity(0.5)),
+                )
+            })
             .child(command_palette::command_key_hint(&theme, "↑ ↓", "Navigate"))
             .child(command_palette::command_key_hint(
                 &theme,
@@ -6805,6 +7009,15 @@ mod project_flow_tests {
 
     #[gpui::test]
     fn devices_locations_folders_and_back_clear_stale_state(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
         let data = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -6876,6 +7089,91 @@ mod project_flow_tests {
             // Slash navigation only applies to folders, never device search.
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
+        });
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            // Name a new folder on the selected remote device. The real RPC
+            // reader below drives failure, retry, and browsing the new child.
+            let device = shell.state.read(cx).devices[1].clone();
+            shell.state.update(cx, |state, _| {
+                state.local_device_id = Some("local".into());
+                state.set_test_engine(engine);
+            });
+            let flow = shell.add_space.as_mut().unwrap();
+            flow.device = Some(device);
+            flow.step = ProjectStep::Folders;
+            flow.browser = Loadable::Ready(FolderListing {
+                path: "/projects".into(),
+                entries: vec![],
+                truncated: false,
+            });
+            shell.open_new_project_folder(cx);
+            let input = shell
+                .add_space
+                .as_ref()
+                .unwrap()
+                .new_folder
+                .as_ref()
+                .unwrap()
+                .input
+                .clone();
+            input.update(cx, |input, cx| input.set_text("new project", cx));
+            shell.submit_new_project_folder(cx);
+            shell.submit_new_project_folder(cx); // Double submission stays single.
+        });
+        cx.run_until_parked();
+        let first: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(first["method"], methods::CREATE_FOLDER);
+        assert_eq!(
+            first["params"],
+            serde_json::json!({ "parentPath": "/projects", "name": "new project", "targetDeviceId": "remote" })
+        );
+        assert!(requests.try_recv().is_err());
+        let deliver = |reply: serde_json::Value| {
+            runtime.block_on(async {
+                replies.send(reply.to_string()).await.unwrap();
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            });
+        };
+        deliver(serde_json::json!({ "id": first["id"], "err": "permission denied" }));
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            let flow = shell.add_space.as_ref().unwrap();
+            assert_eq!(flow.browser.ready().unwrap().path, "/projects");
+            assert_eq!(
+                flow.new_folder.as_ref().unwrap().input.read(cx).text(),
+                "new project"
+            );
+            assert!(flow.error.as_ref().unwrap().contains("permission denied"));
+            assert!(!flow.submit_busy);
+            shell.submit_new_project_folder(cx);
+        });
+        cx.run_until_parked();
+        let retry: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        deliver(
+            serde_json::json!({ "id": retry["id"], "ok": { "path": "/projects/new project" } }),
+        );
+        cx.run_until_parked();
+        let browse: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(browse["method"], methods::LIST_FOLDERS);
+        assert_eq!(browse["params"]["targetDeviceId"], "remote");
+        assert_eq!(browse["params"]["path"], "/projects/new project");
+        deliver(
+            serde_json::json!({ "id": browse["id"], "ok": { "path": "/projects/new project", "entries": [], "truncated": false } }),
+        );
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            let flow = shell.add_space.as_ref().unwrap();
+            assert!(flow.new_folder.is_none());
+            assert_eq!(flow.browser.ready().unwrap().path, "/projects/new project");
+            assert!(!flow.browser_repo);
+            assert!(
+                shell.state.read(cx).spaces.is_empty(),
+                "folder creation still requires Add project"
+            );
         });
     }
 }

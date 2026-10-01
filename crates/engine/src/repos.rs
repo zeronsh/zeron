@@ -1358,6 +1358,65 @@ impl Repos {
         }
     }
 
+    /// Create exactly one child of an existing folder on this device. Never
+    /// reuse an existing directory or interpret the name as a relative path.
+    pub async fn create_folder(
+        &self,
+        parent_path: String,
+        name: String,
+    ) -> Result<String, EngineError> {
+        let mut components = Path::new(&name).components();
+        if name.trim().is_empty()
+            || matches!(name.as_str(), "." | "..")
+            || name.contains(['/', '\\', '\0'])
+            || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return Err(EngineError::Other(
+                "Enter a folder name without path separators.".into(),
+            ));
+        }
+        let parent = PathBuf::from(parent_path);
+        if !parent.is_absolute() {
+            return Err(EngineError::Other(
+                "The parent folder must be an absolute path.".into(),
+            ));
+        }
+        // Like browsing, keep a stalled network mount off Tokio's blocking
+        // pool and bound how long the caller waits for the filesystem.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("folder-create".into())
+            .spawn(move || {
+                let path = parent.join(name);
+                let result = std::fs::create_dir(&path)
+                    .map(|()| path.to_string_lossy().into_owned())
+                    .map_err(|e| {
+                        let message = match e.kind() {
+                            std::io::ErrorKind::AlreadyExists => {
+                                "A file or folder with that name already exists.".into()
+                            }
+                            std::io::ErrorKind::PermissionDenied => {
+                                "Zeron doesn't have permission to create a folder here on the device."
+                                    .into()
+                            }
+                            _ => format!("Couldn't create the folder: {e}"),
+                        };
+                        EngineError::Other(message)
+                    });
+                let _ = tx.send(result);
+            })
+            .map_err(|e| EngineError::Other(format!("folder creation failed: {e}")))?;
+        match tokio::time::timeout(FOLDER_LIST_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(EngineError::Other("folder creation worker exited".into())),
+            Err(_) => Err(EngineError::Other(
+                "Folder creation timed out on the device. Check the parent folder before retrying."
+                    .into(),
+            )),
+        }
+    }
+
     // ── ListDrives ──────────────────────────────────────────────────────────
 
     /// Mounted drives/volumes — the browse roots beyond home. Same disposable
