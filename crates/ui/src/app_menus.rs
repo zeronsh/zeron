@@ -23,6 +23,7 @@ actions!(
     [
         About,
         CheckForUpdates,
+        WhatsNew,
         Quit,
         Hide,
         HideOthers,
@@ -47,6 +48,7 @@ pub fn init(cx: &mut App) {
     // Global, not per-window: it must work with every window closed, and the
     // update lifecycle is app-wide (see `app_update`).
     cx.on_action(|_: &CheckForUpdates, cx| crate::app_update::check_for_updates(cx));
+    cx.on_action(|_: &WhatsNew, cx| crate::changelog::show(cx));
     // Application-menu verbs — gpui wraps NSApp `hide` / `hideOtherApplications`
     // / `unhideAllApplications` (zed registers the same trio in
     // crates/zed/src/zed.rs `init`).
@@ -173,6 +175,7 @@ pub fn app_menus() -> Vec<Menu> {
         // Sparkle's placement: directly under About. Other platforms reach
         // the same check from the account menu.
         MenuItem::action("Check for Updates…", CheckForUpdates),
+        MenuItem::action("Show Update Log…", WhatsNew),
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),

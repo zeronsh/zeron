@@ -1944,6 +1944,8 @@ pub struct Shell {
     /// lifecycle ([`crate::app_update`]) moves. `None` when the app runs
     /// without a desktop checker (tests).
     _app_update_observation: Option<Subscription>,
+    /// Repaints the "What's new" window as [`crate::changelog`] moves.
+    _changelog_observation: Option<Subscription>,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -2353,6 +2355,8 @@ impl Shell {
             sidebar_notice: None,
             _app_update_observation: crate::app_update::AppUpdate::global(cx)
                 .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
+            _changelog_observation: crate::changelog::Changelog::global(cx)
+                .map(|changelog| cx.observe(&changelog, |_, _, cx| cx.notify())),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -4468,6 +4472,7 @@ impl Shell {
     fn sync_independent_settings(&mut self, cx: &App) {
         let current = settings::current(cx);
         self.settings.window_geometry = current.window_geometry;
+        self.settings.last_seen_changelog_version = current.last_seen_changelog_version;
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
         self.settings.wallpaper_folder = current.wallpaper_folder;
@@ -8717,6 +8722,22 @@ impl Shell {
                             .child(SharedString::from("Check for updates")),
                     )
                 })
+                .when(!cfg!(target_os = "macos"), |menu| {
+                    menu.child(
+                        popover::menu_row(theme, false, "user-menu-whats-new")
+                            .id("user-menu-whats-new")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_user_menu(cx);
+                                crate::changelog::show(cx);
+                            }))
+                            .child(
+                                icon(icons::MAGIC_STICK_3)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Show update log")),
+                    )
+                })
                 .into_any_element();
             // Opens upward, left-aligned with the pill: the card is as wide as
             // the footer row, so it covers the row instead of the pane beside it.
@@ -9267,6 +9288,14 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        // The "What's new" window sits above everything else, so it takes
+        // Escape, Enter and Space (any of them skips it) first.
+        if crate::changelog::is_skip_key(event.keystroke.key.as_str())
+            && crate::changelog::dismiss_if_visible(cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key == "escape" && self.command_palette.is_some() {
             self.close_command_palette(window, cx);
             cx.stop_propagation();
@@ -9768,6 +9797,9 @@ impl Shell {
         }
         if let Some(update) = self.render_update_prompt(viewport, cx) {
             overlays.push(update);
+        }
+        if let Some(changelog) = crate::changelog::render(viewport, window, cx.entity_id(), cx) {
+            overlays.push(changelog);
         }
 
         overlays

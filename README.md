@@ -59,6 +59,8 @@ On Windows: run the `zeron-<version>-windows-x86_64-setup.exe` installer from th
 
 The desktop app checks for a new release when it starts, every hour while it runs, and when you come back to it after the machine slept. A new version downloads in the background; the sidebar then offers **Update ready — restart to apply**, and if you don't restart, it installs the next time you quit Zeron. Check by hand with **Zeron → Check for Updates…** on macOS, or **Check for updates** in the account menu (bottom of the sidebar) on Windows and Linux. Set `ZERON_AUTO_UPDATE=0` to be notified without the background download.
 
+The first launch after an update opens a **What’s new** window with the release notes from GitHub (every release since the last one you saw, newest first). It only appears when the notes can be fetched, and you can reopen it from **Zeron → Show Update Log…** on macOS or **Show update log** in the account menu elsewhere. Escape, Enter or Space (or **Continue**) closes it. Set `ZERON_CHANGELOG=0` to turn the automatic window off.
+
 Linux desktop installs from the release tarball's `install.sh` use the same `~/.zeron/app` layout as the curl installer, so they update in place too. A daemon installed as a service restarts into a newer installed version once no agent run or terminal is active; `zeron update` updates headless installs on demand.
 
 ## Sponsors

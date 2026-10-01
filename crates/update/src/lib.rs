@@ -39,6 +39,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
+pub mod release_notes;
 #[cfg(windows)]
 pub mod windows;
 

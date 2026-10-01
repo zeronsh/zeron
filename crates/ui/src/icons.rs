@@ -223,12 +223,21 @@ icon_assets![
     (ANTIGRAVITY_MARK, "antigravity-mark"),
 ];
 
+/// The app icon (the one the desktop entry and dock use), 192 px with its
+/// corners rounded and transparent — for surfaces that show the app itself.
+pub const APP_ICON: &str = "images/zeron-app-icon.png";
+
 /// Serves both the compact control-icon set and the complete file-identity
 /// icon theme through the single asset source registered at app startup.
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == APP_ICON {
+            return Ok(Some(Cow::Borrowed(
+                include_bytes!("../assets/images/zeron-app-icon.png").as_slice(),
+            )));
+        }
         if let Some(asset) = ControlAssets.load(path)? {
             return Ok(Some(asset));
         }

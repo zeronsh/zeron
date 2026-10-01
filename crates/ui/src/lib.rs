@@ -21,6 +21,7 @@ pub mod attachments;
 pub mod badges;
 pub mod browser;
 pub mod change_requests;
+pub mod changelog;
 pub mod changes;
 mod comment_ui;
 pub mod comments;
@@ -151,6 +152,9 @@ pub fn run_app(config: UiConfig) {
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
+        // Before the load: no settings file means a first launch, which has
+        // no release notes to catch up on.
+        let existing_install = settings::UiSettings::path(&data_dir).exists();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
         let font_availability = typography::register_fonts(cx);
@@ -191,6 +195,7 @@ pub fn run_app(config: UiConfig) {
         terminal::panel::init(cx);
         app_menus::init(cx);
         app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
+        changelog::Changelog::init(existing_install, cx);
         cx.register_url_scheme("zeron").detach();
 
         let state = cx.new(|_| state::AppState::new());
