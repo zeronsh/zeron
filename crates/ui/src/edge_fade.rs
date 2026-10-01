@@ -63,6 +63,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         overflow_y: None,
         scroll_x: None,
         smooth_overflow_x: false,
+        grow_x: false,
         child: child.into_any_element(),
     }
 }
@@ -81,6 +82,7 @@ pub struct EdgeFaded {
     overflow_y: Option<Box<dyn Fn(&App) -> (bool, bool)>>,
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
+    grow_x: bool,
     child: AnyElement,
 }
 
@@ -136,6 +138,16 @@ impl EdgeFaded {
     /// paint time (the right-pane surface-tab strip).
     pub fn fade_overflow_x(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
+        self
+    }
+
+    /// [`Self::fade_overflow_x`] for a scrolling strip: each side's ramp is
+    /// as wide as the content hidden past it, up to the band. The ramp still
+    /// reaches zero exactly at the clip edge, but a strip scrolled by 2 px
+    /// dims 2 px instead of a whole band — no snap as the fade switches on.
+    pub fn fade_scroll_x(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll_x = Some(handle.clone());
+        self.grow_x = true;
         self
     }
 
@@ -221,7 +233,17 @@ impl Element for EdgeFaded {
         }
         let (mut left, mut right) = (self.left, self.right);
         let mut outset_right = 0.0;
-        if let Some(scroll) = &self.scroll_x {
+        let (mut band_left, mut band_right) = (None, None);
+        if let Some(scroll) = &self.scroll_x
+            && self.grow_x
+        {
+            let hidden_left = (-f32::from(scroll.offset().x)).max(0.0);
+            let hidden_right = (f32::from(scroll.max_offset().x) - hidden_left).max(0.0);
+            left &= hidden_left > 0.5;
+            right &= hidden_right > 0.5;
+            band_left = Some(px(hidden_left.min(self.band)));
+            band_right = Some(px(hidden_right.min(self.band)));
+        } else if let Some(scroll) = &self.scroll_x {
             let scrolled = -f32::from(scroll.offset().x);
             let max_scroll = f32::from(scroll.max_offset().x);
             left &= scrolled > 1.0;
@@ -246,6 +268,8 @@ impl Element for EdgeFaded {
                 band: px(self.band),
                 band_top: self.band_top.map(px),
                 band_bottom: self.band_bottom.map(px),
+                band_left,
+                band_right,
                 top,
                 bottom,
                 left,

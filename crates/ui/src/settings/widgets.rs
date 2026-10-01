@@ -629,18 +629,16 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .child(label.into())
 }
 
-// Clean glass: a pill thumb inset evenly inside the rail, so the radii stay
-// concentric (14 = 12 + 2), wider than tall like the slider's thumb, with
-// no grip. Thin on/off marks in the open stretch of rail back up the colour.
-pub const SWITCH_WIDTH: f32 = 56.0;
-const SWITCH_HEIGHT: f32 = 28.0;
-const SWITCH_THUMB_INSET: f32 = 2.0;
-const SWITCH_THUMB: f32 = SWITCH_HEIGHT - 2.0 * SWITCH_THUMB_INSET;
-const SWITCH_THUMB_WIDTH: f32 = 32.0;
-const SWITCH_TRAVEL: f32 = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_THUMB_INSET;
+pub const SWITCH_WIDTH: f32 = 44.8;
+const SWITCH_HEIGHT: f32 = 28.8;
+const SWITCH_TRACK_HEIGHT: f32 = 20.8;
+const SWITCH_SIDE_INSET: f32 = 1.6;
+const SWITCH_THUMB_WIDTH: f32 = 24.0;
+const SWITCH_THUMB_HEIGHT: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_SIDE_INSET;
+const SWITCH_MARK_SIZE: f32 = 7.2;
 
-/// A glass switch: a neutral rail that crossfades to the accent plate as the
-/// thumb travels. The caller owns activation and accessibility.
+/// A pill switch with the on/off marks nested beneath a sliding thumb.
+/// The caller owns activation and accessibility; only the thumb interpolates.
 pub fn toggle_switch(theme: &Theme, on: bool, key: impl Into<SharedString>) -> gpui::Div {
     let key: SharedString = key.into();
     div()
@@ -669,9 +667,63 @@ struct SwitchTravel {
 
 impl SwitchTravel {
     fn value(&self, now: std::time::Instant) -> f32 {
-        let t = (now.duration_since(self.started).as_secs_f32() / 0.16).min(1.0);
+        let t = (now.duration_since(self.started).as_secs_f32() / 0.18).min(1.0);
         self.from + (self.target - self.from) * (1.0 - (1.0 - t).powi(3))
     }
+}
+
+fn switch_track_color(theme: &Theme, on: bool) -> gpui::Hsla {
+    let dark = theme.appearance.is_dark();
+    if on {
+        if dark {
+            // Keep the accent saturated and opaque, but give the enabled
+            // track more depth against the dark settings surface.
+            crate::theme::flatten(gpui::black().opacity(0.14), theme.accent_strong)
+        } else {
+            // Preserve the current light opaque treatment.
+            let accent = theme.accent;
+            crate::theme::flatten(
+                gpui::hsla(accent.h, accent.s, accent.l + (1.0 - accent.l) * 0.10, 0.98),
+                theme.surface,
+            )
+        }
+    } else {
+        let opacity = match (dark, theme.is_frost()) {
+            (true, true) => 0.22,
+            (true, false) => 0.18,
+            (false, true) => 0.12,
+            (false, false) => 0.10,
+        };
+        crate::theme::flatten(theme.ink(opacity), theme.surface)
+    }
+}
+
+fn switch_thumb_color(theme: &Theme) -> gpui::Hsla {
+    let white = if theme.is_frost() {
+        if theme.appearance.is_dark() {
+            0.94
+        } else {
+            0.96
+        }
+    } else if theme.appearance.is_dark() {
+        0.96
+    } else {
+        1.0
+    };
+    crate::theme::flatten(gpui::white().opacity(white), theme.surface)
+}
+
+/// Frosted switches catch a little light across their rim and thumb. Both
+/// gradient stops are composited to opaque colors before painting.
+fn switch_surface_tones(theme: &Theme, base: gpui::Hsla, thumb: bool) -> (gpui::Hsla, gpui::Hsla) {
+    if !theme.is_frost() {
+        return (base, base);
+    }
+    let (light, shade) = if thumb { (0.12, 0.07) } else { (0.07, 0.09) };
+    (
+        crate::theme::flatten(gpui::white().opacity(light), base),
+        crate::theme::flatten(gpui::black().opacity(shade), base),
+    )
 }
 
 impl RenderOnce for SwitchVisual {
@@ -704,105 +756,116 @@ impl RenderOnce for SwitchVisual {
         if (position - target).abs() > 0.001 {
             window.request_animation_frame();
         }
-        // The accent plate covers the neutral rim too, so the two crossfade
-        // as one surface while the thumb moves.
-        let rail = crate::glass::light(div().absolute().inset_0().rounded_full(), &self.theme, 1.0)
-            .when(position > 0.001, |el| {
-                el.child(crate::glass::accent(
-                    div()
-                        .absolute()
-                        .top(px(-1.0))
-                        .left(px(-1.0))
-                        .right(px(-1.0))
-                        .bottom(px(-1.0))
-                        .rounded_full(),
-                    &self.theme,
-                    position,
-                    0.0,
-                ))
-            });
-        // The state mark sits in the stretch of rail the thumb leaves open: a
-        // bar on the fill when on, a slim upright oval on the rail when off,
-        // crossfading with the travel. They share one height, like an I and
-        // an O of one face, and sit on the stretch's area centroid (12.25pt
-        // in, since the rail's round end trims its outer side), rounded to
-        // 12.5 so their edges land on whole Retina pixels.
-        let mark_centre = 12.5;
-        let (mark_h, oval_w) = (7.0, 5.0);
-        // Both marks land at 3:1 against the surface under them (measured
-        // on the default accent): the bar is the thumb's white, full on the
-        // lighter dark-mode fill and at 0.7 on the deeper light-mode one; the
-        // faint-text oval mirrors that on the neutral rail.
         let dark = self.theme.appearance.is_dark();
-        let (bar_alpha, oval_alpha) = if dark { (1.0, 0.7) } else { (0.7, 1.0) };
-        let marks = div()
+        let track = switch_track_color(&self.theme, self.on);
+        let (track_light, track_shade) = switch_surface_tones(&self.theme, track, false);
+        let thumb = switch_thumb_color(&self.theme);
+        let (thumb_light, thumb_shade) = switch_surface_tones(&self.theme, thumb, true);
+        let empty_width = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - SWITCH_SIDE_INSET;
+        let mark_padding = (empty_width - SWITCH_MARK_SIZE) / 2.0;
+        let thumb_left = SWITCH_SIDE_INSET
+            + (SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_SIDE_INSET) * position;
+        let track_element = div()
             .absolute()
-            .inset_0()
+            .top(px((SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0))
+            .left_0()
+            .w(px(SWITCH_WIDTH))
+            .h(px(SWITCH_TRACK_HEIGHT))
+            .rounded_full()
+            .bg(gpui::linear_gradient(
+                180.0,
+                gpui::linear_color_stop(track_light, 0.0),
+                gpui::linear_color_stop(track_shade, 1.0),
+            ))
+            .border_1()
+            .border_color(if self.on {
+                crate::theme::flatten(
+                    gpui::white().opacity(if self.theme.is_frost() { 0.16 } else { 0.12 }),
+                    track,
+                )
+            } else {
+                crate::theme::flatten(self.theme.border, track)
+            })
             .child(
                 div()
                     .absolute()
-                    .left(px(mark_centre - 0.5))
-                    .top(px((SWITCH_HEIGHT - mark_h) / 2.0))
-                    .w(px(1.0))
-                    .h(px(mark_h))
-                    .rounded_full()
-                    .bg(gpui::white().opacity(bar_alpha))
-                    .opacity(position),
-            )
-            .child({
-                // A true ellipse, not a rounded rect: a rect's straight
-                // sides read as the digit zero at this size.
-                let color = self.theme.text_faint.opacity(oval_alpha * (1.0 - position));
-                gpui::canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        if color.a <= 0.001 {
-                            return;
-                        }
-                        let centre = bounds.center();
-                        // Semi-axes to the stroke's centre line.
-                        let (rx, ry) = ((oval_w - 1.0) / 2.0, (mark_h - 1.0) / 2.0);
-                        let mut path = gpui::PathBuilder::stroke(px(1.0));
-                        for i in 0..=48 {
-                            let angle = std::f32::consts::TAU * i as f32 / 48.0;
-                            let p = gpui::point(
-                                centre.x + px(rx * angle.cos()),
-                                centre.y + px(ry * angle.sin()),
-                            );
-                            if i == 0 {
-                                path.move_to(p);
-                            } else {
-                                path.line_to(p);
-                            }
-                        }
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, color);
-                        }
-                    },
+                    .inset_0()
+                    .px(px(mark_padding))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .size(px(SWITCH_MARK_SIZE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(position)
+                            .child(
+                                div()
+                                    .w(px(1.2))
+                                    .h(px(7.2))
+                                    .rounded_full()
+                                    .bg(gpui::white().opacity(0.96)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .size(px(SWITCH_MARK_SIZE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(1.0 - position)
+                            .child(
+                                div()
+                                    .size(px(6.4))
+                                    .rounded_full()
+                                    .border(px(1.0))
+                                    .border_color(gpui::white().opacity(0.92)),
+                            ),
+                    ),
+            );
+        let thumb_element = div()
+            .absolute()
+            .top(px((SWITCH_HEIGHT - SWITCH_THUMB_HEIGHT) / 2.0))
+            .left(px(thumb_left))
+            .w(px(SWITCH_THUMB_WIDTH))
+            .h(px(SWITCH_THUMB_HEIGHT))
+            .rounded_full()
+            .bg(gpui::linear_gradient(
+                180.0,
+                gpui::linear_color_stop(thumb_light, 0.0),
+                gpui::linear_color_stop(thumb_shade, 1.0),
+            ))
+            .border_1()
+            .border_color(crate::theme::flatten(
+                gpui::black().opacity(if dark { 0.10 } else { 0.08 }),
+                thumb,
+            ))
+            // The rim highlight only belongs to the on state; it fades with
+            // the thumb's travel so switching off doesn't pop.
+            .when(self.theme.is_frost() && position > 0.001, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(1.6))
+                        .left(px(7.2))
+                        .w(px(9.6))
+                        .h(px(1.0))
+                        .opacity(position)
+                        .rounded_full()
+                        .bg(crate::theme::flatten(
+                            gpui::white().opacity(0.45),
+                            thumb_light,
+                        )),
                 )
-                .absolute()
-                .left(px(SWITCH_WIDTH - mark_centre - oval_w / 2.0))
-                .top(px((SWITCH_HEIGHT - mark_h) / 2.0))
-                .w(px(oval_w))
-                .h(px(mark_h))
             });
-        let thumb = crate::glass::knob(
-            div()
-                .absolute()
-                .top(px(SWITCH_THUMB_INSET))
-                .left(px(SWITCH_THUMB_INSET + SWITCH_TRAVEL * position))
-                .w(px(SWITCH_THUMB_WIDTH))
-                .h(px(SWITCH_THUMB))
-                .rounded_full(),
-            &self.theme,
-        );
         div()
             .relative()
             .w(px(SWITCH_WIDTH))
             .h(px(SWITCH_HEIGHT))
-            .child(rail)
-            .child(marks)
-            .child(thumb)
+            .child(track_element)
+            .child(thumb_element)
     }
 }
 
@@ -852,6 +915,45 @@ mod switch_tests {
             assert!(limits.top() >= px(Theme::TITLEBAR_HEIGHT));
             assert!(limits.bottom() <= pane.bottom());
         }
+    }
+
+    #[test]
+    fn switch_material_keeps_dark_accent_and_opaque_fills() {
+        use zeron_theme::SurfaceTreatment;
+
+        let mut dark = Theme::dark();
+        dark.surface_treatment = SurfaceTreatment::Opaque;
+        let dark_on = switch_track_color(&dark, true);
+        assert_eq!(dark_on.a, 1.0);
+        assert!(dark_on.l < dark.accent_strong.l);
+        assert_eq!(switch_track_color(&dark, false).a, 1.0);
+        assert_eq!(switch_thumb_color(&dark).a, 1.0);
+        assert_eq!(
+            switch_surface_tones(&dark, dark_on, false),
+            (dark_on, dark_on)
+        );
+        let opaque_off = switch_track_color(&dark, false);
+
+        dark.surface_treatment = SurfaceTreatment::Frosted;
+        assert_eq!(switch_track_color(&dark, true), dark_on);
+        assert_eq!(switch_track_color(&dark, false).a, 1.0);
+        assert_eq!(switch_thumb_color(&dark).a, 1.0);
+        assert_ne!(switch_track_color(&dark, false), opaque_off);
+        for (base, thumb) in [(dark_on, false), (switch_thumb_color(&dark), true)] {
+            let (light, shade) = switch_surface_tones(&dark, base, thumb);
+            assert_eq!((light.a, shade.a), (1.0, 1.0));
+            assert!(light.l > base.l && shade.l < base.l);
+        }
+
+        let mut light = Theme::light();
+        light.surface_treatment = SurfaceTreatment::Opaque;
+        assert_eq!(switch_track_color(&light, true).a, 1.0);
+        assert!(switch_track_color(&light, true).l > light.accent.l);
+        let light_on = switch_track_color(&light, true);
+        assert_eq!(
+            switch_surface_tones(&light, light_on, false),
+            (light_on, light_on)
+        );
     }
 
     #[test]

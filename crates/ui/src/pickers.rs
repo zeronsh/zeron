@@ -539,6 +539,10 @@ pub struct Pickers {
     compact_control: compact::CompactControl,
     effort_dragging: bool,
     compact_motion: compact::CompactMotion,
+    /// The model list's harness strip scrolls sideways when it overflows;
+    /// the viewed chip is kept in view as the list scrolls.
+    compact_strip_scroll: gpui::ScrollHandle,
+    compact_strip_viewed: Option<usize>,
     compact_keyboard: bool,
     effort_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     open: popover::Popup<PickerKind>,
@@ -773,6 +777,8 @@ impl Pickers {
             compact_control: compact::CompactControl::default(),
             effort_dragging: false,
             compact_motion: compact::CompactMotion::default(),
+            compact_strip_scroll: gpui::ScrollHandle::new(),
+            compact_strip_viewed: None,
             compact_keyboard: false,
             effort_bounds: None,
             config: DraftConfig::default(),
@@ -2039,15 +2045,6 @@ impl Pickers {
     /// icon and then the model.
     fn activate_model_index(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(row) = self.model_rows(cx).get(ix).cloned() else {
-            if self.compact_model_picker(cx) && self.compact_model_list {
-                if let Some(status) = ix
-                    .checked_sub(self.model_rows_len(cx))
-                    .and_then(|index| self.compact_catalog_statuses(cx).get(index).cloned())
-                    .filter(|status| status.error.is_some())
-                {
-                    self.ensure_models(status.harness, true, cx);
-                }
-            }
             return;
         };
         if row.selected_only {
@@ -2664,7 +2661,7 @@ impl Pickers {
                     Some(PickerKind::HarnessModel) => {
                         self.model_rows_len(cx)
                             + if self.compact_model_picker(cx) {
-                                self.compact_catalog_statuses(cx).len()
+                                0
                             } else {
                                 self.setting_groups(cx).len()
                             }
@@ -2680,13 +2677,7 @@ impl Pickers {
                 // the traits chips below live in the pinned tray and never
                 // need scrolling into view.
                 if self.open_kind() == Some(PickerKind::HarnessModel)
-                    && self.active
-                        < self.model_rows_len(cx)
-                            + if self.compact_model_picker(cx) {
-                                self.compact_catalog_statuses(cx).len()
-                            } else {
-                                0
-                            }
+                    && self.active < self.model_rows_len(cx)
                 {
                     self.model_scroll
                         .scroll_to_item(self.active, gpui::ScrollStrategy::Nearest);
@@ -2947,13 +2938,9 @@ impl Pickers {
             })
             .when(!label_loading, |el| {
                 el.child(if resizing {
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(label)
+                    resizing_chip_text(format!("{id}-label").into(), 1.0, None, label)
                 } else {
-                    div().min_w_0().truncate().child(label)
+                    div().min_w_0().truncate().child(label).into_any_element()
                 })
             })
             // The effort half of the combined model+effort chip (and the space
@@ -2962,17 +2949,17 @@ impl Pickers {
             // pressure the suffix yields FIRST (large shrink factor) so the
             // model name — the run's identity — truncates last.
             .when_some(suffix, |el, (suffix, tint)| {
-                let suffix_el = div()
-                    .flex_shrink(1000.0)
-                    .min_w_0()
-                    .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7)));
+                let color = tint.unwrap_or(theme.text_muted.opacity(0.7));
                 el.child(if resizing {
-                    suffix_el
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(suffix)
+                    resizing_chip_text(format!("{id}-suffix").into(), 1000.0, Some(color), suffix)
                 } else {
-                    suffix_el.truncate().child(suffix)
+                    div()
+                        .flex_shrink(1000.0)
+                        .min_w_0()
+                        .text_color(color)
+                        .truncate()
+                        .child(suffix)
+                        .into_any_element()
                 })
             })
     }
@@ -3754,9 +3741,7 @@ impl Pickers {
         let height = self.menu_geometry().height.min(self.open_model_height);
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
         let list_height = if compact {
-            compact::compact_list_height(
-                self.model_rows_len(cx) + self.compact_catalog_statuses(cx).len(),
-            )
+            compact::compact_list_height(self.model_rows_len(cx))
             .min((height - 80.0).max(0.0))
         } else {
             list_height
@@ -3960,35 +3945,18 @@ impl Pickers {
         //    (field report: the un-virtualized stack was the picker's lag).
         //    Keyboard nav scrolls via the UniformListScrollHandle.
         let effective_models = effective.and_then(|h| self.models.get(&h));
-        let catalog_statuses = if compact {
-            self.compact_catalog_statuses(cx)
-        } else {
-            Vec::new()
-        };
-        let list_count = rows.len() + catalog_statuses.len();
-        let model_list: Option<AnyElement> = if list_count > 0 {
+        let model_list: Option<AnyElement> = if !rows.is_empty() {
             let entity = cx.entity();
             let row_data = rows.clone();
             Some(
                 gpui::uniform_list(
                     "model-menu-scroll",
-                    list_count,
+                    rows.len(),
                     move |range, _window, app| {
                         entity.update(app, |this, cx| {
                             range
                                 .filter_map(|ix| {
-                                    row_data
-                                        .get(ix)
-                                        .map(|row| this.render_model_row(ix, row, cx))
-                                        .or_else(|| {
-                                            catalog_statuses.get(ix - row_data.len()).map(
-                                                |status| {
-                                                    this.render_compact_catalog_status(
-                                                        ix, status, cx,
-                                                    )
-                                                },
-                                            )
-                                        })
+                                    row_data.get(ix).map(|row| this.render_model_row(ix, row, cx))
                                 })
                                 .collect::<Vec<AnyElement>>()
                         })
@@ -4497,11 +4465,19 @@ impl Pickers {
     }
 
     /// The tray's settings. A model configured in place keeps them in its
-    /// hover card only.
+    /// hover card only — except in the compact picker, whose panel is the
+    /// one place the selected model's settings live.
     fn setting_groups(&self, cx: &App) -> Vec<SettingGroup> {
         // Titles always run at minimal reasoning with no model options.
-        if self.title.is_some() || self.selected_model(cx).is_some_and(configured_in_place) {
+        if self.title.is_some() {
             return Vec::new();
+        }
+        if self.selected_model(cx).is_some_and(configured_in_place) {
+            return if self.compact_model_picker(cx) {
+                card_order(self.live_groups(cx))
+            } else {
+                Vec::new()
+            };
         }
         self.live_groups(cx)
     }
@@ -5038,11 +5014,15 @@ impl Pickers {
                     .child(row),
             );
         }
+        // The compact panel's own inset already closes the card below the
+        // last row; a second one left the bottom twice as deep as the sides.
+        let compact = tray && self.compact_model_picker(cx);
         div()
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .py(px(popover::CARD_INSET))
+            .pt(px(popover::CARD_INSET))
+            .when(!compact, |el| el.pb(px(popover::CARD_INSET)))
             .children(rows)
             .into_any_element()
     }
@@ -5558,21 +5538,62 @@ fn model_menu_budgets(height: f32, setting_count: usize) -> (f32, f32) {
     (body - tray, tray)
 }
 
+/// Chip text while the chip's width animates: clipped rather than
+/// ellipsized (an ellipsis would flicker in and out each frame), with the
+/// clip edge faded so a half-shown glyph never ends in a hard cut. The ramp
+/// is as wide as the hidden text, so it is zero exactly at the clip edge.
+fn resizing_chip_text(
+    id: SharedString,
+    shrink: f32,
+    color: Option<gpui::Hsla>,
+    text: SharedString,
+) -> AnyElement {
+    let overflow = gpui::ScrollHandle::new();
+    crate::edge_fade::edge_faded(
+        16.0,
+        false,
+        false,
+        div()
+            .id(id)
+            .flex_shrink(shrink)
+            .min_w_0()
+            .overflow_hidden()
+            .track_scroll(&overflow)
+            .flex()
+            .when_some(color, |el, color| el.text_color(color))
+            .child(div().flex_none().whitespace_nowrap().child(text)),
+    )
+    .fade_right(true)
+    .fade_scroll_x(&overflow)
+    .into_any_element()
+}
+
 /// Fast mode's `(on, off)` choices, whatever form a harness gives it: a
-/// `fastMode`/`fast_mode` toggle, or a tier/speed option offering `fast`
-/// beside its default. Every model then gets the same fast-mode UI.
+/// `fastMode`/`fast_mode` on/off toggle (Claude), Cursor's `fast` true/false,
+/// or a tier/speed option offering `fast` (Codex, Devin). Off is the default
+/// when fast isn't, else the other choice — Cursor runs some models fast by
+/// default. Every model then gets the same fast-mode UI.
 fn fast_mode_values(option: &zeron_proto::ModelOption) -> Option<(&str, &str)> {
     let has = |id: &str| option.choices.iter().any(|choice| choice.id == id);
-    if matches!(option.id.as_str(), "fastMode" | "fast_mode") && has("on") {
-        let off = if option.default_choice == "on" {
-            "off"
-        } else {
-            option.default_choice.as_str()
-        };
-        return (option.default_choice != "on").then_some(("on", off));
-    }
-    (has("fast") && option.default_choice != "fast")
-        .then_some(("fast", option.default_choice.as_str()))
+    let on = if matches!(option.id.as_str(), "fastMode" | "fast_mode") && has("on") {
+        "on"
+    } else if option.id == "fast" && has("true") {
+        "true"
+    } else if has("fast") {
+        "fast"
+    } else {
+        return None;
+    };
+    let off = if option.default_choice != on && has(&option.default_choice) {
+        option.default_choice.as_str()
+    } else {
+        option
+            .choices
+            .iter()
+            .map(|choice| choice.id.as_str())
+            .find(|id| *id != on)?
+    };
+    Some((on, off))
 }
 
 /// Attach the (single) open popover above a selector trigger.
@@ -5831,7 +5852,7 @@ impl Render for Pickers {
                 chip.child(motion::fast_tier(
                     "composer-fast-tier",
                     div().flex_none().child(
-                        crate::icons::icon(crate::icons::FAST_TIER)
+                        crate::icons::icon(crate::icons::FAST_TIER_BOLD)
                             .size(px(13.0))
                             .text_color(theme.accent),
                     ),
@@ -6418,13 +6439,31 @@ mod tests {
             fast_mode_values(&option("fast_mode", &["off", "on"], "off")),
             Some(("on", "off"))
         );
-        // Not fast mode: other toggles, or fast already the default.
+        // Cursor's true/false switch, off by default (Opus) and on by
+        // default (Grok, Composer): both still toggle between the two.
+        assert_eq!(
+            fast_mode_values(&option("fast", &["false", "true"], "false")),
+            Some(("true", "false"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("fast", &["false", "true"], "true")),
+            Some(("true", "false"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("serviceTier", &["default", "fast"], "fast")),
+            Some(("fast", "default"))
+        );
+        // Not fast mode: other toggles, including Cursor's true/false ones.
         assert_eq!(
             fast_mode_values(&option("thinking", &["off", "on"], "off")),
             None
         );
         assert_eq!(
-            fast_mode_values(&option("serviceTier", &["default", "fast"], "fast")),
+            fast_mode_values(&option("thinking", &["false", "true"], "true")),
+            None
+        );
+        assert_eq!(
+            fast_mode_values(&option("contextWindow", &["200k", "1m"], "200k")),
             None
         );
     }
@@ -7790,7 +7829,114 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_catalog_failures_remain_visible_beside_ready_models(cx: &mut gpui::TestAppContext) {
+    fn compact_panel_lists_settings_of_models_configured_in_place(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let option = |id: &str, label: &str, choices: &[(&str, &str)]| ModelOption {
+            id: id.into(),
+            label: label.into(),
+            default_choice: choices[0].0.into(),
+            choices: choices
+                .iter()
+                .map(|(id, label)| ModelOptionChoice {
+                    id: (*id).into(),
+                    label: (*label).into(),
+                })
+                .collect(),
+        };
+        handle
+            .update(cx, |pickers, _, cx| {
+                let mut fusion = bare_model("fusion", "Fusion");
+                fusion.reasoning_levels = vec![ReasoningLevel::Medium, ReasoningLevel::High];
+                fusion.options = vec![
+                    option("sidekick", "Sidekick", &[("swe-2", "SWE-2"), ("swe-3", "SWE-3")]),
+                    option("lead", "Lead", &[("fable", "Fable"), ("sol", "Sol")]),
+                ];
+                pickers.config.harness = Some(HarnessId::Devin);
+                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Devin, "Devin")]);
+                pickers.models.insert(
+                    HarnessId::Devin,
+                    Loadable::Ready(vec![bare_model("adaptive", "Adaptive"), fusion]),
+                );
+                pickers.pick_model("fusion".into(), cx);
+                // No hover card in the compact panel: Lead leads, as in the card.
+                let fast = pickers.fast_option_id(cx);
+                let visible: Vec<_> = pickers
+                    .setting_groups(cx)
+                    .into_iter()
+                    .filter(|g| Pickers::compact_option_visible(&g.id, fast.as_deref()))
+                    .map(|g| g.id)
+                    .collect();
+                assert_eq!(
+                    visible,
+                    [
+                        ModelSetting::Option("lead".into()),
+                        ModelSetting::Option("sidekick".into())
+                    ]
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_fast_button_toggles_cursor_fast_by_default_models(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        handle
+            .update(cx, |pickers, _, cx| {
+                let mut grok = bare_model("grok-4.6", "Grok 4.6");
+                grok.options = vec![ModelOption {
+                    id: "fast".into(),
+                    label: "Fast".into(),
+                    default_choice: "true".into(),
+                    choices: [("false", "false"), ("true", "Fast\u{200b}")]
+                        .iter()
+                        .map(|(id, label)| ModelOptionChoice {
+                            id: (*id).into(),
+                            label: (*label).into(),
+                        })
+                        .collect(),
+                }];
+                pickers.config.harness = Some(HarnessId::Cursor);
+                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Cursor, "Cursor")]);
+                pickers
+                    .models
+                    .insert(HarnessId::Cursor, Loadable::Ready(vec![grok]));
+                pickers.pick_model("grok-4.6".into(), cx);
+                // On by default: the button starts lit and turning it off is
+                // an explicit pick; turning it back on returns to the default.
+                let (option, next, default, fast) = pickers.compact_fast_choice(cx).unwrap();
+                assert_eq!((next.as_str(), default, fast), ("false", false, true));
+                pickers.pick_option(option, next, default, cx);
+                let (option, next, default, fast) = pickers.compact_fast_choice(cx).unwrap();
+                assert_eq!((next.as_str(), default, fast), ("true", true, false));
+                pickers.pick_option(option, next, default, cx);
+                assert!(pickers.compact_fast_choice(cx).unwrap().3);
+                assert!(!pickers.explicit_options(cx).contains_key("fast"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_list_hides_loading_and_failed_harnesses(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
@@ -7822,21 +7968,15 @@ mod tests {
             .update(cx, |picker, window, cx| {
                 picker.open_model_menu(window, cx);
                 picker.show_compact_models(cx);
-                let statuses = picker.compact_catalog_statuses(cx);
-                assert_eq!(statuses.len(), 2);
-                assert_eq!(statuses[0].harness, HarnessId::ClaudeCode);
-                assert_eq!(statuses[0].error.as_deref(), Some("Catalog timed out"));
-                assert!(statuses[1].error.is_none());
                 assert_eq!(picker.model_rows_len(cx), 1);
             })
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
+        // Only the ready model is navigable: no status rows follow it.
         cx.simulate_keystrokes(handle.into(), "down");
         handle
-            .read_with(cx, |picker, _| {
-                assert_eq!(picker.active, 1, "Retry row must be keyboard reachable")
-            })
+            .read_with(cx, |picker, _| assert_eq!(picker.active, 0))
             .unwrap();
         handle
             .update(cx, |picker, _, cx| {
@@ -7846,15 +7986,6 @@ mod tests {
                 );
                 picker.catalog_rev += 1;
                 assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.compact_catalog_statuses(cx).len(), 1);
-                picker.state.update(cx, |state, cx| {
-                    state.selected_chat = Some("thread".into());
-                    cx.notify();
-                });
-                assert!(
-                    picker.compact_catalog_statuses(cx).is_empty(),
-                    "Other harness errors must stay hidden in-thread"
-                );
             })
             .unwrap();
     }

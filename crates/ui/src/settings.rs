@@ -955,7 +955,7 @@ impl Default for UiSettings {
             composer_send_behavior: ComposerSendBehavior::default(),
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
-            compact_model_picker: false,
+            compact_model_picker: true,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -1786,16 +1786,16 @@ mod tests {
     }
 
     #[test]
-    fn compact_model_picker_is_opt_in_and_persists() {
+    fn compact_model_picker_is_default_and_opt_out_persists() {
         let legacy: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(!legacy.compact_model_picker);
+        assert!(legacy.compact_model_picker);
         let settings = UiSettings {
-            compact_model_picker: true,
+            compact_model_picker: false,
             ..legacy
         };
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
-        assert!(loaded.compact_model_picker);
+        assert!(!loaded.compact_model_picker);
     }
 
     #[test]

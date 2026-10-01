@@ -50,8 +50,10 @@ macro_rules! icon_assets {
 icon_assets![
     (PROJECT_DEFAULT, "project-default"),
     (REMOTE_SERVER, "remote-server"),
-    // Service-tier bolt, drawn in the toolbar family's linear weight.
+    // Service-tier bolt, drawn in the toolbar family's linear weight; the
+    // filled twin marks fast mode on.
     (FAST_TIER, "fast-tier"),
+    (FAST_TIER_BOLD, "fast-tier-bold"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (SUN, "sun"),

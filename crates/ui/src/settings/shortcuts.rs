@@ -594,6 +594,45 @@ impl Render for ShortcutsPage {
                         cx.notify();
                     })),
             );
+        let compact_model_picker = crate::settings::compact_model_picker(cx);
+        let compact_model_picker_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(&theme, "Compact model picker"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![
+                            div()
+                                .child("Adjust effort with a slider, then open the model list when needed.")
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(&theme, compact_model_picker, "compact-model-picker")
+                    .id("compact-model-picker-toggle")
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Compact model picker")
+                    .aria_toggled(if compact_model_picker {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Debounced,
+                            cx,
+                            |settings| settings.compact_model_picker = !compact_model_picker,
+                        );
+                        cx.refresh_windows();
+                        cx.notify();
+                    })),
+            );
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -655,6 +694,7 @@ impl Render for ShortcutsPage {
                                         widgets::section_card(&theme)
                                             .child(send_behavior_row)
                                             .child(compact_mode_row)
+                                            .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
                                     )
                                     .child(self.thread_naming.clone()),

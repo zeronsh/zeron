@@ -10,13 +10,6 @@ pub(super) enum CompactControl {
     Option(ModelSetting),
 }
 
-#[derive(Clone)]
-pub(super) struct CatalogStatus {
-    pub harness: HarnessId,
-    pub name: String,
-    pub error: Option<String>,
-}
-
 pub(super) const COMPACT_WIDTH: f32 = 256.0;
 /// One-line model rows (plus the 2px gap) so about seven fit at once.
 pub(super) const COMPACT_ROW_HEIGHT: f32 = 32.0;
@@ -47,17 +40,34 @@ const FILL_PAST: f32 = RAIL_HEIGHT / 2.0;
 /// corners. 8pt of padding around the two-line title puts its text 12pt
 /// from the card's top and leading edges.
 const HEADER_HEIGHT: f32 = 48.0;
+/// A model without an effort ladder titles the header with its name alone.
+const HEADER_HEIGHT_SINGLE: f32 = 36.0;
 /// Flush with the card inset, a 15pt glyph centred in 32pt ends 12pt from
 /// the card edge: the slider rail's end.
 const FAST_BUTTON_WIDTH: f32 = 32.0;
 /// The header inside the card inset, then the slider block and the space
 /// above the option rows. The slider's 4pt below its box leaves the rail
 /// 12pt from the card's bottom when no options follow.
-const HEADER_BLOCK: f32 = 2.0 * popover::CARD_INSET + HEADER_HEIGHT;
+fn header_block(effort: bool) -> f32 {
+    2.0 * popover::CARD_INSET
+        + if effort {
+            HEADER_HEIGHT
+        } else {
+            HEADER_HEIGHT_SINGLE
+        }
+}
 const SLIDER_TOP: f32 = 2.0;
 const SLIDER_BOTTOM: f32 = 4.0;
 const EFFORT_BLOCK: f32 = SLIDER_TOP + SLIDER_HEIGHT + SLIDER_BOTTOM;
 const OPTIONS_GAP: f32 = 4.0;
+/// The card's 1pt border, top and bottom, sits inside its height.
+const CARD_BORDERS: f32 = 2.0;
+/// Option rows (26pt plus a 2pt gap) all show up to this many, then scroll.
+const OPTIONS_MAX_ROWS: usize = 6;
+/// The rows' 4pt top inset, then the rows; the panel's inset closes below.
+fn options_height(count: usize) -> f32 {
+    2.0 + count.min(OPTIONS_MAX_ROWS) as f32 * 28.0
+}
 
 #[derive(Default)]
 pub(super) struct CompactMotion {
@@ -237,13 +247,6 @@ impl Pickers {
                         )
                     }),
             )
-            .child(div().size(px(14.0)).when(selected, |el| {
-                el.child(
-                    crate::icons::icon(crate::icons::CHECK)
-                        .size(px(14.0))
-                        .text_color(theme.accent),
-                )
-            }))
             .child(
                 div()
                     .id(("model-star", ix))
@@ -338,7 +341,7 @@ impl Pickers {
         groups
     }
 
-    pub(super) fn compact_model_back_header(&self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn compact_model_back_header(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = Theme::of(cx).for_popup();
         let searching = !self.search.read(cx).text().trim().is_empty();
         let groups = if searching {
@@ -357,12 +360,26 @@ impl Pickers {
             .rev()
             .find(|(_, start)| *start <= top)
             .map(|(group, _)| *group);
-        let strip = (groups.len() > 1).then(|| {
-            div()
-                .flex_none()
+        // Many harnesses overflow the strip: keep the viewed chip in sight
+        // as the list scrolls, without fighting a manual sideways scroll.
+        let viewed_ix = groups.iter().position(|(group, _)| current == Some(*group));
+        if viewed_ix != self.compact_strip_viewed {
+            self.compact_strip_viewed = viewed_ix;
+            if let Some(ix) = viewed_ix {
+                self.compact_strip_scroll.scroll_to_item(ix);
+            }
+        }
+        let strip = (!groups.is_empty()).then(|| {
+            let chips = div()
+                .id("compact-group-strip")
+                .flex_1()
+                .min_w_0()
+                .h_full()
                 .flex()
                 .items_center()
                 .gap(px(2.0))
+                .overflow_x_scroll()
+                .track_scroll(&self.compact_strip_scroll)
                 .children(groups.into_iter().map(|(group, start)| {
                     let viewed = current == Some(group);
                     let (icon, tint, name): (&'static str, Option<gpui::Hsla>, SharedString) =
@@ -385,6 +402,7 @@ impl Pickers {
                         .role(gpui::Role::Button)
                         .aria_label(SharedString::from(format!("Jump to {name}")))
                         .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
+                        .flex_none()
                         .size(px(26.0))
                         .rounded(px(7.0))
                         .flex()
@@ -406,7 +424,13 @@ impl Pickers {
                         .child(crate::icons::icon(icon).size(px(14.0)).text_color(
                             tint.unwrap_or(if viewed { theme.text } else { theme.text_muted }),
                         ))
-                }))
+                }));
+            // Each side fades over the chips hidden past it, up to one chip
+            // pitch, reaching zero exactly at the clip edge.
+            crate::edge_fade::edge_faded(28.0, false, false, chips)
+                .fade_left(true)
+                .fade_right(true)
+                .fade_scroll_x(&self.compact_strip_scroll)
         });
         div()
             .h(px(40.0))
@@ -420,8 +444,7 @@ impl Pickers {
                     .id("compact-model-back")
                     .role(gpui::Role::Button)
                     .aria_label("Back to effort")
-                    .flex_1()
-                    .min_w_0()
+                    .flex_none()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.compact_control = CompactControl::Model;
                         this.compact_model_list = false;
@@ -432,8 +455,7 @@ impl Pickers {
                         crate::icons::icon(crate::icons::ALT_ARROW_LEFT)
                             .size(px(14.0))
                             .text_color(theme.text_muted),
-                    )
-                    .child(div().truncate().child("Models")),
+                    ),
             )
             .children(strip)
     }
@@ -450,10 +472,11 @@ impl Pickers {
             .and_then(|v| v.as_str())
             .unwrap_or(&option.default_choice)
             == on;
+        let next = if fast { off } else { on };
         Some((
             option.id.clone(),
-            if fast { off.to_owned() } else { on.to_owned() },
-            fast,
+            next.to_owned(),
+            next == option.default_choice,
             fast,
         ))
     }
@@ -530,22 +553,18 @@ impl Pickers {
             .iter()
             .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
             .count();
-        let panel_height = HEADER_BLOCK
-            + if self.trait_ladder(cx).is_empty() {
-                0.0
-            } else {
-                EFFORT_BLOCK
-            }
+        let effort = !self.trait_ladder(cx).is_empty();
+        let panel_height = CARD_BORDERS
+            + header_block(effort)
+            + if effort { EFFORT_BLOCK } else { 0.0 }
             + if options == 0 {
                 0.0
             } else {
-                OPTIONS_GAP + (6.0 + options as f32 * 28.0).min(64.0)
+                OPTIONS_GAP + options_height(options)
             };
         let target = self.menu_geometry().height.min(if self.compact_model_list {
             // Back header and search (40 each) above the list.
-            80.0 + compact_list_height(
-                self.model_rows_len(cx) + self.compact_catalog_statuses(cx).len(),
-            ) + 2.0
+            80.0 + compact_list_height(self.model_rows_len(cx)) + CARD_BORDERS
         } else {
             panel_height
         });
@@ -669,77 +688,6 @@ impl Pickers {
         cx.stop_propagation();
     }
 
-    pub(super) fn compact_catalog_statuses(&self, cx: &App) -> Vec<CatalogStatus> {
-        self.rail_descriptors(cx)
-            .into_iter()
-            .filter_map(|descriptor| {
-                let error = match self.models.get(&descriptor.id) {
-                    Some(Loadable::Ready(_)) => return None,
-                    Some(Loadable::Error(error)) => Some(error.clone()),
-                    _ => None,
-                };
-                Some(CatalogStatus {
-                    harness: descriptor.id,
-                    name: descriptor.name,
-                    error,
-                })
-            })
-            .collect()
-    }
-
-    pub(super) fn render_compact_catalog_status(
-        &self,
-        ix: usize,
-        status: &CatalogStatus,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = Theme::of(cx).for_popup();
-        let harness = status.harness;
-        let failed = status.error.is_some();
-        let title: SharedString = format!(
-            "{} — {}",
-            status.name,
-            if failed {
-                "Models unavailable"
-            } else {
-                "Loading models…"
-            }
-        )
-        .into();
-        let mut row = popover::menu_row(&theme, self.active == ix, format!("catalog-status-{ix}"))
-            .id(("catalog-status", ix))
-            .h(px(48.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().truncate().child(title))
-                    .when_some(status.error.clone(), |el, error| {
-                        el.child(
-                            div()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .child(error),
-                        )
-                    }),
-            );
-        if failed {
-            let error: SharedString = status.error.clone().unwrap_or_default().into();
-            row = row
-                .role(gpui::Role::Button)
-                .aria_label(SharedString::from(format!("Retry {} models", status.name)))
-                .aria_description(error.clone())
-                .tooltip(move |_, cx| cx.new(|_| PickerHint(error.clone())).into())
-                .on_click(cx.listener(move |this, _, _, cx| this.ensure_models(harness, true, cx)))
-                .child(div().text_color(theme.accent).child("Retry"));
-        }
-        div()
-            .pb(px(popover::MENU_GAP))
-            .child(row)
-            .into_any_element()
-    }
-
     pub(super) fn render_compact_model_panel(
         &mut self,
         window: &mut Window,
@@ -848,9 +796,19 @@ impl Pickers {
                     .flex()
                     .items_center()
                     .gap(px(3.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .line_height(px(15.0))
-                    .text_color(motion::mix(theme.text_muted, theme.text, hover))
+                    .map(|el| {
+                        if levels.is_empty() {
+                            // The name is the whole title: no effort above it.
+                            el.text_size(crate::typography::ui_rems(14.0))
+                                .line_height(px(17.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                        } else {
+                            el.text_size(crate::typography::ui_rems(12.0))
+                                .line_height(px(15.0))
+                                .text_color(motion::mix(theme.text_muted, theme.text, hover))
+                        }
+                    })
                     .child(div().min_w_0().truncate().child(label.clone()))
                     .child(
                         // Leans 3pt toward the list and firms up on hover.
@@ -877,6 +835,8 @@ impl Pickers {
             if fading {
                 window.request_animation_frame();
             }
+            let fast_key: SharedString = format!("compact-fast-{}", cx.entity_id()).into();
+            let fast_hover = motion::hover_t(&fast_key);
             fast_button = Some(
                 div()
                     .id("compact-fast")
@@ -900,8 +860,8 @@ impl Pickers {
                         })
                         .into()
                     })
-                    // A faint neutral plate marks it as a control in both
-                    // states; the glyph's colour is the state, and the
+                    // Bare like the model button beside it: a plate only on
+                    // hover. The glyph's colour is the state, and the
                     // slider's fill carries the accent.
                     .w(px(FAST_BUTTON_WIDTH))
                     .h_full()
@@ -911,8 +871,8 @@ impl Pickers {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .bg(crate::theme::ink(0.04))
-                    .hover(|s| s.bg(crate::theme::ink(0.07)))
+                    .bg(crate::theme::ink(0.05 * fast_hover))
+                    .on_hover(motion::hover_listener(fast_key))
                     .when(fast_focus, |el| {
                         el.aria_active_descendant().shadow(focus_outline(&theme))
                     })
@@ -920,17 +880,43 @@ impl Pickers {
                         this.compact_keyboard = false;
                         this.pick_option(option.clone(), choice.clone(), default, cx);
                     }))
-                    .child(
-                        crate::icons::icon(crate::icons::FAST_TIER)
+                    .child({
+                        let color = motion::mix(
+                            motion::mix(theme.text_muted, theme.text, fast_hover),
+                            theme.accent,
+                            fast_t,
+                        );
+                        // On fills the bolt: the solid twin fades in over the
+                        // outline, which shares its silhouette.
+                        div()
+                            .relative()
                             .size(px(15.0))
-                            .text_color(motion::mix(theme.text_muted, theme.accent, fast_t)),
-                    ),
+                            .child(
+                                crate::icons::icon(crate::icons::FAST_TIER)
+                                    .size(px(15.0))
+                                    .text_color(color),
+                            )
+                            .when(fast_t > 0.0, |el| {
+                                el.child(
+                                    crate::icons::icon(crate::icons::FAST_TIER_BOLD)
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size(px(15.0))
+                                        .text_color(color.opacity(fast_t)),
+                                )
+                            })
+                    }),
             );
         }
         // Flush with the card inset, like the option rows, so the title's
         // text and the rows' labels share one leading edge.
         let header = div()
-            .h(px(HEADER_HEIGHT))
+            .h(px(if levels.is_empty() {
+                HEADER_HEIGHT_SINGLE
+            } else {
+                HEADER_HEIGHT
+            }))
             .flex_none()
             .flex()
             .gap(px(popover::CARD_INSET))
@@ -1119,8 +1105,10 @@ impl Pickers {
         if option_count > 0 {
             let options = self.render_traits_sections(cx);
             let scrollbar = popover::rail(self, "compact-options-scrollbar", &theme, cx);
-            let chrome =
-                HEADER_BLOCK + if levels.is_empty() { 0.0 } else { EFFORT_BLOCK } + OPTIONS_GAP;
+            let chrome = CARD_BORDERS
+                + header_block(!levels.is_empty())
+                + if levels.is_empty() { 0.0 } else { EFFORT_BLOCK }
+                + OPTIONS_GAP;
             // Space, not a rule, separates the options from the effort group.
             panel = panel.child(
                 div().mt(px(OPTIONS_GAP)).child(
@@ -1129,9 +1117,8 @@ impl Pickers {
                         .child(popover::faded_menu_list(
                             &self.menu_scroll,
                             popover::menu_scroll_list("compact-options", &self.menu_scroll)
-                                .max_h(px(
-                                    64.0_f32.min((self.menu_geometry().height - chrome).max(0.0))
-                                ))
+                                .max_h(px(options_height(option_count)
+                                    .min((self.menu_geometry().height - chrome).max(0.0))))
                                 .child(options),
                         ))
                         .children(scrollbar),
