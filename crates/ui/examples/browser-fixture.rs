@@ -1,3 +1,5 @@
+#[path = "browser-fixture/terminal_links.rs"]
+mod terminal_links;
 #[path = "browser-fixture/transcript_links.rs"]
 mod transcript_links;
 #[cfg(target_os = "linux")]
@@ -200,6 +202,9 @@ fn main() -> anyhow::Result<()> {
                 pause(cx, 1200).await;
                 if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
+                }
+                if std::env::var_os("ZERON_TERMINAL_LINK_FIXTURE_ONLY").is_some() {
+                    return terminal_links::exercise(window, &output, cx).await;
                 }
                 state.update(cx, |s, cx| {
                     let entries = serde_json::from_value(serde_json::json!([

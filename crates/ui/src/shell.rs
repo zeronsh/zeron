@@ -15777,6 +15777,17 @@ impl Shell {
         self.settings.right_pane_width = width;
         cx.notify();
     }
+    /// Open the bottom terminal drawer (as Cmd/Ctrl+J does) and return it.
+    pub fn fixture_open_terminal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalPanel> {
+        if !self.terminal_open(cx) {
+            self.toggle_terminal(window, cx);
+        }
+        self.terminal_panel(cx)
+    }
 }
 
 #[cfg(test)]
