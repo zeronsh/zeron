@@ -32,6 +32,18 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             self.showRoot(animated: true)
         }
         let args = ProcessInfo.processInfo.arguments
+        #if DEBUG
+        if args.contains("-native-codex") {
+            window.rootViewController = MainTabController.nav(NativeCodexViewController())
+            window.makeKeyAndVisible()
+            return
+        }
+        if args.contains("-native-agent-lab") {
+            window.rootViewController = MainTabController.nav(NativeAgentLabViewController())
+            window.makeKeyAndVisible()
+            return
+        }
+        #endif
         // `-wallpaper <path> [-wallpaper-effect ascii]`: set the wallpaper at
         // launch (screenshots, tests); `-wallpaper none` clears it.
         if let i = args.firstIndex(of: "-wallpaper"), i + 1 < args.count {
@@ -67,7 +79,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     /// The signed-in shell is up: refresh this phone's notification
     /// registration and open a session a notification was tapped for.
     private func shellShown() {
-        guard app.isSignedIn else { return }
+        guard app.client != nil else { return }
         if !app.isDemo { PushNotifications.shared.signedIn() }
         PushNotifications.shared.shellReady()
     }

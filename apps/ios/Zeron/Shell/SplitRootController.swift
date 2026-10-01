@@ -74,7 +74,7 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         if currentChatId == chatId, detail.viewControllers.first is SessionViewController { return }
         currentChatId = chatId
         sidebar.currentChatId = chatId
-        detail.setViewControllers([SessionViewController(app: app, chatId: chatId)], animated: false)
+        detail.setViewControllers([app.sessionScreen(chatId)], animated: false)
     }
 
     func presentNewSession(prompt: String?) {
@@ -96,7 +96,7 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             // handoff carries the composer and message across.
             self.currentChatId = chatId
             self.sidebar.currentChatId = chatId
-            let session = SessionViewController(app: self.app, chatId: chatId)
+            let session = self.app.sessionScreen(chatId)
             UIView.performWithoutAnimation {
                 self.detail.setViewControllers([session], animated: false)
                 self.view.layoutIfNeeded()
@@ -163,7 +163,7 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             let shown = (self.detail.viewControllers.first as? SessionViewController)?.chatId
             if let chatId = current {
                 if shown != chatId {
-                    self.detail.setViewControllers([SessionViewController(app: self.app, chatId: chatId)], animated: false)
+                    self.detail.setViewControllers([self.app.sessionScreen(chatId)], animated: false)
                 }
                 self.sidebar.currentChatId = chatId
             } else if self.detail.viewControllers.isEmpty {

@@ -2,8 +2,9 @@
 
 A UIKit viewport onto the zeron mesh, built on the Rust mobile core. The phone
 is a **peer device**: it mirrors the workspace registry, joins per-chat session
-rooms, and drives remote engines through the durable command ledger. No agent
-runs on the phone.
+rooms, and drives remote engines through the durable command ledger. The
+Native Codex provider also embeds the agent runtime on the phone; model inference
+still runs through OpenAI.
 
 **Rust decides what to paint and where; Swift paints, scrolls and handles
 gestures.** Everything in Rust is platform-neutral — the future Android app
@@ -67,6 +68,13 @@ Zeron/
    prefetched off the main thread.
 
 ## Launch arguments
+
+Native Codex is available from the normal new-session provider/model menu as **Native Codex**.
+Its chats appear in Sessions, with a progress bar during runtime startup. It embeds the Rust agent and uses a just-bash workspace;
+model inference still uses OpenAI. Composer controls include model, reasoning, and service tier.
+Import a project folder through the attachment menu, browse/edit workspace files, and export a copy to Files. See
+[`scripts/ios/native-agent/README.md`](../../scripts/ios/native-agent/README.md)
+for setup, tests, supported tools and current limitations.
 
 | Arg | Effect |
 | --- | --- |

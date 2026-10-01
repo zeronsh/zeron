@@ -2,8 +2,8 @@ import UIKit
 
 /// One session: virtualized transcript under a glass bottom stack (status
 /// pill, queue, composer or question panel) that rides the keyboard.
-final class SessionViewController: UIViewController, UIGestureRecognizerDelegate {
-    private let app: AppModel
+class SessionViewController: UIViewController, UIGestureRecognizerDelegate {
+    private let app: AppModel?
     let chatId: String
     private let source: SessionSource
     private lazy var relay = FrameRelay { [weak self] in self?.applyFrame() }
@@ -14,6 +14,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let queue = QueuePanel()
     private let pill = StatusPill()
     private let bottom = UIStackView()
+    private let loadingBar = UIProgressView(progressViewStyle: .bar)
+    private let loadingLabel = UILabel()
+    private let loadingStack = UIStackView()
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
     private let titleView = SessionTitleView()
     private var shown = SessionChrome()
@@ -24,6 +27,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         self.app = app
         self.chatId = chatId
         self.source = app.sessionSource(chatId)
+        super.init(nibName: nil, bundle: nil)
+        hidesBottomBarWhenPushed = true
+    }
+
+    init(source: SessionSource, chatId: String) {
+        self.app = nil
+        self.chatId = chatId
+        self.source = source
         super.init(nibName: nil, bundle: nil)
         hidesBottomBarWhenPushed = true
     }
@@ -40,6 +51,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.titleView = titleView
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu())
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "session-menu"
 
         list.frame = view.bounds
         list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -62,7 +74,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
         composer.attachMenu = { [weak self] in
             guard let self else { return UIMenu() }
-            return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
+            return self.attachmentMenu()
         }
         composer.onSend = { [weak self] text, images, mode in
             guard let self else { return .kept }
@@ -105,7 +117,15 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.translatesAutoresizingMaskIntoConstraints = false
         let pillRow = UIStackView(arrangedSubviews: [pill, UIView()])
         pillRow.axis = .horizontal
-        for v in [pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
+        loadingLabel.font = Fonts.ui(.sans, 13)
+        loadingLabel.textColor = Palette.secondary
+        loadingBar.accessibilityIdentifier = "native-codex-loading"
+        loadingStack.axis = .vertical
+        loadingStack.spacing = 6
+        loadingStack.addArrangedSubview(loadingLabel)
+        loadingStack.addArrangedSubview(loadingBar)
+        loadingStack.isHidden = true
+        for v in [loadingStack, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
         // Hidden panels start dematerialized so their first appearance grows in.
@@ -150,7 +170,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         source.onChange = { [weak self] in self?.render(animated: true) }
         source.attach(engine)
         render(animated: false)
-        app.markSeen(chatId)
+        app?.markSeen(chatId)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -290,7 +310,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             if tabBarController != nil { (splitViewController as? SplitRootController)?.sessionDidClose(chatId) }
             source.detach()
             engine.close()
-            app.markSeen(chatId)
+            app?.markSeen(chatId)
         }
     }
 
@@ -461,6 +481,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let old = shown
         shown = c
         titleView.set(title: c.title, subtitle: c.subtitle)
+        loadingStack.isHidden = c.loadingProgress == nil
+        loadingLabel.text = c.loadingLabel
+        if let progress = c.loadingProgress { loadingBar.setProgress(Float(progress), animated: animated) }
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
         composer.canSteer = c.canSteer
@@ -500,18 +523,22 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
-    private func sessionMenu() -> UIMenu {
+    func attachmentMenu() -> UIMenu {
+        AttachmentPicker.menu(host: self, limit: 8 - composer.images.count) { [weak self] in self?.composer.addImages($0) }
+    }
+
+    func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
-            guard let self else { return done([]) }
-            let vm = self.app.session(self.chatId)
+            guard let self, let app = self.app else { return done([]) }
+            let vm = app.session(self.chatId)
             let pinned = vm?.pinned ?? false
             done([
-                UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
+                UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in app.setPinned(self.chatId, !pinned) },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
-                    self.app.archive(self.chatId)
+                    app.archive(self.chatId)
                     // Beside the iPad sidebar there's nothing to pop back to.
                     if let split = self.splitViewController as? SplitRootController, !split.isCollapsed {
                         split.showDraft(prompt: nil, focus: false)

@@ -105,7 +105,7 @@ final class SessionCell: UICollectionViewListCell {
 
     func configure(_ vm: SessionRowVM) {
         self.vm = vm
-        harness.image = BrandMarks.image(for: vm.harness ?? "claude-code", side: Self.markSide)
+        harness.image = BrandMarks.image(for: vm.harness == "native-codex" ? "codex" : vm.harness ?? "claude-code", side: Self.markSide)
         title.text = vm.title
         title.font = Fonts.ui(vm.unseen ? .sansSemibold : .sansMedium, TypeScale.size(16.5))
         title.textColor = vm.unseen || vm.status != .idle ? Palette.text : Palette.text.withAlphaComponent(0.88)

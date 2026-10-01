@@ -3338,6 +3338,11 @@ public protocol TranscriptViewProtocol: AnyObject, Sendable {
      */
     func setDebugEntries(entries: [DebugEntry], working: Bool) 
     
+    /**
+     * Feed a local provider without flattening tool calls into markdown.
+     */
+    func setLocalEntries(entries: [LocalTranscriptEntry], working: Bool) 
+    
     func setViewport(width: Float, textScale: Float) 
     
     /**
@@ -3460,6 +3465,19 @@ open func setDebugEntries(entries: [DebugEntry], working: Bool)  {try! rustCall(
     uniffi_zeron_mobile_fn_method_transcriptview_set_debug_entries(
             self.uniffiCloneHandle(),
         FfiConverterSequenceTypeDebugEntry.lower(entries),
+        FfiConverterBool.lower(working),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Feed a local provider without flattening tool calls into markdown.
+     */
+open func setLocalEntries(entries: [LocalTranscriptEntry], working: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_set_local_entries(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeLocalTranscriptEntry.lower(entries),
         FfiConverterBool.lower(working),uniffiCallStatus
     )
 }
@@ -5680,6 +5698,141 @@ public func FfiConverterTypeLiveStatus_lift(_ buf: RustBuffer) throws -> LiveSta
 #endif
 public func FfiConverterTypeLiveStatus_lower(_ value: LiveStatus) -> RustBuffer {
     return FfiConverterTypeLiveStatus.lower(value)
+}
+
+
+public struct LocalTranscriptEntry: Equatable, Hashable {
+    public var id: String
+    public var user: Bool
+    public var text: String
+    public var streaming: Bool
+    public var tool: LocalTranscriptTool?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, user: Bool, text: String, streaming: Bool, tool: LocalTranscriptTool?) {
+        self.id = id
+        self.user = user
+        self.text = text
+        self.streaming = streaming
+        self.tool = tool
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalTranscriptEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalTranscriptEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalTranscriptEntry {
+        return
+            try LocalTranscriptEntry(
+                id: FfiConverterString.read(from: &buf), 
+                user: FfiConverterBool.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                streaming: FfiConverterBool.read(from: &buf), 
+                tool: FfiConverterOptionTypeLocalTranscriptTool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalTranscriptEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterBool.write(value.user, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterBool.write(value.streaming, into: &buf)
+        FfiConverterOptionTypeLocalTranscriptTool.write(value.tool, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalTranscriptEntry_lift(_ buf: RustBuffer) throws -> LocalTranscriptEntry {
+    return try FfiConverterTypeLocalTranscriptEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalTranscriptEntry_lower(_ value: LocalTranscriptEntry) -> RustBuffer {
+    return FfiConverterTypeLocalTranscriptEntry.lower(value)
+}
+
+
+/**
+ * Structured local-provider input; uses the same message parts as synced sessions.
+ */
+public struct LocalTranscriptTool: Equatable, Hashable {
+    public var name: String
+    public var argument: String
+    public var output: String?
+    public var resolved: Bool
+    public var isError: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, argument: String, output: String?, resolved: Bool, isError: Bool) {
+        self.name = name
+        self.argument = argument
+        self.output = output
+        self.resolved = resolved
+        self.isError = isError
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalTranscriptTool: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalTranscriptTool: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalTranscriptTool {
+        return
+            try LocalTranscriptTool(
+                name: FfiConverterString.read(from: &buf), 
+                argument: FfiConverterString.read(from: &buf), 
+                output: FfiConverterOptionString.read(from: &buf), 
+                resolved: FfiConverterBool.read(from: &buf), 
+                isError: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalTranscriptTool, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.argument, into: &buf)
+        FfiConverterOptionString.write(value.output, into: &buf)
+        FfiConverterBool.write(value.resolved, into: &buf)
+        FfiConverterBool.write(value.isError, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalTranscriptTool_lift(_ buf: RustBuffer) throws -> LocalTranscriptTool {
+    return try FfiConverterTypeLocalTranscriptTool.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalTranscriptTool_lower(_ value: LocalTranscriptTool) -> RustBuffer {
+    return FfiConverterTypeLocalTranscriptTool.lower(value)
 }
 
 
@@ -11619,6 +11772,30 @@ fileprivate struct FfiConverterOptionTypeInputRequest: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeLocalTranscriptTool: FfiConverterRustBuffer {
+    typealias SwiftType = LocalTranscriptTool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeLocalTranscriptTool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeLocalTranscriptTool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeProjectRef: FfiConverterRustBuffer {
     typealias SwiftType = ProjectRef?
 
@@ -12176,6 +12353,31 @@ fileprivate struct FfiConverterSequenceTypeLinkHit: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeLinkHit.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeLocalTranscriptEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [LocalTranscriptEntry]
+
+    public static func write(_ value: [LocalTranscriptEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLocalTranscriptEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LocalTranscriptEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LocalTranscriptEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLocalTranscriptEntry.read(from: &buf))
         }
         return seq
     }
@@ -13412,6 +13614,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_set_debug_entries() != 54762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_set_local_entries() != 26468) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_set_viewport() != 43528) {

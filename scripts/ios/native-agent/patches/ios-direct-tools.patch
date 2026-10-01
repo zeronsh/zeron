@@ -1,0 +1,35 @@
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 41ed018..3b512ed 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -73,6 +73,12 @@ pub(crate) fn tool_user_shell_type(
+ }
+ 
+ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
++    // Zeron's iOS host has no subprocess code-mode runtime. Model catalog hints
++    // must not hide its native dynamic tools behind a disabled executor.
++    #[cfg(target_os = "ios")]
++    if !turn_context.config.features.enabled(Feature::CodeModeHost) {
++        return ToolMode::Direct;
++    }
+     model_info.tool_mode.unwrap_or_else(|| {
+         if turn_context.config.features.enabled(Feature::CodeModeOnly) {
+             ToolMode::CodeModeOnly
+diff --git a/codex-rs/ext/image-generation/src/artifact.rs b/codex-rs/ext/image-generation/src/artifact.rs
+index 6c6fce0..5dc3c7a 100644
+--- a/codex-rs/ext/image-generation/src/artifact.rs
++++ b/codex-rs/ext/image-generation/src/artifact.rs
+@@ -39,8 +39,13 @@ pub(crate) fn image_generation_output_hint(
+     image_output_dir: impl Display,
+     image_output_path: impl Display,
+ ) -> Option<String> {
++    #[cfg(not(target_os = "ios"))]
+     let hint = format!(
+         "Generated images are saved to {image_output_dir} as {image_output_path} by default.\nIf you need to use a generated image at another path, copy it and leave the original in place unless the user explicitly asks you to delete it.\nThe generated image is already displayed to the user. There is no need to render it in the final response as a Markdown image or file link."
+     );
++    #[cfg(target_os = "ios")]
++    let hint = format!(
++        "Generated image saved privately at {image_output_path} (directory {image_output_dir}). It is NOT displayed inline in the mobile UI. Use mobile_shell with import_image and this PNG filename to save it into /workspace, then provide the workspace path. Do not use cp on this private path or tell the user the image is displayed above."
++    );
+     (hint.len() <= MAX_IMAGE_GENERATION_OUTPUT_HINT_BYTES).then_some(hint)
+ }

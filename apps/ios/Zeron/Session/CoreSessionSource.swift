@@ -183,7 +183,7 @@ final class CoreSessionSource: SessionSource {
 
     /// The row's raw text with its visible part replaced, keeping the hidden
     /// context after it. Blank edits stay blank (the host removes the row).
-    static func replacingVisible(in raw: String, visible: String, with edited: String) -> String {
+    nonisolated static func replacingVisible(in raw: String, visible: String, with edited: String) -> String {
         if edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || raw == visible { return edited }
         let body = raw.drop(while: \.isWhitespace)
         if body.hasPrefix(visible) { return edited + body.dropFirst(visible.count) }

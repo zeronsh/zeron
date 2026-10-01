@@ -50,6 +50,18 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let mark = UIImageView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
+    private let nativeProgress = UIProgressView(progressViewStyle: .bar)
+    private let nativeLoadingLabel = UILabel()
+    private var nativeLoadingStack = UIStackView()
+
+    private func updateNativeLoading() {
+        let native = NativeCodexSession.shared
+        let loading = draft.harness == "native-codex" && native.loadingProgress != nil
+        nativeLoadingStack.isHidden = !loading
+        nativeLoadingLabel.text = "Loading Native Codex…"
+        if let progress = native.loadingProgress { nativeProgress.setProgress(Float(progress), animated: true) }
+    }
+
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -137,13 +149,28 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         }
         composer.onChipTap = { _, _ in }
         composer.mentionSearch = { [weak self] q in
-            guard let self, let p = self.project else { return [] }
+            guard let self, self.draft.harness != "native-codex", let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
         }
         composer.onSend = { [weak self] text, images, _ in
             self?.create(text: text, images: images) ?? false ? .sent : .kept
         }
         view.addSubview(composer)
+        nativeLoadingStack = UIStackView(arrangedSubviews: [nativeLoadingLabel, nativeProgress])
+        nativeLoadingStack.axis = .vertical
+        nativeLoadingStack.spacing = 6
+        nativeLoadingStack.translatesAutoresizingMaskIntoConstraints = false
+        nativeLoadingLabel.font = Fonts.ui(.sans, 13)
+        nativeLoadingLabel.textColor = Palette.secondary
+        nativeProgress.accessibilityIdentifier = "native-codex-loading"
+        nativeLoadingStack.isHidden = true
+        view.addSubview(nativeLoadingStack)
+        NSLayoutConstraint.activate([
+            nativeLoadingStack.leadingAnchor.constraint(equalTo: composer.leadingAnchor, constant: 12),
+            nativeLoadingStack.trailingAnchor.constraint(equalTo: composer.trailingAnchor, constant: -12),
+            nativeLoadingStack.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -12)
+        ])
+        NativeCodexSession.shared.onLoadingChange = { [weak self] in self?.refreshChips() }
         heroStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24).isActive = true
         // The headline lives in the free space above the composer — from the
         // top of the page to the composer's top edge — centered there, so
@@ -233,7 +260,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func refreshChips() {
         var chips: [ComposerChip] = []
-        if let p = project {
+        if draft.harness == "native-codex" {
+            chips.append(ComposerChip(id: "host", title: "This iPhone", symbol: "iphone"))
+        } else if let p = project {
             chips.append(ComposerChip(id: "project", title: p.name, symbol: nil, icon: ProjectTile.image(name: p.name, colorIndex: p.colorIndex)))
             if p.git {
                 chips.append(ComposerChip(id: "branch", title: draft.worktree ? "New worktree" : (draft.branch ?? "Current branch"), symbol: nil, icon: BranchIcon.sized()))
@@ -246,20 +275,24 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
         // Never the harness name in place of a model: a model this host
         // hasn't listed still gets its catalog label.
-        let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
+        let modelTitle = draft.harness == "native-codex" ? "Native Codex" : model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
         chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
         }
+        if draft.harness == "native-codex" { chips += NativeCodexSession.shared.settingsChips(draft: true) }
         composer.chips = chips
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
-            "host": { [weak self] in self?.hostMenu() },
+            "host": { [weak self] in self?.draft.harness == "native-codex" ? nil : self?.hostMenu() },
             "branch": { [weak self] in self?.branchMenu() },
             "model": { [weak self] in self?.modelMenu() },
-            "effort": { [weak self] in self?.effortMenu() },
+            "effort": { [weak self] in self?.draft.harness == "native-codex" ? NativeCodexSession.shared.settingsMenu("effort", draft: true) : self?.effortMenu() },
+            "native-model": { NativeCodexSession.shared.settingsMenu("native-model", draft: true) },
+            "service-tier": { NativeCodexSession.shared.settingsMenu("service-tier", draft: true) },
         ]
-        mark.image = BrandMarks.image(for: draft.harness, side: 34)
+        mark.image = BrandMarks.image(for: draft.harness == "native-codex" ? "codex" : draft.harness, side: 34)
+        updateNativeLoading()
     }
 
     private func projectMenu() -> UIMenu {
@@ -330,7 +363,13 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func modelMenu() -> UIMenu {
         let byHarness = Dictionary(grouping: models, by: \.harness)
-        return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h in
+        return UIMenu(title: "Model", children: [UIMenu(title: "On this iPhone", options: .displayInline, children: [
+            UIAction(title: "Native Codex", image: UIImage(systemName: "iphone")) { [weak self] _ in self?.draft.harness = "native-codex"
+                self?.draft.model = nil
+                self?.draft.effort = nil
+                self?.refreshChips()
+                NativeCodexSession.shared.start() }
+        ])] + byHarness.keys.sorted().map { h in
             UIMenu(title: byHarness[h]!.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: byHarness[h]!.map { m in
                 UIAction(title: m.label, state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness
@@ -354,15 +393,20 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     /// False when the session couldn't be created (the prompt stays put).
     private func create(text: String, images: [StagedImage]) -> Bool {
+        if draft.harness == "native-codex", !images.isEmpty {
+            let alert = UIAlertController(title: "Native Codex", message: "Remove image attachments; this provider currently supports text files.", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default)); present(alert, animated: true)
+            return false
+        }
         app.lastDraft = draft
         guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
-            let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
+            let alert = UIAlertController(title: "Couldn't start the session", message: draft.harness == "native-codex" ? "Wait for the current Native Codex turn to finish, or stop it before starting another chat." : "Choose a project or a host that can run it.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
             return false
         }
         created = true
-        PushNotifications.shared.askAfterFirstSession()
+        if draft.harness != "native-codex" { PushNotifications.shared.askAfterFirstSession() }
         app.newSessionText = ""
         app.newSessionImages = []
         // Lift the draft out (page + composer + typed text) so the chat can
@@ -374,5 +418,5 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
 enum HarnessNames {
     /// The core's harness catalog label (same table as desktop).
-    static func label(_ id: String) -> String { harnessLabel(harness: id) }
+    static func label(_ id: String) -> String { id == "native-codex" ? "Native Codex" : harnessLabel(harness: id) }
 }

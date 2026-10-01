@@ -13,3 +13,5 @@ edge/dist/
 .agents
 .claude
 CLAUDE.md
+
+/crates/codex-mobile/target/

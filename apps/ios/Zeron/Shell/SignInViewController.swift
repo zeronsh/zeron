@@ -72,7 +72,12 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
         top.axis = .vertical
         top.alignment = .center
         top.spacing = 12
-        let buttons = UIStackView(arrangedSubviews: [status, signIn])
+        let native = UIButton(type: .system)
+        native.setTitle("Use Native Codex", for: .normal)
+        native.addAction(UIAction { [weak self] _ in
+            self?.app.enterNativeMode()
+        }, for: .touchUpInside)
+        let buttons = UIStackView(arrangedSubviews: [status, signIn, native])
         buttons.axis = .vertical
         buttons.spacing = 12
         for v in [top, buttons] {

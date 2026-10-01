@@ -34,6 +34,8 @@ struct SessionChrome: Equatable {
         let gate: String?
     }
 
+    var loadingProgress: Double?
+    var loadingLabel = ""
     var title = ""
     var subtitle = ""
     var running = false
@@ -46,7 +48,7 @@ struct SessionChrome: Equatable {
     var error: String?
 
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
-        a.title == b.title && a.subtitle == b.subtitle && a.running == b.running && a.canSteer == b.canSteer
+        a.loadingProgress == b.loadingProgress && a.loadingLabel == b.loadingLabel && a.title == b.title && a.subtitle == b.subtitle && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
             && a.queue == b.queue && a.error == b.error
@@ -54,6 +56,7 @@ struct SessionChrome: Equatable {
 }
 
 /// A session's data + commands, independent of where it comes from.
+@MainActor
 protocol SessionSource: AnyObject {
     var chrome: SessionChrome { get }
     var onChange: (() -> Void)? { get set }

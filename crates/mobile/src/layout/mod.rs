@@ -326,6 +326,25 @@ pub struct DebugEntry {
     pub streaming: bool,
 }
 
+/// Structured local-provider input; uses the same message parts as synced sessions.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LocalTranscriptTool {
+    pub name: String,
+    pub argument: String,
+    pub output: Option<String>,
+    pub resolved: bool,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LocalTranscriptEntry {
+    pub id: String,
+    pub user: bool,
+    pub text: String,
+    pub streaming: bool,
+    pub tool: Option<LocalTranscriptTool>,
+}
+
 enum Msg {
     Input(TranscriptInput),
     Viewport { width: f32, scale: f32 },
@@ -422,6 +441,11 @@ impl TranscriptView {
         self.send(Msg::Input(debug_input(entries, working)));
     }
 
+    /// Feed a local provider without flattening tool calls into markdown.
+    pub fn set_local_entries(&self, entries: Vec<LocalTranscriptEntry>, working: bool) {
+        self.send(Msg::Input(local_input(entries, working)));
+    }
+
     pub fn close(&self) {
         self.watch.lock().unwrap().take();
         self.send(Msg::Shutdown);
@@ -470,6 +494,43 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working_since_ms: None,
         streaming: working,
     }
+}
+
+fn local_input(entries: Vec<LocalTranscriptEntry>, working: bool) -> TranscriptInput {
+    use zeron_proto::ToolCall;
+    let mut messages: Vec<SessionMessageEntry> = Vec::new();
+    for entry in entries {
+        let part = if let Some(tool) = entry.tool {
+            let call = match tool.name.as_str() {
+                "mobile_shell" => ToolCall::Exec { command: tool.argument },
+                "mobile_read_file" => ToolCall::ReadFile { path: tool.argument },
+                "mobile_write_file" => ToolCall::WriteFile { path: tool.argument, content: None },
+                _ => ToolCall::Unknown { name: tool.name, input: None },
+            };
+            MessagePart::Tool {
+                id: entry.id.clone(), call, resolved: tool.resolved, is_error: tool.is_error,
+                output: tool.output, diff: None, output_ref: None, output_bytes: None,
+                diff_ref: None, diff_stats: None, subagent_ref: None,
+                subagent_status: None, subagent_tail: None,
+            }
+        } else { MessagePart::Text { id: entry.id.clone(), text: entry.text } };
+        // Consecutive assistant items form one response, so adjacent tools group
+        // and keep stable disclosure keys while their results stream in.
+        if !entry.user && messages.last().is_some_and(|m| m.role == MessageRole::Assistant) {
+            let message = messages.last_mut().unwrap();
+            message.parts.push(part);
+            message.status = Some(if entry.streaming { MessageStatus::Streaming } else { MessageStatus::Complete });
+        } else {
+            messages.push(SessionMessageEntry {
+                id: entry.id, role: if entry.user { MessageRole::User } else { MessageRole::Assistant },
+                parts: vec![part], created_at: 0, device_id: String::new(),
+                status: Some(if entry.streaming { MessageStatus::Streaming } else { MessageStatus::Complete }),
+                continuation_of: None, duration_ms: None,
+            });
+        }
+    }
+    TranscriptInput { entries: messages.into_iter().map(Arc::new).collect(), pending: Vec::new(),
+        working, working_since_ms: None, streaming: working }
 }
 
 struct HeightMemo {

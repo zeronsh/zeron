@@ -144,7 +144,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         else { return openSession(chatId) }
         selectedTab = tab
         guard let nav = tab.viewController as? UINavigationController else { return openSession(chatId) }
-        let session = SessionViewController(app: app, chatId: chatId)
+        let session = app.sessionScreen(chatId)
         UIView.performWithoutAnimation {
             nav.popToRootViewController(animated: false)
             nav.pushViewController(session, animated: false)
@@ -182,7 +182,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         selectedTab = tab
         guard let nav = tab.viewController as? UINavigationController else { return }
         nav.popToRootViewController(animated: false)
-        nav.pushViewController(SessionViewController(app: app, chatId: chatId), animated: true)
+        nav.pushViewController(app.sessionScreen(chatId), animated: true)
     }
 }
 
