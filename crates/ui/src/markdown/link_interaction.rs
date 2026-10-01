@@ -31,6 +31,11 @@ pub struct LinkRanges {
     pub links: Vec<(Range<usize>, LinkTarget)>,
     pub ui: Option<LinkUi>,
 }
+struct PointerPress {
+    target: (usize, usize),
+    event: gpui::MouseDownEvent,
+}
+
 struct Interaction {
     targets: Vec<LinkTarget>,
     focus: Vec<FocusHandle>,
@@ -42,6 +47,7 @@ struct Interaction {
     dismissed: Rc<Cell<bool>>,
     tooltip_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     focused: Option<usize>,
+    pointer_down: Rc<RefCell<Option<PointerPress>>>,
 }
 impl IntoElement for LinkRanges {
     type Element = Self;
@@ -101,6 +107,7 @@ impl Element for LinkRanges {
                     dismissed: Rc::default(),
                     tooltip_bounds: Rc::default(),
                     focused: None,
+                    pointer_down: Rc::default(),
                 });
             if state.bounds != bounds {
                 state.menu.borrow_mut().take();
@@ -140,6 +147,11 @@ impl Element for LinkRanges {
                     let menu = state.menu.clone();
                     let keyboard_menu = menu.clone();
                     let focus = state.focus[index].clone();
+                    let pointer_down = state.pointer_down.clone();
+                    let pointer_up = pointer_down.clone();
+                    let pointer_out = pointer_down.clone();
+                    let pointer_target = target.clone();
+                    let pointer_ui = self.ui.clone();
                     let click_target = target.clone();
                     let destination = target.original.clone();
                     let tooltip_bounds = state.tooltip_bounds.clone();
@@ -181,11 +193,54 @@ impl Element for LinkRanges {
                         .focus_visible(|s| {
                             s.bg(theme.selection).border_1().border_color(theme.accent)
                         })
+                        // Own the pointer gesture so a containing disclosure
+                        // cannot consume it before the link's click handler.
+                        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                            *pointer_down.borrow_mut() = Some(PointerPress {
+                                target: (index, part),
+                                event: event.clone(),
+                            });
+                            cx.stop_propagation();
+                        })
+                        .on_mouse_up(MouseButton::Left, move |event, window, cx| {
+                            let Some(press) = pointer_up.borrow_mut().take() else {
+                                return;
+                            };
+                            cx.stop_propagation();
+                            if press.target == (index, part)
+                                && click_is_activation(&ClickEvent::Mouse(gpui::MouseClickEvent {
+                                    down: press.event,
+                                    up: event.clone(),
+                                }))
+                                && super::selection::selected_text().is_none()
+                            {
+                                activate_link(
+                                    pointer_target.clone(),
+                                    LinkAction::Primary,
+                                    pointer_ui.as_ref(),
+                                    window,
+                                    cx,
+                                );
+                            }
+                        })
+                        .on_mouse_up_out(MouseButton::Left, move |_, _, _| {
+                            let mut down = pointer_out.borrow_mut();
+                            if down
+                                .as_ref()
+                                .is_some_and(|press| press.target == (index, part))
+                            {
+                                down.take();
+                            }
+                        })
                         .on_click(move |event, window, cx| {
-                            if click_is_activation(event)
+                            if !matches!(event, ClickEvent::Mouse(_))
+                                && click_is_activation(event)
                                 && (matches!(event, ClickEvent::Keyboard(_))
                                     || super::selection::selected_text().is_none())
                             {
+                                // A link inside a tool disclosure opens its
+                                // destination without toggling the parent row.
+                                cx.stop_propagation();
                                 activate_link(
                                     click_target.clone(),
                                     LinkAction::Primary,

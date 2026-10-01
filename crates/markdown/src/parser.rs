@@ -782,6 +782,13 @@ fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     out
 }
 
+/// Detect web links without interpreting Markdown or changing the source text.
+pub fn plain_text_links(text: &str) -> Vec<InlineRun> {
+    let mut runs = Vec::new();
+    push_text_autolinked(&mut runs, text, &InlineStyle::default());
+    runs
+}
+
 fn push_text_autolinked(runs: &mut Vec<InlineRun>, text: &str, style: &InlineStyle) {
     let push = |runs: &mut Vec<InlineRun>, text: &str, style: InlineStyle| {
         if !text.is_empty() {
@@ -1072,6 +1079,26 @@ fn has_link_defs(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_links_preserve_verbatim_text_and_complete_destinations() {
+        let text =
+            "é **raw** [docs](https://example.com/Foo_(bar)). \"https://example.org?q=one&n=2\"";
+        let runs = plain_text_links(text);
+        assert_eq!(
+            runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+            text
+        );
+        assert_eq!(
+            runs.iter()
+                .filter_map(|r| r.style.link.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://example.com/Foo_(bar)",
+                "https://example.org?q=one&n=2"
+            ]
+        );
+    }
 
     #[test]
     fn task_ranges_survive_nested_lists_unicode_crlf_and_streaming() {
