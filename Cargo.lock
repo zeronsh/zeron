@@ -12937,6 +12937,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

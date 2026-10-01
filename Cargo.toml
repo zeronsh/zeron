@@ -97,6 +97,7 @@ libc = "0.2"
 gethostname = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
+regex = "1"
 async-trait = "0.1"
 
 # serialization

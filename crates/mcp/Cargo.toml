@@ -18,3 +18,4 @@ uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+regex.workspace = true

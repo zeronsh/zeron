@@ -9,19 +9,25 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zeron_doc::SessionCommandPayload;
+use zeron_doc::{MessageRole, SessionCommandPayload};
 use zeron_proto::{
     Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
 
+use crate::search::{Matcher, rank};
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
+/// Transcripts fetched at once by `search_chats`; each is a short-lived watch.
+const SEARCH_CONCURRENCY: usize = 8;
+const SEARCH_DEFAULT_SCAN: usize = 200;
+const SEARCH_MAX_SCAN: usize = 1000;
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 /// A session row older than this is not trusted to still be working
@@ -138,6 +144,31 @@ fn catalog() -> Vec<ToolDef> {
                 "include_reasoning": { "type": "boolean", "default": false },
                 "include_tools": { "type": "boolean", "default": true }
             })),
+        },
+        ToolDef {
+            name: "search_chats",
+            description: "Search the content of every chat's transcript (messages, tool lines, titles), not just titles. mode 'words' (default) is forgiving: it ranks chats by how many of the query's words they contain, tolerates typos and word fragments, and weighs rare words above common ones, so a loose description like 'proot rootfs android mount' finds the chat. mode 'regex' is ripgrep-style (case-insensitive unless case_sensitive). Returns the best chats with snippets around the hits; pass a hit's offsetFromNewest to read_chat (offset, minus a few for context) to read the surrounding conversation. Scans the newest max_chats chats matching the filters; the reply says if it stopped short. Your own chat is skipped unless include_self.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Words to look for, or a regex in regex mode." },
+                    "mode": { "type": "string", "enum": ["words", "regex"], "default": "words" },
+                    "project": { "type": "string", "description": "Only chats in this project (id, path, or name)." },
+                    "device": { "type": "string", "description": "Only chats hosted on this device (id or name)." },
+                    "parent": { "type": "string", "description": "Only chats created by this chat (id, prefix, or title)." },
+                    "include_archived": { "type": "boolean", "default": false },
+                    "include_self": { "type": "boolean", "default": false, "description": "Also search the chat you are speaking from." },
+                    "role": { "type": "string", "enum": ["user", "assistant"], "description": "Only search messages from this side." },
+                    "include_tools": { "type": "boolean", "default": true, "description": "Search the one-line tool ledger (file paths, commands)." },
+                    "include_reasoning": { "type": "boolean", "default": false },
+                    "case_sensitive": { "type": "boolean", "default": false, "description": "Regex mode only." },
+                    "min_match": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5, "description": "Words mode: the share of the query (rare words weigh more) a chat must cover. Lower it for broader recall." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "Chats to return." },
+                    "snippets": { "type": "integer", "minimum": 1, "maximum": 20, "default": 3, "description": "Matching messages to show per chat." },
+                    "max_chats": { "type": "integer", "minimum": 1, "maximum": SEARCH_MAX_SCAN, "default": SEARCH_DEFAULT_SCAN, "description": "How many chats (newest activity first) to scan." }
+                },
+                "required": ["query"]
+            }),
         },
         ToolDef {
             name: "send_message",
@@ -274,6 +305,36 @@ struct ReadChatArgs {
 }
 
 #[derive(Deserialize)]
+struct SearchArgs {
+    query: String,
+    mode: Option<String>,
+    project: Option<String>,
+    device: Option<String>,
+    parent: Option<String>,
+    #[serde(default)]
+    include_archived: bool,
+    #[serde(default)]
+    include_self: bool,
+    role: Option<String>,
+    include_tools: Option<bool>,
+    #[serde(default)]
+    include_reasoning: bool,
+    #[serde(default)]
+    case_sensitive: bool,
+    min_match: Option<f32>,
+    limit: Option<usize>,
+    snippets: Option<usize>,
+    max_chats: Option<usize>,
+}
+
+/// What the tool keeps of a chat between scanning and reporting.
+struct ScannedChat {
+    chat: Chat,
+    /// (id, role, ISO time) of every message, indexed like the transcript.
+    messages: Vec<(String, &'static str, String)>,
+}
+
+#[derive(Deserialize)]
 struct SendArgs {
     chat: String,
     text: String,
@@ -381,6 +442,14 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
     })
 }
 
+fn role_name(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => "system",
+    }
+}
+
 fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
     messages.iter().rev().find_map(|m| m.pending_input.clone())
 }
@@ -415,6 +484,7 @@ impl Tools {
             "create_chats" => self.batch(parse(args)?, true).await,
             "send_messages" => self.batch(parse(args)?, false).await,
             "read_chat" => self.read_chat(parse(args)?).await,
+            "search_chats" => self.search_chats(parse(args)?).await,
             "send_message" => self.send_message(parse(args)?).await,
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
@@ -544,27 +614,47 @@ impl Tools {
         }))
     }
 
-    async fn list_chats(&self, args: ListChatsArgs) -> anyhow::Result<Value> {
+    /// Chats passing the project/device/archived/parent filters, with the
+    /// spaces and sessions their summaries need.
+    async fn filtered_chats(
+        &self,
+        project: Option<&str>,
+        device: Option<&str>,
+        include_archived: bool,
+        parent: Option<&str>,
+    ) -> anyhow::Result<(Vec<Chat>, Vec<Space>, Vec<Session>)> {
         let (mut chats, spaces, sessions) = tokio::try_join!(
             self.zeron.chats(),
             self.zeron.spaces(),
             self.zeron.sessions()
         )?;
-        if let Some(project) = args.project.as_deref() {
+        if let Some(project) = project {
             let space = self.zeron.resolve_space(project).await?;
             chats.retain(|c| c.space_id.as_deref() == Some(space.id.as_str()));
         }
-        if args.device.is_some() {
-            let device = self.zeron.resolve_device_id(args.device.as_deref()).await?;
+        if device.is_some() {
+            let device = self.zeron.resolve_device_id(device).await?;
             chats.retain(|c| c.device_id == device);
         }
-        if !args.include_archived {
+        if !include_archived {
             chats.retain(|c| !c.archived);
         }
-        if let Some(parent) = args.parent.as_deref() {
+        if let Some(parent) = parent {
             let parent = self.zeron.resolve_chat(parent).await?;
             chats.retain(|c| c.parent_chat_id.as_deref() == Some(parent.id.as_str()));
         }
+        Ok((chats, spaces, sessions))
+    }
+
+    async fn list_chats(&self, args: ListChatsArgs) -> anyhow::Result<Value> {
+        let (mut chats, spaces, sessions) = self
+            .filtered_chats(
+                args.project.as_deref(),
+                args.device.as_deref(),
+                args.include_archived,
+                args.parent.as_deref(),
+            )
+            .await?;
         chats.sort_by(|a, b| {
             let a_at = a.last_message_at.unwrap_or(a.created_at);
             let b_at = b.last_message_at.unwrap_or(b.created_at);
@@ -791,6 +881,122 @@ impl Tools {
             "newerSkipped": total - end,
             "pendingInput": last_pending_input(&rendered),
             "messages": window,
+        }))
+    }
+
+    async fn search_chats(&self, args: SearchArgs) -> anyhow::Result<Value> {
+        let query = args.query.trim();
+        if query.is_empty() {
+            anyhow::bail!("query is empty");
+        }
+        let mode = args.mode.as_deref().unwrap_or("words");
+        let matcher = match mode {
+            "words" => Matcher::words(query),
+            "regex" => Matcher::regex(query, args.case_sensitive),
+            other => anyhow::bail!("unknown mode {other:?} (use words or regex)"),
+        }
+        .map_err(anyhow::Error::msg)?;
+        let role = match args.role.as_deref() {
+            None => None,
+            Some(r @ ("user" | "assistant")) => Some(r),
+            Some(other) => anyhow::bail!("unknown role {other:?} (use user or assistant)"),
+        };
+
+        let (mut chats, spaces, sessions) = self
+            .filtered_chats(
+                args.project.as_deref(),
+                args.device.as_deref(),
+                args.include_archived,
+                args.parent.as_deref(),
+            )
+            .await?;
+        if !args.include_self
+            && let Some(origin) = self.zeron.origin().chat_id.as_deref()
+        {
+            chats.retain(|c| c.id != origin);
+        }
+        chats.sort_by_key(|c| std::cmp::Reverse(c.last_message_at.unwrap_or(c.created_at)));
+        let candidates = chats.len();
+        chats.truncate(
+            args.max_chats
+                .unwrap_or(SEARCH_DEFAULT_SCAN)
+                .clamp(1, SEARCH_MAX_SCAN),
+        );
+        let attempted = chats.len();
+
+        let options = RenderOptions {
+            include_reasoning: args.include_reasoning,
+            include_tools: args.include_tools.unwrap_or(true),
+        };
+        let (matcher_ref, role) = (&matcher, role);
+        let fetched: Vec<Option<(ScannedChat, crate::search::ChatScan)>> = futures::stream::iter(
+            chats,
+        )
+        .map(|chat| async move {
+            let entries = match self.zeron.transcript(&chat.id).await {
+                Ok(entries) => entries,
+                Err(err) => {
+                    tracing::debug!(chat = %chat.id, "search: transcript unavailable: {err}");
+                    return None;
+                }
+            };
+            let rendered = render_entries(&entries, options);
+            let scan = matcher_ref.scan(
+                chat.title.as_deref(),
+                rendered
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| role.is_none_or(|r| role_name(m.role) == r)),
+            );
+            let messages = rendered
+                .into_iter()
+                .map(|m| (m.id, role_name(m.role), m.created_at_iso))
+                .collect();
+            Some((ScannedChat { chat, messages }, scan))
+        })
+        .buffer_unordered(SEARCH_CONCURRENCY)
+        .collect()
+        .await;
+        let (kept, scans): (Vec<_>, Vec<_>) = fetched.into_iter().flatten().unzip();
+
+        let limit = args.limit.unwrap_or(10).clamp(1, 100);
+        let snippets = args.snippets.unwrap_or(3).clamp(1, 20);
+        let min_match = args.min_match.unwrap_or(0.5).clamp(0.0, 1.0);
+        let (matched_chats, ranked) = rank(&matcher, &scans, min_match, limit, snippets);
+        let results: Vec<Value> = ranked
+            .iter()
+            .map(|r| {
+                let scanned = &kept[r.scan];
+                let total = scanned.messages.len();
+                json!({
+                    "chat": summarize_chat(&scanned.chat, &spaces, &sessions),
+                    "score": (f64::from(r.score) * 100.0).round() / 100.0,
+                    "titleMatch": r.title_match,
+                    "matchedTerms": r.matched,
+                    "messageCount": total,
+                    "matches": r.hits.iter().map(|h| {
+                        let (id, role, at) = &scanned.messages[h.index];
+                        json!({
+                            "messageId": id,
+                            "role": role,
+                            "at": at,
+                            "offsetFromNewest": total - 1 - h.index,
+                            "matchedTerms": h.matched,
+                            "snippet": h.snippet,
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "query": query,
+            "mode": mode,
+            "candidateChats": candidates,
+            "scannedChats": kept.len(),
+            "unreadableChats": attempted - kept.len(),
+            "truncated": attempted < candidates,
+            "matchedChats": matched_chats,
+            "results": results,
         }))
     }
 
@@ -1102,6 +1308,8 @@ mod tests {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        /// Replaces the assistant reply in Beta's transcript.
+        beta_reply: Option<String>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1148,13 +1356,19 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
-                methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
-                    { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
-                      "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
-                    { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
-                      "status": "complete",
-                      "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
-                ]})),
+                methods::WATCH_DOC_MESSAGES => {
+                    let reply = match (&self.beta_reply, params["chatId"].as_str()) {
+                        (Some(text), Some("chat-beta-2")) => text.as_str(),
+                        _ => "hello back",
+                    };
+                    stream(json!({ "reset": [
+                        { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
+                          "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
+                        { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
+                          "status": "complete",
+                          "parts": [{ "kind": "text", "id": "t", "text": reply }] }
+                    ]}))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1217,6 +1431,103 @@ mod tests {
         assert_eq!(read["returned"], 1);
         assert_eq!(read["olderRemaining"], 1);
         assert_eq!(read["messages"][0]["id"], "a1");
+    }
+
+    #[tokio::test]
+    async fn search_chats_finds_content_loosely_and_by_regex() {
+        let world = Arc::new(World {
+            beta_reply: Some("The idle reaper kills persistent sessions after 20 minutes".into()),
+            ..World::default()
+        });
+        let tools = tools(world, Origin::default());
+
+        // Typo, fragment, and a word that is not in the title: still found.
+        let found = tools
+            .call("search_chats", json!({ "query": "persistant reaper" }))
+            .await
+            .unwrap();
+        assert_eq!(found["scannedChats"], 2);
+        assert_eq!(found["matchedChats"], 1);
+        let hit = &found["results"][0];
+        assert_eq!(hit["chat"]["title"], "Beta");
+        let m = &hit["matches"][0];
+        assert_eq!(m["role"], "assistant");
+        assert_eq!(m["offsetFromNewest"], 0);
+        assert!(m["snippet"].as_str().unwrap().contains("idle reaper"));
+
+        // The offset drops straight into read_chat.
+        let read = tools
+            .call(
+                "read_chat",
+                json!({ "chat": "Beta", "limit": 1, "offset": m["offsetFromNewest"] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read["messages"][0]["id"], m["messageId"]);
+
+        let regex = tools
+            .call(
+                "search_chats",
+                json!({ "query": r"\d+ minutes", "mode": "regex" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(regex["results"][0]["chat"]["title"], "Beta");
+        let strict = tools
+            .call(
+                "search_chats",
+                json!({ "query": "REAPER", "mode": "regex", "case_sensitive": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(strict["matchedChats"], 0);
+
+        let users = tools
+            .call("search_chats", json!({ "query": "reaper", "role": "user" }))
+            .await
+            .unwrap();
+        assert_eq!(users["matchedChats"], 0);
+
+        assert!(
+            tools
+                .call("search_chats", json!({ "query": "  " }))
+                .await
+                .is_err()
+        );
+        assert!(
+            tools
+                .call("search_chats", json!({ "query": "(", "mode": "regex" }))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn search_skips_the_calling_chat_and_reports_truncation() {
+        let world = Arc::new(World::default());
+        let origin = Origin {
+            chat_id: Some("chat-alpha-1".into()),
+            ..Origin::default()
+        };
+        let tools = tools(world, origin);
+        let found = tools
+            .call("search_chats", json!({ "query": "hello", "max_chats": 1 }))
+            .await
+            .unwrap();
+        // Alpha is the caller; Beta is the only candidate and fits the cap.
+        assert_eq!(found["candidateChats"], 1);
+        assert_eq!(found["truncated"], false);
+        assert_eq!(found["results"][0]["chat"]["title"], "Beta");
+
+        let all = tools
+            .call(
+                "search_chats",
+                json!({ "query": "hello", "include_self": true, "max_chats": 1 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(all["candidateChats"], 2);
+        assert_eq!(all["truncated"], true);
     }
 
     #[tokio::test]

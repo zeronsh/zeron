@@ -110,11 +110,25 @@ name (default: the local engine's device).
 | `create_chats`     | Concurrent `create_chat` requests with per-request results |
 | `send_messages`    | Concurrent `send_message` requests with per-request results |
 | `read_chat`        | `WatchDocMessages` opening `reset` frame, rendered        |
+| `search_chats`     | `WatchChats` + per-chat `WatchDocMessages`, scored locally |
 | `send_message`     | `QueueCommand` Run / Steer, or `QueueMessage`             |
 | `wait_for_turn`    | `WatchSessions` until the chat settles                    |
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+
+`search_chats` searches transcript content, not titles alone. There is no
+engine-side index: it reads each candidate chat's transcript the way
+`read_chat` does (8 at a time, newest activity first, capped by `max_chats`,
+default 200) and scores it in the MCP process. `words` mode tokenizes the query
+and scores every message per term — exact word 1.0, substring 0.8, typo within
+the length-scaled edit budget 0.6/0.5 — weighting each term by rarity across
+the scanned chats; a chat is listed when it covers `min_match` (default 0.5) of
+the query, with terms allowed to land in different messages. `regex` mode is
+ripgrep-style. Hits carry a snippet and `offsetFromNewest`, which is the
+`read_chat` offset that lands on that message. The calling chat is skipped
+unless `include_self`; the reply reports `truncated` and `unreadableChats` so a
+partial scan is never mistaken for a complete one.
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
