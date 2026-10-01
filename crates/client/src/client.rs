@@ -34,6 +34,15 @@ const TICK: Duration = Duration::from_secs(1);
 /// is evicted. On-screen sessions, streaming ones and ones with unadopted
 /// sends are never evicted.
 pub const WARM_SESSION_CAP: usize = 6;
+/// Estimated resident bytes (see [`zeron_doc::resident_estimate`]) all open
+/// sessions may hold before the least recently used detached ones are
+/// evicted, whatever the count. The count cap alone lets six 5MB chats sit
+/// resident (~180MB estimated) on a phone. 32MB is 40% of the desktop's
+/// `DOC_LRU_BYTE_BUDGET` (docs/memory-plan.md: 150-250MB app target, with
+/// 48MB of that already the attachment cache) and holds the measured 1.6MB
+/// streamed chat (+18.6MB) with room to spare: typical chats (a few hundred
+/// KB) still reach the count cap, and only outsized ones push each other out.
+const WARM_SESSION_BYTE_BUDGET: usize = 32 * 1024 * 1024;
 /// Sessions `preload_sessions` warms (front page order).
 pub const PRELOAD_CAP: usize = 4;
 
@@ -496,24 +505,48 @@ impl ClientInner {
         }
     }
 
-    /// Drop the least recently used detached, quiet sessions past the cap.
+    /// Drop the least recently used detached, quiet sessions past the count
+    /// cap or the byte budget.
     pub(crate) fn evict_sessions(&self) {
-        let mut sessions = lock(&self.sessions);
-        let mut idle: Vec<(i64, String)> = sessions
-            .values()
-            .filter(|core| {
-                !core.view_attached() && !core.has_pending_sends() && !core.snapshot().streaming
-            })
-            .map(|core| (core.touched_ms(), core.chat_id.clone()))
-            .collect();
-        if idle.len() <= WARM_SESSION_CAP {
+        self.evict_sessions_within(WARM_SESSION_BYTE_BUDGET);
+    }
+
+    fn evict_sessions_within(&self, byte_budget: usize) {
+        let evictable = |core: &SessionCore| {
+            !core.view_attached() && !core.has_pending_sends() && !core.snapshot().streaming
+        };
+        // Sized outside the map lock: a first estimate exports the doc.
+        let mut idle = Vec::new();
+        let mut pinned_bytes = 0;
+        for core in self.cores() {
+            let bytes = core.resident_estimate();
+            if evictable(&core) {
+                idle.push((core.touched_ms(), core.chat_id.clone(), bytes));
+            } else {
+                pinned_bytes += bytes;
+            }
+        }
+        let victims = plan_evictions(idle, pinned_bytes, WARM_SESSION_CAP, byte_budget);
+        if victims.is_empty() {
             return;
         }
-        idle.sort();
-        let excess = idle.len() - WARM_SESSION_CAP;
-        for (_, chat_id) in idle.into_iter().take(excess) {
-            tracing::debug!(chat = %chat_id, "evicting warm session");
-            sessions.remove(&chat_id);
+        let evicted: Vec<_> = {
+            let mut sessions = lock(&self.sessions);
+            victims
+                .iter()
+                .filter_map(|id| {
+                    // Re-checked under the lock: a view may have attached
+                    // since the plan was made.
+                    let still_idle = sessions.get(id).is_some_and(|core| evictable(core));
+                    still_idle.then(|| sessions.remove(id)).flatten()
+                })
+                .collect()
+        };
+        for core in evicted {
+            tracing::debug!(chat = %core.chat_id, "evicting warm session");
+            // A handle held elsewhere would keep the room (and its debounced
+            // save) alive past the eviction; persist now instead.
+            core.flush();
         }
     }
 
@@ -1485,6 +1518,33 @@ impl Client {
     }
 }
 
+/// Which detached, quiet sessions (`(touched_ms, chat_id, estimated bytes)`)
+/// to evict, least recently used first, until at most `count_cap` remain and
+/// the total (`pinned_bytes` of sessions that can't be evicted, plus the
+/// rest) fits `byte_budget`. The most recently used one is never picked:
+/// it is the session just opened (not yet attached) or just closed, and
+/// evicting it would drop the session the user is heading into.
+fn plan_evictions(
+    mut idle: Vec<(i64, String, usize)>,
+    pinned_bytes: usize,
+    count_cap: usize,
+    byte_budget: usize,
+) -> Vec<String> {
+    idle.sort();
+    let mut count = idle.len();
+    let mut total = pinned_bytes + idle.iter().map(|(_, _, bytes)| bytes).sum::<usize>();
+    let mut victims = Vec::new();
+    for (_, chat_id, bytes) in idle.iter().take(idle.len().saturating_sub(1)) {
+        if count <= count_cap && total <= byte_budget {
+            break;
+        }
+        victims.push(chat_id.clone());
+        count -= 1;
+        total -= bytes;
+    }
+    victims
+}
+
 /// Seed helpers shared with the demo host.
 pub(crate) fn ms(at: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_millis_opt(at)
@@ -1501,4 +1561,227 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+    use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
+
+    const MB: usize = 1024 * 1024;
+
+    fn plan(idle: &[(i64, &str, usize)], pinned: usize, cap: usize, budget: usize) -> Vec<String> {
+        let idle = idle
+            .iter()
+            .map(|(at, id, bytes)| (*at, (*id).to_owned(), *bytes))
+            .collect();
+        plan_evictions(idle, pinned, cap, budget)
+    }
+
+    #[test]
+    fn small_docs_fill_the_count_cap_and_no_more() {
+        let floor = zeron_doc::resident_estimate(0);
+        let ids = ["c0", "c1", "c2", "c3", "c4", "c5", "c6"];
+        let idle: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(at, id)| (at as i64, *id, floor))
+            .collect();
+        assert!(plan(&idle[..6], 0, WARM_SESSION_CAP, WARM_SESSION_BYTE_BUDGET).is_empty());
+        assert_eq!(
+            plan(&idle, 0, WARM_SESSION_CAP, WARM_SESSION_BYTE_BUDGET),
+            ["c0"]
+        );
+    }
+
+    #[test]
+    fn big_docs_evict_below_the_count_cap() {
+        // Three sessions (well under the cap of six) but 61MB estimated.
+        let idle = [
+            (1, "big-old", 30 * MB),
+            (2, "small", MB),
+            (3, "big-new", 30 * MB),
+        ];
+        assert_eq!(plan(&idle, 0, 6, 32 * MB), ["big-old"]);
+    }
+
+    #[test]
+    fn eviction_stops_once_under_budget() {
+        let idle = [
+            (1, "a", 10 * MB),
+            (2, "b", 10 * MB),
+            (3, "c", 10 * MB),
+            (4, "d", 10 * MB),
+        ];
+        assert_eq!(plan(&idle, 0, 6, 25 * MB), ["a", "b"]);
+    }
+
+    #[test]
+    fn sessions_that_cannot_be_evicted_still_count() {
+        let idle = [(1, "a", 2 * MB), (2, "b", 2 * MB), (3, "c", 2 * MB)];
+        // 30MB on screen or streaming leaves room for two of the three.
+        assert_eq!(plan(&idle, 30 * MB, 6, 35 * MB), ["a"]);
+    }
+
+    #[test]
+    fn the_most_recent_session_is_never_picked() {
+        // Just opened, not attached yet, and alone over the budget.
+        let idle = [(1, "old", MB), (2, "new", 100 * MB)];
+        assert_eq!(plan(&idle, 0, 6, 32 * MB), ["old"]);
+        assert!(plan(&idle[1..], 0, 6, 32 * MB).is_empty());
+    }
+
+    /// Live client with no reachable edge: sessions open from local state.
+    fn offline_client(dir: &std::path::Path) -> Client {
+        let mut config = ClientConfig::new("http://127.0.0.1:9", dir);
+        config.device_id = "ios-evict".into();
+        let client = Client::new(
+            config,
+            Credentials::Dev {
+                user_id: "user-1".into(),
+                org_id: "org-1".into(),
+            },
+            Arc::new(crate::events::NullListener),
+        )
+        .unwrap();
+        for id in ["a", "b", "c", "d"] {
+            let chat = Chat {
+                id: id.into(),
+                device_id: "host".into(),
+                title: None,
+                archived: false,
+                cwd: None,
+                branch: None,
+                checkout_id: None,
+                source_context: None,
+                config: None,
+                last_message_preview: None,
+                last_message_at: None,
+                created_at: Utc::now(),
+                harness_session_id: None,
+                harness_session_cwd: None,
+                space_id: None,
+                last_seen_at: None,
+                room_gen: Some(2),
+                parent_chat_id: None,
+            };
+            client
+                .inner
+                .registry_write(|doc| doc.upsert_chat(&chat))
+                .unwrap();
+        }
+        client
+    }
+
+    /// Open `chat_id` holding `messages` x 200KB of incompressible text,
+    /// arriving as a remote import (a local write would leave unacked
+    /// pushes, which pin the session).
+    fn open_with_history(client: &Client, chat_id: &str, messages: usize) -> SessionHandle {
+        let source = SessionDoc::init(chat_id).unwrap();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for n in 0..messages {
+            let text: String = (0..200 * 1024)
+                .map(|_| {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    char::from(b'a' + (seed >> 59) as u8)
+                })
+                .collect();
+            source
+                .push_message(&SessionMessageEntry {
+                    id: format!("m{n}"),
+                    role: MessageRole::Assistant,
+                    parts: vec![MessagePart::Text {
+                        id: "t0".into(),
+                        text,
+                    }],
+                    created_at: 1,
+                    device_id: "host".into(),
+                    status: Some(MessageStatus::Complete),
+                    continuation_of: None,
+                    duration_ms: None,
+                })
+                .unwrap();
+        }
+        let handle = client.open_session(chat_id).unwrap();
+        handle
+            .core
+            .doc()
+            .doc()
+            .import(&source.export_snapshot().unwrap())
+            .unwrap();
+        // Distinct recency per open, whatever the clock's resolution.
+        std::thread::sleep(Duration::from_millis(3));
+        handle.core.touch();
+        handle
+    }
+
+    fn open_ids(client: &Client) -> Vec<String> {
+        let mut ids = client.open_session_ids();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn a_big_session_is_evicted_before_the_count_cap_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = offline_client(dir.path());
+        let big = open_with_history(&client, "a", 3);
+        let small = open_with_history(&client, "b", 0);
+        let newest = open_with_history(&client, "c", 3);
+        let sizes = [&big, &small, &newest].map(|h| h.core.resident_estimate());
+        assert!(sizes[0] > 2 * sizes[1], "history dominates: {sizes:?}");
+        let total: usize = sizes.iter().sum();
+        assert_eq!(open_ids(&client), ["a", "b", "c"]);
+
+        // Everything fits: nothing goes.
+        client.inner.evict_sessions_within(total);
+        assert_eq!(open_ids(&client), ["a", "b", "c"]);
+        // One byte over: the oldest (big) session goes, three sessions in.
+        client.inner.evict_sessions_within(total - 1);
+        assert_eq!(open_ids(&client), ["b", "c"]);
+        client.shutdown();
+    }
+
+    #[test]
+    fn the_on_screen_session_survives_any_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = offline_client(dir.path());
+        let shown = open_with_history(&client, "a", 3);
+        shown.set_view_attached(true);
+        open_with_history(&client, "b", 3);
+        open_with_history(&client, "c", 0);
+        open_with_history(&client, "d", 0);
+
+        client.inner.evict_sessions_within(0);
+        // The attached one stays; so does the most recent detached one.
+        assert_eq!(open_ids(&client), ["a", "d"]);
+        client.shutdown();
+    }
+
+    #[test]
+    fn a_dirty_session_is_persisted_before_it_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = offline_client(dir.path());
+        // Held handle: the core outlives the eviction, so only an explicit
+        // flush (not the room's drop) can have saved it.
+        let evicted = open_with_history(&client, "a", 1);
+        evicted.core.room().unwrap().mark_dirty();
+        open_with_history(&client, "b", 0);
+
+        client.inner.evict_sessions_within(0);
+        assert_eq!(open_ids(&client), ["b"]);
+        let live = client.inner.live().unwrap();
+        let (bytes, _, _) = live
+            .store
+            .load_snapshot_with_cursor("a")
+            .unwrap()
+            .expect("snapshot written at eviction");
+        let saved = loro::LoroDoc::new();
+        saved.import(&bytes).unwrap();
+        let entries = SessionDoc::from_doc(saved).read_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        client.shutdown();
+    }
 }

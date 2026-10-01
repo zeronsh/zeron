@@ -697,6 +697,12 @@ impl Room {
     pub(crate) fn flush(&self) {
         self.persister.flush();
     }
+
+    /// Stand in for a remote import having changed the doc (debounced save).
+    #[cfg(test)]
+    pub(crate) fn mark_dirty(&self) {
+        self.persister.dirty(false);
+    }
 }
 
 impl Drop for Room {

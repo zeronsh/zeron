@@ -59,15 +59,6 @@ pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;
 /// ~11ms of a warm doc, so the cap trades no perceptible open latency.
 const WARM_DOC_CAP: usize = 12;
 
-/// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
-/// columnar+compressed; the in-memory doc plus mirror runs well above the blob
-/// size. A rough multiplier is enough here — the budget is a safety ceiling,
-/// the count cap does the day-to-day work.
-const RESIDENT_BYTES_PER_SNAPSHOT_BYTE: usize = 6;
-
-/// Floor per open doc (room socket buffers, tasks) regardless of content size.
-const DOC_RESIDENT_FLOOR_BYTES: usize = 512 * 1024;
-
 /// Connection reuse grace is independent of document eviction. Caller-owned
 /// handles and explicit writers protect the open-to-subscribe handoff.
 const SYNC_IDLE_MS: i64 = 10_000;
@@ -884,7 +875,7 @@ impl ChatDocHandle {
             .snapshot_bytes
             .load(Ordering::Relaxed)
             .max(self.persistence.as_ref().map_or(0, |p| p.snapshot_bytes()));
-        (bytes * RESIDENT_BYTES_PER_SNAPSHOT_BYTE).max(DOC_RESIDENT_FLOOR_BYTES)
+        zeron_doc::resident_estimate(bytes)
     }
 }
 
