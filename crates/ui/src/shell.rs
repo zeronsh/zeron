@@ -968,10 +968,6 @@ const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
-/// Compact-row time slot while a text jump hint ("Ctrl+9") stands in for the
-/// time: wide enough for the widest of them at 11px on one line. In
-/// default-size pixels; scaled with the UI font via `ui_rems`.
-const COMPACT_JUMP_HINT_WIDTH: f32 = 42.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
 /// The sidebar footer's profile and settings buttons share one hit target.
 const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
@@ -1904,6 +1900,15 @@ pub struct Shell {
     /// under a still pointer would otherwise never show its archive pill;
     /// while set, rows adopt the hover from a paint-time hit test instead.
     chat_hover_resync: bool,
+    /// A row whose Pin/Archive corner Space opened, with the subscription
+    /// that closes it again once focus leaves the row and its buttons.
+    chat_status_keyboard: Option<(String, gpui::Subscription)>,
+    /// One focus handle per session row, so a row can own its tab stop and
+    /// notice focus leaving it.
+    row_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
+    /// Whether the rows about to render are reachable with Tab. Sections set
+    /// it: rows inside a collapsed section render at zero height.
+    pub(super) next_rows_tab_stop: bool,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// In-flight reorder for the pinned section only.
@@ -2167,6 +2172,20 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
+        let icon_data_dir = data_dir.clone();
+        let icon_references = settings.project_icon_overrides.clone();
+        let icon_cleanup_cutoff = std::time::SystemTime::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        cx.background_executor()
+            .spawn(async move {
+                project_icon::cleanup_orphaned_project_icons(
+                    &icon_data_dir,
+                    &icon_references,
+                    icon_cleanup_cutoff,
+                );
+            })
+            .detach();
         state.update(cx, |state, cx| {
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
         });
@@ -2330,6 +2349,9 @@ impl Shell {
             project_icons: Default::default(),
             chat_status_hover: None,
             chat_hover_resync: false,
+            chat_status_keyboard: None,
+            row_focus: Default::default(),
+            next_rows_tab_stop: true,
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
@@ -6986,9 +7008,8 @@ impl Shell {
         // Activity, not position (t3code Sidebar): status is a small colored
         // word + glyph in the row's top-right corner — Working animates the
         // composer-strip spinner, Done wears a check; Idle rows show the
-        // relative time instead. Hovering the ROW swaps the corner for the
-        // ARCHIVE button. Compact rows keep status first and elapsed time last;
-        // their archive control occupies the remote-icon slot on hover.
+        // relative time instead. Row hover replaces trailing metadata with
+        // separate pin and archive actions. Activity and time share this slot.
         // A chat can appear on both surfaces at once. Namespace every hover
         // key and child id so the palette never animates the sidebar copy.
         let row_id = if search_query.is_some() {
@@ -7007,10 +7028,20 @@ impl Shell {
             .is_some_and(|chat| {
                 self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
             });
-        let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
-            .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
-        let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        // A filtered project's identity lives in the sidebar header; repeating
+        // it on every session adds no information. Keep harness icons intact.
+        let project_icon = (search_query.is_none()
+            && self.settings.sidebar_show_project_icon
+            && self.settings.space_filter.is_none())
+        .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
+        let corner_hovered = !preview
+            && (self.chat_status_hover.as_deref() == Some(row_id.as_str())
+                || self
+                    .chat_status_keyboard
+                    .as_ref()
+                    .is_some_and(|(keyboard, _)| *keyboard == row_id));
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
+        let show_actions = corner_hovered && jump_label.is_none();
         let project_icon = project_icon.map(|icon| {
             div()
                 .flex_none()
@@ -7054,45 +7085,7 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
-        let compact_status = compact.then(|| {
-            let glyph = if working {
-                loaders::mini_glyph_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    theme.glyph,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
-                icon(icons::CHECK)
-                    .size(px(11.0))
-                    .text_color(status_color)
-                    .into_any_element()
-            } else {
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(status_color)
-                    .into_any_element()
-            };
-            div()
-                .id(SharedString::from(format!("{row_id}-status")))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("chat-status-{id}")
-                })
-                .size(px(13.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
-                .child(glyph)
-                .into_any_element()
-        });
-        let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
-        let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
+        let corner_body: AnyElement = if let Some(label) = jump_label {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
             // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
@@ -7118,63 +7111,110 @@ impl Shell {
                     .child(label)
                     .into_any_element()
             }
-        } else if corner_hovered {
+        } else if show_actions {
+            let pinned = self.active_sidebar_pins(cx).contains(&id);
+            let pin_id = id.clone();
+            let archive_id = id.clone();
+            let action = |name: &str, label: &'static str, glyph, tone| {
+                let group = SharedString::from(format!("{row_id}-{name}-hover"));
+                div()
+                    .id(SharedString::from(format!("{row_id}-{name}")))
+                    .group(group.clone())
+                    .debug_selector({
+                        let selector = format!("{row_id}-{name}");
+                        move || selector.clone()
+                    })
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .tab_index(0)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .size(px(24.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    // A pointer press keeps focus where it was; Tab still
+                    // reaches the button, and Enter/Space click it.
+                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    // Paint within the hit target so a compact row retains
+                    // breathing room around the button on every side.
+                    .child(
+                        div()
+                            .debug_selector({
+                                let selector = format!("{row_id}-{name}-surface");
+                                move || selector.clone()
+                            })
+                            .size(px(20.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .group_hover(group.clone(), |s| s.bg(theme.glass_hover()))
+                            .child(
+                                icon(glyph)
+                                    .size(px(14.0))
+                                    .text_color(tone)
+                                    .group_hover(group, |s| s.text_color(theme.text)),
+                            ),
+                    )
+            };
             div()
                 .flex()
-                .flex_row()
                 .items_center()
-                .gap(px(4.0))
-                .h(px(18.0))
-                .when(!compact, |el| {
-                    el.px(px(4.0))
-                        .mr(px(-4.0))
-                        .rounded(px(5.0))
-                        .bg(crate::theme::wash(0.10))
-                        .hover(|s| s.bg(crate::theme::wash(0.18)))
-                })
-                .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(if compact {
-                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
-                    } else {
-                        11.0
-                    }))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-                )
-                .when(!compact, |el| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
-                                "Unarchive"
-                            } else {
-                                "Archive"
-                            })),
+                .gap(px(2.0))
+                // The palette keeps upstream's single Archive action.
+                .when(search_query.is_none(), |actions| {
+                    actions.child(
+                        action(
+                            "pin",
+                            if pinned { "Unpin" } else { "Pin" },
+                            icons::PIN,
+                            if pinned { theme.text } else { theme.text_muted },
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            // Pinning moves the row to another section under a
+                            // still pointer, exactly like archiving.
+                            this.chat_hover_resync = true;
+                            this.chat_status_keyboard = None;
+                            this.set_chat_pinned(pin_id.clone(), !pinned, cx);
+                        })),
                     )
                 })
+                .child(
+                    action(
+                        "archive",
+                        if archived { "Unarchive" } else { "Archive" },
+                        if archived {
+                            icons::ARCHIVE_UP_MINIMALISTIC
+                        } else {
+                            icons::ARCHIVE_MINIMALISTIC
+                        },
+                        theme.text_muted,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.chat_hover_resync = true;
+                        this.chat_status_keyboard = None;
+                        this.set_chat_archived(archive_id.clone(), !archived, cx);
+                    })),
+                )
                 .into_any_element()
-        } else if compact {
-            if remote {
-                icon(icons::REMOTE_SERVER)
-                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            }
         } else {
             match status_label {
                 Some(label) => {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed
+                        && !queued
+                        && !undelivered
+                    {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -7198,78 +7238,55 @@ impl Shell {
                             .into_any_element()
                     };
                     div()
+                        .id(SharedString::from(format!("{row_id}-status")))
+                        .aria_label(label)
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-status-{id}")
+                        })
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(4.0))
                         .child(glyph)
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(status_color)
-                                .child(SharedString::from(label)),
-                        )
+                        .when(!compact || !working, |el| {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(10.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(status_color)
+                                    .child(SharedString::from(label)),
+                            )
+                        })
                         .into_any_element()
                 }
                 None => div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-time-{id}")
+                    })
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(time_ago.clone())
                     .into_any_element(),
             }
         };
-        // One stable wrapper across both states (identity keeps the hover
-        // from flickering as the content swaps); the swap is driven by the
-        // ROW's hover (user request — corner-only felt undiscoverable), but
-        // archiving only clicks on the corner itself, so the row's own click
-        // stays the selector.
-        let corner: AnyElement = {
-            let archive_id = id.clone();
-            div()
-                .id(SharedString::from(format!("{row_id}-corner")))
-                .debug_selector({
-                    let row_id = row_id.clone();
-                    move || format!("{row_id}-corner")
-                })
-                .aria_label(if corner_hovered {
-                    if archived { "Unarchive" } else { "Archive" }
-                } else {
-                    if compact {
-                        if remote {
-                            "Remote session"
-                        } else {
-                            "Session actions"
-                        }
-                    } else {
-                        status_label.unwrap_or("Idle")
-                    }
-                })
-                .when(compact, |el| el.w(px(18.0)).justify_center())
-                .flex_none()
-                // Pin the corner to line 1's text height so the archive pill
-                // (taller, padded) overflows vertically instead of growing the
-                // row — the swap must not shift the card's content.
-                // NO occlude: the ROW's hover drives the swap, and an
-                // occluding corner un-hovered the row underneath it —
-                // pill mounts, steals the pointer, row un-hovers, pill
-                // unmounts, repeat (user-reported flicker). The pill's
-                // stop_propagation click is separation enough.
-                .h(px(14.0))
-                .flex()
-                .items_center()
-                .when(!preview, |el| el.cursor_pointer())
-                .when(corner_hovered, |el| {
-                    el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.chat_hover_resync = true;
-                            this.set_chat_archived(archive_id.clone(), !archived, cx);
-                        }))
-                })
-                .child(corner_body)
-                .into_any_element()
-        };
+        // Keep one non-occluding wrapper: actions must not steal row hover
+        // and repeatedly mount/unmount as the pointer crosses into them.
+        let corner = div()
+            .id(SharedString::from(format!("{row_id}-corner")))
+            .debug_selector({
+                let row_id = row_id.clone();
+                move || format!("{row_id}-corner")
+            })
+            .flex_none()
+            .min_w(px(24.0))
+            .h(px(14.0))
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(corner_body)
+            .into_any_element();
         let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
@@ -7279,6 +7296,18 @@ impl Shell {
             theme.text_muted.opacity(0.5)
         };
         let select_id = id.clone();
+        let keyboard_row_id = row_id.clone();
+        // Sidebar rows take keyboard focus (Enter opens, Space reveals Pin and
+        // Archive); palette rows keep the palette's own navigation.
+        let row_focus = (!preview && search_query.is_none()).then(|| {
+            self.row_focus
+                .borrow_mut()
+                .entry(row_id.clone())
+                .or_insert_with(|| cx.focus_handle())
+                .clone()
+                .tab_index(0)
+                .tab_stop(self.next_rows_tab_stop)
+        });
         let menu_id = id.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
         // the wash and the title brighten ride the same 150ms blend.
@@ -7328,8 +7357,54 @@ impl Shell {
             // No selection ring (user request) — the wash alone marks the
             // active row.
             // Row hover drives BOTH the wash blend and the corner's
-            // status→Archive swap (one listener — gpui allows a single
+            // metadata→actions swap (one listener — gpui allows a single
             // hover listener per element).
+            .when_some(row_focus, |el, focus| {
+                let space_focus = focus.clone();
+                el.role(gpui::Role::ListItem)
+                    .aria_label(SharedString::from(format!("Session {title}")))
+                    .track_focus(&focus)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            let open = this
+                                .chat_status_keyboard
+                                .as_ref()
+                                .is_some_and(|(row, _)| *row == keyboard_row_id);
+                            match event.keystroke.key.as_str() {
+                                "space" if !event.is_held => {
+                                    cx.stop_propagation();
+                                    let row = keyboard_row_id.clone();
+                                    // Focus leaving the row and its buttons
+                                    // closes the corner again.
+                                    let closes = cx.on_focus_out(
+                                        &space_focus,
+                                        window,
+                                        move |this, _, _, cx| {
+                                            if this
+                                                .chat_status_keyboard
+                                                .as_ref()
+                                                .is_some_and(|(open, _)| *open == row)
+                                            {
+                                                this.chat_status_keyboard = None;
+                                                cx.notify();
+                                            }
+                                        },
+                                    );
+                                    this.chat_status_keyboard =
+                                        Some((keyboard_row_id.clone(), closes));
+                                    cx.notify();
+                                }
+                                "escape" if open => {
+                                    cx.stop_propagation();
+                                    this.chat_status_keyboard = None;
+                                    cx.notify();
+                                }
+                                _ => {}
+                            }
+                        },
+                    ))
+            })
             .when(!preview, |el| {
                 el.on_hover({
                     let fade_hover = motion::hover_listener(fade_key.clone());
@@ -7349,12 +7424,23 @@ impl Shell {
                     })
                 })
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                    // Space reveals the row's actions; only Enter or a
+                    // pointer click opens the session.
+                    if let gpui::ClickEvent::Keyboard(key) = event
+                        && key.button == gpui::KeyboardButton::Space
+                    {
+                        return;
+                    }
                     this.open_chat(select_id.clone(), cx);
                 }))
+                // Pointer presses keep focus where it was (the composer):
+                // a drag or context menu must not strand typing on a row.
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
                         this.chat_menu.open(ChatMenuState {
                             tab: None,
                             chat_id: menu_id.clone(),
@@ -7432,30 +7518,37 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(if compact {
-                        4.0
-                    } else {
-                        SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
-                    }))
-                    .children(compact_status)
-                    .when_some(
-                        harness.map(crate::pickers::harness_brand_icon),
-                        |el, (path, tint)| {
-                            el.child(
-                                icon(path)
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                    .flex_none()
-                                    .text_color(
-                                        tint.unwrap_or(subline).opacity(if archived_muted {
-                                            0.4
-                                        } else {
-                                            0.8
-                                        }),
-                                    ),
-                            )
-                        },
-                    )
-                    .children(project_icon)
+                    // Trailing metadata must not set this line's height: its
+                    // font metrics differ from the hover action controls.
+                    .when(compact, |el| el.h(px(17.0)))
+                    .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
+                    .when(project_icon.is_some() || harness.is_some(), |el| {
+                        el.child(
+                            div()
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("chat-identity-{id}")
+                                })
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .children(project_icon)
+                                .when_some(
+                                    harness.map(crate::pickers::harness_brand_icon),
+                                    |el, (path, tint)| {
+                                        el.child(
+                                            icon(path)
+                                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                                .flex_none()
+                                                .text_color(tint.unwrap_or(subline).opacity(
+                                                    if archived_muted { 0.4 } else { 0.8 },
+                                                )),
+                                        )
+                                    },
+                                ),
+                        )
+                    })
                     .child(sidebar_faded_label(
                         format!("chat-title-{content_id}").into(),
                         true,
@@ -7464,77 +7557,50 @@ impl Shell {
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
                     ))
-                    .when(!compact && !show_label && remote, |el| {
-                        el.child(
-                            icon(icons::REMOTE_SERVER)
-                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                .flex_none()
-                                .text_color(subline),
-                        )
-                    })
-                    .when(
-                        if compact {
-                            remote || corner_hovered
-                        } else {
-                            !show_label
-                        },
-                        |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(subline)
-                                    .children(corner.take()),
-                            )
-                        },
-                    )
-                    .when(compact, |el| {
-                        el.children(change_request.clone().map(|summary| {
-                            if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            }
-                        }))
-                    })
-                    .when(compact, |el| {
-                        // The time slot is 30px, which holds "17m" but not
-                        // "Ctrl+2": unwrapped, the hint broke after the `+`
-                        // and stacked two lines. A text-length hint keeps one
-                        // line in a wider slot — a floor, not content sized,
-                        // so "Ctrl+1" (a narrower glyph) doesn't nudge its
-                        // row's badge off the others'. The floor scales with
-                        // the UI font like the text does, and a longer
-                        // rebound combo grows the slot instead of spilling
-                        // over the title.
-                        let text_hint = compact_jump_label
-                            .as_ref()
-                            .is_some_and(|label| label.chars().count() > 3);
+                    .when(compact || !show_label, |el| {
                         el.child(
                             div()
                                 .debug_selector({
                                     let id = id.clone();
-                                    move || format!("chat-time-{id}")
+                                    move || format!("chat-trailing-{id}")
                                 })
-                                .when(text_hint, |el| {
-                                    el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
-                                })
-                                .when(!text_hint, |el| el.w(px(30.0)))
                                 .flex_none()
-                                .whitespace_nowrap()
-                                .text_right()
-                                .text_size(crate::typography::ui_rems(11.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                // Separate session content from metadata while
+                                // keeping metadata internally grouped.
+                                .ml(px(4.0))
+                                .when(show_actions, |el| el.mr(px(-4.0)))
                                 .text_color(subline)
-                                .child(compact_jump_label.unwrap_or(time_ago)),
+                                .when((compact || !show_label) && remote && !show_actions, |el| {
+                                    el.child(
+                                        icon(icons::REMOTE_SERVER)
+                                            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                            .flex_none()
+                                            .text_color(subline),
+                                    )
+                                })
+                                .when(compact && !show_actions, |el| {
+                                    el.children(change_request.clone().map(|summary| {
+                                        if preview {
+                                            crate::change_requests::pull_request_badge_preview(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                                        } else {
+                                            crate::change_requests::pull_request_badge(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                                        }
+                                    }))
+                                })
+                                .children(corner.take()),
                         )
                     }),
             )
@@ -7824,7 +7890,7 @@ impl Shell {
                 "sidebar-pinned-header".to_string(),
                 spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
                     + if self.pinned_open {
-                        spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
+                        spaces::SIDEBAR_DISCLOSURE_BODY_INSET
                     } else {
                         0.0
                     },
@@ -7836,12 +7902,12 @@ impl Shell {
                     "sidebar-sessions-header".into(),
                     spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
                         + if show_pinned_section || custom_count > 0 {
-                            12.0
+                            spaces::SIDEBAR_SECTION_GAP
                         } else {
                             0.0
                         }
                         + if self.sessions_open {
-                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
+                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET
                         } else {
                             0.0
                         },
@@ -7853,7 +7919,15 @@ impl Shell {
             if ix < pinned_count && !self.pinned_open {
                 continue;
             }
-            order.push((key.clone(), *height));
+            let next_in_list = if ix < pinned_count {
+                ix + 1 < pinned_count
+            } else {
+                ungrouped && ix + 1 < keyed.len()
+            };
+            order.push((
+                key.clone(),
+                *height + if next_in_list { SIDEBAR_LIST_GAP } else { 0.0 },
+            ));
         }
         if self.pinned_session_drag.is_none()
             && self.sidebar_session_transfer.is_none()
@@ -7866,7 +7940,7 @@ impl Shell {
                 // that movement, leaving gaps and momentary overlaps between
                 // the first group, following groups, and Archived.
                 let offsets = if key_order_changed {
-                    resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP)
+                    resort_offsets(&self.sidebar_prev_order, &order, 0.0)
                 } else {
                     std::collections::HashMap::new()
                 };
@@ -7980,8 +8054,7 @@ impl Shell {
                 .id("sidebar-active-sessions")
                 .flex()
                 .flex_col()
-                .gap(px(SIDEBAR_LIST_GAP))
-                .pb(px(Theme::SPACE_SM))
+                .pb(px(spaces::SIDEBAR_SECTION_GAP))
                 .when_some(pinned_group, |el, group| el.child(group))
                 .children(custom_items)
                 .when(
@@ -8040,7 +8113,7 @@ impl Shell {
                                     ))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(SIDEBAR_LIST_GAP))
+                                    .gap(px(if ungrouped { SIDEBAR_LIST_GAP } else { 0.0 }))
                                     .when(regular_items.is_empty(), |el| {
                                         el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
                                             .justify_center()
@@ -8121,8 +8194,8 @@ impl Shell {
                     .px(px(Theme::SPACE_SM))
                     .flex()
                     .flex_col()
-                    // No "Sessions" header (user request) — the list
-                    // is the whole column; a little air stands in.
+                    // One inset below the fixed project filter, independent
+                    // of grouping and disclosure state.
                     .pt(px(SIDEBAR_LIST_PAD_TOP))
                     .child(active_list)
                     .children(archived_section)
@@ -16647,6 +16720,181 @@ mod settings_modal_regressions {
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.route, Route::Chat);
             assert_eq!(shell.settings.settings_section, SettingsSection::Devices);
+        });
+    }
+}
+
+#[cfg(feature = "project-palette-fixture")]
+impl Shell {
+    pub fn fixture_project_icon_menu(&mut self, cx: &mut Context<Self>) {
+        self.space_menu
+            .open(("project".into(), gpui::point(px(28.0), px(100.0))));
+        cx.notify();
+    }
+
+    /// Deterministic disclosure and hover states for sidebar review captures.
+    pub fn fixture_sidebar_state(
+        &mut self,
+        organization: crate::settings::SidebarOrganization,
+        collapsed: bool,
+        hover: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar_organization = organization;
+        self.pinned_open = !collapsed;
+        self.sessions_open = !collapsed;
+        self.archived_open = !collapsed;
+        self.chat_status_hover = hover.then(|| "chat-chat-0".into());
+        self.sidebar_disclosure_motion.clear();
+        self.sidebar_prev_order.clear();
+        self.sidebar_resort.clear();
+        self.sidebar_new_keys.clear();
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod sidebar_row_keyboard_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn session_row_keyboard_reveals_and_activates_pin(cx: &mut TestAppContext) {
+        struct RowHost(Entity<Shell>);
+        impl Render for RowHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    shell.render_chat_row(
+                        "keyboard".into(),
+                        "Keyboard session".into(),
+                        "now".into(),
+                        "Project".into(),
+                        None,
+                        None,
+                        None,
+                        zeron_proto::ChatIndicator::Idle,
+                        false,
+                        false,
+                        false,
+                        None,
+                        None,
+                        None,
+                        &Theme::default(),
+                        cx,
+                    )
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            RowHost(cx.new(|cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                        "id": "keyboard", "title": "Keyboard session", "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap(),
+                    ];
+                    state
+                });
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: String::new(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_show_project_icon = false;
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        // Test windows only dispatch key downs; gpui clicks a focused
+        // element on the key up that follows.
+        let press = |cx: &mut gpui::VisualTestContext, key: &str| {
+            cx.simulate_keystrokes(key);
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+            });
+        };
+        // Focus events carry the previous path only for an active window.
+        cx.update(|window, _| window.activate_window());
+        // A right-click opens the row's menu without taking focus from
+        // wherever typing was going (the composer, in the app).
+        let typing = cx.update(|_, cx| cx.focus_handle());
+        cx.update(|window, cx| window.focus(&typing, cx));
+        let row = cx.debug_bounds("chat-keyboard").unwrap();
+        cx.simulate_mouse_down(row.center(), MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(row.center(), MouseButton::Right, gpui::Modifiers::default());
+        assert!(cx.update(|window, _| typing.is_focused(window)));
+        shell.update(cx, |shell, cx| {
+            shell.chat_menu.begin_close();
+            cx.notify();
+        });
+        cx.update(|window, _| window.blur());
+        assert!(cx.debug_bounds("chat-keyboard-pin").is_none());
+        cx.update(|window, cx| window.focus_next(cx));
+        // Space reveals the actions without opening the session.
+        press(cx, "space");
+        assert!(cx.debug_bounds("chat-keyboard-pin").is_some());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.state.read(cx).selected_chat.is_none());
+        });
+        // Escape hides them again.
+        press(cx, "escape");
+        assert!(cx.debug_bounds("chat-keyboard-pin").is_none());
+        // Focus leaving the row (for the composer, say) hides them too.
+        press(cx, "space");
+        assert!(cx.debug_bounds("chat-keyboard-pin").is_some());
+        let elsewhere = cx.update(|_, cx| cx.focus_handle());
+        cx.update(|window, cx| window.focus(&elsewhere, cx));
+        // Focus events reach listeners on the next drawn frame.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-keyboard-pin").is_none());
+        // Enter on Pin pins the session and closes the corner.
+        cx.update(|window, cx| {
+            let row = shell
+                .read(cx)
+                .row_focus
+                .borrow()
+                .get("chat-keyboard")
+                .cloned();
+            window.focus(&row.unwrap(), cx);
+        });
+        press(cx, "space");
+        cx.update(|window, cx| window.focus_next(cx));
+        press(cx, "enter");
+        shell.read_with(cx, |shell, cx| {
+            assert!(
+                shell
+                    .active_sidebar_pins(cx)
+                    .contains(&"keyboard".to_string())
+            );
+            assert!(shell.chat_status_keyboard.is_none());
         });
     }
 }
