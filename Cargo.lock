@@ -12438,6 +12438,7 @@ dependencies = [
  "gpui-base",
  "gpui_platform",
  "gpui_tokio",
+ "html5ever",
  "image",
  "libc",
  "mermaid-rs-renderer",
