@@ -3,6 +3,7 @@ use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(super) enum CompactControl {
+    Provider,
     #[default]
     Model,
     Fast,
@@ -43,7 +44,8 @@ const HEADER_HEIGHT: f32 = 48.0;
 /// A model without an effort ladder titles the header with its name alone.
 const HEADER_HEIGHT_SINGLE: f32 = 36.0;
 /// Flush with the card inset, a 15pt glyph centred in 32pt ends 12pt from
-/// the card edge: the slider rail's end.
+/// the card edge: the slider rail's end. The provider button mirrors it on
+/// the leading side.
 const FAST_BUTTON_WIDTH: f32 = 32.0;
 /// The header inside the card inset, then the slider block and the space
 /// above the option rows. The slider's 4pt below its box leaves the rail
@@ -62,11 +64,45 @@ const EFFORT_BLOCK: f32 = SLIDER_TOP + SLIDER_HEIGHT + SLIDER_BOTTOM;
 const OPTIONS_GAP: f32 = 4.0;
 /// The card's 1pt border, top and bottom, sits inside its height.
 const CARD_BORDERS: f32 = 2.0;
+/// The list pages' one header row: back button and filter side by side.
+pub(super) const LIST_HEADER: f32 = 40.0;
 /// Option rows (26pt plus a 2pt gap) all show up to this many, then scroll.
 const OPTIONS_MAX_ROWS: usize = 6;
 /// The rows' 4pt top inset, then the rows; the panel's inset closes below.
 fn options_height(count: usize) -> f32 {
     2.0 + count.min(OPTIONS_MAX_ROWS) as f32 * 28.0
+}
+
+/// Option ids Cursor uses for an effort ladder (its models carry none).
+const EFFORT_OPTION_IDS: [&str; 3] = ["effort", "reasoning", "reasoning_effort"];
+
+pub(super) struct CompactEffort {
+    pub labels: Vec<SharedString>,
+    pub selected: usize,
+    stops: EffortStops,
+}
+
+enum EffortStops {
+    Reasoning(Vec<ReasoningLevel>),
+    Option {
+        id: String,
+        choices: Vec<String>,
+        default: String,
+    },
+}
+
+/// One entry on the provider page: the starred models, or a provider.
+#[derive(Clone)]
+pub(super) enum ProviderRow {
+    Starred,
+    Harness(HarnessDescriptor),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompactPage {
+    Panel,
+    Models,
+    Providers,
 }
 
 #[derive(Default)]
@@ -81,7 +117,7 @@ pub(super) struct CompactMotion {
     shimmer_last_frame: Option<std::time::Instant>,
     fast: Option<ScalarTransition>,
     height: Option<ScalarTransition>,
-    page: Option<bool>,
+    page: Option<CompactPage>,
     reveal: Option<ScalarTransition>,
     pub frame_height: f32,
 }
@@ -296,28 +332,31 @@ impl Pickers {
     }
 
     pub(super) fn show_compact_models(&mut self, cx: &mut Context<Self>) {
+        // The provider button picks the provider; the list holds its models.
+        self.show_compact_list(ModelRail::Harness, "Search models…", cx);
+    }
+
+    /// The starred models across providers, opened from the provider page.
+    fn show_compact_starred(&mut self, cx: &mut Context<Self>) {
+        self.show_compact_list(ModelRail::Favorites, "Search starred…", cx);
+    }
+
+    fn show_compact_list(
+        &mut self,
+        rail: ModelRail,
+        placeholder: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         self.setting_menu = None;
+        self.compact_providers = false;
         self.compact_model_list = true;
-        self.model_rail = ModelRail::All;
-        // Open on the current model: its provider's group at the top when
-        // the model sits near the start of it, else centred on the model.
+        self.model_rail = rail;
+        self.reset_compact_search(placeholder, cx);
+        // Open on the current model, at the top when it is near the start.
         let selected = self.selected_model_index(cx);
         self.active = selected;
-        let start = self
-            .compact_groups(cx)
-            .into_iter()
-            .rev()
-            .find(|(_, start)| *start <= selected)
-            .map_or(0, |(_, start)| start);
-        if selected - start < COMPACT_LIST_ROWS as usize - 2 {
-            // One row of the previous group stays above, under the edge
-            // fade, so the group's first row is never washed out and the
-            // list shows there is more above.
-            self.model_scroll.scroll_to_item_strict_with_offset(
-                start,
-                gpui::ScrollStrategy::Top,
-                usize::from(start > 0),
-            );
+        if selected < COMPACT_LIST_ROWS as usize - 2 {
+            self.model_scroll_base().set_offset(gpui::Point::default());
         } else {
             self.model_scroll
                 .scroll_to_item_strict(selected, gpui::ScrollStrategy::Center);
@@ -326,138 +365,249 @@ impl Pickers {
         cx.notify();
     }
 
-    /// Where each provider's group starts in the unsearched list: starred
-    /// models first, then one run per provider.
-    fn compact_groups(&self, cx: &App) -> Vec<(Option<HarnessId>, usize)> {
-        let rows = self.model_rows(cx);
-        let mut groups: Vec<(Option<HarnessId>, usize)> = Vec::new();
-        for (ix, row) in rows.iter().enumerate() {
-            let group =
-                (!self.defaults.is_favorite(row.harness, &row.model.id)).then_some(row.harness);
-            if groups.last().is_none_or(|(last, _)| *last != group) {
-                groups.push((group, ix));
-            }
+    pub(super) fn show_compact_providers(&mut self, cx: &mut Context<Self>) {
+        if self.harness_locked(cx) {
+            return;
         }
-        groups
+        self.setting_menu = None;
+        self.compact_model_list = false;
+        self.compact_providers = true;
+        self.reset_compact_search("Search providers…", cx);
+        let effective = self.effective_harness(cx);
+        self.active = self
+            .compact_provider_rows(cx)
+            .iter()
+            .position(|row| matches!(row, ProviderRow::Harness(d) if Some(d.id) == effective))
+            .unwrap_or(0);
+        popover::reset_menu_scroll(&self.menu_scroll, &mut self.menu_bar);
+        self.focus_on_mount = true;
+        cx.notify();
     }
 
-    pub(super) fn compact_model_back_header(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = Theme::of(cx).for_popup();
-        let searching = !self.search.read(cx).text().trim().is_empty();
-        let groups = if searching {
-            Vec::new()
+    /// Back from either list page to the panel, onto the control that
+    /// opened it.
+    pub(super) fn show_compact_panel(&mut self, cx: &mut Context<Self>) {
+        self.compact_control = if self.compact_providers {
+            CompactControl::Provider
         } else {
-            self.compact_groups(cx)
+            CompactControl::Model
         };
-        // The group whose rows sit at the top of the scroll lights its chip.
-        // Rows share one pitch, so the offset names the top row directly.
-        let top = (f32::from(-self.model_scroll_base().offset().y)
-            / (COMPACT_ROW_HEIGHT + popover::MENU_GAP))
-            .round()
-            .max(0.0) as usize;
-        let current = groups
-            .iter()
-            .rev()
-            .find(|(_, start)| *start <= top)
-            .map(|(group, _)| *group);
-        // Many harnesses overflow the strip: keep the viewed chip in sight
-        // as the list scrolls, without fighting a manual sideways scroll.
-        let viewed_ix = groups.iter().position(|(group, _)| current == Some(*group));
-        if viewed_ix != self.compact_strip_viewed {
-            self.compact_strip_viewed = viewed_ix;
-            if let Some(ix) = viewed_ix {
-                self.compact_strip_scroll.scroll_to_item(ix);
+        self.compact_model_list = false;
+        self.compact_providers = false;
+        self.focus_on_mount = true;
+        cx.notify();
+    }
+
+    /// Clear the shared filter for a new page without letting the clear's
+    /// Edited event reset the highlight anchored right after.
+    fn reset_compact_search(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
+        self.search_reset_muted = !self.search.read(cx).text().is_empty();
+        self.search.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, cx);
+            if !input.text().is_empty() {
+                input.set_text("", cx);
             }
-        }
-        let strip = (!groups.is_empty()).then(|| {
-            let chips = div()
-                .id("compact-group-strip")
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .overflow_x_scroll()
-                .track_scroll(&self.compact_strip_scroll)
-                .children(groups.into_iter().map(|(group, start)| {
-                    let viewed = current == Some(group);
-                    let (icon, tint, name): (&'static str, Option<gpui::Hsla>, SharedString) =
-                        match group {
-                            None => (crate::icons::STAR_BOLD, None, "Starred".into()),
-                            Some(harness) => {
-                                let (icon, tint) = harness_brand_icon(harness);
-                                let name = self
-                                    .rail_descriptors(cx)
-                                    .into_iter()
-                                    .find(|d| d.id == harness)
-                                    .map(|d| d.name)
-                                    .unwrap_or_default();
-                                (icon, tint, name.into())
-                            }
-                        };
-                    let hint = name.clone();
-                    div()
-                        .id(SharedString::from(format!("compact-group-{start}")))
-                        .role(gpui::Role::Button)
-                        .aria_label(SharedString::from(format!("Jump to {name}")))
-                        .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
-                        .flex_none()
-                        .size(px(26.0))
-                        .rounded(px(7.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .when(viewed, |el| el.bg(crate::theme::ink(0.08)))
-                        .when(!viewed, |el| {
-                            el.opacity(0.7)
-                                .hover(|s| s.bg(crate::theme::ink(0.05)).opacity(1.0))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.compact_keyboard = false;
-                            this.active = start;
-                            this.model_scroll
-                                .scroll_to_item_strict(start, gpui::ScrollStrategy::Top);
-                            cx.notify();
-                        }))
-                        .child(crate::icons::icon(icon).size(px(14.0)).text_color(
-                            tint.unwrap_or(if viewed { theme.text } else { theme.text_muted }),
-                        ))
-                }));
-            // Each side fades over the chips hidden past it, up to one chip
-            // pitch, reaching zero exactly at the clip edge.
-            crate::edge_fade::edge_faded(28.0, false, false, chips)
-                .fade_left(true)
-                .fade_right(true)
-                .fade_scroll_x(&self.compact_strip_scroll)
         });
+    }
+
+    /// Starred models first (once any are starred), then the providers on
+    /// offer, narrowed by the filter.
+    pub(super) fn compact_provider_rows(&self, cx: &App) -> Vec<ProviderRow> {
+        let query = self.search.read(cx).text().trim().to_lowercase();
+        let matches = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
+        let starred = (!self.defaults.favorites.is_empty() && matches("Starred"))
+            .then_some(ProviderRow::Starred);
+        starred
+            .into_iter()
+            .chain(
+                self.rail_descriptors(cx)
+                    .into_iter()
+                    .filter(|d| matches(&d.name))
+                    .map(ProviderRow::Harness),
+            )
+            .collect()
+    }
+
+    /// Picking a provider runs its last-used model at that model's last
+    /// settings (the remembered defaults take over once the harness moves).
+    pub(super) fn pick_compact_provider(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        self.model_rail = ModelRail::Harness;
+        self.pick_harness(harness, cx);
+        self.show_compact_panel(cx);
+    }
+
+    /// Both list pages share one header row: back to the panel, then the
+    /// page's filter beside it.
+    pub(super) fn compact_list_header(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = Theme::of(cx).for_popup();
         div()
             .h(px(40.0))
             .flex_none()
             .px(px(popover::CARD_INSET))
+            .border_b_1()
+            .border_color(crate::theme::hairline(0.08))
             .flex()
             .items_center()
             .gap(px(4.0))
             .child(
-                popover::menu_row(&theme, false, "compact-model-back")
-                    .id("compact-model-back")
+                popover::menu_row(&theme, false, "compact-list-back")
+                    .id("compact-list-back")
                     .role(gpui::Role::Button)
-                    .aria_label("Back to effort")
+                    .aria_label("Back")
                     .flex_none()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.compact_control = CompactControl::Model;
-                        this.compact_model_list = false;
-                        this.focus_on_mount = true;
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_compact_panel(cx)))
                     .child(
                         crate::icons::icon(crate::icons::ALT_ARROW_LEFT)
                             .size(px(14.0))
                             .text_color(theme.text_muted),
                     ),
             )
-            .children(strip)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .child(self.search.clone()),
+            )
+    }
+
+    pub(super) fn render_compact_provider_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let rows = self.compact_provider_rows(cx);
+        let effective = self.effective_harness(cx);
+        let list_height = compact_list_height(rows.len())
+            .min((self.menu_geometry().height - LIST_HEADER - CARD_BORDERS).max(0.0));
+        let items: Vec<AnyElement> = if rows.is_empty() {
+            vec![empty_list_note(&theme, "No providers found")]
+        } else {
+            rows.into_iter()
+                .enumerate()
+                .map(|(ix, row)| {
+                    let (icon, tint, name, selected): (_, _, SharedString, bool) = match &row {
+                        ProviderRow::Starred => {
+                            (crate::icons::STAR_BOLD, None, "Starred".into(), false)
+                        }
+                        ProviderRow::Harness(descriptor) => {
+                            let (icon, tint) = harness_brand_icon(descriptor.id);
+                            (
+                                icon,
+                                tint,
+                                descriptor.name.clone().into(),
+                                effective == Some(descriptor.id),
+                            )
+                        }
+                    };
+                    let item = div()
+                        .id(("compact-provider", ix))
+                        .role(gpui::Role::ListBoxOption)
+                        .aria_label(name.clone())
+                        .aria_selected(selected)
+                        .h(px(COMPACT_ROW_HEIGHT))
+                        .pl(px(8.0))
+                        .pr(px(8.0))
+                        .rounded(px(popover::MENU_ITEM_RADIUS))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .cursor_pointer()
+                        .text_color(theme.text)
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .when(selected, |el| crate::glass::light(el, &theme, 1.0))
+                        .when(!selected && self.active == ix, |el| {
+                            el.bg(crate::theme::ink(0.05))
+                        })
+                        .when(self.compact_keyboard && self.active == ix, |el| {
+                            el.aria_active_descendant().shadow(focus_outline(&theme))
+                        })
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered && (this.active != ix || this.compact_keyboard) {
+                                this.compact_keyboard = false;
+                                this.active = ix;
+                                cx.notify();
+                            }
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.activate_provider_row(row.clone(), cx)
+                        }))
+                        .child(
+                            crate::icons::icon(icon)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(tint.unwrap_or(theme.text_muted)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(name),
+                        );
+                    div()
+                        .pb(px(popover::MENU_GAP))
+                        .child(item)
+                        .into_any_element()
+                })
+                .collect()
+        };
+        let scrollbar = popover::rail(self, "compact-providers-scrollbar", &theme, cx);
+        let list = div()
+            .id("compact-providers-host")
+            .relative()
+            .flex_none()
+            .h(px(list_height))
+            .py(px(popover::CARD_INSET))
+            .bg(crate::theme::ink(0.02))
+            .on_hover(cx.listener(Self::on_menu_list_hover))
+            .child(popover::faded_menu_list(
+                &self.menu_scroll,
+                popover::menu_scroll_list("compact-providers", &self.menu_scroll)
+                    .size_full()
+                    .child(div().flex().flex_col().children(items)),
+            ))
+            .children(scrollbar);
+        div()
+            .flex()
+            .flex_col()
+            .child(self.compact_list_header(cx))
+            .child(list)
+            .into_any_element()
+    }
+
+    pub(super) fn compact_provider_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let count = self.compact_provider_rows(cx).len();
+        match event.keystroke.key.as_str() {
+            "escape" => self.show_compact_panel(cx),
+            "up" | "down" => {
+                let current = (self.active < count).then_some(self.active);
+                self.active = popover::menu_step(
+                    current,
+                    count,
+                    if event.keystroke.key == "up" { -1 } else { 1 },
+                )
+                .unwrap_or(0);
+                self.compact_keyboard = true;
+                cx.notify();
+            }
+            "enter" => self.activate_compact_provider(cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    pub(super) fn activate_compact_provider(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = self.compact_provider_rows(cx).get(self.active).cloned() {
+            self.activate_provider_row(row, cx);
+        }
+    }
+
+    fn activate_provider_row(&mut self, row: ProviderRow, cx: &mut Context<Self>) {
+        match row {
+            ProviderRow::Starred => self.show_compact_starred(cx),
+            ProviderRow::Harness(descriptor) => self.pick_compact_provider(descriptor.id, cx),
+        }
     }
 
     pub(super) fn compact_fast_choice(&self, cx: &App) -> Option<(String, String, bool, bool)> {
@@ -490,56 +640,138 @@ impl Pickers {
             .map(|o| o.id.clone())
     }
 
+    /// The slider's stops: the model's reasoning ladder, else an option
+    /// shaped like one (Cursor's `effort`/`reasoning` choices), so every
+    /// model with an effort gets the same slider.
+    pub(super) fn compact_effort(&self, cx: &App) -> Option<CompactEffort> {
+        let levels = self.trait_ladder(cx);
+        if !levels.is_empty() {
+            let current = self.effective_reasoning(cx);
+            return Some(CompactEffort {
+                labels: levels.iter().map(|l| reasoning_label(*l).into()).collect(),
+                selected: levels.iter().position(|l| Some(*l) == current).unwrap_or(0),
+                stops: EffortStops::Reasoning(levels),
+            });
+        }
+        let option = self
+            .selected_model(cx)?
+            .options
+            .iter()
+            .find(|o| EFFORT_OPTION_IDS.contains(&o.id.as_str()) && o.choices.len() > 1)?;
+        let options = self.explicit_options(cx);
+        let current = options
+            .get(&option.id)
+            .and_then(|v| v.as_str())
+            .unwrap_or(&option.default_choice);
+        Some(CompactEffort {
+            labels: option
+                .choices
+                .iter()
+                .map(|c| SharedString::from(c.label.clone()))
+                .collect(),
+            selected: option
+                .choices
+                .iter()
+                .position(|c| c.id == current)
+                .unwrap_or(0),
+            stops: EffortStops::Option {
+                id: option.id.clone(),
+                choices: option.choices.iter().map(|c| c.id.clone()).collect(),
+                default: option.default_choice.clone(),
+            },
+        })
+    }
+
+    /// Option ids the compact card draws as its own controls, not rows.
+    pub(super) fn compact_hidden_options(&self, cx: &App) -> Vec<String> {
+        let effort = match self.compact_effort(cx).map(|e| e.stops) {
+            Some(EffortStops::Option { id, .. }) => Some(id),
+            _ => None,
+        };
+        self.fast_option_id(cx).into_iter().chain(effort).collect()
+    }
+
     pub(super) fn pick_effort_at(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
         let Some(bounds) = self.effort_bounds else {
             return;
         };
-        let levels = self.trait_ladder(cx);
+        let Some(effort) = self.compact_effort(cx) else {
+            return;
+        };
+        let count = effort.labels.len();
         let Some(index) = effort_index(
             f32::from(x - bounds.left()),
             f32::from(bounds.size.width),
-            levels.len(),
+            count,
         ) else {
             return;
         };
         if self.effort_dragging {
             let fraction =
                 effort_fraction(f32::from(x - bounds.left()), f32::from(bounds.size.width));
-            self.compact_motion.drag_fraction = Some(if levels.len() > 1 { fraction } else { 0.0 });
+            self.compact_motion.drag_fraction = Some(if count > 1 { fraction } else { 0.0 });
             cx.notify();
         }
-        self.pick_compact_effort(levels[index], cx);
+        self.pick_compact_effort(effort, index, cx);
     }
 
     /// Effort and fast mode have their own controls in the compact card.
-    pub(super) fn compact_option_visible(id: &ModelSetting, fast: Option<&str>) -> bool {
+    pub(super) fn compact_option_visible(id: &ModelSetting, hidden: &[String]) -> bool {
         !matches!(id, ModelSetting::Reasoning)
-            && !matches!(id, ModelSetting::Option(id) if Some(id.as_str()) == fast)
+            && !matches!(id, ModelSetting::Option(id) if hidden.contains(id))
     }
 
     fn compact_controls(&self, cx: &App) -> Vec<CompactControl> {
-        let mut controls = vec![CompactControl::Model];
+        let mut controls = Vec::new();
+        if !self.harness_locked(cx) {
+            controls.push(CompactControl::Provider);
+        }
+        controls.push(CompactControl::Model);
         if self.compact_fast_choice(cx).is_some() {
             controls.push(CompactControl::Fast);
         }
-        if !self.trait_ladder(cx).is_empty() {
+        if self.compact_effort(cx).is_some() {
             controls.push(CompactControl::Effort);
         }
-        let fast_id = self.fast_option_id(cx);
+        let hidden = self.compact_hidden_options(cx);
         controls.extend(
             self.setting_groups(cx)
                 .into_iter()
-                .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
+                .filter(|g| Self::compact_option_visible(&g.id, &hidden))
                 .map(|g| CompactControl::Option(g.id)),
         );
         controls
     }
 
-    fn pick_compact_effort(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
-        if self.effective_reasoning(cx) != Some(level) {
-            self.pick_reasoning(level, cx);
-            crate::haptics::selection_step();
+    pub(super) fn pick_compact_effort(
+        &mut self,
+        effort: CompactEffort,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if index == effort.selected {
+            return;
         }
+        match effort.stops {
+            EffortStops::Reasoning(levels) => {
+                let Some(level) = levels.get(index).copied() else {
+                    return;
+                };
+                self.pick_reasoning(level, cx);
+            }
+            EffortStops::Option {
+                id,
+                choices,
+                default,
+            } => {
+                let Some(choice) = choices.get(index).cloned() else {
+                    return;
+                };
+                let is_default = choice == default;
+                self.pick_option(id, choice, is_default, cx);
+            }
+        }
+        crate::haptics::selection_step();
     }
 
     pub(super) fn render_compact_menu(
@@ -547,13 +779,13 @@ impl Pickers {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let fast_id = self.fast_option_id(cx);
+        let hidden = self.compact_hidden_options(cx);
         let options = self
             .setting_groups(cx)
             .iter()
-            .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
+            .filter(|g| Self::compact_option_visible(&g.id, &hidden))
             .count();
-        let effort = !self.trait_ladder(cx).is_empty();
+        let effort = self.compact_effort(cx).is_some();
         let panel_height = CARD_BORDERS
             + header_block(effort)
             + if effort { EFFORT_BLOCK } else { 0.0 }
@@ -562,11 +794,23 @@ impl Pickers {
             } else {
                 OPTIONS_GAP + options_height(options)
             };
-        let target = self.menu_geometry().height.min(if self.compact_model_list {
-            // Back header and search (40 each) above the list.
-            80.0 + compact_list_height(self.model_rows_len(cx)) + CARD_BORDERS
+        let page = if self.compact_providers {
+            CompactPage::Providers
+        } else if self.compact_model_list {
+            CompactPage::Models
         } else {
-            panel_height
+            CompactPage::Panel
+        };
+        let target = self.menu_geometry().height.min(match page {
+            CompactPage::Models => {
+                LIST_HEADER + compact_list_height(self.model_rows_len(cx)) + CARD_BORDERS
+            }
+            CompactPage::Providers => {
+                LIST_HEADER
+                    + compact_list_height(self.compact_provider_rows(cx).len())
+                    + CARD_BORDERS
+            }
+            CompactPage::Panel => panel_height,
         });
         let (height, moving) = ScalarTransition::sample(
             &mut self.compact_motion.height,
@@ -578,24 +822,20 @@ impl Pickers {
         if moving {
             window.request_animation_frame();
         }
-        let content = if self.compact_model_list {
-            self.render_harness_model_popover(cx)
-        } else {
-            self.render_compact_model_panel(window, cx)
+        let content = match page {
+            CompactPage::Models => self.render_harness_model_popover(cx),
+            CompactPage::Providers => self.render_compact_provider_page(cx),
+            CompactPage::Panel => self.render_compact_model_panel(window, cx),
         };
         let now = std::time::Instant::now();
-        if self
-            .compact_motion
-            .page
-            .is_some_and(|page| page != self.compact_model_list)
-        {
+        if self.compact_motion.page.is_some_and(|last| last != page) {
             self.compact_motion.reveal = Some(ScalarTransition {
                 from: 0.0,
                 to: 1.0,
                 started: now,
             });
         }
-        self.compact_motion.page = Some(self.compact_model_list);
+        self.compact_motion.page = Some(page);
         let (reveal, revealing) = ScalarTransition::sample(
             &mut self.compact_motion.reveal,
             1.0,
@@ -640,11 +880,11 @@ impl Pickers {
                     _ => NO_ACTIVE_ROW,
                 };
                 if let CompactControl::Option(id) = &self.compact_control {
-                    let fast_id = self.fast_option_id(cx);
+                    let hidden = self.compact_hidden_options(cx);
                     let index = self
                         .setting_groups(cx)
                         .iter()
-                        .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
+                        .filter(|g| Self::compact_option_visible(&g.id, &hidden))
                         .position(|g| &g.id == id)
                         .unwrap_or(0);
                     self.menu_scroll
@@ -652,6 +892,7 @@ impl Pickers {
                 }
             }
             "enter" | "space" => match self.compact_control.clone() {
+                CompactControl::Provider => self.show_compact_providers(cx),
                 CompactControl::Model => self.show_compact_models(cx),
                 CompactControl::Fast => {
                     if let Some((option, choice, default, _)) = self.compact_fast_choice(cx) {
@@ -667,19 +908,15 @@ impl Pickers {
                 }
             }
             "left" | "right" | "home" | "end" if self.compact_control == CompactControl::Effort => {
-                let levels = self.trait_ladder(cx);
-                if !levels.is_empty() {
-                    let index = levels
-                        .iter()
-                        .position(|level| Some(*level) == self.effective_reasoning(cx))
-                        .unwrap_or(0);
+                if let Some(effort) = self.compact_effort(cx) {
+                    let last = effort.labels.len().saturating_sub(1);
                     let next = match event.keystroke.key.as_str() {
-                        "left" => index.saturating_sub(1),
-                        "right" => (index + 1).min(levels.len() - 1),
+                        "left" => effort.selected.saturating_sub(1),
+                        "right" => (effort.selected + 1).min(last),
                         "home" => 0,
-                        _ => levels.len() - 1,
+                        _ => last,
                     };
-                    self.pick_compact_effort(levels[next], cx);
+                    self.pick_compact_effort(effort, next, cx);
                 }
             }
             _ => return,
@@ -694,11 +931,9 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let levels = self.trait_ladder(cx);
-        let selected = levels
-            .iter()
-            .position(|l| Some(*l) == self.effective_reasoning(cx))
-            .unwrap_or(0);
+        let (levels, selected) = self
+            .compact_effort(cx)
+            .map_or((Vec::new(), 0), |e| (e.labels, e.selected));
         let label: SharedString = self
             .selected_model(cx)
             .map(|m| m.label.clone())
@@ -706,12 +941,12 @@ impl Pickers {
             .into();
         let effort: SharedString = levels
             .get(selected)
-            .copied()
-            .map(reasoning_label)
-            .unwrap_or("Default")
-            .into();
+            .cloned()
+            .unwrap_or_else(|| "Default".into());
         let model_accessible: SharedString =
             format!("{} · {} · Change model", effort, label).into();
+        let provider_focus =
+            self.compact_keyboard && self.compact_control == CompactControl::Provider;
         let model_focus = self.compact_keyboard && self.compact_control == CompactControl::Model;
         let fast_focus = self.compact_keyboard && self.compact_control == CompactControl::Fast;
         let effort_focus = self.compact_keyboard && self.compact_control == CompactControl::Effort;
@@ -909,17 +1144,70 @@ impl Pickers {
                     }),
             );
         }
-        // Flush with the card inset, like the option rows, so the title's
-        // text and the rows' labels share one leading edge.
-        let header = div()
-            .h(px(if levels.is_empty() {
-                HEADER_HEIGHT_SINGLE
+        // The provider is a square button as tall as the title, leading it.
+        // A chat whose harness is fixed shows the mark without the button.
+        let header_height = if levels.is_empty() {
+            HEADER_HEIGHT_SINGLE
+        } else {
+            HEADER_HEIGHT
+        };
+        let locked = self.harness_locked(cx);
+        let provider_button = self.effective_harness(cx).map(|harness| {
+            let (icon, tint) = harness_brand_icon(harness);
+            let name: SharedString = self
+                .rail_descriptors(cx)
+                .into_iter()
+                .find(|d| d.id == harness)
+                .map(|d| d.name)
+                .unwrap_or_default()
+                .into();
+            let provider_key: SharedString = format!("compact-provider-{}", cx.entity_id()).into();
+            let provider_hover = if locked {
+                0.0
             } else {
-                HEADER_HEIGHT
-            }))
+                motion::hover_t(&provider_key)
+            };
+            let hint: SharedString = if locked {
+                name.clone()
+            } else {
+                format!("{name} · Change provider").into()
+            };
+            div()
+                .id("compact-select-provider")
+                .w(px(FAST_BUTTON_WIDTH))
+                .h_full()
+                .flex_none()
+                .rounded(px(popover::MENU_ITEM_RADIUS))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(crate::theme::ink(0.05 * provider_hover))
+                .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
+                .when(!locked, |el| {
+                    el.role(gpui::Role::Button)
+                        .aria_label(SharedString::from(format!("{name} · Change provider")))
+                        .cursor_pointer()
+                        .on_hover(motion::hover_listener(provider_key))
+                        .when(provider_focus, |el| {
+                            el.aria_active_descendant().shadow(focus_outline(&theme))
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.compact_keyboard = false;
+                            this.show_compact_providers(cx);
+                        }))
+                })
+                .child(
+                    crate::icons::icon(icon)
+                        .size(px(16.0))
+                        .text_color(tint.unwrap_or(theme.text_muted)),
+                )
+        });
+        let header = div()
+            .h(px(header_height))
             .flex_none()
             .flex()
             .gap(px(popover::CARD_INSET))
+            .children(provider_button)
             .child(title)
             .children(fast_button);
         let mut panel = div()
@@ -1096,11 +1384,11 @@ impl Pickers {
                     .child(slider),
             );
         }
-        let fast_id = self.fast_option_id(cx);
+        let hidden = self.compact_hidden_options(cx);
         let option_count = self
             .setting_groups(cx)
             .iter()
-            .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
+            .filter(|g| Self::compact_option_visible(&g.id, &hidden))
             .count();
         if option_count > 0 {
             let options = self.render_traits_sections(cx);

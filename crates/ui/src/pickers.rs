@@ -536,13 +536,12 @@ pub struct Pickers {
     chip_resizing: bool,
     open_model_height: f32,
     compact_model_list: bool,
+    /// The compact picker's provider page, entered from the panel's
+    /// provider button; exclusive with [`Self::compact_model_list`].
+    compact_providers: bool,
     compact_control: compact::CompactControl,
     effort_dragging: bool,
     compact_motion: compact::CompactMotion,
-    /// The model list's harness strip scrolls sideways when it overflows;
-    /// the viewed chip is kept in view as the list scrolls.
-    compact_strip_scroll: gpui::ScrollHandle,
-    compact_strip_viewed: Option<usize>,
     compact_keyboard: bool,
     effort_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     open: popover::Popup<PickerKind>,
@@ -774,11 +773,10 @@ impl Pickers {
             chip_resizing: false,
             open_model_height: model_menu_height(0),
             compact_model_list: false,
+            compact_providers: false,
             compact_control: compact::CompactControl::default(),
             effort_dragging: false,
             compact_motion: compact::CompactMotion::default(),
-            compact_strip_scroll: gpui::ScrollHandle::new(),
-            compact_strip_viewed: None,
             compact_keyboard: false,
             effort_bounds: None,
             config: DraftConfig::default(),
@@ -961,8 +959,12 @@ impl Pickers {
         let explicit = self.config.reasoning.or_else(|| {
             match self.state.read(cx).selected_chat_row() {
                 Some(chat) => chat.config.as_ref().and_then(|c| c.reasoning),
-                // New chat: the remembered last-used level.
-                None => self.defaults.reasoning,
+                // New chat: the level last used with this model, else the
+                // last-used level overall.
+                None => self
+                    .effective_harness(cx)
+                    .and_then(|h| self.defaults.reasoning_for(h, self.effective_model_id(cx)))
+                    .or(self.defaults.reasoning),
             }
         });
         if self.selected_model(cx).is_none() {
@@ -1165,6 +1167,7 @@ impl Pickers {
             self.open_model_height = model_menu_height(self.setting_groups(cx).len());
             self.compact_control = compact::CompactControl::Model;
             self.compact_model_list = false;
+            self.compact_providers = false;
             self.effort_dragging = false;
             self.compact_keyboard = false;
             self.compact_motion = compact::CompactMotion::default();
@@ -1668,7 +1671,7 @@ impl Pickers {
             // provider settings so both the picker and first createChat use the
             // new harness, even when its model catalog has not loaded yet.
             let model = self.defaults.model_for(harness).map(|m| m.id.clone());
-            let reasoning = self.defaults.reasoning;
+            let reasoning = self.defaults.reasoning_for(harness, model.as_deref());
             let options = model
                 .as_deref()
                 .and_then(|model| self.defaults.model_options_for(harness, model))
@@ -1721,7 +1724,9 @@ impl Pickers {
             self.update_chat_config(cx, move |config| config.model = Some(model_id));
         } else {
             // New chat: draft pick + sticky last-used memory for this harness.
+            // Effort follows the model: its own remembered level, if any.
             self.config.model = Some(model_id.clone());
+            self.config.reasoning = None;
             if let Some(harness) = self.effective_harness(cx) {
                 let label = self
                     .models
@@ -1743,7 +1748,13 @@ impl Pickers {
             self.update_chat_config(cx, move |config| config.reasoning = Some(level));
         } else {
             self.config.reasoning = Some(level);
-            self.defaults.reasoning = Some(level);
+            if let Some(harness) = self.effective_harness(cx) {
+                let model = self.effective_model_id(cx).map(str::to_owned);
+                self.defaults
+                    .remember_reasoning(harness, model.as_deref(), level);
+            } else {
+                self.defaults.reasoning = Some(level);
+            }
             self.save_defaults();
         }
         cx.notify();
@@ -2029,6 +2040,8 @@ impl Pickers {
     fn activate_model_row(&mut self, cx: &mut Context<Self>) {
         if self.setting_menu.is_some() {
             self.activate_setting_choice(cx);
+        } else if self.compact_model_picker(cx) && self.compact_providers {
+            self.activate_compact_provider(cx);
         } else if self.compact_model_picker(cx) && self.compact_model_list {
             self.activate_model_index(self.active, cx);
         } else if let Some(index) = self.active.checked_sub(self.model_rows_len(cx)) {
@@ -2607,15 +2620,16 @@ impl Pickers {
             return;
         }
         if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
+            if self.compact_providers {
+                self.compact_provider_key(event, cx);
+                return;
+            }
             if !self.compact_model_list {
                 self.compact_panel_key(event, cx);
                 return;
             }
             if event.keystroke.key == "escape" {
-                self.compact_control = compact::CompactControl::Model;
-                self.compact_model_list = false;
-                self.focus_on_mount = true;
-                cx.notify();
+                self.show_compact_panel(cx);
                 cx.stop_propagation();
                 return;
             }
@@ -3742,7 +3756,7 @@ impl Pickers {
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
         let list_height = if compact {
             compact::compact_list_height(self.model_rows_len(cx))
-            .min((height - 80.0).max(0.0))
+                .min((height - compact::LIST_HEADER - 2.0).max(0.0))
         } else {
             list_height
         };
@@ -3910,7 +3924,7 @@ impl Pickers {
         }
 
         if compact {
-            tabs = self.compact_model_back_header(cx);
+            tabs = self.compact_list_header(cx);
         }
 
         // ── search row: icon + borderless input over a full-bleed hairline.
@@ -3956,7 +3970,9 @@ impl Pickers {
                         entity.update(app, |this, cx| {
                             range
                                 .filter_map(|ix| {
-                                    row_data.get(ix).map(|row| this.render_model_row(ix, row, cx))
+                                    row_data
+                                        .get(ix)
+                                        .map(|row| this.render_model_row(ix, row, cx))
                                 })
                                 .collect::<Vec<AnyElement>>()
                         })
@@ -4074,7 +4090,8 @@ impl Pickers {
             .flex()
             .flex_col()
             .child(tabs)
-            .child(search_row)
+            // The compact header carries the filter beside its back button.
+            .when(!compact, |el| el.child(search_row))
             .children(refresh_error)
             .child(list_host)
             .children(tray)
@@ -4778,7 +4795,7 @@ impl Pickers {
         for (ix, group) in groups.enumerate() {
             if tray
                 && self.compact_model_picker(cx)
-                && !Self::compact_option_visible(&group.id, self.fast_option_id(cx).as_deref())
+                && !Self::compact_option_visible(&group.id, &self.compact_hidden_options(cx))
             {
                 continue;
             }
@@ -5808,14 +5825,24 @@ impl Render for Pickers {
 
         // The composer places this model chip beside Send:
         // brand icon + model name, then the effort as the chip's muted second
-        // tone. No suffix when the model has no reasoning ladder, nor for the
-        // title picker (titles always run at minimal reasoning).
-        let chip_suffix = effort.filter(|_| self.title.is_none()).map(|level| {
-            (
-                SharedString::from(reasoning_label(level)),
-                effort_customized.then(|| theme.text.opacity(0.85)),
-            )
-        });
+        // tone — the ladder's level, else an effort option's choice (Cursor).
+        // None for the title picker (titles always run at minimal reasoning).
+        let chip_suffix = effort
+            .filter(|_| self.title.is_none())
+            .map(|level| {
+                (
+                    SharedString::from(reasoning_label(level)),
+                    effort_customized.then(|| theme.text.opacity(0.85)),
+                )
+            })
+            .or_else(|| {
+                self.title
+                    .is_none()
+                    .then(|| self.compact_effort(cx))
+                    .flatten()
+                    .and_then(|e| e.labels.get(e.selected).cloned())
+                    .map(|label| (label, None))
+            });
         let fast = self.selected_model(cx).is_some_and(|model| {
             model.options.iter().any(|option| {
                 fast_mode_values(option).is_some_and(|(on, _)| {
@@ -7782,7 +7809,20 @@ mod tests {
                 );
             })
             .unwrap();
+        // Tab wraps to the provider button, which opens the provider page;
+        // Escape returns onto it, and the model button is the next control.
         cx.simulate_keystrokes(handle.into(), "escape tab enter");
+        handle
+            .read_with(cx, |picker, _| assert!(picker.compact_providers))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "escape");
+        handle
+            .read_with(cx, |picker, _| {
+                assert!(!picker.compact_providers);
+                assert_eq!(picker.compact_control, CompactControl::Provider);
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "down enter");
         handle
             .read_with(cx, |picker, _| assert!(picker.compact_model_list))
             .unwrap();
@@ -7817,7 +7857,8 @@ mod tests {
                 assert_eq!(picker.model_rows(cx)[picker.active].model.id, "other");
             })
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "escape shift-tab");
+        // Back from the list onto Model; the provider button sits before it.
+        cx.simulate_keystrokes(handle.into(), "escape shift-tab shift-tab");
         handle
             .read_with(cx, |picker, _| {
                 assert_eq!(
@@ -7858,7 +7899,11 @@ mod tests {
                 let mut fusion = bare_model("fusion", "Fusion");
                 fusion.reasoning_levels = vec![ReasoningLevel::Medium, ReasoningLevel::High];
                 fusion.options = vec![
-                    option("sidekick", "Sidekick", &[("swe-2", "SWE-2"), ("swe-3", "SWE-3")]),
+                    option(
+                        "sidekick",
+                        "Sidekick",
+                        &[("swe-2", "SWE-2"), ("swe-3", "SWE-3")],
+                    ),
                     option("lead", "Lead", &[("fable", "Fable"), ("sol", "Sol")]),
                 ];
                 pickers.config.harness = Some(HarnessId::Devin);
@@ -7869,11 +7914,11 @@ mod tests {
                 );
                 pickers.pick_model("fusion".into(), cx);
                 // No hover card in the compact panel: Lead leads, as in the card.
-                let fast = pickers.fast_option_id(cx);
+                let hidden = pickers.compact_hidden_options(cx);
                 let visible: Vec<_> = pickers
                     .setting_groups(cx)
                     .into_iter()
-                    .filter(|g| Pickers::compact_option_visible(&g.id, fast.as_deref()))
+                    .filter(|g| Pickers::compact_option_visible(&g.id, &hidden))
                     .map(|g| g.id)
                     .collect();
                 assert_eq!(
@@ -7985,7 +8030,141 @@ mod tests {
                     Loadable::Ready(vec![bare_model("claude", "Claude model")]),
                 );
                 picker.catalog_rev += 1;
-                assert_eq!(picker.model_rows_len(cx), 2);
+                // The list holds one provider's models; the provider page
+                // switches to the newly loaded one.
+                assert_eq!(picker.model_rows_len(cx), 1);
+                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                picker.show_compact_models(cx);
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_slider_drives_cursor_effort_option(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        handle
+            .update(cx, |picker, _, cx| {
+                // Cursor's shape: no reasoning ladder, effort as an option.
+                let mut opus = bare_model("claude-opus-5", "Claude Opus 5");
+                opus.options = vec![ModelOption {
+                    id: "effort".into(),
+                    label: "Effort".into(),
+                    default_choice: "high".into(),
+                    choices: [("low", "Low"), ("medium", "Medium"), ("high", "High")]
+                        .iter()
+                        .map(|(id, label)| ModelOptionChoice {
+                            id: (*id).into(),
+                            label: (*label).into(),
+                        })
+                        .collect(),
+                }];
+                picker.config.harness = Some(HarnessId::Cursor);
+                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Cursor, "Cursor")]);
+                picker
+                    .models
+                    .insert(HarnessId::Cursor, Loadable::Ready(vec![opus]));
+                picker.pick_model("claude-opus-5".into(), cx);
+                let effort = picker.compact_effort(cx).unwrap();
+                assert_eq!(effort.labels, ["Low", "Medium", "High"]);
+                assert_eq!(effort.selected, 2);
+                // The slider owns it: no Effort row in the panel.
+                assert_eq!(picker.compact_hidden_options(cx), ["effort"]);
+                picker.pick_compact_effort(effort, 0, cx);
+                assert_eq!(picker.resolved(cx).model_options["effort"], "low");
+                assert_eq!(picker.compact_effort(cx).unwrap().selected, 0);
+                // Back to the default clears the explicit pick.
+                let effort = picker.compact_effort(cx).unwrap();
+                picker.pick_compact_effort(effort, 2, cx);
+                assert!(!picker.explicit_options(cx).contains_key("effort"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn switching_provider_restores_its_last_model_and_effort(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let laddered = |id: &str, label: &str| {
+            let mut model = bare_model(id, label);
+            model.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ];
+            model
+        };
+        handle
+            .update(cx, |picker, _, cx| {
+                picker.harnesses = Loadable::Ready(vec![
+                    descriptor(HarnessId::Codex, "Codex"),
+                    descriptor(HarnessId::ClaudeCode, "Claude"),
+                ]);
+                picker.models.insert(
+                    HarnessId::Codex,
+                    Loadable::Ready(vec![laddered("gpt-a", "A"), laddered("gpt-b", "B")]),
+                );
+                picker.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![laddered("opus", "Opus")]),
+                );
+                picker.pick_harness(HarnessId::Codex, cx);
+                picker.pick_model("gpt-b".into(), cx);
+                picker.pick_reasoning(ReasoningLevel::Low, cx);
+                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                picker.pick_reasoning(ReasoningLevel::High, cx);
+                // Back to Codex: its last model, at that model's last effort.
+                picker.pick_compact_provider(HarnessId::Codex, cx);
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("gpt-b"));
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::Low));
+                // A model with no effort of its own takes the last one used
+                // anywhere (High, on Claude).
+                picker.pick_model("gpt-a".into(), cx);
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
+                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("opus"));
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
+                // Starring adds a Starred entry ahead of the providers; it
+                // opens the starred models from every provider.
+                assert!(matches!(
+                    picker.compact_provider_rows(cx).first(),
+                    Some(compact::ProviderRow::Harness(_))
+                ));
+                picker.toggle_model_favorite(HarnessId::Codex, "gpt-a", cx);
+                picker.show_compact_providers(cx);
+                assert!(matches!(
+                    picker.compact_provider_rows(cx).first(),
+                    Some(compact::ProviderRow::Starred)
+                ));
+                picker.active = 0;
+                picker.activate_compact_provider(cx);
+                assert!(picker.compact_model_list && !picker.compact_providers);
+                let rows = picker.model_rows(cx);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    (rows[0].harness, rows[0].model.id.as_str()),
+                    (HarnessId::Codex, "gpt-a")
+                );
             })
             .unwrap();
     }
@@ -8025,20 +8204,20 @@ mod tests {
             .update(cx, |picker, window, cx| {
                 picker.open_model_menu(window, cx);
                 assert!(!picker.compact_model_list);
+                // The list holds the current provider's models only.
                 picker.show_compact_models(cx);
-                assert_eq!(picker.model_rows_len(cx), 2);
-                let claude = picker
-                    .model_rows(cx)
-                    .iter()
-                    .position(|row| row.harness == HarnessId::ClaudeCode)
-                    .unwrap();
-                picker.activate_model_index(claude, cx);
-                assert!(!picker.compact_model_list);
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
+                // The provider page lists every provider, highlighting the
+                // current one, and a pick lands back on the panel.
+                picker.show_compact_providers(cx);
+                assert!(picker.compact_providers && !picker.compact_model_list);
+                assert_eq!(picker.compact_provider_rows(cx).len(), 2);
+                assert_eq!(picker.active, 0);
+                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                assert!(!picker.compact_providers && !picker.compact_model_list);
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
-                // The list reopens on the current model, not the first row.
-                picker.show_compact_models(cx);
-                assert_ne!(claude, 0);
-                assert_eq!(picker.active, claude);
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude-model"));
                 picker.pick_harness(HarnessId::Codex, cx);
                 picker.pick_model("codex-model".into(), cx);
                 picker.pick_reasoning(ReasoningLevel::Low, cx);
@@ -8050,7 +8229,10 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
+                // A chat's provider is fixed: the provider page stays shut.
                 picker.compact_model_list = false;
+                picker.show_compact_providers(cx);
+                assert!(!picker.compact_providers);
                 picker.focus_on_mount = true;
             })
             .unwrap();

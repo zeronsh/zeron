@@ -49,7 +49,11 @@ pub struct ComposerDefaults {
     /// Last model picked, per harness (restored on harness switch).
     pub model_by_harness: HashMap<HarnessId, RememberedModel>,
     /// Last reasoning level picked (global, like zeron's `reasoning` key).
+    /// The fallback for models with no level of their own yet.
     pub reasoning: Option<ReasoningLevel>,
+    /// Last reasoning level picked per harness and model id, so switching
+    /// back to a model (or its provider) restores the effort it was run at.
+    pub reasoning_by_model: HashMap<HarnessId, HashMap<String, ReasoningLevel>>,
     /// Last non-default model option picks (option id → choice id), per
     /// harness and model id. Model-scoped because each pick was validated
     /// against that model's catalog row, so it stays safe to send before the
@@ -141,6 +145,29 @@ impl ComposerDefaults {
             .or_default()
             .entry(model.to_string())
             .or_default()
+    }
+
+    /// The remembered reasoning level for one model, else the global one.
+    pub fn reasoning_for(&self, harness: HarnessId, model: Option<&str>) -> Option<ReasoningLevel> {
+        model
+            .and_then(|model| self.reasoning_by_model.get(&harness)?.get(model).copied())
+            .or(self.reasoning)
+    }
+
+    /// Remember a reasoning pick for one model (and as the global fallback).
+    pub fn remember_reasoning(
+        &mut self,
+        harness: HarnessId,
+        model: Option<&str>,
+        level: ReasoningLevel,
+    ) {
+        self.reasoning = Some(level);
+        if let Some(model) = model {
+            self.reasoning_by_model
+                .entry(harness)
+                .or_default()
+                .insert(model.to_string(), level);
+        }
     }
 
     /// The cached display label for a model id, if ever seen.
