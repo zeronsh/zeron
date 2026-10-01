@@ -1041,8 +1041,28 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_spaces())?)
     }
 
+    /// A person's rename: the title becomes human-owned and is never refreshed.
     pub fn rename_chat(&self, chat_id: &str, title: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_chat(chat_id, title))?)
+    }
+
+    /// A generated title, marked so a later refresh may replace it.
+    pub fn set_chat_auto_title(&self, chat_id: &str, title: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_auto_title(chat_id, title))?)
+    }
+
+    pub fn chat_title_is_auto(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.chat_title_is_auto(chat_id))
+    }
+
+    /// Replace a generated title iff it is still auto-owned and still `expected`.
+    pub fn refresh_chat_auto_title(
+        &self,
+        chat_id: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.refresh_chat_auto_title(chat_id, expected, title))?)
     }
 
     /// Backdate a chat's activity timestamps (epoch ms). Returns false when

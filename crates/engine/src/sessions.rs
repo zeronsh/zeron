@@ -494,6 +494,8 @@ impl SessionsEngine {
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
                     self.inner.note_message(chat_id, &request.prompt);
+                    self.inner
+                        .note_user_prompt(chat_id, harness_id, &request.prompt);
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -615,6 +617,10 @@ impl SessionsEngine {
         // generation).
         if let Some(titles) = self.inner.titles.get() {
             titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+        }
+        if !startup_retry {
+            self.inner
+                .note_user_prompt(chat_id, harness_id, &request.prompt);
         }
 
         tokio::spawn(drive_run(
@@ -746,6 +752,7 @@ impl SessionsEngine {
             }
             self.set_status(chat_id, SessionStatus::Working, false);
             self.inner.note_message(chat_id, prompt);
+            self.inner.note_user_prompt(chat_id, harness_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
         // The run died around the send. Exit drain claimed the entry → its
@@ -1225,6 +1232,15 @@ impl Inner {
         }
         if let Some(ws) = self.workspace() {
             ws.note_message(chat_id, text);
+        }
+    }
+
+    /// Count an accepted user prompt toward the periodic title refresh. Called
+    /// once per prompt on whichever route accepted it (fresh run, live-run
+    /// routing, steer) — never for hand-offs a re-dispatch will count itself.
+    fn note_user_prompt(&self, chat_id: &str, harness_id: HarnessId, prompt: &str) {
+        if let Some(titles) = self.titles.get() {
+            titles.note_prompt(chat_id, harness_id, prompt);
         }
     }
 
