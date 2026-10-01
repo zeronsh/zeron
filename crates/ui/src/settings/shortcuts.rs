@@ -249,6 +249,15 @@ impl ShortcutsPage {
                     cx.stop_propagation();
                     return;
                 }
+                if crate::ui_scale::is_reserved_combo(&combo) {
+                    self.conflict_notice = Some(
+                        format!("{} is reserved for UI scaling.", display_combo(&combo)).into(),
+                    );
+                    self.stop_recording();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if send_combo_is_reserved(self.composer_send_behavior, &combo) {
                     self.conflict_notice = Some(
                         format!("{} is reserved for the composer.", display_combo(&combo)).into(),

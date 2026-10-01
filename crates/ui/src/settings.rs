@@ -896,6 +896,8 @@ pub struct UiSettings {
     pub ui_font_family: crate::typography::UiFontFamily,
     /// Base size for interface and conversational prose.
     pub ui_font_size: crate::typography::UiFontSize,
+    /// Whole-interface zoom, independent of fonts and system display density.
+    pub ui_scale_percent: u16,
     /// Terminal family and absolute pixel size. Only fixed-width families
     /// qualify, including compatible Nerd Fonts.
     pub terminal_font_family: crate::typography::UiFontFamily,
@@ -1008,6 +1010,7 @@ impl Default for UiSettings {
             git_history_author_display: GitHistoryAuthorDisplay::default(),
             ui_font_family: crate::typography::UiFontFamily::default(),
             ui_font_size: crate::typography::UiFontSize::default(),
+            ui_scale_percent: crate::ui_scale::DEFAULT_PERCENT,
             terminal_font_family: crate::typography::UiFontFamily::GeistMono,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             code_font_family: crate::typography::UiFontFamily::GeistMono,
@@ -1615,11 +1618,17 @@ impl UiSettings {
         self.git_history_column_widths = self.git_history_column_widths.clamped();
         self.git_history_column_order = self.git_history_column_order.normalized();
         self.ui_font_size = self.ui_font_size.normalized();
+        self.ui_scale_percent = crate::ui_scale::clamp(self.ui_scale_percent);
         if let Some(background) = self.new_thread_composer_background.as_mut() {
             background.adjustment = background.adjustment.normalized();
         }
         self.keymap.heal_jump_slots();
         self.keymap.heal_reserved_composer_shortcuts();
+        for id in ShortcutId::ALL {
+            if crate::ui_scale::is_reserved_combo(self.keymap.get(id)) {
+                self.keymap.reset(id);
+            }
+        }
         self
     }
 
@@ -2563,6 +2572,7 @@ mod tests {
             git_history_author_display: GitHistoryAuthorDisplay::Name,
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
+            ui_scale_percent: 150,
             theme_selection: zeron_theme::ThemeSelection {
                 light: "catppuccin-latte".into(),
                 dark: "catppuccin-mocha".into(),

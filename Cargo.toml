@@ -172,3 +172,12 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# Whole-window scaling patch; also applies to gpui-base's GPUI dependency so
+# the application and component layer share one GPUI type universe.
+# Remove after the patch is merged and the upstream revision is updated.
+[patch."https://github.com/zeronsh/zui"]
+gpui = { git = "https://github.com/katulevskiy/zui", rev = "fd28a46632f8dc1a6c430f694ce970cd3f0a3407" }
+gpui_platform = { git = "https://github.com/katulevskiy/zui", rev = "fd28a46632f8dc1a6c430f694ce970cd3f0a3407" }
+gpui_tokio = { git = "https://github.com/katulevskiy/zui", rev = "fd28a46632f8dc1a6c430f694ce970cd3f0a3407" }
+gpui_macros = { git = "https://github.com/katulevskiy/zui", rev = "fd28a46632f8dc1a6c430f694ce970cd3f0a3407" }

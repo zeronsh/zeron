@@ -404,10 +404,10 @@ pub fn apply_keymap(
 ) {
     fn valid_or_default(combo: &str, fallback: &str) -> String {
         let candidate = platform_combo(combo);
-        if Keystroke::parse(&candidate).is_ok() {
+        if Keystroke::parse(&candidate).is_ok() && !crate::ui_scale::is_reserved_combo(combo) {
             candidate
         } else {
-            tracing::warn!(%combo, "unparseable shortcut combo; using default");
+            tracing::warn!(%combo, "invalid or reserved shortcut combo; using default");
             platform_combo(fallback)
         }
     }
@@ -422,6 +422,7 @@ pub fn apply_keymap(
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
+    crate::ui_scale::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new(
             &valid_or_default(&keymap.random_wallpaper, "mod-u"),
@@ -4478,6 +4479,7 @@ impl Shell {
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
+        self.settings.ui_scale_percent = current.ui_scale_percent;
         self.settings.terminal_font_family = current.terminal_font_family;
         self.settings.terminal_font_size = current.terminal_font_size;
         self.settings.code_font_family = current.code_font_family;
@@ -6111,6 +6113,11 @@ impl Shell {
         // The tween runs in cluster-start coordinates; the spacer is that
         // minus the container's own padding.
         let start = self.eval_tween(self.titlebar_tween, titlebar_cluster_start(fullscreen));
+        let start = if fullscreen {
+            start
+        } else {
+            start / crate::ui_scale::factor(self.settings.ui_scale_percent)
+        };
         let width = (start - container_pad).max(0.0);
         Some(div().flex_none().h_full().w(px(width)).into_any_element())
     }
@@ -6131,6 +6138,11 @@ impl Shell {
             self.titlebar_tween,
             cluster_buttons_start(is_macos, fullscreen, self.linux_left_caption_count()),
         );
+        let cluster = if is_macos && !fullscreen {
+            cluster / crate::ui_scale::factor(self.settings.ui_scale_percent)
+        } else {
+            cluster
+        };
         cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
     }
 
@@ -12443,6 +12455,15 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
+            .on_action(cx.listener(|_, _: &crate::ui_scale::Increase, window, cx| {
+                crate::ui_scale::step(1, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &crate::ui_scale::Decrease, window, cx| {
+                crate::ui_scale::step(-1, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &crate::ui_scale::Reset, window, cx| {
+                crate::ui_scale::set(crate::ui_scale::DEFAULT_PERCENT, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)
@@ -16429,6 +16450,112 @@ mod settings_modal_regressions {
             (Route::Chat, Some("newer".into()))
         );
         assert_eq!(press(&keymap.new_session), (Route::Chat, None));
+    }
+
+    #[gpui::test]
+    fn ui_scale_appearance_buttons_use_scaled_hit_testing(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let mut shell = test_shell(dir.path(), cx);
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell
+        });
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::Appearance, cx)
+        });
+        for (selector, expected) in [
+            ("ui-scale-increase", 110),
+            ("ui-scale-increase", 120),
+            ("ui-scale-decrease", 110),
+            ("ui-scale-reset", 100),
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear());
+            let center = cx
+                .debug_bounds(selector)
+                .expect("scale control visible")
+                .center();
+            let position = cx.update(|window, _| center * window.ui_scale());
+            cx.simulate_click(position, gpui::Modifiers::default());
+            cx.update(|window, cx| {
+                assert_eq!(
+                    settings::current(cx).ui_scale_percent,
+                    expected,
+                    "{selector}"
+                );
+                assert_eq!(window.ui_scale(), crate::ui_scale::factor(expected));
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn ui_scale_shortcuts_work_from_settings_and_preserve_independent_settings(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let window = cx.add_window(|_, cx| {
+            let mut shell = test_shell(dir.path(), cx);
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_settings(SettingsSection::Appearance, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        for (combo, expected) in [
+            ("ctrl-shift-+", 110),
+            ("ctrl-shift-=", 120),
+            ("ctrl-shift--", 110),
+            ("ctrl-shift-_", 100),
+            ("ctrl-shift-+", 110),
+        ] {
+            cx.simulate_keystrokes(window.into(), combo);
+            window
+                .update(cx, |shell, window, cx| {
+                    assert_eq!(settings::current(cx).ui_scale_percent, expected, "{combo}");
+                    assert_eq!(window.ui_scale(), crate::ui_scale::factor(expected));
+                    assert_eq!(shell.route, Route::Settings(SettingsSection::Appearance));
+                    // A later pane save must not restore the shell's stale scale.
+                    shell.settings.sidebar_width = 300.0;
+                    shell.schedule_save(cx);
+                    assert_eq!(settings::current(cx).ui_scale_percent, expected);
+                })
+                .unwrap();
+        }
+        cx.update(|cx| {
+            apply_keymap(
+                cx,
+                &KeymapConfig::default(),
+                ComposerSendBehavior::default(),
+            )
+        });
+        cx.simulate_keystrokes(window.into(), "ctrl-shift-0");
+        window
+            .update(cx, |_, window, cx| {
+                assert_eq!(window.ui_scale(), 1.0);
+                assert_eq!(settings::current(cx).ui_scale_percent, 100);
+                settings::flush(cx);
+            })
+            .unwrap();
+        window
+            .update(cx, |shell, _, cx| shell.close_settings(cx))
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                window.focus(&shell.composer.focus_handle(cx), cx);
+            })
+            .unwrap();
+        cx.simulate_keystrokes(window.into(), "ctrl-shift-+");
+        assert_eq!(cx.read(|cx| settings::current(cx).ui_scale_percent), 110);
+        cx.simulate_keystrokes(window.into(), "ctrl-shift-0");
+        assert_eq!(UiSettings::load(dir.path()).ui_scale_percent, 100);
+        assert_eq!(UiSettings::load(dir.path()).sidebar_width, 300.0);
     }
 
     #[gpui::test]

@@ -61,6 +61,7 @@ pub mod theme;
 pub mod theme_library;
 pub mod transcript;
 pub mod typography;
+pub mod ui_scale;
 mod workspace_links;
 
 use std::path::PathBuf;
@@ -420,6 +421,7 @@ fn open_main_window(
                 ..Default::default()
             },
             move |window, cx| {
+                ui_scale::apply_to_window(settings::current(cx).ui_scale_percent, window);
                 window.set_rem_size(px(typography::font_size(cx).pixels()));
                 // React to the user flipping macOS between light and dark. Detached:
                 // the subscription lives as long as the window does, and the window

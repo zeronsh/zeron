@@ -534,6 +534,9 @@ impl Render for BrowserSurface {
                             let right =
                                 (window.viewport_size().width - right_occlusion).max(mask.left());
                             mask.size.width = mask.size.width.min(right - mask.left());
+                            let bounds = window.ui_to_platform_bounds(bounds);
+                            let mask = window.ui_to_platform_bounds(mask);
+                            let resize_inset = resize_inset * window.ui_scale();
                             let dragging = cx.has_active_drag();
                             window.on_present(move || {
                                 if let Some(native) = native.upgrade() {

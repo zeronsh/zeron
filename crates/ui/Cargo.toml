@@ -12,6 +12,7 @@ browser-fixture = []
 windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
+ui-scale-fixture = ["gpui/bench", "gpui_platform/test-support"]
 
 [[example]]
 name = "macos-resource-profile"
@@ -32,6 +33,10 @@ required-features = ["windows-render-fixture"]
 [[example]]
 name = "appshots-fixture"
 required-features = ["appshots-fixture"]
+
+[[example]]
+name = "ui-scale-fixture"
+required-features = ["ui-scale-fixture"]
 
 [[example]]
 name = "new-project-fixture"

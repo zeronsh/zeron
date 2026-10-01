@@ -3912,6 +3912,91 @@ impl Render for AppearancePage {
         let terminal_size = self.render_size_picker(FontKind::Terminal, &theme, fixed.clone(), cx);
         let code_size = self.render_size_picker(FontKind::Code, &theme, fixed.clone(), cx);
 
+        let scale = crate::settings::current(cx).ui_scale_percent;
+        let mut scale_controls = div().flex().items_center().gap(px(6.0));
+        for (id, label, target, enabled) in [
+            (
+                "ui-scale-decrease",
+                "−",
+                crate::ui_scale::stepped(scale, -1),
+                scale > crate::ui_scale::MIN_PERCENT,
+            ),
+            (
+                "ui-scale-increase",
+                "+",
+                crate::ui_scale::stepped(scale, 1),
+                scale < crate::ui_scale::MAX_PERCENT,
+            ),
+            (
+                "ui-scale-reset",
+                "Reset",
+                crate::ui_scale::DEFAULT_PERCENT,
+                scale != crate::ui_scale::DEFAULT_PERCENT,
+            ),
+        ] {
+            if id == "ui-scale-increase" {
+                scale_controls = scale_controls.child(
+                    div()
+                        .id("ui-scale-value")
+                        .min_w(px(48.0))
+                        .text_center()
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .child(format!("{scale}%")),
+                );
+            }
+            scale_controls = scale_controls.child(
+                widgets::text_action(&theme, widgets::ActionTone::Outlined, label)
+                    .id(id)
+                    .debug_selector(move || id.into())
+                    .aria_label(match id {
+                        "ui-scale-decrease" => "Decrease UI scale",
+                        "ui-scale-increase" => "Increase UI scale",
+                        _ => "Reset UI scale to 100%",
+                    })
+                    .min_w(px(32.0))
+                    .justify_center()
+                    .when(!enabled, |button| button.opacity(0.4).cursor_default())
+                    .when(enabled, |button| {
+                        button
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                crate::ui_scale::set(target, window, cx);
+                            }))
+                    }),
+            );
+        }
+        let scale_card = widgets::section_card(&theme)
+            .mt_0()
+            .font_family(fixed.clone())
+            .child(
+                widgets::card_row(&theme, true)
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(widgets::row_title(&theme, "UI scale"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![
+                                    div()
+                                        .child("Resize the entire interface · 50–200%")
+                                        .into_any_element(),
+                                ],
+                            ))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![
+                                    div()
+                                        .child("Ctrl+Shift+Plus / Minus · Ctrl+Shift+0 to reset")
+                                        .into_any_element(),
+                                ],
+                            )),
+                    )
+                    .child(scale_controls),
+            );
+        let scale_section = widgets::section(&theme, "Interface scale", scale_card);
         let mut font_rows = widgets::section_card(&theme)
             .mt_0()
             .font_family(fixed.clone());
@@ -4036,6 +4121,7 @@ impl Render for AppearancePage {
                                     .mt(px(24.0))
                                     .gap(px(12.0)),
                                 )
+                                .child(scale_section)
                                 .child(
                                     widgets::section_card(&theme)
                                         .children(color_rows)

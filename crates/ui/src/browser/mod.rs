@@ -26,6 +26,7 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     // already assign mod-shift-r to the right pane.
     let available = |combo: &str, own: Option<ShortcutId>| {
         !combo.is_empty()
+            && !crate::ui_scale::is_reserved_combo(combo)
             && !ShortcutId::ALL.iter().any(|id| {
                 Some(*id) != own
                     && gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
@@ -200,6 +201,11 @@ impl BrowserSurface {
                     .iter()
                     .filter(|id| **id != crate::settings::ShortcutId::SaveFile)
                     .map(|id| crate::settings::platform_combo(keymap.get(*id)))
+                    .chain(
+                        crate::ui_scale::combos()
+                            .into_iter()
+                            .map(|(combo, _)| combo.to_owned()),
+                    )
                     .collect(),
             );
         }
