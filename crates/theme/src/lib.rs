@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 19);
+        assert_eq!(registry.families.len(), 20);
         assert!(registry.variant("zeron-light").is_some());
         assert!(registry.variant("zeron-dark").is_some());
         let errors: Vec<_> = registry
@@ -830,7 +830,95 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 30);
-        assert_eq!(variants * VisualFixture::ALL.len(), 300);
+        assert_eq!(variants, 31);
+        assert_eq!(variants * VisualFixture::ALL.len(), 310);
+    }
+
+    #[test]
+    fn vesper_covers_runtime_roles_with_readable_contrast() {
+        let registry = ThemeRegistry::builtin();
+        let variant = registry.variant("vesper-dark").unwrap();
+        assert_eq!(variant.family_id, "vesper");
+        assert_eq!(variant.appearance, Appearance::Dark);
+        assert_eq!(
+            variant.recommended_surface_treatment,
+            SurfaceTreatment::Opaque
+        );
+        let findings: Vec<_> = registry
+            .validate()
+            .into_iter()
+            .filter(|issue| issue.variant_id == variant.id)
+            .collect();
+        assert!(findings.is_empty(), "{findings:#?}");
+
+        let colors = &variant.colors;
+        for surface in [
+            colors.background,
+            colors.shell,
+            colors.raised,
+            colors.card,
+            colors.dialog,
+            colors.overlay,
+            colors.hover,
+            colors.active,
+            colors.input,
+        ] {
+            for (role, foreground, minimum) in [
+                ("text", colors.text, 4.5),
+                ("textMuted", colors.text_muted, 4.5),
+                ("textFaint", colors.text_faint, 3.0),
+                ("danger", colors.danger, 3.0),
+                ("warning", colors.warning, 3.0),
+                ("success", colors.success, 3.0),
+                ("dangerMuted", colors.danger_muted, 3.0),
+                ("warningMuted", colors.warning_muted, 3.0),
+                ("successMuted", colors.success_muted, 3.0),
+            ] {
+                assert!(
+                    foreground.contrast(surface) >= minimum,
+                    "{role} on {surface:?}"
+                );
+            }
+        }
+        assert!(colors.on_solid.contrast(colors.solid) >= 4.5);
+        for role in [
+            "comment",
+            "keyword",
+            "string",
+            "stringSpecial",
+            "escape",
+            "number",
+            "boolean",
+            "type",
+            "typeBuiltin",
+            "constructor",
+            "function",
+            "functionBuiltin",
+            "macro",
+            "property",
+            "constant",
+            "variable",
+            "variableSpecial",
+            "parameter",
+            "operator",
+            "punctuation",
+            "tag",
+            "attribute",
+            "label",
+            "embedded",
+            "invalid",
+            "markupHeading",
+            "markupRaw",
+            "markupLink",
+            "markupReference",
+            "markupEmphasis",
+            "markupStrong",
+        ] {
+            let color = variant
+                .syntax
+                .get(role)
+                .unwrap_or_else(|| panic!("missing {role}"));
+            assert!(color.contrast(colors.background) >= 4.5, "{role}");
+        }
     }
 }
