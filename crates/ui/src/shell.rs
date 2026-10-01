@@ -4936,6 +4936,12 @@ impl Shell {
                                 ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
                                     this.settings.composer_send_behavior = *behavior;
                                 }
+                                ShortcutsEvent::KeepAwakeChanged(mode) => {
+                                    this.settings.keep_awake = *mode;
+                                    settings::update(SavePolicy::Immediate, cx, |settings| {
+                                        settings.keep_awake = *mode;
+                                    });
+                                }
                                 ShortcutsEvent::AppshotsChanged {
                                     enabled,
                                     sound_enabled,
@@ -16217,6 +16223,22 @@ mod shortcut_focus_regressions {
 /// Native visual QA uses the production shell with isolated fixture data.
 #[cfg(feature = "appshots-fixture")]
 impl Shell {
+    pub fn fixture_general_settings(
+        &mut self,
+        mode: crate::keep_awake::KeepAwakeMode,
+        dropdown: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.keep_awake = mode;
+        settings::update(SavePolicy::Immediate, cx, |settings| {
+            settings.keep_awake = mode
+        });
+        self.open_settings(SettingsSection::General, cx);
+        if let Some(page) = &self.shortcuts_page {
+            page.update(cx, |page, cx| page.fixture_keep_awake(mode, dropdown, cx));
+        }
+    }
+
     pub fn fixture_appshots_settings(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
             self.open_settings(SettingsSection::Appshots, cx);

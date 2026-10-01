@@ -789,6 +789,8 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
+    /// Device-local automatic sleep prevention policy.
+    pub keep_awake: crate::keep_awake::KeepAwakeMode,
     /// Legacy global opt-in; per-harness preferences take precedence.
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
@@ -968,6 +970,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             window_geometry: None,
+            keep_awake: crate::keep_awake::KeepAwakeMode::default(),
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
@@ -2499,6 +2502,7 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
+            keep_awake: crate::keep_awake::KeepAwakeMode::WhilePromptRunning,
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,

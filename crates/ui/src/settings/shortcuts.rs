@@ -49,6 +49,7 @@ pub enum ShortcutsEvent {
     EscapeStopsActiveAgentChanged(bool),
     /// The composer send behavior changed — persist + re-apply.
     ComposerSendBehaviorChanged(ComposerSendBehavior),
+    KeepAwakeChanged(crate::keep_awake::KeepAwakeMode),
     AppshotsChanged {
         enabled: bool,
         sound_enabled: bool,
@@ -77,6 +78,8 @@ pub struct ShortcutsPage {
     appshot_destination: AppshotDestination,
     appshot_capabilities: AppshotCapabilities,
     send_select: widgets::SelectState,
+    keep_awake: crate::keep_awake::KeepAwakeMode,
+    keep_awake_select: widgets::SelectState,
     destination_select: widgets::SelectState,
     capture_access_prompted: bool,
     semantic_access_prompted: bool,
@@ -118,6 +121,8 @@ impl ShortcutsPage {
             appshot_destination,
             appshot_capabilities: crate::appshots::capabilities(),
             send_select: widgets::SelectState::default(),
+            keep_awake: crate::settings::current(cx).keep_awake,
+            keep_awake_select: widgets::SelectState::default(),
             destination_select: widgets::SelectState::default(),
             capture_access_prompted: false,
             semantic_access_prompted: false,
@@ -127,6 +132,27 @@ impl ShortcutsPage {
             },
             _state: state,
         }
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_keep_awake(
+        &mut self,
+        mode: crate::keep_awake::KeepAwakeMode,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_keep_awake(mode, cx);
+        if open {
+            self.keep_awake_select.open(
+                crate::keep_awake::KeepAwakeMode::ALL
+                    .iter()
+                    .position(|candidate| *candidate == mode)
+                    .unwrap(),
+            );
+        } else {
+            widgets::close_select(self, |page| &mut page.keep_awake_select, cx);
+        }
+        cx.notify();
     }
 
     pub fn show_appshots(&mut self, appshots: bool) {
@@ -200,6 +226,14 @@ impl ShortcutsPage {
             self.composer_send_behavior = behavior;
             self.conflict_notice = None;
             cx.emit(ShortcutsEvent::ComposerSendBehaviorChanged(behavior));
+            cx.notify();
+        }
+    }
+
+    fn set_keep_awake(&mut self, mode: crate::keep_awake::KeepAwakeMode, cx: &mut Context<Self>) {
+        if self.keep_awake != mode {
+            self.keep_awake = mode;
+            cx.emit(ShortcutsEvent::KeepAwakeChanged(mode));
             cx.notify();
         }
     }
@@ -671,6 +705,41 @@ impl Render for ShortcutsPage {
                 })),
             );
         if self.general_page {
+            let modes = crate::keep_awake::KeepAwakeMode::ALL;
+            let awake_control = widgets::select(
+                "keep-awake-mode",
+                "Keep computer awake",
+                &theme,
+                |page: &mut Self| &mut page.keep_awake_select,
+            )
+            .options(
+                modes
+                    .iter()
+                    .map(|mode| widgets::SelectOption::new(mode.label())),
+                modes
+                    .iter()
+                    .position(|mode| *mode == self.keep_awake)
+                    .unwrap_or_default(),
+            )
+            .width(232.0)
+            .on_select(move |page, ix, _, cx| page.set_keep_awake(modes[ix], cx))
+            .render(&self.keep_awake_select, cx);
+            let awake_row = widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Keep computer awake"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child("Prevent automatic sleep on this device.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(awake_control);
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -697,6 +766,7 @@ impl Render for ShortcutsPage {
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
                                     )
+                                    .child(widgets::section_card(&theme).child(awake_row))
                                     .child(self.thread_naming.clone()),
                             ),
                     )
@@ -838,6 +908,90 @@ impl Render for ShortcutsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn keep_awake_control_supports_keyboard_and_emits_each_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = ShortcutsPage::new(
+                state,
+                KeymapConfig::default(),
+                false,
+                ComposerSendBehavior::default(),
+                false,
+                false,
+                AppshotDestination::Automatic,
+                cx,
+            );
+            page.show_section(false, true);
+            page
+        });
+        let changes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let changes = changes.clone();
+            cx.subscribe(&page, move |_, event: &ShortcutsEvent, _| {
+                if let ShortcutsEvent::KeepAwakeChanged(mode) = event {
+                    changes.borrow_mut().push(*mode);
+                }
+            })
+            .detach();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let press = |cx: &mut gpui::VisualTestContext, key: &str| {
+            cx.update(|window, cx| {
+                window.draw(cx).clear();
+                let keystroke = gpui::Keystroke::parse(key).unwrap();
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
+                    cx,
+                );
+            });
+        };
+        let trigger = cx.debug_bounds("keep-awake-mode").unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        press(cx, "down");
+        press(cx, "enter");
+        page.read_with(cx, |page, _| {
+            assert_eq!(
+                page.keep_awake,
+                crate::keep_awake::KeepAwakeMode::WhileAppOpen
+            )
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        press(cx, "down");
+        cx.update(|window, cx| window.draw(cx).clear());
+        press(cx, "end");
+        press(cx, "enter");
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.keep_awake, crate::keep_awake::KeepAwakeMode::Off)
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        press(cx, "down");
+        cx.update(|window, cx| window.draw(cx).clear());
+        press(cx, "home");
+        press(cx, "enter");
+        assert_eq!(
+            *changes.borrow(),
+            vec![
+                crate::keep_awake::KeepAwakeMode::WhileAppOpen,
+                crate::keep_awake::KeepAwakeMode::Off,
+                crate::keep_awake::KeepAwakeMode::WhilePromptRunning
+            ]
+        );
+    }
 
     #[gpui::test]
     fn conversation_controls_work_after_moving_out_of_shortcuts(cx: &mut gpui::TestAppContext) {
