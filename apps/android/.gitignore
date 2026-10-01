@@ -1,0 +1,12 @@
+.gradle/
+build/
+local.properties
+app/build/
+app/src/main/jniLibs/
+*.apk
+.cxx/
+.kotlin/
+# Signing material never lives in the repo.
+*.jks
+*.keystore
+keystore.properties

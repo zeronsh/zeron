@@ -33,6 +33,8 @@ pub(crate) fn deadline(method: &str) -> Duration {
     match method {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
+        // A forced usage probe hits every provider the host is signed into.
+        methods::LIST_AGENT_ACCOUNTS => Duration::from_secs(60),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
         _ => CALL_TIMEOUT,
     }

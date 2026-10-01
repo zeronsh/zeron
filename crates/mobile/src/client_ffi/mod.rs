@@ -11,6 +11,7 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod direct;
 mod session;
 mod types;
 
@@ -92,6 +93,21 @@ impl CoreClient {
 
     pub fn is_demo(&self) -> bool {
         self.client.is_demo()
+    }
+
+    /// Direct (SSH) mode.
+    pub fn is_direct(&self) -> bool {
+        self.client.is_direct()
+    }
+
+    /// Direct mode: link phase, errors and stream counters (`None` otherwise).
+    pub fn direct_status(&self) -> Option<direct::DirectStatus> {
+        self.client.direct_status().map(Into::into)
+    }
+
+    /// Direct mode: drop the current link, even a stalled one, and redial.
+    pub fn reconnect_direct(&self) {
+        self.client.reconnect_direct();
     }
 
     pub fn device_id(&self) -> String {
@@ -425,6 +441,35 @@ impl CoreClient {
             on_runtime(async move { client.list_folders(&device_id, path).await })
                 .await?
                 .into(),
+        )
+    }
+
+    /// Drives / volumes to browse beyond home (empty on older engines).
+    pub async fn list_drives(&self, device_id: String) -> CoreResult<Vec<DriveEntry>> {
+        let client = self.client.clone();
+        Ok(
+            on_runtime(async move { client.list_drives(&device_id).await })
+                .await?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+    }
+
+    /// Plan / rate-limit usage of the agent logins on a device. `force`
+    /// re-probes the providers; otherwise the host's last probe is served.
+    pub async fn list_agent_usage(
+        &self,
+        device_id: String,
+        force: bool,
+    ) -> CoreResult<Vec<AgentUsage>> {
+        let client = self.client.clone();
+        Ok(
+            on_runtime(async move { client.list_agent_usage(&device_id, force).await })
+                .await?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         )
     }
 

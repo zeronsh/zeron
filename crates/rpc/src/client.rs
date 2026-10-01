@@ -56,6 +56,12 @@ impl RpcSubscription {
     pub async fn recv(&mut self) -> Option<serde_json::Value> {
         self.items.recv().await
     }
+
+    /// An item already queued, without waiting (snapshot streams use this to
+    /// skip to the newest frame).
+    pub fn try_recv(&mut self) -> Option<serde_json::Value> {
+        self.items.try_recv().ok()
+    }
 }
 
 impl Drop for RpcSubscription {
@@ -369,9 +375,36 @@ pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
         .await
         .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
         .map_err(|e| RpcError::Transport(e.to_string()))?;
+    Ok(spawn_ws(ws))
+}
+
+/// Run the WebSocket handshake over an already-open byte stream (e.g. an SSH
+/// `direct-tcpip` channel to the engine's loopback port) and wrap it.
+pub async fn connect_ws_stream<S>(url: &str, stream: S) -> Result<RpcClient, RpcError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (ws, _) = tokio::time::timeout(
+        CONNECT_TIMEOUT * 3,
+        tokio_tungstenite::client_async(url, stream),
+    )
+    .await
+    .map_err(|_| RpcError::Transport(format!("timed out opening {url}")))?
+    .map_err(|e| RpcError::Transport(e.to_string()))?;
+    Ok(spawn_ws(ws))
+}
+
+fn spawn_ws<S>(ws: tokio_tungstenite::WebSocketStream<S>) -> RpcClient
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let (mut sink, mut stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    // Reader and writer run independently: a write parked on transport
+    // backpressure (an SSH channel waiting for its session loop) must never
+    // stop the reads that would unblock it.
+    let (closed_tx, mut closed_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -386,17 +419,53 @@ pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
                         break;
                     }
                 },
-                message = stream.next() => match message {
-                    Some(Ok(WsMessage::Text(text))) => {
-                        if in_tx.send(text).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(_)) => {}
-                },
+                _ = &mut closed_rx => break,
             }
         }
     });
-    Ok(RpcClient::new(out_tx, in_rx))
+    tokio::spawn(async move {
+        // Dropped on exit: stops the writer.
+        let _closed = closed_tx;
+        while let Some(message) = stream.next().await {
+            match message {
+                Ok(WsMessage::Text(text)) => {
+                    if in_tx.send(text).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(WsMessage::Close(_)) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    RpcClient::new(out_tx, in_rx)
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    /// A newer engine may push frames this client doesn't know: server
+    /// notifications without an id, unknown ids, extra fields, junk lines.
+    /// They are ignored and the connection keeps working.
+    #[tokio::test]
+    async fn unknown_server_frames_are_ignored() {
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(16);
+        let (in_tx, in_rx) = mpsc::channel::<String>(16);
+        let client = RpcClient::new(out_tx, in_rx);
+        let call =
+            tokio::spawn(async move { client.call("EngineInfo", serde_json::json!({})).await });
+        let sent: serde_json::Value = serde_json::from_str(&out_rx.recv().await.unwrap()).unwrap();
+        let id = sent["id"].as_u64().unwrap();
+        for junk in [
+            r#"{"method":"HarnessUpdateAvailable","params":{"harness":"codex"}}"#.to_owned(),
+            r#"{"id":987654,"item":{"anything":true}}"#.to_owned(),
+            "not json at all".to_owned(),
+            format!(r#"{{"id":{id},"ok":{{"deviceId":"d"}},"trace":"x","newField":[1]}}"#),
+        ] {
+            in_tx.send(junk).await.unwrap();
+        }
+        let reply = call.await.unwrap().expect("reply despite unknown frames");
+        assert_eq!(reply["deviceId"], "d");
+    }
 }

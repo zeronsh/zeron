@@ -28,6 +28,10 @@ thiserror.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
+# Direct mode: SSH to the user's own machine, WebSocket IPC over a
+# direct-tcpip channel (no local listening port). ring only — no aws-lc.
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2"] }
+ring = "0.17"
 
 [dev-dependencies]
 tempfile.workspace = true

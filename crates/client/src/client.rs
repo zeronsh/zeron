@@ -18,6 +18,7 @@ use crate::connectivity::{
     Connectivity, ConnectivityState, ConnectivityTracker, RawConnectivity, SendState,
 };
 use crate::demo::DemoHost;
+use crate::direct::host::DirectHost;
 use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
@@ -61,6 +62,8 @@ pub struct NewSession {
 pub(crate) enum Backend {
     Demo(Arc<DemoHost>),
     Live(Box<LiveBackend>),
+    /// SSH straight to the user's own machine (no edge).
+    Direct(Arc<DirectHost>),
 }
 
 pub(crate) struct ClientInner {
@@ -96,8 +99,42 @@ impl ClientInner {
     pub(crate) fn demo(&self) -> Option<&Arc<DemoHost>> {
         match self.backend() {
             Backend::Demo(demo) => Some(demo),
-            Backend::Live(_) => None,
+            _ => None,
         }
+    }
+
+    pub(crate) fn direct(&self) -> Option<&Arc<DirectHost>> {
+        match self.backend.get()? {
+            Backend::Direct(direct) => Some(direct),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_direct(&self) -> bool {
+        self.direct().is_some()
+    }
+
+    /// Direct: forward a registry mutation to the engine (the optimistic
+    /// local write already landed; the mirror confirms it).
+    pub(crate) fn direct_mutate(&self, op: serde_json::Value) {
+        if let Some(direct) = self.direct() {
+            direct.mutate(op);
+        }
+    }
+
+    /// Direct: first mirror pass landed — the replica is authoritative.
+    pub(crate) fn mark_direct_synced(self: &Arc<Self>) {
+        if self.synced.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // Phone-only sidebar prefs (pins/sections) initialize locally.
+        let _ = self
+            .workspace
+            .mutate(|doc| doc.reconcile_sidebar_pins(true));
+        if let Some(direct) = self.direct() {
+            direct.settle_registry(self);
+        }
+        self.recompute_workspace();
     }
 
     pub(crate) fn is_demo(&self) -> bool {
@@ -107,7 +144,7 @@ impl ClientInner {
     pub(crate) fn live(&self) -> Option<&LiveBackend> {
         match self.backend.get()? {
             Backend::Live(live) => Some(live),
-            Backend::Demo(_) => None,
+            _ => None,
         }
     }
 
@@ -151,6 +188,7 @@ impl ClientInner {
         match self.backend() {
             Backend::Demo(demo) => demo.settle_registry(&self.workspace),
             Backend::Live(live) => live.registry_written(),
+            Backend::Direct(direct) => direct.settle_registry(self),
         }
         self.recompute_workspace();
     }
@@ -288,11 +326,25 @@ impl ClientInner {
     }
 
     pub(crate) fn mark_seen(self: &Arc<Self>, chat_id: &str) {
-        let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
+        let now = Utc::now();
+        let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, now));
+        self.direct_mutate(serde_json::json!({
+            "op": "markChatSeen", "chatId": chat_id, "at": now.timestamp_millis(),
+        }));
     }
 
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
         let raw = match self.live() {
+            None if self.is_direct() => {
+                let status = self.direct().map(|d| d.status()).unwrap_or_default();
+                RawConnectivity {
+                    path_offline: !self.network_online(),
+                    registry_connected: status.phase.is_up(),
+                    registry_retry_at_ms: status.retry_at_ms,
+                    last_failure: status.last_error,
+                    chat_rooms: Vec::new(),
+                }
+            }
             None => RawConnectivity {
                 path_offline: !self.network_online(),
                 registry_connected: true,
@@ -394,7 +446,10 @@ impl ClientInner {
         let Some(device) = workspace.device(device_id) else {
             return HostCapabilities::default();
         };
-        let has = |cap: &str| device.capabilities.iter().any(|c| c == cap);
+        // Direct: the shared queue lives in the engine's doc, which the phone
+        // only mirrors — busy sends steer instead of queueing.
+        let direct = self.is_direct();
+        let has = |cap: &str| !direct && device.capabilities.iter().any(|c| c == cap);
         let mid_turn_steering = harness.and_then(|harness| {
             lock(&self.harness_catalogs)
                 .get(device_id)
@@ -463,6 +518,7 @@ impl ClientInner {
     pub(crate) fn after_command(self: &Arc<Self>, core: &Arc<SessionCore>, has_attachments: bool) {
         match self.backend() {
             Backend::Demo(demo) => demo.on_command(&core.chat_id),
+            Backend::Direct(direct) => direct.on_command(&core.chat_id),
             Backend::Live(live) => {
                 if has_attachments {
                     live.escorts.respawn_chat(self, &core.chat_id);
@@ -483,6 +539,10 @@ impl ClientInner {
         match self.backend() {
             Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
             Backend::Live(live) => live.relay.call(device_id, method, params).await,
+            Backend::Direct(direct) => {
+                let _ = device_id; // one machine per link
+                direct.call(method, params).await
+            }
         }
     }
 
@@ -493,6 +553,9 @@ impl ClientInner {
         }
         if let Some(live) = self.live() {
             live.kick();
+        }
+        if let Some(direct) = self.direct() {
+            direct.kick();
         }
     }
 
@@ -572,6 +635,11 @@ impl Client {
         // the very first snapshot renders the cached workspace (instant).
         let (registry, store) = if credentials.is_demo() {
             (RegistryDoc::new(config.device_id.clone()), None)
+        } else if credentials.is_direct() {
+            (
+                DirectHost::load_registry(&config.data_dir, &config.device_id),
+                None,
+            )
         } else {
             let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
             (registry, Some(store))
@@ -607,6 +675,7 @@ impl Client {
                 inner.synced.store(true, Ordering::Release);
                 Backend::Demo(demo)
             }
+            Credentials::Direct(target) => Backend::Direct(DirectHost::new(&inner, target.clone())),
             _ => Backend::Live(Box::new({
                 catalog::DiskCatalog::new(&inner.config.data_dir).warm_labels();
                 LiveBackend::new(
@@ -622,6 +691,10 @@ impl Client {
             Backend::Demo(demo) => demo.start(&inner, inner.cancel.clone()),
             Backend::Live(live) => {
                 live.start(&inner);
+                inner.recompute_connectivity();
+            }
+            Backend::Direct(direct) => {
+                direct.start(inner.cancel.clone());
                 inner.recompute_connectivity();
             }
         }
@@ -654,6 +727,23 @@ impl Client {
         self.inner.is_demo()
     }
 
+    pub fn is_direct(&self) -> bool {
+        self.inner.is_direct()
+    }
+
+    /// The direct link's phase, errors and stream counters (`None` outside
+    /// direct mode).
+    pub fn direct_status(&self) -> Option<crate::direct::DirectStatus> {
+        self.inner.direct().map(|d| d.status())
+    }
+
+    /// Direct mode: drop the current link, even a stalled one, and redial.
+    pub fn reconnect_direct(&self) {
+        if let Some(direct) = self.inner.direct() {
+            direct.reconnect();
+        }
+    }
+
     pub fn device_id(&self) -> &str {
         &self.inner.config.device_id
     }
@@ -674,6 +764,7 @@ impl Client {
                 live.flush_registry(&self.inner);
                 live.stop();
             }
+            Backend::Direct(direct) => direct.stop(),
         }
         self.inner.cancel.cancel();
         // Dropping the cores stops their rooms (each flushes its snapshot).
@@ -762,6 +853,25 @@ impl Client {
         };
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        if let Some(direct) = self.inner.direct() {
+            direct.note_local_row(&id);
+            let mut op = serde_json::json!({
+                "op": "createChat",
+                "chatId": id,
+                "spaceId": chat.space_id,
+                "deviceId": chat.device_id,
+                "config": chat.config,
+                "branch": chat.branch,
+            });
+            if chat.space_id.is_none() || new.cwd.is_some() {
+                op["cwd"] = serde_json::json!(chat.cwd);
+            }
+            direct.mutate(op);
+            if let Some(title) = &chat.title {
+                direct
+                    .mutate(serde_json::json!({"op": "renameChat", "chatId": id, "title": title}));
+            }
+        }
         Ok(id)
     }
 
@@ -778,15 +888,27 @@ impl Client {
     }
 
     pub fn archive_session(&self, chat_id: &str) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, true))
+        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, true))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatArchived", "chatId": chat_id, "archived": true}),
+        );
+        Ok(())
     }
 
     pub fn unarchive_session(&self, chat_id: &str) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
+        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatArchived", "chatId": chat_id, "archived": false}),
+        );
+        Ok(())
     }
 
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.rename_chat(chat_id, title.trim()))
+        self.chat_write(chat_id, |doc| doc.rename_chat(chat_id, title.trim()))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "renameChat", "chatId": chat_id, "title": title.trim()}),
+        );
+        Ok(())
     }
 
     pub fn mark_seen(&self, chat_id: &str) {
@@ -794,12 +916,18 @@ impl Client {
     }
 
     pub fn set_session_config(&self, chat_id: &str, config: &ChatConfig) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))
+        self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatConfig", "chatId": chat_id, "config": config}),
+        );
+        Ok(())
     }
 
     /// Remove the chat row (the doc itself stays on the edge).
     pub fn delete_session(&self, chat_id: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.delete_chat(chat_id))?;
+        self.inner
+            .direct_mutate(serde_json::json!({"op": "deleteChat", "chatId": chat_id}));
         let core = lock(&self.inner.sessions).remove(chat_id);
         // A view may still hold the session: close its room now (it flushes
         // once), so nothing re-saves the snapshot deleted below.
@@ -833,6 +961,10 @@ impl Client {
                     doc.set_chat_cwd(chat_id, &worktree)?;
                     doc.set_chat_branch(chat_id, &reference.name)
                 })?;
+                self.inner.direct_mutate(
+                    serde_json::json!({"op": "setChatCwd", "chatId": chat_id, "cwd": worktree}),
+                );
+                self.inner.direct_mutate(serde_json::json!({"op": "setChatBranch", "chatId": chat_id, "branch": reference.name}));
             }
             return Ok(());
         }
@@ -840,6 +972,9 @@ impl Client {
             .await?;
         self.inner
             .registry_write(|doc| doc.set_chat_branch(chat_id, &reference.name))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatBranch", "chatId": chat_id, "branch": reference.name}),
+        );
         Ok(())
     }
 
@@ -941,7 +1076,7 @@ impl Client {
         if let Some(existing) = state
             .spaces
             .iter()
-            .find(|s| s.device_id == device_id && s.path == path)
+            .find(|s| s.device_id == device_id && same_folder(&s.path, path))
         {
             return Ok(existing.id.clone());
         }
@@ -959,10 +1094,10 @@ impl Client {
         // The owning host writes the row itself (it knows git state and runs
         // the project's setup); an unreachable host gets a local row write
         // it will adopt later.
-        if let Some(live) = self.inner.live() {
-            let asked = live
-                .relay
-                .call(
+        if self.inner.live().is_some() || self.inner.is_direct() {
+            let asked = self
+                .inner
+                .host_rpc(
                     device_id,
                     zeron_rpc::methods::MUTATE,
                     serde_json::json!({
@@ -1009,6 +1144,9 @@ impl Client {
             .inner
             .registry_write(|doc| doc.rename_space(space_id, name))?
         {
+            self.inner.direct_mutate(
+                serde_json::json!({"op": "renameSpace", "spaceId": space_id, "name": name}),
+            );
             Ok(())
         } else {
             Err(ClientError::NotFound(space_id.to_owned()))
@@ -1020,6 +1158,8 @@ impl Client {
         let deleted = self
             .inner
             .registry_write(|doc| doc.delete_space(space_id))?;
+        self.inner
+            .direct_mutate(serde_json::json!({"op": "deleteSpace", "spaceId": space_id}));
         let mut sessions = lock(&self.inner.sessions);
         for chat_id in deleted.chat_ids {
             sessions.remove(&chat_id);
@@ -1040,6 +1180,7 @@ impl Client {
         }
         let (doc, cursor, hydrated) = match self.inner.backend() {
             Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
+            Backend::Direct(direct) => (direct.session_doc(chat_id)?, 0, false),
             Backend::Live(live) => {
                 let local = crate::live::room::load_local(&live.store, chat_id);
                 (local.doc, local.cursor, local.had_content)
@@ -1061,6 +1202,9 @@ impl Client {
         core.refresh();
         if let Some(demo) = self.inner.demo() {
             demo.session_opened(&core);
+        }
+        if let Some(direct) = self.inner.direct() {
+            direct.session_opened(&core);
         }
         self.inner.evict_sessions();
         Ok(SessionHandle { core })
@@ -1090,11 +1234,11 @@ impl Client {
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
         let list = match self.inner.backend() {
             Backend::Demo(demo) => demo.list_harnesses(device_id).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
-                let reply = live
-                    .relay
-                    .call(
+                let reply = self
+                    .inner
+                    .host_rpc(
                         device_id,
                         zeron_rpc::methods::LIST_HARNESSES,
                         serde_json::json!({}),
@@ -1133,11 +1277,11 @@ impl Client {
     pub async fn list_models(&self, device_id: &str, harness: &str) -> Vec<ModelInfo> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_models(harness).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
-                let reply = live
-                    .relay
-                    .call(
+                let reply = self
+                    .inner
+                    .host_rpc(
                         device_id,
                         zeron_rpc::methods::LIST_MODELS,
                         serde_json::json!({ "harness": harness }),
@@ -1227,10 +1371,10 @@ impl Client {
     pub async fn list_refs(&self, device_id: &str, repo_path: &str) -> Result<Vec<RepoRef>> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_refs(repo_path).await,
-            Backend::Live(live) => {
-                let value = live
-                    .relay
-                    .call(
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
                         device_id,
                         zeron_rpc::methods::LIST_REFS,
                         serde_json::json!({ "repoPath": repo_path }),
@@ -1274,10 +1418,10 @@ impl Client {
                     })
                     .collect())
             }
-            Backend::Live(live) => {
-                let value = live
-                    .relay
-                    .call(
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
                         device_id,
                         zeron_rpc::methods::SEARCH_FILES,
                         serde_json::json!({ "query": query, "chatId": chat_id, "spaceId": space_id }),
@@ -1296,16 +1440,65 @@ impl Client {
     ) -> Result<FolderListing> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_folders(device_id, path).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let params = match path.filter(|p| !p.is_empty()) {
                     Some(path) => serde_json::json!({ "path": path }),
                     None => serde_json::json!({}),
                 };
-                let value = live
-                    .relay
-                    .call(device_id, zeron_rpc::methods::LIST_FOLDERS, params)
+                let value = self
+                    .inner
+                    .host_rpc(device_id, zeron_rpc::methods::LIST_FOLDERS, params)
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// Browse roots beyond home on a device: drive letters on Windows,
+    /// mounted volumes elsewhere (host `ListDrives`). Engines that predate
+    /// it answer `Unsupported`; callers then offer home only.
+    pub async fn list_drives(&self, device_id: &str) -> Result<Vec<crate::rpc::DriveEntry>> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(vec![crate::rpc::DriveEntry {
+                name: "System".into(),
+                path: "/".into(),
+            }]),
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
+                        device_id,
+                        zeron_rpc::methods::LIST_DRIVES,
+                        serde_json::json!({}),
+                    )
+                    .await?;
+                serde_json::from_value::<crate::rpc::DriveListing>(value)
+                    .map(|l| l.drives)
+                    .map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// Plan / rate-limit usage of every agent login on a device (host
+    /// `ListAgentAccounts`). `force` re-probes the providers (the engine
+    /// throttles it); otherwise the engine serves its last good probe.
+    pub async fn list_agent_usage(
+        &self,
+        device_id: &str,
+        force: bool,
+    ) -> Result<Vec<crate::rpc::AgentUsage>> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(Vec::new()),
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
+                        device_id,
+                        zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
+                        serde_json::json!({ "forceUsage": force }),
+                    )
+                    .await?;
+                Ok(crate::rpc::parse_agent_usage(&value))
             }
         }
     }
@@ -1314,9 +1507,9 @@ impl Client {
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.switch_ref(repo_path, ref_name).await,
-            Backend::Live(live) => live
-                .relay
-                .call(
+            Backend::Live(_) | Backend::Direct(_) => self
+                .inner
+                .host_rpc(
                     device_id,
                     zeron_rpc::methods::SWITCH_REF,
                     serde_json::json!({ "repoPath": repo_path, "refName": ref_name }),
@@ -1336,14 +1529,14 @@ impl Client {
     ) -> Result<String> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.create_worktree(repo_path, branch).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let mut params = serde_json::json!({ "repoPath": repo_path, "branch": branch });
                 if !space_id.is_empty() {
                     params["spaceId"] = serde_json::Value::String(space_id.to_owned());
                 }
-                let value = live
-                    .relay
-                    .call(device_id, zeron_rpc::methods::CREATE_WORKTREE, params)
+                let value = self
+                    .inner
+                    .host_rpc(device_id, zeron_rpc::methods::CREATE_WORKTREE, params)
                     .await?;
                 value
                     .get("path")
@@ -1384,6 +1577,9 @@ impl Client {
                     .put(device_id, &path, Arc::new(data));
                 Ok(path)
             }
+            Backend::Direct(_) => Err(ClientError::Unsupported(
+                "attachments over a direct SSH link are not supported yet".into(),
+            )),
         }
     }
 
@@ -1396,6 +1592,11 @@ impl Client {
         let bytes = match self.inner.backend() {
             Backend::Demo(demo) => demo.read_attachment(path)?,
             Backend::Live(live) => Arc::new(live.relay.read_attachment(device_id, path).await?),
+            Backend::Direct(_) => {
+                return Err(ClientError::Unsupported(
+                    "attachments over a direct SSH link are not supported yet".into(),
+                ));
+            }
         };
         self.inner
             .attachment_cache
@@ -1419,6 +1620,9 @@ impl Client {
                 live.kick();
                 self.kick_rooms();
             }
+            if online && let Some(direct) = self.inner.direct() {
+                direct.kick();
+            }
         }
     }
 
@@ -1434,6 +1638,9 @@ impl Client {
             live.relay.clear_unsupported();
             self.inner.reconcile_change_request_watches();
         }
+        if let Some(direct) = self.inner.direct() {
+            direct.kick();
+        }
         self.inner.tick();
     }
 
@@ -1447,6 +1654,9 @@ impl Client {
             for core in self.inner.cores() {
                 core.flush();
             }
+        }
+        if let Some(direct) = self.inner.direct() {
+            direct.save_registry();
         }
     }
 
@@ -1501,4 +1711,58 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+/// Whether two project paths name the same folder. Windows hosts accept
+/// either separator (real spaces carry paths like `D:\\/Work/app`) and are
+/// case-insensitive, so compare those normalized; POSIX paths only ignore a
+/// trailing slash.
+pub(crate) fn same_folder(a: &str, b: &str) -> bool {
+    fn windowsy(p: &str) -> bool {
+        let bytes = p.as_bytes();
+        (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic())
+            || p.starts_with("\\\\")
+    }
+    fn norm(p: &str) -> String {
+        if windowsy(p) {
+            let mut out = String::with_capacity(p.len());
+            for c in p.chars() {
+                let c = if c == '/' { '\\' } else { c };
+                if c == '\\' && out.ends_with('\\') && out.len() > 1 {
+                    continue;
+                }
+                out.push(c);
+            }
+            out.trim_end_matches('\\').to_lowercase()
+        } else {
+            let t = p.trim_end_matches('/');
+            if t.is_empty() {
+                "/".into()
+            } else {
+                t.to_owned()
+            }
+        }
+    }
+    a == b || norm(a) == norm(b)
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::same_folder;
+
+    #[test]
+    fn windows_paths_match_across_separators_and_case() {
+        assert!(same_folder(
+            "D:\\/Work/Projects/app",
+            "D:\\Work\\Projects\\app"
+        ));
+        assert!(same_folder("c:\\Users\\dev\\", "C:\\Users\\dev"));
+        assert!(!same_folder("C:\\Users\\dev", "C:\\Users\\dev2"));
+    }
+
+    #[test]
+    fn posix_paths_ignore_only_a_trailing_slash() {
+        assert!(same_folder("/home/dev/app/", "/home/dev/app"));
+        assert!(!same_folder("/home/dev/App", "/home/dev/app"));
+    }
 }

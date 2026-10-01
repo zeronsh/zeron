@@ -52,7 +52,7 @@ pub(crate) struct DemoServer {
 }
 
 impl DemoServer {
-    fn settle(&mut self, doc: &mut RegistryDoc) {
+    pub(crate) fn settle(&mut self, doc: &mut RegistryDoc) {
         loop {
             let batches = doc.take_pushable();
             if batches.is_empty() {

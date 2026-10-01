@@ -65,6 +65,9 @@ pub enum Credentials {
     Dev { user_id: String, org_id: String },
     /// Fully offline, deterministic dataset with a simulated host.
     Demo(DemoOptions),
+    /// Direct mode: SSH to the user's own machine and talk to its engine's
+    /// loopback IPC over the tunnel. No edge, no account.
+    Direct(crate::direct::SshTarget),
 }
 
 impl Credentials {
@@ -72,10 +75,15 @@ impl Credentials {
         matches!(self, Credentials::Demo(_))
     }
 
+    pub fn is_direct(&self) -> bool {
+        matches!(self, Credentials::Direct(_))
+    }
+
     pub fn org_id(&self) -> &str {
         match self {
             Credentials::WorkOs { org_id, .. } | Credentials::Dev { org_id, .. } => org_id,
             Credentials::Demo(_) => "demo",
+            Credentials::Direct(_) => "direct",
         }
     }
 
@@ -83,6 +91,7 @@ impl Credentials {
         match self {
             Credentials::WorkOs { user_id, .. } | Credentials::Dev { user_id, .. } => user_id,
             Credentials::Demo(_) => "demo",
+            Credentials::Direct(target) => &target.user,
         }
     }
 }

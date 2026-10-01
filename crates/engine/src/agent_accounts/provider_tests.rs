@@ -574,6 +574,31 @@ fn devin_usage_inverts_remaining_quota_and_names_the_account() {
     assert!(devin_usage_snapshot(&serde_json::json!({ "userStatus": {} })).is_none());
 }
 
+/// A Devin Pro seat that only reports a weekly quota (what the desktop's
+/// accounts card shows as a single "Week" meter).
+#[test]
+fn devin_usage_with_only_a_weekly_quota_is_one_week_window() {
+    let body = serde_json::json!({
+        "userStatus": {
+            "email": "dev@example.com",
+            "planStatus": {
+                "planInfo": { "teamsTier": "TEAMS_TIER_DEVIN_PRO" },
+                "weeklyQuotaRemainingPercent": 50,
+                "weeklyQuotaResetAtUnix": "1791158400",
+            }
+        }
+    });
+    let (snapshot, _) = devin_usage_snapshot(&body).unwrap();
+    assert_eq!(snapshot.plan_label.as_deref(), Some("Devin Pro"));
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].label, "Week");
+    assert!((snapshot.windows[0].used_fraction - 0.5).abs() < 1e-6);
+    assert_eq!(
+        snapshot.windows[0].resets_at.map(|t| t.timestamp()),
+        Some(1791158400)
+    );
+}
+
 #[tokio::test]
 async fn devin_swaps_and_learns_its_identity_from_the_usage_probe() {
     let server = MockServer::start(|method, path, body| {

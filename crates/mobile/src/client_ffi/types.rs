@@ -193,6 +193,8 @@ pub enum Credentials {
     Dev { user_id: String, org_id: String },
     /// Fully offline dataset with a simulated host.
     Demo { options: DemoOptions },
+    /// SSH straight to the user's own machine (no edge, no account).
+    Direct { target: super::direct::SshTarget },
 }
 
 impl From<Credentials> for zc::Credentials {
@@ -209,6 +211,7 @@ impl From<Credentials> for zc::Credentials {
             },
             Credentials::Dev { user_id, org_id } => zc::Credentials::Dev { user_id, org_id },
             Credentials::Demo { options } => zc::Credentials::Demo(options.into()),
+            Credentials::Direct { target } => zc::Credentials::Direct(target.into()),
         }
     }
 }
@@ -1017,6 +1020,64 @@ impl From<zc::rpc::FolderListing> for FolderListing {
                 })
                 .collect(),
             truncated: l.truncated,
+        }
+    }
+}
+
+/// A browse root beyond home (a Windows drive letter, a mounted volume).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DriveEntry {
+    pub name: String,
+    pub path: String,
+}
+
+impl From<zc::rpc::DriveEntry> for DriveEntry {
+    fn from(d: zc::rpc::DriveEntry) -> Self {
+        Self {
+            name: d.name,
+            path: d.path,
+        }
+    }
+}
+
+/// One agent login's plan usage on a host (ListAgentAccounts), meters only.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AgentUsage {
+    pub harness: String,
+    pub email: Option<String>,
+    pub plan_label: Option<String>,
+    pub active: bool,
+    pub windows: Vec<UsageWindow>,
+    pub fetched_at_ms: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// A rate-limit window ("5-hour", "Weekly", …); `used_fraction` is 0…1.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct UsageWindow {
+    pub label: String,
+    pub used_fraction: f32,
+    pub resets_at_ms: Option<i64>,
+}
+
+impl From<zc::rpc::AgentUsage> for AgentUsage {
+    fn from(a: zc::rpc::AgentUsage) -> Self {
+        Self {
+            harness: a.harness,
+            email: a.email,
+            plan_label: a.plan_label,
+            active: a.active,
+            windows: a
+                .windows
+                .into_iter()
+                .map(|w| UsageWindow {
+                    label: w.label,
+                    used_fraction: w.used_fraction,
+                    resets_at_ms: w.resets_at_ms,
+                })
+                .collect(),
+            fetched_at_ms: a.fetched_at_ms,
+            error: a.error,
         }
     }
 }

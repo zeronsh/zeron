@@ -618,6 +618,57 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Mirror helper (thin clients shadowing a host's transcript): overwrite
+    /// the scalar fields (status, duration, …) of the entry at `index`.
+    pub fn set_entry_scalars(
+        &self,
+        index: usize,
+        entry: &SessionMessageEntry,
+    ) -> Result<bool, DocError> {
+        let messages = self.doc.get_list("messages");
+        let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+            messages.get(index)
+        else {
+            return Ok(false);
+        };
+        write_entry_scalar_fields(&map, entry)?;
+        self.doc.commit();
+        Ok(true)
+    }
+
+    /// Mirror helper: replace the entry at `index` wholesale (a part rewrite
+    /// the append-only [`SegmentWriter`] can't express).
+    pub fn replace_message(
+        &self,
+        index: usize,
+        entry: &SessionMessageEntry,
+    ) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        if index < messages.len() {
+            messages.delete(index, 1)?;
+        }
+        let at = index.min(messages.len());
+        let map = messages.insert_container(at, LoroMap::new())?;
+        write_entry_scalar_fields(&map, entry)?;
+        let parts = map.insert_container("parts", LoroList::new())?;
+        for part in &entry.parts {
+            push_part(&parts, part)?;
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Mirror helper: drop entries from `index` to the end.
+    pub fn truncate_messages(&self, index: usize) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        let len = messages.len();
+        if index < len {
+            messages.delete(index, len - index)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
     /// Append an error part to an existing entry (crash recovery: the aborted
     /// entry must SAY why it ended — "Run interrupted by engine restart…" —
     /// not just truncate silently). Returns `false` when no entry matches.
