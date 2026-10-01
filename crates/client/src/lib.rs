@@ -37,6 +37,7 @@ mod live;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
+pub mod subagents;
 pub mod workspace;
 
 pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
@@ -52,6 +53,7 @@ pub use session::{
     QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
     SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
 };
+pub use subagents::{SubagentGroups, SubagentItem, SubagentState};
 pub use workspace::{
     DeviceView, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit,
     SectionView, SessionRow, WorkspaceSnapshot, project_color_index, relative_time_label,

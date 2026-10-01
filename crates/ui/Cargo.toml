@@ -63,7 +63,7 @@ serde.workspace = true
 serde_json.workspace = true
 pulldown-cmark.workspace = true
 zeron-markdown.workspace = true
-alacritty_terminal.workspace = true
+zeron-vt.workspace = true
 base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 usvg = "0.46"

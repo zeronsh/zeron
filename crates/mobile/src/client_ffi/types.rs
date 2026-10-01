@@ -507,6 +507,9 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
+    /// Subagents running right now, also after the chat's own turn settled
+    /// (staleness-gated). Draw as "● N" (`running_count_label`).
+    pub running_subagents: u32,
 }
 
 impl From<&zc::SessionRow> for SessionRow {
@@ -546,6 +549,7 @@ impl From<&zc::SessionRow> for SessionRow {
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
             room_gen: r.room_gen,
+            running_subagents: r.running_subagents,
         }
     }
 }

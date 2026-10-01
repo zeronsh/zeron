@@ -1,5 +1,9 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -47,6 +51,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import sh.zeron.android.tools.Links
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -90,7 +97,7 @@ private data class TextSheet(val title: String, val text: String, val mono: Bool
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
+fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigate: (String) -> Unit = {}, showSubagents: Boolean = false) {
     val client by model.client.collectAsState()
     val core = client ?: return
     val handle: SessionHandle = remember(chatId) { runCatching { core.openSession(chatId) }.getOrNull() } ?: run {
@@ -112,8 +119,17 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     var composer by remember { mutableStateOf(handle.composer()) }
     val workspace by model.workspace.collectAsState()
     val connectivity by model.connectivity.collectAsState()
+    // The chat's subagents, read from its spawn chips (Rust groups them the
+    // desktop's way); re-read with the transcript.
+    var subagents by remember(chatId) { mutableStateOf(groupsOf(core, chatId)) }
+    var subagentsOpen by androidx.compose.runtime.saveable.rememberSaveable(chatId) { mutableStateOf(showSubagents) }
     LaunchedEffect(chatId) {
-        model.sessionEvents.collect { if (it == chatId) composer = handle.composer() }
+        model.sessionEvents.collect {
+            if (it == chatId) {
+                composer = handle.composer()
+                subagents = groupsOf(core, chatId)
+            }
+        }
     }
     // Upload rings on pending thumbnails follow the escort.
     LaunchedEffect(composer.transferProgress) { transcript.uploadProgress = composer.transferProgress }
@@ -121,14 +137,44 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
 
     val context = LocalContext.current
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
+    val clipboard = LocalClipboardManager.current
     val actions = remember(chatId) {
         TranscriptActions(
             openUrl = { url ->
                 val uri = Uri.parse(url)
-                if (uri.scheme == "http" || uri.scheme == "https") {
-                    CustomTabsIntent.Builder().build().launchUrl(context, uri)
-                } else {
-                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                // A spawn card: open that subagent.
+                val subagent = subagentDocOf(url)
+                if (subagent != null) onNavigate(Routes.subagent(chatId, subagent))
+                else when (val target = Links.classify(url, model.workspaceRef(chatId))) {
+                    // Pages open in the in-app browser (localhost dev servers too).
+                    is Links.Target.Web -> onNavigate(Routes.browser(chatId, target.url))
+                    is Links.Target.File -> onNavigate(Routes.file(chatId, target.path))
+                    is Links.Target.Outside -> sh.zeron.android.tools.toast(context, "${target.path} is outside this session's folder")
+                    Links.Target.Other -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                        .onFailure { runCatching { CustomTabsIntent.Builder().build().launchUrl(context, uri) } }
+                }
+            },
+            fileActions = { path ->
+                when (val target = Links.classify(path, model.workspaceRef(chatId))) {
+                    is Links.Target.File -> {
+                        val ref = model.workspaceRef(chatId)
+                        listOfNotNull(
+                            MenuAction("Open", ZIcons.Text) { onNavigate(Routes.file(chatId, target.path)) },
+                            if (ref != null && sh.zeron.android.tools.FileKind.of(target.path) == sh.zeron.android.tools.FileKind.Html) {
+                                MenuAction("Open in browser", ZIcons.Globe) { onNavigate(Routes.browser(chatId, sh.zeron.android.tools.Browser.workspaceUrl(ref, target.path))) }
+                            } else null,
+                            ref?.let { MenuAction("Save to Downloads", ZIcons.Save) { model.downloads.saveFile(it, target.path) } },
+                            MenuAction("Copy path", ZIcons.Copy, haptic = Haptic.Confirm, cue = Cue.Copy) { clipboard.setText(AnnotatedString(path)) },
+                        )
+                    }
+                    else -> listOf(MenuAction("Copy path", ZIcons.Copy, haptic = Haptic.Confirm, cue = Cue.Copy) { clipboard.setText(AnnotatedString(path)) })
+                }
+            },
+            openFile = { path ->
+                when (val target = Links.classify(path, model.workspaceRef(chatId))) {
+                    is Links.Target.File -> onNavigate(Routes.file(chatId, target.path))
+                    is Links.Target.Outside -> sh.zeron.android.tools.toast(context, "${target.path} is outside this session's folder")
+                    else -> Unit
                 }
             },
             loadImage = { ref ->
@@ -145,7 +191,6 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     val project = row?.project?.name ?: "No project"
     val subtitle = composer.host.name?.let { "$project @ $it" } ?: project
     var overflow by remember { mutableStateOf(false) }
-    val clipboard = LocalClipboardManager.current
 
     // Flat Material chrome: the header sits on the page and takes the
     // container tone once the transcript scrolls under it; the transcript
@@ -170,15 +215,28 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
                     Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
                     Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                // Running count comes from the transcript when it has them,
+                // else from the row (a count published before the chips synced).
+                val running = maxOf(subagents.running.toInt(), row?.runningSubagents?.toInt() ?: 0)
+                if (running > 0 || Subagents.total(subagents) > 0) {
+                    SubagentsButton(running, onClick = { subagentsOpen = true })
+                    Spacer(Modifier.width(8.dp))
+                }
+                TonalCircleButton(ZIcons.FileTree, "Files", onClick = { onNavigate(Routes.files(chatId)) }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                Spacer(Modifier.width(8.dp))
                 Box {
                     TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
                     ActionMenu(
                         overflow,
                         { overflow = false },
                         listOfNotNull(
-                            MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
-                            row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
-                            row?.let { MenuAction("Archive", ZIcons.Archive) { model.archive(chatId); onBack() } },
+                            MenuAction("Files", ZIcons.FileTree) { onNavigate(Routes.files(chatId)) },
+                            if (Subagents.total(subagents) > 0) MenuAction("Subagents", ZIcons.Bot) { subagentsOpen = true } else null,
+                            MenuAction("Terminal", ZIcons.Terminal) { onNavigate(Routes.terminal(chatId)) },
+                            MenuAction("Browser & previews", ZIcons.Globe) { onNavigate(Routes.browser(chatId, null)) },
+                            MenuAction("Copy transcript", ZIcons.Copy, haptic = Haptic.Confirm, cue = Cue.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
+                            row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin, haptic = Haptic.Pop, cue = if (r.pinned) Cue.Unstar else Cue.Pin) { model.setPinned(chatId, !r.pinned) } },
+                            row?.let { MenuAction("Archive", ZIcons.Archive, haptic = Haptic.Confirm, cue = Cue.Archive) { model.archive(chatId); onBack() } },
                         ),
                     )
                 }
@@ -194,7 +252,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
             ) {
                 SmallFloatingActionButton(
-                    onClick = { transcript.scrollToBottom() },
+                    onClick = feedbackAction(Haptic.Select, Cue.Select) { transcript.scrollToBottom() },
                     shape = CircleShape,
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -208,8 +266,20 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
         }
     }
 
+    if (subagentsOpen) {
+        SubagentsSheet(
+            subagents,
+            onOpen = { view ->
+                subagentsOpen = false
+                onNavigate(Routes.subagent(chatId, view.docId))
+            },
+            onDismiss = { subagentsOpen = false },
+        )
+    }
+
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {
+            OpenCloseFeedback()
             Text(s.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 24.dp))
             SelectionContainer {
                 Text(
@@ -235,5 +305,6 @@ private fun Banner(c: ComposerState, connectivity: ConnectivityState?, onRetry: 
         !c.room.connected && c.room.retryAtMs != null -> "Reconnecting…"
         else -> null
     } ?: return
-    StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to onRetry else null)
+    val retry = feedbackAction(Haptic.Select, Cue.Refresh, onRetry)
+    StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to retry else null)
 }

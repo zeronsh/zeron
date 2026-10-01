@@ -194,7 +194,7 @@ pub fn installed(id: HarnessId) -> bool {
     }
 }
 
-fn invalidate_versions(id: HarnessId) {
+pub(crate) fn invalidate_versions(id: HarnessId) {
     let (cli, _) = cli_and_dir(id);
     if id == HarnessId::Cursor {
         crate::executable::invalidate_versions(&[cli, "agent"]);
@@ -213,7 +213,7 @@ fn post_install(id: HarnessId) -> Result<(), HarnessError> {
     )))
 }
 
-fn configure(command: &mut Command) {
+pub(crate) fn configure(command: &mut Command) {
     crate::acp::child::configure(command);
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("ZERON_") {
@@ -307,7 +307,7 @@ pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result
             result = tokio::time::timeout(DEADLINE, crate::acp::install_harness(id)) => result.unwrap_or_else(|_| Err(HarnessError::Install("installation timed out after 15 minutes".into()))),
         }
     } else {
-        run(command(method)?, cancel, DEADLINE).await
+        run(command(method)?, cancel, DEADLINE, INSTALL).await
     };
     invalidate_versions(id);
     result?;
@@ -323,7 +323,7 @@ pub async fn install_with_command(
 ) -> Result<(), HarnessError> {
     let mut cmd = shell_command(script)?;
     configure(&mut cmd);
-    let result = run(cmd, cancel, DEADLINE).await;
+    let result = run(cmd, cancel, DEADLINE, INSTALL).await;
     invalidate_versions(id);
     result?;
     post_install(id)
@@ -353,13 +353,29 @@ async fn capture(mut pipe: impl AsyncRead + Unpin, tail: StderrTail) {
     tail.push(&crate::redact_secrets(&String::from_utf8_lossy(&line)));
 }
 
-async fn run(
+/// How a supervised subprocess names itself in its errors.
+#[derive(Clone, Copy)]
+pub(crate) struct Labels {
+    /// `installation cancelled`, `uninstall timed out after …`.
+    pub noun: &'static str,
+    /// `installer exited with …`.
+    pub actor: &'static str,
+}
+
+const INSTALL: Labels = Labels {
+    noun: "installation",
+    actor: "installer",
+};
+
+pub(crate) async fn run(
     mut command: Command,
     cancel: CancellationToken,
     deadline: Duration,
+    labels: Labels,
 ) -> Result<(), HarnessError> {
+    let Labels { noun, actor } = labels;
     if cancel.is_cancelled() {
-        return Err(HarnessError::Install("installation cancelled".into()));
+        return Err(HarnessError::Install(format!("{noun} cancelled")));
     }
     let mut child = crate::acp::child::Child::new(
         command
@@ -371,10 +387,10 @@ async fn run(
     let stderr = capture(child.stderr.take().expect("piped stderr"), tail.clone());
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => Err("installation cancelled".to_string()),
-        _ = tokio::time::sleep(deadline) => Err("installation timed out after 15 minutes".to_string()),
+        _ = cancel.cancelled() => Err(format!("{noun} cancelled")),
+        _ = tokio::time::sleep(deadline) => Err(format!("{noun} timed out after {} minutes", deadline.as_secs() / 60)),
         result = async { let (status, (), ()) = tokio::join!(child.wait(), stdout, stderr); status } =>
-            result.map_err(|e| e.to_string()).and_then(|status| if status.success() { Ok(()) } else { Err(format!("installer exited with {status}")) }),
+            result.map_err(|e| e.to_string()).and_then(|status| if status.success() { Ok(()) } else { Err(format!("{actor} exited with {status}")) }),
     };
     child.shutdown(Duration::from_millis(100)).await;
     result.map_err(|reason| {
@@ -466,6 +482,7 @@ mod tests {
             fixture("test \"$CI\" = 1 && test -z \"$CLAUDECODE\" && test ! -t 0"),
             CancellationToken::new(),
             Duration::from_secs(2),
+            INSTALL,
         )
         .await
         .unwrap();
@@ -473,6 +490,7 @@ mod tests {
             fixture("echo stdout-message; echo 'api_key=private' >&2; exit 7"),
             CancellationToken::new(),
             Duration::from_secs(2),
+            INSTALL,
         )
         .await
         .unwrap_err()
@@ -484,6 +502,7 @@ mod tests {
             fixture("sleep 60"),
             CancellationToken::new(),
             Duration::from_millis(30),
+            INSTALL,
         )
         .await
         .unwrap_err()
@@ -492,7 +511,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         assert!(
-            run(fixture("exit 0"), cancel, DEADLINE)
+            run(fixture("exit 0"), cancel, DEADLINE, INSTALL)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -509,7 +528,7 @@ mod tests {
             let mut command = fixture("sleep 60 & echo $! > \"$PIDFILE\"; wait");
             command.env("PIDFILE", &pidfile);
             let cancel = CancellationToken::new();
-            let task = tokio::spawn(run(command, cancel.clone(), DEADLINE));
+            let task = tokio::spawn(run(command, cancel.clone(), DEADLINE, INSTALL));
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !pidfile.exists() {
                     tokio::time::sleep(Duration::from_millis(10)).await;

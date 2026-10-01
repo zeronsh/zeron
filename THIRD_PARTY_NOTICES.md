@@ -30,6 +30,14 @@ Zeron bundles the SVG icon set and filename/folder associations from
 Symbols is MIT licensed. The complete upstream license and copyright notice is
 retained at `crates/ui/assets/file-icons/LICENSE.symbols`.
 
+## Lucide
+
+The Android app's "Reset to defaults" glyph (`apps/android/app/src/main/res/drawable/ic_reset_defaults.xml`) is the
+[Lucide](https://lucide.dev) `rotate-ccw` icon. Lucide is ISC licensed: Copyright (c) for portions of Lucide are held by
+Cole Bemis 2013-2022 as part of Feather (MIT); all other copyright (c) for Lucide are held by Lucide Contributors 2022.
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted,
+provided that the above copyright notice and this permission notice appear in all copies.
+
 ## Bundled theme palette adaptations
 
 Zeron includes manually curated palette adaptations derived from the projects

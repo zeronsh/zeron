@@ -106,6 +106,9 @@ struct Lease {
     expires_at_ms: i64,
 }
 
+/// The demo harness's context window (tokens).
+const DEMO_CONTEXT_WINDOW: u64 = 200_000;
+
 pub(crate) struct DemoHost {
     options: DemoOptions,
     client: Weak<ClientInner>,
@@ -205,7 +208,7 @@ impl DemoHost {
                         matches!(
                             s.status,
                             SessionStatus::Working | SessionStatus::AwaitingInput
-                        )
+                        ) || s.running_subagents > 0
                     })
                     .cloned()
                     .collect();
@@ -267,6 +270,20 @@ impl DemoHost {
             }
             _ => transcripts::fixture(chat_id, &host, last),
         };
+        for entry in &entries {
+            doc.push_message(entry).map_err(doc_err)?;
+        }
+        Ok(doc)
+    }
+
+    /// The fixture doc of one of a demo chat's subagents.
+    pub(crate) fn subagent_doc(&self, parent_chat_id: &str, doc_id: &str) -> Result<SessionDoc> {
+        let client = self.client()?;
+        let host = self.host_of(&client, parent_chat_id);
+        let source = crate::subagents::subagent_source_chat(doc_id).unwrap_or(parent_chat_id);
+        let entries = transcripts::subagent(source, doc_id, &host)
+            .ok_or_else(|| ClientError::NotFound(doc_id.to_owned()))?;
+        let doc = SessionDoc::init(doc_id).map_err(doc_err)?;
         for entry in &entries {
             doc.push_message(entry).map_err(doc_err)?;
         }
@@ -496,6 +513,7 @@ impl DemoHost {
         let _ = client.registry_write(|doc| {
             doc.upsert_session(&Session {
                 last_completed_turn: completed.map(str::to_owned),
+                running_subagents: 0,
                 chat_id: chat_id.to_owned(),
                 device_id: host,
                 status,
@@ -599,6 +617,15 @@ impl DemoHost {
                 );
                 let _ = core.write(|doc| doc.push_message(&entry));
             }
+            // Each prompt fills the context window a little more, as a live
+            // harness reports it, so the composer's indicator has a reading.
+            let _ = core.write(|doc| {
+                let used = doc.context_usage().and_then(|u| u.tokens).unwrap_or(24_000);
+                doc.update_context_usage(
+                    Some((used + 41_000).min(DEMO_CONTEXT_WINDOW)),
+                    Some(DEMO_CONTEXT_WINDOW),
+                )
+            });
             let preview = crate::attachments::parse_user_message(prompt).text;
             let untitled = client
                 .workspace

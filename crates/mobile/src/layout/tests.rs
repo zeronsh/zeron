@@ -286,6 +286,11 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
     assert_eq!(spinners(&frame_for(SubagentStatus::Done)), 0, "finished subagent is quiet");
     let failed = frame_for(SubagentStatus::Failed);
     assert!(failed.display(0).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
+    // Every spawned card is one tap target opening its subagent.
+    let done = frame_for(SubagentStatus::Done).display(0).unwrap();
+    let links: Vec<_> = done.links.iter().map(|l| l.url.as_str()).collect();
+    assert_eq!(links, ["zeron-subagent:sub-1"]);
+    assert!(done.links[0].w > 300.0, "the whole card is the target");
 }
 
 #[test]

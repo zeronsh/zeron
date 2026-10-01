@@ -61,6 +61,37 @@ object ZIcons {
     val Text = R.drawable.zi_document
     val Image = R.drawable.zi_file_image
     val Link = R.drawable.zi_arrow_up_right
+    val Bell = R.drawable.zi_bell
+    val Bot = R.drawable.zi_bot
+    val Key = R.drawable.zi_key_minimalistic
+    val Terminal = R.drawable.zi_terminal
+    val Restart = R.drawable.zi_restart
+    val Globe = R.drawable.zi_globe
+    val AddCircle = R.drawable.zi_add_circle
+    val Cloud = R.drawable.zi_cloud
+    val Star = R.drawable.zi_star
+    /** Fast mode (the desktop's fast-tier bolt). */
+    val FastTier = R.drawable.zi_fast_tier
+    val StarFilled = R.drawable.zi_star_bold
+    // Developer tools (desktop files panel, editor, browser, terminal).
+    val FileTree = R.drawable.zi_file_tree
+    val Save = R.drawable.zi_floppy_disk
+    val Eye = R.drawable.zi_eye
+    val EyeClosed = R.drawable.zi_eye_closed
+    val Forward = R.drawable.zi_arrow_right
+    val Code = R.drawable.zi_file_code
+    val Markdown = R.drawable.zi_file_markdown
+    val Keyboard = R.drawable.zi_keyboard
+    val Play = R.drawable.zi_action_play
+    val WrapText = R.drawable.zi_wrap_text
+    val Expand = R.drawable.zi_expand_arrows
+    val Collapse = R.drawable.zi_collapse_arrows
+    val ChevronLeft = R.drawable.zi_alt_arrow_left
+    val Window = R.drawable.zi_window_maximize
+    val DocumentAdd = R.drawable.zi_document_add
+    val Return = R.drawable.zi_return
+    val HardDrive = R.drawable.zi_hard_drive
+    val Volume = R.drawable.zi_volume_loud
 }
 
 @Composable

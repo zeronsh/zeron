@@ -20,6 +20,17 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONObject
+import sh.zeron.android.feedback.AndroidFeedback
+import sh.zeron.android.feedback.AppFeedback
+import sh.zeron.android.feedback.FeedbackStore
+import sh.zeron.android.feedback.LinkTransitions
+import sh.zeron.android.feedback.Phase
+import sh.zeron.android.feedback.SessionFeedbackPolicy
+import sh.zeron.android.feedback.SessionTransitions
+import uniffi.zeron_core.ChatIndicator
+import uniffi.zeron_core.ConnectivityState
+import uniffi.zeron_core.WorkspaceSnapshot as Snapshot
 import uniffi.zeron_core.AuthCallback
 import uniffi.zeron_core.AuthOrg
 import uniffi.zeron_core.ChatConfig
@@ -28,9 +39,11 @@ import uniffi.zeron_core.ClientListener
 import uniffi.zeron_core.Connectivity
 import uniffi.zeron_core.CoreClient
 import uniffi.zeron_core.CoreConfig
+import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.Credentials
 import uniffi.zeron_core.DemoFixture
 import uniffi.zeron_core.DemoOptions
+import uniffi.zeron_core.DeviceView
 import uniffi.zeron_core.NewSession
 import uniffi.zeron_core.SandboxLevel
 import uniffi.zeron_core.SendRequest
@@ -59,6 +72,10 @@ data class LaunchOptions(
     val huge: Boolean = false,
     val noProjects: Boolean = false,
     val signedOut: Boolean = false,
+    /** Developer (debuggable builds): sign in to an `AUTH_MODE=dev` edge as `devUser@devOrg`. */
+    val devEdge: String? = null,
+    val devUser: String? = null,
+    val devOrg: String? = null,
     val route: String? = null,
     val wallpaper: String? = null,
     val wallpaperEffect: String? = null,
@@ -74,6 +91,9 @@ class AppModel(private val app: Application) {
     private val main = Handler(Looper.getMainLooper())
     val credentials = CredentialStore(app)
     val wallpaper = WallpaperStore(app)
+    val notifier by lazy { Notifier(app) { feedback.store.current } }
+    val workspaceApi by lazy { sh.zeron.android.tools.WorkspaceApi(this) }
+    val downloads by lazy { sh.zeron.android.tools.Downloads(app, this) }
 
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
@@ -93,6 +113,24 @@ class AppModel(private val app: Application) {
     val signInError = MutableStateFlow<String?>(null)
 
     private val settings = app.getSharedPreferences("settings", 0)
+
+    /** Haptics and sound for the whole app; Compose reaches it through `LocalFeedback`, everything else through [AppFeedback]. */
+    val feedback: AndroidFeedback by lazy { AndroidFeedback(app, FeedbackStore(settings)).also { AppFeedback.current = it } }
+    private var inForeground = false
+    private val sessionTransitions = SessionTransitions()
+    private val linkTransitions = LinkTransitions()
+    private val sessionFeedback by lazy { SessionFeedbackPolicy(feedback, notifier, { inForeground }, android.os.SystemClock::uptimeMillis) }
+
+    /** The notification permission has been asked for once (it is asked in context, not at launch). */
+    var notificationsAsked: Boolean
+        get() = settings.getBoolean("asked.notifications", false)
+        set(value) = settings.edit().putBoolean("asked.notifications", value).apply()
+
+    /** Routes asked for by a notification tap while the app is already running. */
+    val routeRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+
+    /** The user stopped [chatId]: the idle that follows is not a completion. */
+    fun noteInterrupted(chatId: String) = sessionFeedback.interrupted(chatId)
     private val _appearance = MutableStateFlow(
         Appearance(
             runCatching { ThemeMode.valueOf(settings.getString("theme", "System")!!) }.getOrDefault(ThemeMode.System),
@@ -100,6 +138,9 @@ class AppModel(private val app: Application) {
         ),
     )
     val appearance: StateFlow<Appearance> = _appearance.asStateFlow()
+
+    /** Starred models in the model picker (device-local, every mode). */
+    val favorites = FavoritesStore(settings)
 
     fun setAppearance(value: Appearance) {
         _appearance.value = value
@@ -142,6 +183,7 @@ class AppModel(private val app: Application) {
     fun boot(options: LaunchOptions) {
         launch = options
         if (_client.value != null) return
+        if (isDebuggable) registerDebugAlerts()
         if (options.signedOut) credentials.clear()
         watchNetwork()
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
@@ -153,17 +195,51 @@ class AppModel(private val app: Application) {
             WallpaperStore.effects.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let(wallpaper::setEffect)
         }
         val stored = credentials.stored()
+        val dev = options.devEdge?.takeIf { isDebuggable }
         when {
             options.demo -> start(Credentials.Demo(demoOptions()))
+            dev != null -> devSignIn(dev, options.devUser ?: "dev-user", options.devOrg ?: "dev-org")
             stored != null -> start(stored)
         }
         // Relative times ("4m") and staleness age without events.
         scope.launch {
             while (true) {
                 delay(30_000)
-                refreshWorkspace()
+                refreshWorkspace(announce = false)
             }
         }
+    }
+
+    /**
+     * Debuggable builds: `adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android --es kind
+     * done|input|failed [--es chat <id>]` (or `haptic` / `cue` with `--es name <entry>`) runs a session event through the real policy (in-app cue in front,
+     * notification behind), to check the sensory layer without waiting for an agent.
+     */
+    private fun registerDebugAlerts() {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+                // `--es kind haptic --es name Surge [--ef level 0.5]` / `--es kind cue --es name ProviderClaude`
+                // play one vocabulary entry straight through the engine (logs, dumpsys vibrator_manager).
+                when (intent.getStringExtra("kind")) {
+                    "haptic" -> sh.zeron.android.feedback.Haptic.entries.firstOrNull { it.name == intent.getStringExtra("name") }?.let {
+                        feedback.haptic(it, intent.getFloatExtra("level", 0.5f))
+                    }
+                    "cue" -> sh.zeron.android.feedback.Cue.entries.firstOrNull { it.name == intent.getStringExtra("name") }?.let { feedback.cue(it) }
+                }
+                if (intent.getStringExtra("kind") in setOf("haptic", "cue")) return
+                val event = when (intent.getStringExtra("kind")) {
+                    "input" -> sh.zeron.android.feedback.SessionEvent.NeedsInput
+                    "failed" -> sh.zeron.android.feedback.SessionEvent.Failed
+                    else -> sh.zeron.android.feedback.SessionEvent.Done
+                }
+                val chat = intent.getStringExtra("chat") ?: _workspace.value?.let { phases(it).keys.firstOrNull() } ?: return
+                // `--ez background true` takes the backgrounded branch while the app stays up (emulators crash on task changes).
+                if (intent.getBooleanExtra("background", false)) notifier.alert(chat, event) else sessionFeedback.session(chat, event)
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            app, receiver, android.content.IntentFilter("sh.zeron.android.DEBUG_EVENT"), androidx.core.content.ContextCompat.RECEIVER_EXPORTED,
+        )
     }
 
     fun demoOptions() = DemoOptions(
@@ -183,7 +259,7 @@ class AppModel(private val app: Application) {
     private fun claimCoreDir(credentials: Credentials) {
         val owner = when (credentials) {
             is Credentials.WorkOs -> "${credentials.userId}/${credentials.orgId}"
-            is Credentials.Dev -> "${credentials.userId}/${credentials.orgId}"
+            is Credentials.Dev -> "${credentials.userId}/${credentials.orgId}@${this.credentials.devEdge}"
             is Credentials.Demo -> return
         }
         val marker = File(coreDir, ".owner")
@@ -198,7 +274,7 @@ class AppModel(private val app: Application) {
         if (!demo) claimCoreDir(credentials)
         dir.mkdirs()
         val config = CoreConfig(
-            edgeUrl = edgeUrl,
+            edgeUrl = if (credentials is Credentials.Dev) this.credentials.devEdge ?: edgeUrl else edgeUrl,
             dataDir = dir.path,
             deviceId = deviceId,
             deviceName = deviceName(),
@@ -223,6 +299,30 @@ class AppModel(private val app: Application) {
     }
 
     val edgeUrl: String get() = authProductionEdgeUrl()
+
+    /** Developer sign-in is offered in debuggable builds only. */
+    val isDebuggable: Boolean get() = (app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /**
+     * Developer: join an `AUTH_MODE=dev` edge (`wrangler dev --var
+     * AUTH_MODE:dev`) as `user@org` — no WorkOS. Debuggable builds only;
+     * hidden behind seven taps on the sign-in screen's mark (or the
+     * `dev-edge` launch extra).
+     */
+    fun devSignIn(edge: String, user: String, org: String): Boolean {
+        if (!isDebuggable) return false
+        val url = edge.trim().trimEnd('/')
+        if (!(url.startsWith("http://") || url.startsWith("https://")) || user.isBlank()) {
+            signInError.value = "Enter the edge URL (http://…) and a user id."
+            return false
+        }
+        _client.value?.shutdown()
+        _client.value = null
+        val dev = Credentials.Dev(user.trim(), org.trim())
+        credentials.store(dev, devEdge = url)
+        credentials.profile = CredentialStore.Profile(user.trim(), url, org.trim().ifEmpty { null })
+        return start(dev).also { if (!it) signInError.value = "Couldn't open the dev workspace." }
+    }
 
     private val deviceId: String
         get() {
@@ -285,6 +385,8 @@ class AppModel(private val app: Application) {
         _client.value = null
         _workspace.value = null
         _connectivity.value = null
+        sessionTransitions.reset()
+        linkTransitions.reset()
         if (!wasDemo) {
             credentials.clear()
             coreDir.deleteRecursively()
@@ -310,7 +412,10 @@ class AppModel(private val app: Application) {
             is ClientEvent.WorkspaceChanged -> scheduleRefresh()
             is ClientEvent.SessionChanged -> _sessionEvents.tryEmit(event.chatId)
             is ClientEvent.ComposerChanged -> _sessionEvents.tryEmit(event.chatId)
-            is ClientEvent.ConnectivityChanged -> _connectivity.value = event.connectivity
+            is ClientEvent.ConnectivityChanged -> {
+                _connectivity.value = event.connectivity
+                observeLink(event.connectivity)
+            }
             is ClientEvent.AuthRefreshed -> credentials.updateTokens(event.tokens)
             is ClientEvent.AuthExpired -> signOut()
         }
@@ -326,17 +431,54 @@ class AppModel(private val app: Application) {
         }
     }
 
-    fun refreshWorkspace() {
+    /** [announce] false for clock-driven refreshes: a status that merely aged out (staleness gate) is not an event. */
+    fun refreshWorkspace(announce: Boolean = true) {
         val client = _client.value ?: return
-        _workspace.value = client.workspace()
+        val snapshot = client.workspace()
+        _workspace.value = snapshot
+        observeSessions(snapshot, announce)
+    }
+
+    private fun phases(ws: Snapshot): Map<String, Phase> {
+        val out = HashMap<String, Phase>()
+        for (row in ws.projects.flatMap { it.sessions } + ws.projectless) {
+            if (row.parentChatId != null) continue // subagents do not chime
+            out[row.id] = when (row.indicator) {
+                ChatIndicator.WORKING -> Phase.Working
+                ChatIndicator.AWAITING_INPUT -> Phase.AwaitingInput
+                ChatIndicator.ERRORED -> Phase.Errored
+                ChatIndicator.COMPLETED -> Phase.Completed
+                ChatIndicator.IDLE -> Phase.Idle
+            }
+        }
+        return out
+    }
+
+    /** Turn changes of session state into one-shot events: in-app cue in front, notification behind. */
+    private fun observeSessions(ws: Snapshot, announce: Boolean) {
+        val events = sessionTransitions.observe(phases(ws))
+        if (announce) for ((id, event) in events) sessionFeedback.session(id, event)
+    }
+
+    private fun observeLink(c: Connectivity) {
+        val degraded = c.state == ConnectivityState.OFFLINE || c.state == ConnectivityState.RECONNECTING
+        val running = _workspace.value?.let { phases(it).values.any { p -> p == Phase.Working } } == true
+        linkTransitions.observe(degraded, running)?.let(sessionFeedback::link)
     }
 
     fun onForeground() {
+        inForeground = true
+        feedback.setForeground(true)
+        // What happened while away was already announced by a notification: start from what is on screen.
+        sessionTransitions.reset()
+        notifier.clearSessionAlerts()
         _client.value?.onForeground()
         refreshWorkspace()
     }
 
     fun onBackground() {
+        inForeground = false
+        feedback.setForeground(false)
         _client.value?.onBackground()
     }
 
@@ -385,6 +527,54 @@ class AppModel(private val app: Application) {
 
     fun row(id: String): SessionRow? = _client.value?.sessionRow(id)
 
+    /** The workspace a chat runs in, for the developer tools. */
+    fun workspaceRef(chatId: String): sh.zeron.android.tools.WorkspaceRef? {
+        val row = row(chatId) ?: return null
+        val project = row.project?.let { runCatching { _client.value?.project(it.id) }.getOrNull() }
+        return sh.zeron.android.tools.WorkspaceRef(
+            deviceId = row.deviceId,
+            chatId = chatId,
+            spaceId = row.project?.id,
+            root = row.cwd ?: project?.path,
+            title = row.project?.name ?: row.cwd?.substringAfterLast('/')?.ifEmpty { null } ?: "Home",
+            deviceName = row.deviceName,
+        )
+    }
+
+    /** A project's folder on its device (no chat). */
+    fun projectRef(spaceId: String): sh.zeron.android.tools.WorkspaceRef? {
+        val p = runCatching { _client.value?.project(spaceId) }.getOrNull() ?: return null
+        return sh.zeron.android.tools.WorkspaceRef(p.deviceId, null, p.id, p.path, p.name, p.deviceName)
+    }
+
+    /** Devices that run agents (the account's computers). */
+    fun executionDevices(): List<DeviceView> = runCatching { _client.value?.executionDevices() }.getOrNull().orEmpty()
+
+    // ── host calls ─────────────────────────────────────────────────────────
+
+    /** Untyped engine RPC (harness installs, agent sign-ins). Throws on failure. */
+    suspend fun hostCall(deviceId: String, method: String, params: JSONObject = JSONObject()): Any {
+        val c = _client.value ?: throw IllegalStateException("Not connected")
+        return Agents.parse(c.hostCall(deviceId, method, params.toString()))
+    }
+
+    /**
+     * Clone a repository, or create an empty one, on a device and make it a
+     * project. The device's engine does it (`CloneRepo` / `CreateRepo`).
+     */
+    suspend fun addProject(deviceId: String, source: ProjectSource, input: String): Result<String> {
+        val (method, params) = when (source) {
+            ProjectSource.Clone -> "CloneRepo" to JSONObject().put("url", input.trim())
+            ProjectSource.Empty -> "CreateRepo" to JSONObject().put("name", input.trim())
+        }
+        val path = runCatching {
+            val reply = hostCall(deviceId, method, params) as? JSONObject
+            reply?.optString("path")?.ifEmpty { null } ?: error("The device didn't say where the project is.")
+        }.getOrElse { return Result.failure(it) }
+        val c = _client.value ?: return Result.failure(IllegalStateException("Not connected"))
+        return runCatching { c.createProject(deviceId, path, true) }.onSuccess { refreshWorkspace() }
+    }
+
     /** Create the chat and send its first message. */
     fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
@@ -393,9 +583,14 @@ class AppModel(private val app: Application) {
             draft.hostId != null -> SessionTarget.Projectless(draft.hostId)
             else -> return null
         }
-        val config = ChatConfig(draft.harness, draft.model, draft.effort, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
+        val config = ChatConfig(draft.harness, draft.model, draft.effort, draft.options, SandboxLevel.WORKSPACE_WRITE)
         return try {
-            val chatId = client.createSession(NewSession(target, config, if (draft.worktree) null else draft.branch, null, null))
+            // A new worktree is minted with the first send; otherwise the
+            // session runs in the checkout — or in the picked branch's own
+            // worktree, reused as is (the desktop's "current worktree").
+            val chatId = client.createSession(
+                NewSession(target, config, if (draft.worktree) null else draft.branch, if (draft.worktree) null else draft.cwd, null),
+            )
             val handle = client.openSession(chatId)
             val project = _workspace.value?.projects?.firstOrNull { it.id == draft.projectId }
             val worktree = if (draft.worktree && project != null) WorktreeSpec(project.path, draft.branch ?: "HEAD", project.id) else null
@@ -409,6 +604,26 @@ class AppModel(private val app: Application) {
     }
 }
 
+/** Human wording for core errors. */
+fun Throwable.userMessage(): String = when (this) {
+    is CoreException.HostUnavailable ->
+        if (Agents.isTimeout(reason)) "The device took too long to answer." else "The device isn't reachable right now."
+    is CoreException.Unsupported -> "Not supported by this device's engine."
+    is CoreException.Closed -> "Not connected."
+    // Host errors arrive as "Method: reason" — the reason is what people read.
+    is CoreException.HostException -> reason.substringAfter(": ", reason).ifBlank { "The device couldn't do that." }
+    is CoreException.NotFound -> reason
+    is CoreException.InvalidArgument -> reason
+    is CoreException.Network -> reason
+    is CoreException.Auth -> reason
+    is CoreException.Storage -> reason
+    is CoreException.NotImplemented -> reason
+    is CoreException.Internal -> reason
+    else -> message ?: "Something went wrong."
+}
+
+enum class ProjectSource { Clone, Empty }
+
 /** The new-session page's options (kept across launches). */
 data class NewSessionDraft(
     val projectId: String? = null,
@@ -416,6 +631,10 @@ data class NewSessionDraft(
     val harness: String = "claude-code",
     val model: String? = null,
     val effort: String? = null,
+    /** Model option id → choice id picked for [model] (fast mode, context window…); empty = the defaults. */
+    val options: Map<String, String> = emptyMap(),
     val branch: String? = null,
     val worktree: Boolean = false,
+    /** Run in this existing worktree of [branch] instead of the project folder. */
+    val cwd: String? = null,
 )

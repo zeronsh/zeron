@@ -17,6 +17,7 @@ members = [
     "crates/client",
     "crates/mcp",
     "crates/text",
+    "crates/vt",
     "apps/zeron",
 ]
 
@@ -43,6 +44,7 @@ zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }
 zeron-text = { path = "crates/text" }
+zeron-vt = { path = "crates/vt" }
 
 # CRDT
 loro = "1.13"

@@ -408,6 +408,19 @@ impl WorkspaceFiles {
         result
     }
 
+    pub async fn read_bytes(
+        &self,
+        request: zeron_proto::ReadWorkspaceBytesRequest,
+    ) -> Result<zeron_proto::WorkspaceBytesChunk, WorkspaceFilesError> {
+        let workspace = self.resolve_target(&request.target).await?;
+        let relative = WorkspaceRelativePath::file(&request.path)?;
+        tokio::task::spawn_blocking(move || {
+            read_bytes_blocking(&workspace.root, &relative, &request)
+        })
+        .await
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?
+    }
+
     pub async fn read_image(
         &self,
         request: zeron_proto::ReadWorkspaceImageRequest,
@@ -1207,6 +1220,85 @@ fn compare_workspace_search_matches(
         .cmp(&left.score)
         .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
         .then_with(|| left.path.cmp(&right.path))
+}
+
+fn file_revision(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ino()
+    };
+    #[cfg(not(unix))]
+    let inode = 0u64;
+    format!("{}-{modified}-{inode}", metadata.len())
+}
+
+fn read_bytes_blocking(
+    root: &Path,
+    relative: &WorkspaceRelativePath,
+    request: &zeron_proto::ReadWorkspaceBytesRequest,
+) -> Result<zeron_proto::WorkspaceBytesChunk, WorkspaceFilesError> {
+    use base64::Engine as _;
+    use std::io::{Read, Seek, SeekFrom};
+    use zeron_proto::WORKSPACE_BYTES_CHUNK_MAX;
+    if request.offset > 0 && request.expected_revision.is_none() {
+        return Err(bad_path("A continuation requires the file revision"));
+    }
+    let before = checked_file_metadata(root, relative)?;
+    let mut file = std::fs::File::open(root.join(relative.as_path()))
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    let opened = file
+        .metadata()
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    if !same_file_revision(&before, &opened) {
+        return Err(WorkspaceFilesError::Io("File changed before open".into()));
+    }
+    let revision = file_revision(&opened);
+    if request
+        .expected_revision
+        .as_ref()
+        .is_some_and(|expected| expected != &revision)
+    {
+        return Err(WorkspaceFilesError::Io(
+            "File changed during download; try again".into(),
+        ));
+    }
+    let size = opened.len();
+    if request.offset > size {
+        return Err(bad_path("Invalid file offset"));
+    }
+    let length = request
+        .length
+        .unwrap_or(WORKSPACE_BYTES_CHUNK_MAX)
+        .clamp(1, WORKSPACE_BYTES_CHUNK_MAX) as u64;
+    file.seek(SeekFrom::Start(request.offset))
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    let mut bytes = Vec::with_capacity(length.min(size - request.offset) as usize);
+    (&mut file)
+        .take(length)
+        .read_to_end(&mut bytes)
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    let after = file
+        .metadata()
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    if !same_file_revision(&opened, &after) {
+        return Err(WorkspaceFilesError::Io(
+            "File changed during download; try again".into(),
+        ));
+    }
+    let next_offset = request.offset + bytes.len() as u64;
+    Ok(zeron_proto::WorkspaceBytesChunk {
+        revision,
+        size,
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        next_offset,
+        done: next_offset >= size,
+    })
 }
 
 fn read_image_blocking(
@@ -2774,6 +2866,92 @@ mod tests {
         let mut subscription = watch.subscribe(Weak::<WorkspaceFilesInner>::new());
         assert!(subscription.recv().await.unwrap().resync_required);
         watch.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod bytes_tests {
+    use super::*;
+    use base64::Engine as _;
+    use zeron_proto::{ReadWorkspaceBytesRequest, WorkspaceTarget};
+
+    fn request(path: &str) -> ReadWorkspaceBytesRequest {
+        ReadWorkspaceBytesRequest {
+            target: WorkspaceTarget {
+                chat_id: None,
+                space_id: Some("space".into()),
+                checkout_path: None,
+            },
+            path: path.into(),
+            offset: 0,
+            length: Some(4),
+            expected_revision: None,
+        }
+    }
+
+    fn decode(data: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap()
+    }
+
+    #[test]
+    fn any_file_streams_in_revisioned_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/report.pdf"), b"%PDF\0binary\xff").unwrap();
+        let path = WorkspaceRelativePath::file("docs/report.pdf").unwrap();
+        let mut request = request("docs/report.pdf");
+        let mut out = Vec::new();
+        let first = read_bytes_blocking(&root, &path, &request).unwrap();
+        assert_eq!(first.size, 12);
+        assert!(!first.done);
+        out.extend(decode(&first.data));
+        // A continuation must name the revision it continues.
+        request.offset = first.next_offset;
+        assert!(read_bytes_blocking(&root, &path, &request).is_err());
+        request.expected_revision = Some(first.revision.clone());
+        request.length = None;
+        let rest = read_bytes_blocking(&root, &path, &request).unwrap();
+        assert!(rest.done);
+        assert_eq!(rest.next_offset, 12);
+        out.extend(decode(&rest.data));
+        assert_eq!(out, b"%PDF\0binary\xff");
+
+        // A changed file fails the continuation instead of splicing.
+        std::fs::write(root.join("docs/report.pdf"), b"%PDF different length").unwrap();
+        assert!(read_bytes_blocking(&root, &path, &request).is_err());
+        request.offset = 1 << 40;
+        request.expected_revision = None;
+        assert!(read_bytes_blocking(&root, &path, &request).is_err());
+    }
+
+    #[test]
+    fn byte_reads_refuse_symlinks_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        assert!(
+            read_bytes_blocking(
+                &root,
+                &WorkspaceRelativePath::file("dir").unwrap(),
+                &request("dir")
+            )
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", root.join("link")).unwrap();
+            assert!(
+                read_bytes_blocking(
+                    &root,
+                    &WorkspaceRelativePath::file("link").unwrap(),
+                    &request("link")
+                )
+                .is_err()
+            );
+        }
     }
 }
 

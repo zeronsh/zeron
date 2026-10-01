@@ -30,7 +30,17 @@ const DARK_AFTER_MS: i64 = 5 * 60_000;
 const LIVENESS_WARMUP_MS: i64 = 60_000;
 
 pub(crate) fn deadline(method: &str) -> Duration {
+    // Mirrors the engine's forward_deadline tiers: a vendor installer or a
+    // clone legitimately runs for minutes, and timing out here only hides a
+    // result the host still delivers.
     match method {
+        methods::INSTALL_HARNESS | methods::CLONE_REPO | methods::FETCH_ALL => {
+            Duration::from_secs(15 * 60)
+        }
+        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
+        methods::APPLY_ALL_HARNESS_UPDATES => Duration::from_secs(60 * 60),
+        methods::UNINSTALL_HARNESS => Duration::from_secs(6 * 60),
+        methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
@@ -56,6 +66,10 @@ pub(crate) struct Relay {
     /// registry reconnect).
     unsupported: Mutex<HashSet<String>>,
 }
+
+/// Deadline for a stream's acknowledgement (the host answers `{stream:true}`
+/// before its first item, or fails the method).
+const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct WatchKey {
@@ -137,6 +151,44 @@ impl Relay {
                     return Err(ClientError::HostUnavailable(format!(
                         "{method} on {device_id} timed out"
                     )));
+                }
+            }
+        }
+        unreachable!("the second attempt always returns")
+    }
+
+    /// A host stream (`SubscribeTerminal`, `WatchWorkspaceFiles`,
+    /// `WatchPreviews`…), acknowledged by the host before it returns: an
+    /// unknown method or a rejected request fails here. Dropping the
+    /// subscription cancels the host's stream. A stale cached link is
+    /// retried once on a fresh dial.
+    pub(crate) async fn subscribe(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<zeron_rpc::RpcSubscription> {
+        let timed_out =
+            || ClientError::HostUnavailable(format!("{method} on {device_id} timed out"));
+        for attempt in 0..2 {
+            let client = self
+                .links
+                .client(device_id)
+                .await
+                .map_err(|e| map_rpc(device_id, method, e))?;
+            let subscribe = client.subscribe_checked(method, params.clone());
+            match tokio::time::timeout(SUBSCRIBE_TIMEOUT, subscribe).await {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(err @ (RpcError::Closed | RpcError::Transport(_)))) => {
+                    self.links.invalidate(device_id);
+                    if attempt == 1 {
+                        return Err(map_rpc(device_id, method, err));
+                    }
+                }
+                Ok(Err(err)) => return Err(map_rpc(device_id, method, err)),
+                Err(_) => {
+                    self.links.invalidate(device_id);
+                    return Err(timed_out());
                 }
             }
         }
@@ -363,4 +415,43 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vendor installer runs for minutes; a 30s client deadline reported
+    /// failure while the host was still installing (Android Agents panel).
+    #[test]
+    fn long_host_operations_outlive_the_default_deadline() {
+        for method in [
+            methods::INSTALL_HARNESS,
+            methods::CLONE_REPO,
+            methods::FETCH_ALL,
+        ] {
+            assert_eq!(deadline(method), Duration::from_secs(15 * 60), "{method}");
+        }
+        assert_eq!(deadline(methods::LIST_REFS), CALL_TIMEOUT);
+    }
+
+    /// Harness maintenance mirrors the engine's forward deadlines: an
+    /// update-all pass or an npm uninstall must not read as a failure while
+    /// the host is still working.
+    #[test]
+    fn harness_maintenance_deadlines_match_the_engine_tiers() {
+        assert_eq!(
+            deadline(methods::APPLY_ALL_HARNESS_UPDATES),
+            Duration::from_secs(60 * 60)
+        );
+        assert_eq!(
+            deadline(methods::UNINSTALL_HARNESS),
+            Duration::from_secs(6 * 60)
+        );
+        assert_eq!(
+            deadline(methods::CHECK_HARNESS_UPDATES),
+            Duration::from_secs(4 * 60)
+        );
+        assert_eq!(deadline(methods::LIST_HARNESS_UPDATES), CALL_TIMEOUT);
+    }
 }

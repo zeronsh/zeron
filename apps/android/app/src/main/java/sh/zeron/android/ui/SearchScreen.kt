@@ -1,5 +1,8 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.AppFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -88,7 +91,10 @@ fun SearchScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit) 
         }
         itemsIndexed(results, key = { _, r -> r.id }) { i, row ->
             Box(Modifier.padding(horizontal = 16.dp)) {
-                SessionItem(row, i, results.size, model, onOpen) { model.archive(it.id) }
+                SessionItem(row, i, results.size, model, onOpen) {
+                    AppFeedback.current.both(Haptic.Confirm, Cue.Archive)
+                    model.archive(it.id)
+                }
             }
         }
     }
