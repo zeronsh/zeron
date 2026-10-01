@@ -4,6 +4,7 @@
 /ignore/
 *.pdb
 .DS_Store
+._*
 .env
 .env.local
 node_modules
@@ -11,5 +12,8 @@ node_modules
 build/
 edge/dist/
 .agents
+AGENTS.md
+.superpowers
+.codegraph
 .claude
 CLAUDE.md
