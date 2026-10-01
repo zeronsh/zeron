@@ -290,7 +290,6 @@ pub enum SavePolicy {
 #[serde(rename_all = "camelCase")]
 pub enum PullRequestDestination {
     #[default]
-    #[serde(alias = "browser")]
     Native,
     External,
 }
@@ -2008,24 +2007,16 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_destinations_migrate_and_round_trip() {
-        let legacy: UiSettings =
-            serde_json::from_str(r#"{"sidebarWidth":300,"openWebLinksInZeron":false}"#).unwrap();
+    fn pull_request_destination_defaults_to_the_native_view_and_round_trips() {
+        let existing: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
         assert_eq!(
-            legacy.pull_request_destination,
-            PullRequestDestination::Native
-        );
-        assert!(!legacy.open_web_links_in_zeron);
-        let browser: UiSettings =
-            serde_json::from_str(r#"{"pullRequestDestination":"browser"}"#).unwrap();
-        assert_eq!(
-            browser.pull_request_destination,
+            existing.pull_request_destination,
             PullRequestDestination::Native
         );
         for destination in PullRequestDestination::ALL {
             let settings = UiSettings {
                 pull_request_destination: destination,
-                ..legacy.clone()
+                ..existing.clone()
             };
             let loaded: UiSettings =
                 serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();

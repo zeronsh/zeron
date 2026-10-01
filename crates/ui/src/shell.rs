@@ -4182,8 +4182,7 @@ impl Shell {
     ) {
         let was_active = self.resolved_right_active(cx) == surface;
         let restore_focus = was_active && self.navigation_focus.in_right(window, cx);
-        self.navigation_focus
-            .remember(&self.shortcut_focus, window, cx);
+        self.navigation_focus.remember(&self.shortcut_focus, window, cx);
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
@@ -6486,38 +6485,27 @@ impl Shell {
         cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
     }
 
-    /// The session titlebar remains mounted beneath the settings modal.
+    /// The session titlebar, or on the Pull requests route the open pull
+    /// request's own bar.
     fn render_title_bar(&mut self, viewport_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
-        match self.route {
-            Route::Chat => self.render_session_title_bar(viewport_height, cx),
-            Route::PullRequests | Route::Settings(_) => {
-                let inner = div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .pt(px(Theme::TITLEBAR_TOP_PAD))
-                    .pl(px(if matches!(self.route, Route::PullRequests) {
-                        (self.sidebar_now() + Theme::SPACE_LG).max(self.title_bar_content_start())
-                    } else {
-                        self.title_bar_content_start()
-                    }))
-                    .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-                    .when(matches!(self.route, Route::PullRequests), |bar| {
-                        if let Some(detail) = &self.pull_request_detail {
-                            bar.child(detail.update(cx, |page, cx| page.titlebar(cx)))
-                        } else {
-                            bar
-                        }
-                    });
-                let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
-                let id = if matches!(self.route, Route::PullRequests) {
-                    "pull-requests-titlebar"
-                } else {
-                    "settings-header-titlebar"
-                };
-                self.titlebar_drag_region(id, bar, cx).into_any_element()
-            }
+        if !matches!(self.route, Route::PullRequests) {
+            return self.render_session_title_bar(viewport_height, cx);
         }
+        let inner = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .pl(px(
+                (self.sidebar_now() + Theme::SPACE_LG).max(self.title_bar_content_start())
+            ))
+            .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
+            .when_some(self.pull_request_detail.clone(), |bar, detail| {
+                bar.child(detail.update(cx, |page, cx| page.titlebar(cx)))
+            });
+        let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
+        self.titlebar_drag_region("pull-requests-titlebar", bar, cx)
+            .into_any_element()
     }
 
     /// Make a titlebar strip drag the window — zed's platform-titlebar
@@ -8188,19 +8176,13 @@ impl Shell {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
         let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn
-            .chats
-            .iter()
+        let chat = conn.chats.iter()
             .find(|c| Some(c.chat_id.as_str()) == selected);
         let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
                 "Changes could not be saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
+                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
             ),
             S::Disabled => return None,
             S::Connected => {
@@ -8208,13 +8190,9 @@ impl Shell {
                 (
                     caption.into(),
                     loaders::mini_mono_spinner(
-                        "chat-sync-spinner",
-                        2.0,
-                        theme.text_muted,
-                        self.sidebar_pane.entity_id(),
-                        cx,
-                    )
-                    .into_any_element(),
+                        "chat-sync-spinner", 2.0, theme.text_muted,
+                        self.sidebar_pane.entity_id(), cx,
+                    ).into_any_element(),
                 )
             }
             S::Offline => (
@@ -10469,22 +10447,6 @@ impl Shell {
                 .into_any_element();
         }
 
-        // Settings route: just the section outlet — the section label lives in
-        // the unified window titlebar now (render_title_bar). Settings never
-        // underlaps: pad below the overlaid titlebar.
-        if let Route::Settings(section) = self.route {
-            let outlet = self.settings_outlet(section, window, cx);
-            return div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .pt(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_col()
-                .child(div().flex_1().min_h_0().child(outlet))
-                .into_any_element();
-        }
-
         let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_spaces = !self.state.read(cx).spaces.is_empty();
@@ -11264,6 +11226,7 @@ impl Shell {
         let panel_bg = theme.panel_bg();
         let panel = div()
             .id("right-pane-focus")
+            .debug_selector(|| "right-pane".into())
             .track_focus(&self.navigation_focus.right)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.capture_navigation_focus(true, false, window, cx);
@@ -13194,15 +13157,22 @@ impl Render for Shell {
                 |this, action: &crate::pull_request_detail::StartPullRequestSession, _, cx| {
                     this.open_new_session(None, cx);
                     // Stage after the composer has swapped to the new
-                    // session's (empty) draft, which runs on the state
-                    // observation `open_new_session` just queued.
+                    // session's draft, which runs on the state observation
+                    // `open_new_session` just queued. A draft already waiting
+                    // there stays, above the prompt.
                     let composer = this.composer.clone();
                     let prompt = action.0.clone();
                     cx.defer(move |cx| {
                         composer.update(cx, |composer, cx| {
-                            composer
-                                .input
-                                .update(cx, |input, cx| input.set_text(prompt, cx));
+                            composer.input.update(cx, |input, cx| {
+                                let draft = input.text().trim_end();
+                                let text = if draft.is_empty() {
+                                    prompt
+                                } else {
+                                    format!("{draft}\n\n{prompt}")
+                                };
+                                input.set_text(text, cx)
+                            });
                             composer.focus_pending = true;
                             cx.notify();
                         });
@@ -13367,7 +13337,9 @@ impl Render for Shell {
                         .child(sidebar_tone)
                         .child(motion::fade_in("phase-app", page));
                 }
-                let on_chat = true;
+                // The Pull requests route shares this layout without the
+                // chat's side pane.
+                let on_chat = matches!(self.route, Route::Chat);
                 let right_target_width = if on_chat {
                     self.right_visible_width(cx)
                 } else {
@@ -13761,26 +13733,17 @@ mod tests {
 
         chat.sync_state = S::Waiting;
         chat.connected = false;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Sync queued — changes are saved")
-        );
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
         chat.sync_state = S::Offline;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Offline — changes are saved")
-        );
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
 
         // Real pending pushes remain visible even with a live room.
         chat.connected = true;
         chat.pending_pushes = 1;
         chat.sync_state = S::Waiting;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Sync queued — changes are saved")
-        );
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
     }
@@ -15438,8 +15401,7 @@ mod exit_regressions {
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.wallpaper_folder = Some(dir.path().join("wallpapers"));
                         settings.wallpaper_source = Some(dir.path().join("wallpapers/current.png"));
-                        settings.wallpaper_history =
-                            vec![dir.path().join("wallpapers/current.png")];
+                        settings.wallpaper_history = vec![dir.path().join("wallpapers/current.png")];
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.pull_request_destination =
@@ -15465,14 +15427,8 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
-                        assert_eq!(
-                            current.wallpaper_history,
-                            vec![dir.path().join("wallpapers/current.png")]
-                        );
-                        assert_eq!(
-                            current.wallpaper_folder,
-                            Some(dir.path().join("wallpapers"))
-                        );
+                        assert_eq!(current.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                        assert_eq!(current.wallpaper_folder, Some(dir.path().join("wallpapers")));
                         assert_eq!(
                             current.wallpaper_source,
                             Some(dir.path().join("wallpapers/current.png"))
@@ -15520,10 +15476,7 @@ mod exit_regressions {
                         Some("remote-pr-device")
                     );
                     assert_eq!(loaded.window_geometry, geometry);
-                    assert_eq!(
-                        loaded.wallpaper_history,
-                        vec![dir.path().join("wallpapers/current.png")]
-                    );
+                    assert_eq!(loaded.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
                     assert_eq!(loaded.wallpaper_folder, Some(dir.path().join("wallpapers")));
                     assert_eq!(
                         loaded.wallpaper_source,
@@ -15936,6 +15889,69 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn pull_request_route_hides_the_chat_side_pane(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.connection = zeron_proto::view::ConnectionStatus::Ready;
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.active_chat = "chat".into();
+            shell
+                .panels
+                .update("chat", |panel| panel.changes_open = true);
+            assert!(shell.right_pane_open(cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("right-pane").is_some(),
+            "the chat shows its side pane"
+        );
+        shell.update(cx, |shell, cx| {
+            shell.open_pull_requests(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("right-pane").is_none());
+        let board = cx.debug_bounds("pull-requests-column").unwrap();
+        assert!(
+            board.size.width > px(300.0),
+            "the board keeps the room the pane would take"
+        );
+    }
+
+    #[gpui::test]
     fn pull_request_handoff_stages_its_prompt_in_a_new_session(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -15969,7 +15985,6 @@ mod exit_regressions {
         });
         window
             .update(cx, |shell, _, cx| {
-                shell.open_chat("existing".into(), cx);
                 shell.composer.update(cx, |composer, cx| {
                     composer
                         .input
@@ -15996,7 +16011,11 @@ mod exit_regressions {
                     "a new session opens"
                 );
                 let composer = shell.composer.read(cx);
-                assert_eq!(composer.input.read(cx).text(), "Review pull request #7");
+                assert_eq!(
+                    composer.input.read(cx).text(),
+                    "half-written reply\n\nReview pull request #7",
+                    "a draft already on the canvas stays above the prompt"
+                );
                 assert!(composer.focus_pending);
             })
             .unwrap();
