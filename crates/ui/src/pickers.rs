@@ -2578,7 +2578,10 @@ impl Pickers {
             return;
         }
         if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
-            self.compact_keyboard = true;
+            // Escape only steps back a page or closes a submenu: it should
+            // not light focus rings on the controls it returns to. The next
+            // navigation key brings them back.
+            self.compact_keyboard = event.keystroke.key != "escape";
             if self.compact_model_list
                 && event.keystroke.modifiers.platform
                 && event.keystroke.modifiers.shift
@@ -7820,6 +7823,10 @@ mod tests {
             .read_with(cx, |picker, _| {
                 assert!(!picker.compact_providers);
                 assert_eq!(picker.compact_control, CompactControl::Provider);
+                assert!(
+                    !picker.compact_keyboard,
+                    "Escape back must not light the focus ring"
+                );
             })
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "down enter");
