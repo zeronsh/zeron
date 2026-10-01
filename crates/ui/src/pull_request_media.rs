@@ -95,7 +95,7 @@ pub(super) fn parse_description(source: &str) -> BlockTree {
     markdown::parse_full(&description_markdown(source))
 }
 
-fn image_url(source: &str, pr_url: &str) -> Option<String> {
+fn image_url(source: &str, pr_url: &str) -> Option<url::Url> {
     let mut url = if source.starts_with('/') {
         url::Url::parse(pr_url).ok()?.join(source).ok()?
     } else {
@@ -118,7 +118,17 @@ fn image_url(source: &str, pr_url: &str) -> Option<String> {
             url.set_host(Some("raw.githubusercontent.com")).ok()?;
         }
     }
-    Some(url.into())
+    Some(url)
+}
+
+/// GitHub serves the image itself. Anything else is another party's server,
+/// which would learn who opened the pull request and when.
+fn github_hosted(url: &url::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host == "github.com"
+            || host.ends_with(".githubusercontent.com")
+            || host.ends_with(".githubassets.com")
+    })
 }
 
 fn placeholder(label: String, theme: &Theme) -> AnyElement {
@@ -268,8 +278,11 @@ pub(super) fn media(
             } else {
                 image.alt.clone()
             };
+            let inline = github_hosted(&source);
+            let host = source.host_str().unwrap_or_default().to_owned();
+            let source = String::from(source);
             let tile_selector = format!("pr-image-tile-{id}");
-            div()
+            let tile = div()
                 .id(id.clone())
                 .debug_selector(move || tile_selector.clone())
                 .w_full()
@@ -280,7 +293,6 @@ pub(super) fn media(
                 .justify_center()
                 .overflow_hidden()
                 .role(gpui::Role::Button)
-                .aria_label(format!("Open image: {alt}"))
                 .tab_index(0)
                 .focus_visible(|style| style.bg(theme.glass_hover()))
                 .cursor_pointer()
@@ -291,14 +303,25 @@ pub(super) fn media(
                         cx.stop_propagation();
                         open(&source, window, cx);
                     }
-                })
-                .child(PreviewImage {
-                    source: source.into(),
-                    id: format!("{id}-image").into(),
-                    alt,
-                    theme: theme.clone(),
-                })
-                .into_any_element()
+                });
+            if inline {
+                tile.aria_label(format!("Open image: {alt}"))
+                    .child(PreviewImage {
+                        source: source.into(),
+                        id: format!("{id}-image").into(),
+                        alt,
+                        theme: theme.clone(),
+                    })
+                    .into_any_element()
+            } else {
+                // Loaded only when asked for.
+                tile.aria_label(format!("Load image from {host}: {alt}"))
+                    .child(placeholder(
+                        format!("{alt} · hosted on {host} · Click to load"),
+                        theme,
+                    ))
+                    .into_any_element()
+            }
         }),
     }
 }
@@ -489,11 +512,15 @@ mod tests {
     fn pull_request_image_urls_only_load_web_media_and_normalize_github_blobs() {
         let pr = "https://github.com/owner/repo/pull/1";
         assert_eq!(
-            image_url("/user-attachments/assets/abc", pr).unwrap(),
+            image_url("/user-attachments/assets/abc", pr)
+                .unwrap()
+                .as_str(),
             "https://github.com/user-attachments/assets/abc"
         );
         assert_eq!(
-            image_url("https://github.com/o/r/blob/main/image.png", pr).unwrap(),
+            image_url("https://github.com/o/r/blob/main/image.png", pr)
+                .unwrap()
+                .as_str(),
             "https://raw.githubusercontent.com/o/r/main/image.png"
         );
         for source in [
@@ -590,7 +617,7 @@ mod tests {
             cx.set_http_client(client);
         });
         let (view, cx) = cx.add_window_view(|_, _| MediaFixture {
-            description: "<img src='https://example.com/image.png' alt='Screenshot'/>".into(),
+            description: "<img src='https://private-user-images.githubusercontent.com/image.png' alt='Screenshot'/>".into(),
         });
         cx.simulate_resize(gpui::size(px(400.0), px(600.0)));
         cx.run_until_parked();
@@ -612,7 +639,7 @@ mod tests {
         );
         assert!(cx.debug_bounds("pr-description-image-error").is_none());
         view.update(cx, |view, cx| {
-            view.description = "| Before | After |\n| --- | --- |\n| ![a](https://example.com/image.png) | ![b](https://example.com/image.png) |".into();
+            view.description = "| Before | After |\n| --- | --- |\n| ![a](https://private-user-images.githubusercontent.com/image.png) | ![b](https://private-user-images.githubusercontent.com/image.png) |".into();
             cx.notify();
         });
         for width in [800.0, 320.0] {
@@ -636,7 +663,9 @@ mod tests {
             }
         }
         view.update(cx, |view, cx| {
-            view.description = "![portrait](https://example.com/portrait.png)".into();
+            view.description =
+                "![portrait](https://private-user-images.githubusercontent.com/portrait.png)"
+                    .into();
             cx.notify();
         });
         for width in [320.0, 1200.0] {
@@ -662,7 +691,8 @@ mod tests {
             assert!(image.left() >= px(24.0) && image.right() <= px(width - 24.0));
         }
         view.update(cx, |view, cx| {
-            view.description = "![missing](https://example.com/missing.png)".into();
+            view.description =
+                "![missing](https://private-user-images.githubusercontent.com/missing.png)".into();
             cx.notify();
         });
         cx.run_until_parked();
@@ -673,5 +703,19 @@ mod tests {
         let error = cx.debug_bounds("pr-description-image-error");
         let image = cx.debug_bounds("pr-description-image");
         assert!(error.is_some(), "image bounds: {image:?}");
+        // Another party's server is contacted only on request.
+        view.update(cx, |view, cx| {
+            view.description = "![chart](https://example.com/chart.png)".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(requests.load(Ordering::SeqCst), 3, "nothing is fetched");
+        assert!(cx.debug_bounds("pr-description-image").is_none());
+        assert!(
+            cx.debug_bounds("pr-image-tile-media-test-gallery-0-0-0")
+                .is_some()
+        );
     }
 }

@@ -4,16 +4,16 @@
 //! redirects included: never plain HTTP, this machine, or the local network.
 use futures::{FutureExt, StreamExt};
 use gpui::http_client::{AsyncBody, HttpClient, Request, Response, http::HeaderValue};
-use std::{sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 const MAX_ASSET_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 
-/// An HTTPS URL on a public host: no credentials, no loopback, private,
-/// link-local, or shared (CGNAT/Tailscale) addresses, and no local names.
-/// Names that resolve to private addresses are not detected.
-pub(crate) fn public_https(url: &url::Url) -> bool {
-    use std::net::{IpAddr, Ipv4Addr};
+fn public_ip(ip: IpAddr) -> bool {
     fn public_v4(ip: Ipv4Addr) -> bool {
         let [a, b, ..] = ip.octets();
         !(ip.is_loopback()
@@ -25,21 +25,24 @@ pub(crate) fn public_https(url: &url::Url) -> bool {
             || a == 0
             || (a == 100 && (64..128).contains(&b)))
     }
-    fn public_ip(ip: IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(ip) => public_v4(ip),
-            IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-                Some(ip) => public_v4(ip),
-                None => {
-                    let first = ip.segments()[0];
-                    !(ip.is_loopback()
-                        || ip.is_unspecified()
-                        || (first & 0xfe00) == 0xfc00
-                        || (first & 0xffc0) == 0xfe80)
-                }
-            },
-        }
+    match ip {
+        IpAddr::V4(ip) => public_v4(ip),
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(ip) => public_v4(ip),
+            None => {
+                let first = ip.segments()[0];
+                !(ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (first & 0xfe00) == 0xfc00
+                    || (first & 0xffc0) == 0xfe80)
+            }
+        },
     }
+}
+
+/// An HTTPS URL on a public host: no credentials, no loopback, private,
+/// link-local, or shared (CGNAT/Tailscale) addresses, and no local names.
+pub(crate) fn public_https(url: &url::Url) -> bool {
     url.scheme() == "https"
         && url.username().is_empty()
         && url.password().is_none()
@@ -57,6 +60,42 @@ pub(crate) fn public_https(url: &url::Url) -> bool {
         }
 }
 
+/// Resolves names to their public addresses only, so a public-looking name
+/// cannot point the transport at this machine or the local network.
+struct PublicDns;
+
+impl reqwest::dns::Resolve for PublicDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addresses: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0))
+                .await?
+                .filter(|address| public_ip(address.ip()))
+                .collect();
+            if addresses.is_empty() {
+                return Err("no public address".into());
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Hop {
+    Follow,
+    Stop,
+    TooMany,
+}
+
+fn next_hop(public_only: bool, hops: usize, url: &url::Url) -> Hop {
+    if hops >= MAX_REDIRECTS {
+        Hop::TooMany
+    } else if public_only && !public_https(url) {
+        Hop::Stop
+    } else {
+        Hop::Follow
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AssetHttpClient {
     client: reqwest::Client,
@@ -72,22 +111,22 @@ impl AssetHttpClient {
     /// `public_only: false` lets tests reach a loopback server.
     fn with_policy(runtime: tokio::runtime::Handle, public_only: bool) -> Arc<Self> {
         let redirects = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                attempt.error("too many redirects")
-            } else if public_only && !public_https(attempt.url()) {
-                attempt.stop()
-            } else {
-                attempt.follow()
+            match next_hop(public_only, attempt.previous().len(), attempt.url()) {
+                Hop::Follow => attempt.follow(),
+                Hop::Stop => attempt.stop(),
+                Hop::TooMany => attempt.error("too many redirects"),
             }
         });
+        let mut client = reqwest::Client::builder()
+            .user_agent("Zeron/desktop")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .redirect(redirects);
+        if public_only {
+            client = client.dns_resolver(Arc::new(PublicDns));
+        }
         Arc::new(Self {
-            client: reqwest::Client::builder()
-                .user_agent("Zeron/desktop")
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .redirect(redirects)
-                .build()
-                .expect("image HTTP client"),
+            client: client.build().expect("image HTTP client"),
             runtime,
             public_only,
         })
@@ -224,6 +263,24 @@ mod tests {
                 "{url}"
             );
         }
+        let url = |text: &str| url::Url::parse(text).unwrap();
+        // Every redirect hop is held to the same rule.
+        assert_eq!(
+            next_hop(true, 0, &url("https://avatars.githubusercontent.com/u/1")),
+            Hop::Follow
+        );
+        assert_eq!(
+            next_hop(true, 0, &url("http://169.254.169.254/latest")),
+            Hop::Stop
+        );
+        assert_eq!(
+            next_hop(true, MAX_REDIRECTS, &url("https://github.com/a.png")),
+            Hop::TooMany
+        );
+        // A name that resolves to this machine has no usable address.
+        use reqwest::dns::Resolve;
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        assert!(PublicDns.resolve(name).await.is_err());
         // Enforced by the transport too, before any connection is made.
         let client = AssetHttpClient::new(tokio::runtime::Handle::current());
         assert!(

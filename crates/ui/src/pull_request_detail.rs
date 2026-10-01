@@ -67,7 +67,12 @@ pub fn open(url: &str, window: &mut Window, cx: &mut App) {
 }
 
 pub fn open_on_device(url: &str, device: Option<String>, window: &mut Window, cx: &mut App) {
-    if settings::current(cx).pull_request_destination == PullRequestDestination::External {
+    // The native view reads github.com through `gh`; pull requests on other
+    // hosts open in the browser.
+    let on_github = url::Url::parse(url).is_ok_and(|url| url.host_str() == Some("github.com"));
+    if !on_github
+        || settings::current(cx).pull_request_destination == PullRequestDestination::External
+    {
         cx.open_url(url);
     } else {
         window.dispatch_action(Box::new(OpenPullRequest(url.to_owned(), device)), cx);
@@ -255,6 +260,8 @@ struct DetailSnapshot {
 #[derive(Default)]
 pub(crate) struct PullRequestCache {
     entries: Vec<((Option<String>, String), DetailSnapshot)>,
+    /// Unsent comments, with the reason the last send failed.
+    drafts: std::collections::HashMap<(Option<String>, String), (String, Option<String>)>,
 }
 
 impl PullRequestCache {
@@ -275,6 +282,20 @@ impl PullRequestCache {
         self.entries.push(((target, url), snapshot));
         if self.entries.len() > 12 {
             self.entries.remove(0);
+        }
+    }
+
+    fn evict(&mut self, target: &Option<String>, url: &str) {
+        self.entries
+            .retain(|((device, entry), _)| device != target || entry != url);
+    }
+
+    fn set_draft(&mut self, target: &Option<String>, url: &str, text: &str, error: Option<String>) {
+        let key = (target.clone(), url.to_owned());
+        if text.is_empty() {
+            self.drafts.remove(&key);
+        } else {
+            self.drafts.insert(key, (text.to_owned(), error));
         }
     }
 }
@@ -329,7 +350,8 @@ pub struct PullRequestDetailPage {
     scroll: widgets::PageScroll,
     comment_input: Entity<crate::composer::ComposerInput>,
     comment_subscription: Option<Subscription>,
-    comment_task: Option<Task<()>>,
+    /// A comment is being posted.
+    sending: bool,
     comment_error: Option<String>,
     mention_token: Option<crate::composer::MentionToken>,
     mention_choices: Vec<String>,
@@ -412,7 +434,7 @@ impl PullRequestDetailPage {
                 .with_viewport_height(120.0)
             }),
             comment_subscription: None,
-            comment_task: None,
+            sending: false,
             comment_error: None,
             mention_token: None,
             mention_choices: Vec::new(),
@@ -466,6 +488,17 @@ impl PullRequestDetailPage {
             if let Some(diff) = snapshot.diff {
                 page.install_diff(diff, cx);
             }
+        }
+        let draft = page
+            .cache
+            .borrow()
+            .drafts
+            .get(&(page.target.clone(), page.url.clone()))
+            .cloned();
+        if let Some((text, error)) = draft {
+            page.comment_input
+                .update(cx, |input, cx| input.set_text(text, cx));
+            page.comment_error = error;
         }
         if page.detail.is_none() {
             page.load(false, cx);
@@ -606,7 +639,7 @@ impl PullRequestDetailPage {
     }
 
     fn load(&mut self, refresh: bool, cx: &mut Context<Self>) {
-        if self.comment_task.is_some() {
+        if self.sending {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {

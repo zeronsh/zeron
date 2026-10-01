@@ -9,6 +9,9 @@ impl PullRequestDetailPage {
                 self.send_comment(cx)
             }
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
+                if matches!(event, ComposerInputEvent::Edited) {
+                    self.save_draft(cx);
+                }
                 let input = self.comment_input.read(cx);
                 self.mention_token =
                     crate::composer::mention_token(input.text(), input.cursor_offset());
@@ -74,7 +77,7 @@ impl PullRequestDetailPage {
 
     fn send_comment(&mut self, cx: &mut Context<Self>) {
         let body = self.comment_input.read(cx).text().to_owned();
-        if self.comment_task.is_some() || self.detail.is_none() || body.trim().is_empty() {
+        if self.sending || self.detail.is_none() || body.trim().is_empty() {
             return;
         }
         if body.len() > 60_000 {
@@ -88,17 +91,44 @@ impl PullRequestDetailPage {
         self.task = None;
         self.loading = false;
         self.comment_error = None;
+        self.sending = true;
         let mut params = self.params(false);
         params["body"] = body.clone().into();
-        self.comment_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::POST_CHANGE_REQUEST_COMMENT, params).await
-                .map_err(|error| format!("Couldn’t confirm your comment was posted. {} Your draft is kept; check GitHub before sending again.", super::failure_reason(&error)))
-                .and_then(|value| serde_json::from_value::<zeron_proto::ChangeRequestComment>(value).map_err(|_| "Your comment was posted, but its reply couldn’t be read. Refresh to see it.".to_owned()));
-            let result = cx.background_executor().spawn(async move {
-                result.map(|comment| { let parsed = super::super::pull_request_media::parse_description(&comment.body); (comment, parsed) })
-            }).await;
-            let _ = this.update(cx, |page, cx| {
-                page.comment_task = None;
+        let (cache, target, url) = (self.cache.clone(), self.target.clone(), self.url.clone());
+        // Detached: leaving the pull request neither stops the post nor loses
+        // its outcome.
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::POST_CHANGE_REQUEST_COMMENT, params)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Couldn’t confirm your comment was posted. {} Your draft is kept; check GitHub before sending again.",
+                        super::failure_reason(&error)
+                    )
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<zeron_proto::ChangeRequestComment>(value).map_err(
+                        |_| {
+                            "Your comment was posted, but its reply couldn’t be read. Refresh to see it."
+                                .to_owned()
+                        },
+                    )
+                });
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    result.map(|comment| {
+                        let parsed =
+                            super::super::pull_request_media::parse_description(&comment.body);
+                        (comment, parsed)
+                    })
+                })
+                .await;
+            let failure = result.as_ref().err().cloned();
+            let shown = this.update(cx, |page, cx| {
+                page.sending = false;
                 match result {
                     Ok((comment, parsed)) => {
                         if let Some(detail) = &mut page.detail {
@@ -106,24 +136,64 @@ impl PullRequestDetailPage {
                             detail.comments.push(comment);
                         }
                         if page.comment_input.read(cx).text() == body {
-                            page.comment_input.update(cx, |input, cx| input.set_text("", cx));
+                            page.comment_input
+                                .update(cx, |input, cx| input.set_text("", cx));
                         }
+                        page.save_draft(cx);
                         if let (Some(detail), Some(parsed)) = (&page.detail, &page.body) {
-                            let snapshot = DetailSnapshot { detail: detail.clone(), body: parsed.clone(), activity: page.activity_bodies.clone(), fetched: page.fetched.unwrap_or_else(Instant::now), diff: page.diff_snapshot() };
-                            page.cache.borrow_mut().put(page.target.clone(), page.url.clone(), snapshot);
+                            let snapshot = DetailSnapshot {
+                                detail: detail.clone(),
+                                body: parsed.clone(),
+                                activity: page.activity_bodies.clone(),
+                                fetched: page.fetched.unwrap_or_else(Instant::now),
+                                diff: page.diff_snapshot(),
+                            };
+                            page.cache.borrow_mut().put(
+                                page.target.clone(),
+                                page.url.clone(),
+                                snapshot,
+                            );
                         }
-                        page.scroll.scroll.set_offset(gpui::point(px(0.0), px(-1_000_000.0)));
+                        page.scroll
+                            .scroll
+                            .set_offset(gpui::point(px(0.0), px(-1_000_000.0)));
                     }
-                    Err(error) => page.comment_error = Some(error),
+                    Err(error) => {
+                        page.comment_error = Some(error);
+                        page.save_draft(cx);
+                    }
                 }
                 cx.notify();
             });
-        }));
+            if shown.is_err() {
+                // The view is gone. A posted comment makes the cached thread
+                // stale; a failed one waits as a draft with the reason.
+                let mut cache = cache.borrow_mut();
+                match failure {
+                    None => {
+                        cache.set_draft(&target, &url, "", None);
+                        cache.evict(&target, &url);
+                    }
+                    Some(error) => cache.set_draft(&target, &url, &body, Some(error)),
+                }
+            }
+        })
+        .detach();
         cx.notify();
     }
 
+    /// Keep the unsent comment for the next visit to this pull request.
+    fn save_draft(&self, cx: &App) {
+        self.cache.borrow_mut().set_draft(
+            &self.target,
+            &self.url,
+            self.comment_input.read(cx).text(),
+            self.comment_error.clone(),
+        );
+    }
+
     pub(super) fn comment_composer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let sending = self.comment_task.is_some();
+        let sending = self.sending;
         let can_send = !sending
             && self.detail.is_some()
             && !self.comment_input.read(cx).text().trim().is_empty();
@@ -498,7 +568,7 @@ mod tests {
         for _ in 0..100 {
             cx.run_until_parked();
             runtime.block_on(async { tokio::task::yield_now().await });
-            if page.read_with(cx, |page, _| page.comment_task.is_none()) {
+            if page.read_with(cx, |page, _| !page.sending) {
                 break;
             }
         }
@@ -517,7 +587,7 @@ mod tests {
         for _ in 0..100 {
             cx.run_until_parked();
             runtime.block_on(async { tokio::task::yield_now().await });
-            if page.read_with(cx, |page, _| page.comment_task.is_none()) {
+            if page.read_with(cx, |page, _| !page.sending) {
                 break;
             }
         }
@@ -527,5 +597,85 @@ mod tests {
             assert!(page.comment_error.is_some());
             assert_eq!(page.detail.as_ref().unwrap().comments.len(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn pull_request_comment_outlives_the_view_and_a_failed_one_returns_as_a_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let url = "https://github.com/a/b/pull/1";
+        let target = Some("device".to_owned());
+        let cache = Rc::new(RefCell::new(PullRequestCache::default()));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::memory_client(Arc::new(CommentRpc(calls.clone()))),
+            ));
+            state
+        });
+        let open = |cx: &mut gpui::TestAppContext| {
+            cache.borrow_mut().put(
+                target.clone(),
+                url.into(),
+                DetailSnapshot {
+                    detail: ChangeRequestDetail::default(),
+                    body: crate::markdown::parse_full(""),
+                    activity: Vec::new(),
+                    fetched: Instant::now(),
+                    diff: None,
+                },
+            );
+            cx.add_window(|window, cx| {
+                PullRequestDetailPage::new(
+                    state.clone(),
+                    url.into(),
+                    target.clone(),
+                    cache.clone(),
+                    None,
+                    window,
+                    cx,
+                )
+            })
+        };
+        // Send, then leave before GitHub answers.
+        let send_and_leave = |cx: &mut gpui::TestAppContext, text: &str, expected_calls: usize| {
+            let window = open(cx);
+            window
+                .update(cx, |page, window, cx| {
+                    page.comment_input
+                        .update(cx, |input, cx| input.set_text(text, cx));
+                    page.send_comment(cx);
+                    window.remove_window();
+                })
+                .unwrap();
+            for _ in 0..100 {
+                cx.run_until_parked();
+                runtime.block_on(async { tokio::task::yield_now().await });
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+        };
+
+        send_and_leave(cx, "Posted after leaving", 1);
+        assert!(
+            cache.borrow_mut().get(&target, url).is_none(),
+            "the cached thread predates the comment"
+        );
+        assert!(cache.borrow().drafts.is_empty());
+
+        send_and_leave(cx, "Keep me", 2);
+        let window = open(cx);
+        window
+            .update(cx, |page, _, cx| {
+                assert_eq!(page.comment_input.read(cx).text(), "Keep me");
+                assert!(page.comment_error.is_some());
+            })
+            .unwrap();
     }
 }
