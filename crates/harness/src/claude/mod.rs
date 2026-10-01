@@ -11,9 +11,11 @@
 //!   live against 2.1.228: `can_use_tool` control requests arrive and
 //!   allow/deny responses are honored). The alternative channel — an MCP
 //!   permission tool — needs a server process and was rejected. Tool calls
-//!   auto-allow (zeron sessions run unattended, parity with the ACP
-//!   harness's preferred-allow behavior); `AskUserQuestion` round-trips
-//!   through [`RunControls::request_input`].
+//!   are answered by Zeron's policy (see [`permissions`]): Bypass, the
+//!   default, allows them all as before; the other modes pick the CLI's own
+//!   permission mode and answer through the shared gate, asking the user via
+//!   [`RunControls::request_input`] when it can't decide. `AskUserQuestion`
+//!   round-trips through the same bridge.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
 //!   wake turn when a background task finishes — a fresh `init` (same
@@ -34,6 +36,7 @@
 pub mod catalog;
 mod discovery;
 mod normalize;
+mod permissions;
 mod wire;
 
 use std::path::PathBuf;
@@ -48,10 +51,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, UserInputAnswer, UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, Model, PermissionMode, PolicyCaps, ReasoningLevel,
+    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
+use crate::policy::{Decision, Gate};
 use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use catalog::{apply_ultrathink, to_effort};
@@ -206,15 +210,7 @@ impl ClaudeHarness {
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
         }
-        if request.auto_approve {
-            cmd.args([
-                "--permission-mode",
-                "bypassPermissions",
-                "--dangerously-skip-permissions",
-            ]);
-        } else {
-            cmd.args(["--permission-mode", "default"]);
-        }
+        cmd.args(permissions::permission_args(request));
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
         }
@@ -398,6 +394,16 @@ impl Harness for ClaudeHarness {
             ReasoningLevel::Max,
         ]
     }
+    /// Every mode: the CLI asks before acting (`--permission-prompt-tool
+    /// stdio`) and has a native plan mode. A mode change restarts the run
+    /// (see [`permissions`]). No sandbox until Zeron's OS sandbox lands.
+    fn policy_caps(&self) -> PolicyCaps {
+        PolicyCaps {
+            native_plan: true,
+            live_mode_switch: false,
+            ..PolicyCaps::all_modes()
+        }
+    }
     fn installed(&self) -> bool {
         // The launch resolver, not bare discovery: a valid CLAUDE_CODE_EXECUTABLE
         // (or a test `executable`) must report installed, and an invalid one
@@ -513,6 +519,7 @@ impl Harness for ClaudeHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
+        request.policy = Default::default();
         self.run_with_mode(request, controls, true).await
     }
 }
@@ -598,9 +605,14 @@ impl ClaudeHarness {
         let _ = stdin_tx.send(StdinMsg::Line(first));
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let gate = Gate::new(
+            request.policy.clone(),
+            crate::policy::workspace_root(&request.cwd),
+        );
         tokio::spawn(run_session(Session {
             normalizer,
             title_only,
+            gate,
             child,
             stdout_lines: BufReader::new(stdout).lines(),
             stdin_tx,
@@ -726,6 +738,8 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 struct Session {
     normalizer: Normalizer,
     title_only: bool,
+    /// Answers `can_use_tool` under the run's permission mode.
+    gate: Gate,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
@@ -744,6 +758,7 @@ async fn run_session(session: Session) {
     let Session {
         normalizer: mut norm,
         title_only,
+        gate,
         mut child,
         mut stdout_lines,
         stdin_tx,
@@ -761,6 +776,7 @@ async fn run_session(session: Session) {
         interrupt,
     } = controls;
     let request_input = Arc::new(request_input);
+    let gate = Arc::new(tokio::sync::Mutex::new(gate));
 
     let mut pending_steers = std::collections::VecDeque::new();
     // Top-level tool calls in flight: a steer must not abort them (see
@@ -807,7 +823,7 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(req, &gate, &request_input, &stdin_tx);
                         }
                         continue;
                     }
@@ -975,15 +991,22 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
-/// Serve one `can_use_tool` control request. Every tool is auto-approved
-/// (unattended parity — the CLI still blocks until SOME response arrives, so
-/// every request must be answered); `AskUserQuestion` is intercepted —
-/// surface the questions through the engine's input bridge (which owns the
-/// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
-/// (in a subtask so the frame loop keeps flowing), and hand them back keyed
-/// by question text, as the tool expects.
+/// Serve one `can_use_tool` control request (the CLI blocks until SOME
+/// response arrives, so every request is answered). Tool calls go through the
+/// run's [`Gate`]: allowed and refused ones are answered at once (in Bypass,
+/// with no standing rules, that is every one — unattended parity); a call
+/// the policy can't settle becomes an approval question through the input
+/// bridge, in a subtask so the frame loop keeps flowing. Questions are asked
+/// one at a time, so an "Always allow" answer settles identical calls queued
+/// behind it.
+///
+/// `AskUserQuestion` is intercepted — surface the questions through the
+/// engine's input bridge (which owns the `InputRequested`/`InputResolved`
+/// lifecycle), wait for the user's answers, and hand them back keyed by
+/// question text, as the tool expects.
 fn handle_control_request(
     req: ControlRequestFrame,
+    gate: &Arc<tokio::sync::Mutex<Gate>>,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) {
@@ -995,8 +1018,48 @@ fn handle_control_request(
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
-        let line = control_response_line(&req.request_id, allow_response(req.request.input));
-        let _ = stdin_tx.send(StdinMsg::Line(line));
+        let tool = req.request.tool_name;
+        let action = permissions::action_for(&tool, &req.request.input);
+        let exit_plan = tool == permissions::EXIT_PLAN_MODE;
+        let respond = {
+            let stdin_tx = stdin_tx.clone();
+            let request_id = req.request_id;
+            move |response: Value| {
+                let line = control_response_line(&request_id, response);
+                let _ = stdin_tx.send(StdinMsg::Line(line));
+            }
+        };
+        let input = req.request.input;
+        // Settle at once when the gate is free and the policy decides.
+        if let Ok(gate) = gate.try_lock() {
+            match permissions::verdict(&gate, &action, exit_plan) {
+                Decision::Allow => return respond(allow_response(input)),
+                Decision::Deny(reason) => return respond(permissions::deny_response(&reason)),
+                Decision::Ask => {}
+            }
+        }
+        let gate = Arc::clone(gate);
+        let request_input = Arc::clone(request_input);
+        tokio::spawn(async move {
+            let mut gate = gate.lock().await;
+            let response = match permissions::verdict(&gate, &action, exit_plan) {
+                Decision::Allow => allow_response(input),
+                Decision::Deny(reason) => permissions::deny_response(&reason),
+                Decision::Ask => {
+                    if !gate.ask(&action, &**request_input).await {
+                        permissions::deny_response(permissions::USER_DENIED)
+                    } else if exit_plan && gate.policy.mode == PermissionMode::Plan {
+                        // Out of plan mode: the CLI goes to `default`, and
+                        // the gate asks before edits and commands from now.
+                        gate.policy.mode = PermissionMode::Ask;
+                        permissions::exit_plan_allow_response(input)
+                    } else {
+                        allow_response(input)
+                    }
+                }
+            };
+            respond(response);
+        });
         return;
     }
     let request_input = Arc::clone(request_input);

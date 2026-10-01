@@ -234,7 +234,21 @@ impl CoreClient {
     }
 
     pub fn set_session_config(&self, chat_id: String, config: ChatConfig) -> CoreResult<()> {
-        let config: zc::ChatConfig = config.try_into()?;
+        let keep_mode = config.permission_mode.is_none();
+        let mut config: zc::ChatConfig = config.try_into()?;
+        // The chat's sandbox, network and rules ride along untouched; its
+        // mode too unless this write names one.
+        if let Some(existing) = self.client.session_config(&chat_id) {
+            let mode = if keep_mode {
+                existing.policy.mode
+            } else {
+                config.policy.mode
+            };
+            config.policy = zeron_proto::AgentPolicy {
+                mode,
+                ..existing.policy.clone()
+            };
+        }
         Ok(self.client.set_session_config(&chat_id, &config)?)
     }
 

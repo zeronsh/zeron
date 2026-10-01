@@ -256,6 +256,12 @@ impl Harness for PiHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
     }
+    /// Bypass only: Pi's RPC has no permission protocol — its tools run
+    /// without asking anyone — so no policy can answer for it. The stricter
+    /// modes wait for an OS sandbox that confines the process.
+    fn policy_caps(&self) -> zeron_proto::PolicyCaps {
+        zeron_proto::PolicyCaps::bypass_only()
+    }
     fn installed(&self) -> bool {
         self.resolve_executable().is_ok()
     }
@@ -998,6 +1004,15 @@ async fn load_images(paths: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::load_images;
+
+    #[test]
+    fn pi_offers_only_bypass() {
+        use crate::Harness;
+        assert_eq!(
+            super::PiHarness::new().policy_caps(),
+            zeron_proto::PolicyCaps::bypass_only()
+        );
+    }
 
     #[tokio::test]
     async fn unsupported_or_missing_attachments_do_not_fail_the_turn() {

@@ -34,6 +34,7 @@ pub(super) async fn wait_for_model(
     response: &mut serde_json::Value,
     model: &str,
     members: &[String],
+    gate: Option<&crate::policy::SharedGate>,
 ) -> Result<String, HarnessError> {
     let wait = async {
         loop {
@@ -56,7 +57,7 @@ pub(super) async fn wait_for_model(
                     }
                 }
                 Some(Incoming::Request { id, method, params }) => {
-                    super::handle_server_request(client, id, &method, &params);
+                    super::handle_server_request(client, id, &method, &params, gate);
                 }
                 Some(_) => {}
                 None => {

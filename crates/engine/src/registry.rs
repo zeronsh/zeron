@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 
 use zeron_harness::{Harness, HarnessError, mock::MockHarness};
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use zeron_proto::{
+    AgentEvent, DoneStatus, HarnessId, PermissionMode, PolicyCaps, ReasoningLevel, SteeringMode,
+};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +40,11 @@ pub struct HarnessDescriptor {
     /// "unknown": consumers fall back to detection (see [`descriptor_enabled`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// The permission modes and sandboxes the listing device's harness can
+    /// honour. A catalog from an engine predating policies reads as
+    /// bypass-only — the only thing such an engine ever ran.
+    #[serde(default)]
+    pub policy: PolicyCaps,
 }
 
 impl HarnessDescriptor {
@@ -81,6 +88,7 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
         installed: harness.installed(),
         can_install: false,
         enabled: None,
+        policy: harness.policy_caps(),
     }
 }
 
@@ -93,6 +101,7 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    policy: PolicySettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -107,6 +116,14 @@ pub struct TitleSettings {
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+/// Per-device permission defaults (Settings → General).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PolicySettings {
+    /// The mode new chats on this device start in.
+    pub default_mode: PermissionMode,
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -448,6 +465,43 @@ impl HarnessRegistry {
         Ok(())
     }
 
+    pub fn policy_settings(&self) -> PolicySettings {
+        self.prefs().policy.clone()
+    }
+
+    pub fn set_policy_settings(&self, settings: PolicySettings) {
+        self.prefs().policy = settings;
+        self.persist_prefs();
+    }
+
+    /// What `id` can honour, from the catalog entry (never forces a lazy
+    /// resolve). Unknown harnesses can only bypass.
+    pub fn policy_caps(&self, id: HarnessId) -> PolicyCaps {
+        match self.slots().get(&id) {
+            Some(Slot::Ready(harness)) => harness.policy_caps(),
+            Some(Slot::Lazy { descriptor, .. }) => descriptor.policy.clone(),
+            None => PolicyCaps::bypass_only(),
+        }
+    }
+
+    /// `Err(reason)` when `id` can't honour `mode`: hosts refuse such a run
+    /// instead of running it looser than the user asked.
+    pub fn check_policy(&self, id: HarnessId, mode: PermissionMode) -> Result<(), String> {
+        let (name, caps) = match self.slots().get(&id) {
+            Some(Slot::Ready(harness)) => {
+                (harness.display_name().to_string(), harness.policy_caps())
+            }
+            Some(Slot::Lazy { descriptor, .. }) => {
+                (descriptor.name.clone(), descriptor.policy.clone())
+            }
+            None => (format!("{id:?}"), PolicyCaps::bypass_only()),
+        };
+        match caps.refusal(&name, mode) {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
+    }
+
     pub fn register(&self, harness: Arc<dyn Harness>) {
         let id = harness.id();
         if self.slots().insert(id, Slot::Ready(harness)).is_none() {
@@ -591,6 +645,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::ClaudeHarness::new().policy_caps(),
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
@@ -619,6 +675,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::CodexHarness::new().policy_caps(),
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
@@ -636,6 +694,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::CursorHarness::new().policy_caps(),
         },
         Box::new(|| zeron_harness::CursorHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
@@ -654,6 +714,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::AcpHarness::devin().policy_caps(),
         },
         Box::new(|| zeron_harness::AcpHarness::devin().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
@@ -676,6 +738,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::AcpHarness::grok().policy_caps(),
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
@@ -694,6 +758,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::AcpHarness::hermes().policy_caps(),
         },
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
@@ -709,6 +775,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::PiHarness::new().policy_caps(),
         },
         Box::new(|| zeron_harness::PiHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
@@ -734,6 +802,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::OpencodeHarness::new().policy_caps(),
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
@@ -752,6 +822,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            // Mirrors the harness exactly (descriptor-stability rule).
+            policy: zeron_harness::AcpHarness::antigravity().policy_caps(),
         },
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
@@ -774,6 +846,7 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            policy: PolicyCaps::bypass_only(),
         };
         assert!(descriptor.steers_mid_turn());
 
@@ -801,6 +874,7 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                policy: PolicyCaps::bypass_only(),
             },
             Box::new(|| false),
             Box::new(move || {
@@ -921,6 +995,8 @@ mod tests {
             .unwrap()
         };
         let claude = parse("claude-code");
+        // An engine predating policies only ever bypassed.
+        assert_eq!(claude.policy, PolicyCaps::bypass_only());
         assert!(claude.installed);
         assert!(!claude.can_install);
         assert_eq!(claude.enabled, None);
@@ -933,6 +1009,41 @@ mod tests {
             ..parse("grok")
         };
         assert!(!descriptor_enabled(&missing));
+    }
+
+    #[test]
+    fn descriptors_report_policy_caps_and_round_trip() {
+        let registry = default_registry();
+        for descriptor in registry.descriptors() {
+            // Lazy entries mirror the resolved harness (descriptor stability).
+            let resolved = registry.resolve(descriptor.id).unwrap();
+            assert_eq!(descriptor.policy, resolved.policy_caps(), "{:?}", descriptor.id);
+            assert!(descriptor.policy.supports(PermissionMode::Bypass));
+            assert_eq!(registry.policy_caps(descriptor.id), descriptor.policy);
+            let json = serde_json::to_value(&descriptor).unwrap();
+            assert!(json["policy"]["modes"].is_array());
+            let back: HarnessDescriptor = serde_json::from_value(json).unwrap();
+            assert_eq!(back.policy, descriptor.policy);
+        }
+    }
+
+    #[test]
+    fn policy_settings_default_to_bypass_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.policy_settings().default_mode, PermissionMode::Bypass);
+        registry.set_policy_settings(PolicySettings {
+            default_mode: PermissionMode::Ask,
+        });
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.policy_settings().default_mode, PermissionMode::Ask);
+        // An older prefs file without the section keeps loading.
+        std::fs::write(dir.path().join("harness-prefs.json"), r#"{"disabled":[]}"#).unwrap();
+        let old = HarnessRegistry::new();
+        old.load_prefs(dir.path());
+        assert_eq!(old.policy_settings(), PolicySettings::default());
     }
 
     /// A registry slot for the tests below: installed probe fixed, factory
@@ -948,6 +1059,7 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                policy: PolicyCaps::bypass_only(),
             },
             Box::new(move || installed),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
@@ -1031,6 +1143,7 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                policy: PolicyCaps::bypass_only(),
             },
             Box::new(move || probe.load(Ordering::SeqCst)),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),

@@ -349,7 +349,7 @@ mod tests {
     use super::*;
 
     fn user(id: &str, text: &str) -> SessionMessageEntry {
-        SessionMessageEntry {
+        SessionMessageEntry { origin: None,
             id: id.into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {

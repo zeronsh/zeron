@@ -129,6 +129,7 @@ mod tests {
             checkout_id: None,
             source_context: None,
             config: Some(zeron_proto::ChatConfig {
+                policy: Default::default(),
                 harness,
                 model: None,
                 reasoning: None,

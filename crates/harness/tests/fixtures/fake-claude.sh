@@ -113,6 +113,52 @@ case "$first" in
   esac
   ;;
 
+*scenario:gate*|*scenario:plan-exit*)
+  # Permission modes: report the launch flags, then send can_use_tool
+  # requests one at a time and report each verdict as text.
+  mode=none
+  skip=no
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --permission-mode) shift; mode="$1" ;;
+      --dangerously-skip-permissions) skip=yes ;;
+    esac
+    shift
+  done
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","Edit"],"cwd":"/tmp","session_id":"sess-gate"}'
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"args:$mode:$skip\"}}}"
+  ask() { # $1 = request id, $2 = tool, $3 = input JSON
+    emit "{\"type\":\"control_request\",\"request_id\":\"$1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"$2\",\"input\":$3}}"
+    read -r resp || exit 1
+    case "$resp" in *"\"request_id\":\"$1\""*) ;; *) exit 7 ;; esac
+    case "$resp" in
+      *'"behavior":"allow"'*'"setMode"'*) verdict=allow-setmode ;;
+      *'"behavior":"allow"'*) verdict=allow ;;
+      *'"behavior":"deny"'*'Plan mode'*) verdict=deny-plan ;;
+      *'"behavior":"deny"'*'Auto mode'*) verdict=deny-auto ;;
+      *'"behavior":"deny"'*'user denied'*) verdict=deny-user ;;
+      *'"behavior":"deny"'*) verdict=deny ;;
+      *) verdict=unknown ;;
+    esac
+    emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"|$1:$verdict\"}}}"
+  }
+  here=$(pwd)
+  case "$first" in
+  *scenario:plan-exit*)
+    ask cr-1 ExitPlanMode '{"plan":"1. edit a.rs"}'
+    ask cr-2 Edit "{\"file_path\":\"$here/src/a.rs\",\"old_string\":\"a\",\"new_string\":\"b\"}"
+    ;;
+  *)
+    ask cr-1 Bash '{"command":"cargo test"}'
+    ask cr-2 Bash '{"command":"curl https://example.com"}'
+    ask cr-3 Bash '{"command":"git push --force origin main"}'
+    ask cr-4 Edit "{\"file_path\":\"$here/src/a.rs\",\"old_string\":\"a\",\"new_string\":\"b\"}"
+    ask cr-5 Bash '{"command":"curl https://example.com"}'
+    ;;
+  esac
+  emit '{"type":"result","subtype":"success","result":"gated","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-gate"}'
+  ;;
+
 *scenario:steer*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-steer"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'
