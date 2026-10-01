@@ -626,6 +626,7 @@ pub struct EngineRpc {
     updater: Option<zeron_update::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
+    drafts: Option<crate::draft_host::DraftHost>,
     engine_info: EngineInfo,
 }
 
@@ -671,6 +672,7 @@ impl EngineRpc {
             updater: None,
             harness_updates: None,
             local_import: None,
+            drafts: None,
             engine_info,
         }
     }
@@ -710,6 +712,18 @@ impl EngineRpc {
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
         self
+    }
+
+    /// Attach the composer-draft host (`WatchDraft` / `EditDraft` / `ClearDraft`).
+    pub fn with_drafts(mut self, drafts: crate::draft_host::DraftHost) -> Self {
+        self.drafts = Some(drafts);
+        self
+    }
+
+    fn drafts(&self) -> Result<&crate::draft_host::DraftHost, RpcError> {
+        self.drafts
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("drafts unavailable".into()))
     }
 
     fn auth(&self) -> Result<&Auth, RpcError> {
@@ -1430,7 +1444,14 @@ fn forwardable(method: &str) -> bool {
     )
 }
 
-/// Forwardable methods whose reply is a stream (proxied item-by-item).
+fn draft_rpc_error(error: crate::draft_host::DraftError) -> RpcError {
+    // Both variants are the caller's fault (bad id, bad Loro bytes), not an engine failure.
+    RpcError::BadParams(error.to_string())
+}
+
+/// Forwardable methods whose reply is a stream (proxied item-by-item). This list is the
+/// relay-forwarding path's only consumer, so `WatchDraft` is deliberately absent: drafts are
+/// never forwarded (see `forwardable`).
 fn is_stream_method(method: &str) -> bool {
     matches!(
         method,
@@ -2019,6 +2040,36 @@ impl RpcService for EngineRpc {
                     })
                     .boxed(),
                 ))
+            }
+            // Composer drafts are per-user replicated state served by THIS device's own room
+            // client. They are deliberately not `forwardable`: a draft for a chat hosted on
+            // another device is still edited here, and merged through the draft room.
+            methods::WATCH_DRAFT => {
+                let p: zeron_proto::DraftTarget = parse_params(params)?;
+                let stream = self.drafts()?.watch(&p.chat_id).map_err(draft_rpc_error)?;
+                Ok(RpcReply::Stream(
+                    stream
+                        .filter_map(|frame| async move { serde_json::to_value(frame).ok() })
+                        .boxed(),
+                ))
+            }
+            methods::EDIT_DRAFT => {
+                let p: zeron_proto::EditDraft = parse_params(params)?;
+                let update = base64::engine::general_purpose::STANDARD
+                    .decode(p.update.as_bytes())
+                    .map_err(|e| RpcError::BadParams(format!("update is not valid base64: {e}")))?;
+                let (epoch, changed) = self
+                    .drafts()?
+                    .edit(&p.chat_id, &update)
+                    .map_err(draft_rpc_error)?;
+                RpcReply::value(&serde_json::json!({ "epoch": epoch, "changed": changed }))
+            }
+            methods::CLEAR_DRAFT => {
+                let p: zeron_proto::DraftTarget = parse_params(params)?;
+                let outcome = self.drafts()?.clear(&p.chat_id).map_err(draft_rpc_error)?;
+                RpcReply::value(
+                    &serde_json::json!({ "epoch": outcome.epoch, "pending": outcome.pending }),
+                )
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
@@ -3807,6 +3858,21 @@ mod tests {
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
         ));
+    }
+
+    /// Drafts are per-user replicated state edited through THIS device's own room client, so a
+    /// `targetDeviceId` (the chat's host) must never reroute them, and `is_stream_method` (the
+    /// relay-forwarding stream list) must not mention them either.
+    #[test]
+    fn draft_methods_are_never_forwarded() {
+        for method in [
+            methods::WATCH_DRAFT,
+            methods::EDIT_DRAFT,
+            methods::CLEAR_DRAFT,
+        ] {
+            assert!(!forwardable(method), "{method} must be served locally");
+            assert!(!is_stream_method(method), "{method} is not a relay stream");
+        }
     }
 
     #[test]

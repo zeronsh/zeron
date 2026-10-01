@@ -66,6 +66,17 @@ pub mod methods {
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";
+    /// Live composer draft of a chat, shared by every device of the account. Stream of
+    /// `DraftFrame`s for `{ chatId }`: a `reset` snapshot first, then Loro updates. Always
+    /// served by the local engine (never relay-forwarded): each device runs its own draft room
+    /// client and drafts are per-user replicated state.
+    pub const WATCH_DRAFT: &str = "WatchDraft";
+    /// Push a local draft edit: `{ chatId, update }` (base64 Loro update) →
+    /// `{ epoch, changed }`. Invalid chat id / base64 / Loro bytes are `bad params` errors.
+    pub const EDIT_DRAFT: &str = "EditDraft";
+    /// The draft was sent (or abandoned): discard it everywhere. `{ chatId }` →
+    /// `{ epoch, pending }` (`pending` = the room discard is not confirmed yet; it is retried).
+    pub const CLEAR_DRAFT: &str = "ClearDraft";
     /// Append to the queue. `{ chatId, text, attachments?, holdForTurnEnd? }` → `{ id }`.
     pub const QUEUE_MESSAGE: &str = "QueueMessage";
     /// Retype a queued message; empty text deletes it.

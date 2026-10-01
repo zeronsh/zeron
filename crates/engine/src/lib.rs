@@ -22,6 +22,7 @@ pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod draft_host;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
@@ -52,6 +53,7 @@ pub use diff_sync::{
     discard_working_tree, merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
 pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
+pub use draft_host::{DraftHost, DraftHostConfig};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use project_actions::ProjectActionsStore;
@@ -128,6 +130,8 @@ pub struct EngineConfig {
 pub struct EngineCore {
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
+    /// Synced composer drafts (`WatchDraft` / `EditDraft` / `ClearDraft`).
+    pub drafts: DraftHost,
     pub workspace: WorkspaceHost,
     pub registry: Arc<HarnessRegistry>,
     pub repos: Repos,
@@ -232,6 +236,18 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         );
+        // Drafts live beside the chat docs in the same store (`draft/{chatId}` rows) but never in
+        // the chat outbox/sync-job tables, so the chat sync scheduler cannot see them.
+        let drafts = DraftHost::new(
+            store_for_import.clone(),
+            DraftHostConfig {
+                device_id: device_id.clone(),
+                org_id: profile.org_id().to_string(),
+                edge: edge.clone(),
+                tuning: Default::default(),
+            },
+        );
+        drafts.resume_pending();
         let workspace = WorkspaceHost::open(
             store,
             WorkspaceHostConfig {
@@ -321,6 +337,7 @@ impl EngineCore {
         Ok(Self {
             sessions,
             doc_host,
+            drafts,
             workspace,
             registry,
             repos,
@@ -467,6 +484,7 @@ impl EngineCore {
             self.workspace_scope,
         )
         .with_auth(self.auth())
+        .with_drafts(self.drafts.clone())
         .with_previews(self.previews.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
@@ -490,6 +508,7 @@ impl EngineCore {
             links.disconnect_all();
         }
         self.doc_host.disconnect_edge();
+        self.drafts.disconnect_edge();
         self.workspace.disconnect_edge();
     }
 
@@ -532,6 +551,7 @@ impl EngineCore {
         self.spaces_sync.shutdown().await;
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
+        self.drafts.shutdown().await;
         self.workspace.shutdown();
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.

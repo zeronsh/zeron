@@ -38,6 +38,10 @@
       {
         "name": "PREVIEW_ROOMS",
         "class_name": "PreviewRoom"
+      },
+      {
+        "name": "DRAFT_ROOMS",
+        "class_name": "DraftRoom"
       }
     ]
   },
@@ -50,6 +54,12 @@
         "RegistryRoom",
         "ChatRoom",
         "PreviewRoom"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "DraftRoom"
       ]
     }
   ],

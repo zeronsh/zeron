@@ -22,6 +22,7 @@ export default defineConfig({
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },
           CHAT_ROOMS: { className: "ChatRoom", useSQLite: true },
+          DRAFT_ROOMS: { className: "DraftRoom", useSQLite: true },
           PREVIEW_ROOMS: { className: "PreviewRoom", useSQLite: true },
           REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true }
         }

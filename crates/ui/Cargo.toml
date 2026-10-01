@@ -46,6 +46,7 @@ url = "2"
 zeron-proto.workspace = true
 similar.workspace = true
 zeron-doc.workspace = true
+loro.workspace = true
 zeron-engine.workspace = true
 zeron-harness.workspace = true
 zeron-rpc.workspace = true

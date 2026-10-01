@@ -1684,6 +1684,15 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
     cx.bind_keys(message_bindings);
 }
 
+/// Largest char boundary of `text` at or below `index` (clamped to the length).
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 /// Events the composer wrapper listens for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerInputEvent {
@@ -1747,6 +1756,11 @@ pub struct ComposerInput {
     focus_handle: FocusHandle,
     content: String,
     edit_revision: u64,
+    /// `edit_revision` of the last programmatic replacement ([`Self::set_text`],
+    /// [`Self::apply_remote_text`]). Every replacement emits `Edited` like typing does; the
+    /// wrapper compares this with `edit_revision` to tell them apart, so a draft load, a
+    /// clear-on-submit, or a merged remote update is never echoed back as a user edit.
+    programmatic_revision: Option<u64>,
     pub(crate) read_only: bool,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -1855,6 +1869,7 @@ impl ComposerInput {
             focus_handle: cx.focus_handle(),
             content: String::new(),
             edit_revision: 0,
+            programmatic_revision: None,
             read_only: false,
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -2207,6 +2222,55 @@ impl ComposerInput {
         self.last_edit = None;
         self.reset_blink();
         self.needs_measure = true;
+        self.programmatic_revision = Some(self.edit_revision);
+        cx.emit(ComposerInputEvent::Edited);
+        cx.notify();
+    }
+
+    /// Whether the newest content change was a programmatic replacement rather than typing,
+    /// paste, IME, undo, or completion.
+    pub(crate) fn last_edit_was_programmatic(&self) -> bool {
+        self.programmatic_revision == Some(self.edit_revision)
+    }
+
+    pub(crate) fn selection_range(&self) -> Range<usize> {
+        self.selected_range.clone()
+    }
+
+    pub(crate) fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
+    /// Replace the content with a merged remote edit (`docs/draft-sync.md` §4) while the user
+    /// keeps typing: the tracked `selection` survives (with its direction), the view does not
+    /// jump (`follow_cursor` and the scroll offset are left alone), and everything that holds
+    /// offsets into the old text is dropped — undo/redo hold whole-content snapshots, so they
+    /// are cleared rather than replayed over text they never saw. The caller defers this
+    /// during IME composition.
+    pub(crate) fn apply_remote_text(
+        &mut self,
+        text: String,
+        selection: Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.invalidate_mention_tooltip();
+        // Aborts pending paste rewrites, whose byte ranges are stale now.
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.content = text;
+        let start = floor_char_boundary(&self.content, selection.start);
+        let end = floor_char_boundary(&self.content, selection.end.max(selection.start));
+        self.selected_range = start..end;
+        if start == end {
+            self.selection_reversed = false;
+        }
+        self.preferred_column = None;
+        self.marked_range = None;
+        self.refresh_projection();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_edit = None;
+        self.needs_measure = true;
+        self.programmatic_revision = Some(self.edit_revision);
         cx.emit(ComposerInputEvent::Edited);
         cx.notify();
     }
@@ -5257,8 +5321,15 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
-    /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
+    /// Draft text per chat key ("" = new-chat canvas), surviving navigation. With draft sync
+    /// (`crate::draft_sync`) it stays the fallback for the canvas, engines without the
+    /// capability, and the moment before a chat's first draft frame arrives.
     drafts: HashMap<String, String>,
+    /// What the box held when the current chat's draft watch began; the merge base for text the
+    /// user typed before the first frame arrived.
+    draft_base: String,
+    /// An IME composition deferred a draft push or a remote update; finish both when it commits.
+    draft_ime_pending: bool,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
     /// navigating away and back restores them; memory-only, like the original.
     pub(crate) attachments: HashMap<String, Vec<StagedAttachment>>,
@@ -5491,7 +5562,16 @@ impl Composer {
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
-            ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
+            ComposerInputEvent::Edited => {
+                this.sync_user_edit(cx);
+                this.on_input_edited(cx);
+                this.reconcile_draft(cx);
+            }
+            ComposerInputEvent::CursorMoved => {
+                // `unmark_text` commits a composition without an `Edited`.
+                if this.draft_ime_pending {
+                    this.finish_ime_draft_sync(cx);
+                }
                 this.on_input_edited(cx)
             }
             ComposerInputEvent::ViewportChanged => cx.notify(),
@@ -5542,6 +5622,8 @@ impl Composer {
             queue_edit_draft: None,
             pickers,
             drafts: HashMap::new(),
+            draft_base: String::new(),
+            draft_ime_pending: false,
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             appshot_entrances: HashMap::new(),
@@ -5650,6 +5732,17 @@ impl Composer {
                     .or_default()
                     .extend(staged);
             }
+        }
+        // A window opened onto a chat whose draft is already seeded starts from it.
+        if let Some(text) = composer
+            .state
+            .read(cx)
+            .draft_text(&composer.current_key)
+            .filter(|text| !text.is_empty())
+        {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text(text, cx));
         }
         composer
     }
@@ -6537,6 +6630,116 @@ impl Composer {
         .detach();
     }
 
+    // ---- synced drafts (docs/draft-sync.md §4) ----
+
+    /// The box mirrors the chat's synced draft: capability present, a watch attached, and the
+    /// input is not borrowed by a question panel or a queued-message edit.
+    fn draft_syncing(&self, cx: &App) -> bool {
+        self.wizard.is_none()
+            && self.editing_queued.is_none()
+            && self.state.read(cx).draft_active(&self.current_key)
+    }
+
+    /// A user edit (typing, paste, IME commit, undo, completion) becomes one splice on the
+    /// replica; its local-update hook coalesces the push. Programmatic replacements never
+    /// arrive here as edits.
+    fn sync_user_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.draft_syncing(cx) {
+            return;
+        }
+        let input = self.input.clone();
+        {
+            let input = input.read(cx);
+            if input.last_edit_was_programmatic() {
+                return;
+            }
+            // The half-composed text is not a draft; the commit pushes the result.
+            if input.is_composing() {
+                self.draft_ime_pending = true;
+                return;
+            }
+        }
+        self.draft_ime_pending = false;
+        let key = &self.current_key;
+        self.state.update(cx, |state, cx| {
+            state.draft_local_edit(key, input.read(cx).text());
+        });
+    }
+
+    /// Push `text` into the synced draft as a user-equivalent edit: recoveries and restores
+    /// that put text back as a fresh draft.
+    fn push_draft_text(&mut self, key: &str, text: &str, cx: &mut Context<Self>) {
+        if key == self.current_key {
+            self.state
+                .update(cx, |state, _| state.draft_local_edit(key, text));
+        }
+    }
+
+    /// Put `text` back in the box as the draft of `key` (failed send, queue-edit recovery).
+    fn set_draft_text(&mut self, key: &str, text: String, cx: &mut Context<Self>) {
+        self.push_draft_text(key, &text, cx);
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// The draft was sent: discard it everywhere.
+    fn clear_synced_draft(&mut self, cx: &mut Context<Self>) {
+        if !self.current_key.is_empty() {
+            let key = &self.current_key;
+            self.state.update(cx, |state, _| state.draft_clear(key));
+        }
+    }
+
+    /// An IME composition ended: publish its result, then apply what was deferred.
+    fn finish_ime_draft_sync(&mut self, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() {
+            return;
+        }
+        self.draft_ime_pending = false;
+        if self.draft_syncing(cx) {
+            let input = self.input.clone();
+            let key = &self.current_key;
+            self.state.update(cx, |state, cx| {
+                state.draft_local_edit(key, input.read(cx).text());
+            });
+        }
+        self.reconcile_draft(cx);
+    }
+
+    /// Apply remote draft frames to the box, carrying the caret and selection through each one.
+    pub(crate) fn reconcile_draft(&mut self, cx: &mut Context<Self>) {
+        if !self.draft_syncing(cx) || !self.state.read(cx).draft_has_incoming(&self.current_key) {
+            return;
+        }
+        let input = self.input.read(cx);
+        if input.is_composing() {
+            self.draft_ime_pending = true;
+            return;
+        }
+        let selection = input.selection_range();
+        let text = input.text().to_owned();
+        let mut offsets = [selection.start, selection.end];
+        let key = &self.current_key;
+        let base = &self.draft_base;
+        let merged = self.state.update(cx, |state, _| {
+            state.draft_take_remote(
+                key,
+                &crate::draft_sync::LocalDraft { text: &text, base },
+                &mut offsets,
+            )
+        });
+        let Some(merged) = merged else {
+            return;
+        };
+        let [start, end] = offsets;
+        self.input.update(cx, |input, cx| {
+            input.apply_remote_text(merged, start.min(end)..end.max(start), cx);
+        });
+        // Their byte ranges pointed into the old text.
+        self.reset_mention(None, cx);
+        self.reset_slash(None, cx);
+        cx.notify();
+    }
+
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
         if self.wizard.is_some() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
@@ -7300,7 +7503,8 @@ impl Composer {
                     .filter(|text| !text.is_empty())
                     .collect::<Vec<_>>()
                     .join("\n\n");
-                self.input.update(cx, |input, cx| input.set_text(text, cx));
+                let key = self.current_key.clone();
+                self.set_draft_text(&key, text, cx);
                 attachments.extend(
                     self.attachments
                         .remove(&self.current_key)
@@ -7333,7 +7537,14 @@ impl Composer {
                     self.drafts.insert(self.current_key.clone(), old_text);
                 }
             }
-            let draft = self.drafts.get(&key).cloned().unwrap_or_default();
+            let fallback = self.drafts.get(&key).cloned().unwrap_or_default();
+            let draft = self
+                .state
+                .read(cx)
+                .draft_text(&key)
+                .unwrap_or_else(|| fallback.clone());
+            self.draft_base = fallback;
+            self.draft_ime_pending = false;
             self.current_key = key;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -7445,6 +7656,7 @@ impl Composer {
         self.input
             .update(cx, |input, cx| input.set_key_context(input_context, cx));
         self.on_input_edited(cx);
+        self.reconcile_draft(cx);
         cx.notify();
     }
 
@@ -7862,6 +8074,9 @@ impl Composer {
 
         self.input.update(cx, |input, cx| input.set_text("", cx));
         self.drafts.remove(&self.current_key);
+        if !is_new {
+            self.clear_synced_draft(cx);
+        }
         self.failure = None;
         self.sending = true;
         // A queued row is represented by the queue panel, not the transcript.
@@ -8373,7 +8588,7 @@ impl Composer {
                         // existing chat, or the deleted row's watch event
                         // re-keyed to the canvas before this handler ran —
                         // no further swap will fire). Set the input directly.
-                        composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                        composer.set_draft_text(&restore_key, restore_text, cx);
                     }
                     if !ordinary_staged.is_empty() {
                         // Merge by id (stashAttachments): files the user staged
@@ -8517,6 +8732,7 @@ impl Composer {
             input.set_placeholder("Do anything…", cx);
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
         });
+        self.reconcile_draft(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -14166,6 +14382,669 @@ mod appshot_rebase_tests {
             assert_eq!(composer.staged_appshots().len(), 2);
             assert_eq!(composer.input.read(cx).text(), "original\n\nedited");
         });
+    }
+}
+
+#[cfg(test)]
+mod draft_sync_tests {
+    use super::*;
+    use crate::draft_sync::PUSH_DEBOUNCE;
+    use crate::state::EngineHandle;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use futures::StreamExt as _;
+    use gpui::TestAppContext;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+    use zeron_doc::DraftDoc;
+    use zeron_proto::draft::{DraftFrame, EditDraft};
+    use zeron_rpc::{RpcReply, RpcService};
+
+    struct FakeInner {
+        doc: DraftDoc,
+        epoch: u64,
+        watchers: Vec<UnboundedSender<DraftFrame>>,
+        calls: Vec<(String, serde_json::Value)>,
+    }
+
+    /// The engine side of the draft RPC contract, with a real replica behind it.
+    struct FakeEngine(Mutex<FakeInner>);
+
+    impl FakeEngine {
+        fn new(initial: &str) -> Arc<Self> {
+            let doc = DraftDoc::new();
+            if !initial.is_empty() {
+                doc.set_text(initial).unwrap();
+            }
+            Arc::new(Self(Mutex::new(FakeInner {
+                doc,
+                epoch: 1,
+                watchers: Vec::new(),
+                calls: Vec::new(),
+            })))
+        }
+
+        fn frame(epoch: u64, reset: bool, bytes: &[u8]) -> DraftFrame {
+            DraftFrame {
+                epoch,
+                reset,
+                update: BASE64.encode(bytes),
+            }
+        }
+
+        fn broadcast(inner: &mut FakeInner, frame: DraftFrame) {
+            inner
+                .watchers
+                .retain(|watcher| watcher.send(frame.clone()).is_ok());
+        }
+
+        /// Another device (or the engine's room) changed the draft.
+        fn remote_type(&self, text: &str) {
+            let mut inner = self.0.lock().unwrap();
+            let before = inner.doc.version();
+            inner.doc.set_text(text).unwrap();
+            let update = inner.doc.export_since(&before).unwrap();
+            let frame = Self::frame(inner.epoch, false, &update);
+            Self::broadcast(&mut inner, frame);
+        }
+
+        /// The draft was sent from another device.
+        fn discard(&self) {
+            let mut inner = self.0.lock().unwrap();
+            inner.doc = DraftDoc::new();
+            inner.epoch += 1;
+            let frame = Self::frame(inner.epoch, true, &inner.doc.snapshot());
+            Self::broadcast(&mut inner, frame);
+        }
+
+        fn text(&self) -> String {
+            self.0.lock().unwrap().doc.text()
+        }
+
+        fn calls(&self, method: &str) -> Vec<serde_json::Value> {
+            self.0
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|(name, _)| name == method)
+                .map(|(_, params)| params.clone())
+                .collect()
+        }
+
+        /// Draft RPCs of any kind (other methods, like completion lookups, are not ours).
+        fn draft_call_count(&self) -> usize {
+            [
+                methods::WATCH_DRAFT,
+                methods::EDIT_DRAFT,
+                methods::CLEAR_DRAFT,
+            ]
+            .into_iter()
+            .map(|method| self.calls(method).len())
+            .sum()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RpcService for FakeEngine {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            let mut inner = self.0.lock().unwrap();
+            inner.calls.push((method.to_owned(), params.clone()));
+            match method {
+                methods::WATCH_DRAFT => {
+                    let (tx, rx) = unbounded_channel();
+                    let first = Self::frame(inner.epoch, true, &inner.doc.snapshot());
+                    tx.send(first).unwrap();
+                    inner.watchers.push(tx);
+                    let stream = futures::stream::unfold(rx, |mut rx| async move {
+                        rx.recv()
+                            .await
+                            .map(|frame| (serde_json::to_value(frame).unwrap(), rx))
+                    })
+                    .boxed();
+                    Ok(RpcReply::Stream(stream))
+                }
+                methods::EDIT_DRAFT => {
+                    let edit: EditDraft = zeron_rpc::parse_params(params)?;
+                    let bytes = BASE64.decode(edit.update).unwrap();
+                    inner.doc.import(&bytes).unwrap();
+                    let frame = Self::frame(inner.epoch, false, &bytes);
+                    Self::broadcast(&mut inner, frame);
+                    Ok(RpcReply::Value(serde_json::json!({})))
+                }
+                methods::CLEAR_DRAFT => {
+                    inner.doc = DraftDoc::new();
+                    inner.epoch += 1;
+                    let frame = Self::frame(inner.epoch, true, &inner.doc.snapshot());
+                    Self::broadcast(&mut inner, frame);
+                    Ok(RpcReply::Value(serde_json::json!({})))
+                }
+                other => Err(RpcError::UnknownMethod(other.to_owned())),
+            }
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        state: Entity<AppState>,
+        window: gpui::WindowHandle<Composer>,
+        _runtime: tokio::runtime::Runtime,
+        _dir: tempfile::TempDir,
+    }
+
+    const SYNCED: &[&str] = &[zeron_proto::capabilities::DRAFT_SYNC_V1];
+
+    impl Rig {
+        /// One pass over both executors. The tokio side (RPC reader, fake engine) is a
+        /// current-thread runtime driven from the test thread: the gpui test scheduler rejects
+        /// wakeups from foreign threads.
+        fn pump(&self, cx: &mut TestAppContext) {
+            cx.executor().advance_clock(PUSH_DEBOUNCE * 2);
+            cx.run_until_parked();
+            self._runtime.block_on(async {
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+            });
+            cx.run_until_parked();
+        }
+
+        /// Pump until `done`.
+        fn settle(
+            &self,
+            cx: &mut TestAppContext,
+            mut done: impl FnMut(&mut TestAppContext) -> bool,
+        ) {
+            for _ in 0..200 {
+                self.pump(cx);
+                if done(cx) {
+                    return;
+                }
+            }
+            panic!("condition not reached");
+        }
+
+        /// Give in-flight work time to (wrongly) produce traffic, then check nothing happened.
+        fn quiesce(&self, cx: &mut TestAppContext) {
+            for _ in 0..20 {
+                self.pump(cx);
+            }
+        }
+
+        fn new(cx: &mut TestAppContext, initial: &str, capabilities: &[&str]) -> Rig {
+            let dir = tempfile::tempdir().unwrap();
+            cx.update(|cx| {
+                gpui_base::init(cx);
+                cx.set_global(Theme::dark());
+                crate::app_menus::init(cx);
+                crate::history::init(
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    cx,
+                );
+                crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            });
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let engine = FakeEngine::new(initial);
+            let client = {
+                let _guard = runtime.enter();
+                zeron_rpc::memory_client(engine.clone())
+            };
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, cx| {
+                state.set_test_engine(EngineHandle::from_test_client_with(
+                    client,
+                    capabilities.iter().map(|value| value.to_string()).collect(),
+                ));
+                state.selected_chat = Some("chat".into());
+                state.start_draft_watch("chat", cx);
+            });
+            let window = cx.add_window({
+                let state = state.clone();
+                move |_, cx| Composer::new(state, cx)
+            });
+            Rig {
+                engine,
+                state,
+                window,
+                _runtime: runtime,
+                _dir: dir,
+            }
+        }
+
+        /// Wait for the first frame to seed the replica (and through it the box).
+        fn seeded(cx: &mut TestAppContext, initial: &str, capabilities: &[&str]) -> Rig {
+            let rig = Self::new(cx, initial, capabilities);
+            rig.settle(cx, |cx| {
+                rig.state
+                    .read_with(cx, |state, _| state.draft_text("chat").is_some())
+            });
+            assert_eq!(rig.text(cx), initial);
+            rig
+        }
+
+        fn text(&self, cx: &mut TestAppContext) -> String {
+            self.window
+                .read_with(cx, |composer, cx| composer.input.read(cx).text().to_owned())
+                .unwrap()
+        }
+
+        fn input(&self, cx: &mut TestAppContext) -> Entity<ComposerInput> {
+            self.window
+                .read_with(cx, |composer, _| composer.input.clone())
+                .unwrap()
+        }
+
+        fn selection(&self, cx: &mut TestAppContext) -> (Range<usize>, bool) {
+            let input = self.input(cx);
+            input.read_with(cx, |input, _| {
+                (input.selected_range.clone(), input.selection_reversed)
+            })
+        }
+
+        fn select(&self, cx: &mut TestAppContext, range: Range<usize>, reversed: bool) {
+            let input = self.input(cx);
+            input.update(cx, |input, _| {
+                input.selected_range = range;
+                input.selection_reversed = reversed;
+            });
+        }
+
+        fn type_text(&self, cx: &mut TestAppContext, text: &str) {
+            self.window
+                .update(cx, |composer, window, cx| {
+                    composer.input.update(cx, |input, cx| {
+                        for ch in text.chars() {
+                            input.replace_text_in_range(None, &ch.to_string(), window, cx);
+                        }
+                    });
+                })
+                .unwrap();
+        }
+
+        /// A remote edit lands while the user's selection is `range`.
+        fn remote_edit_with_selection(
+            &self,
+            cx: &mut TestAppContext,
+            range: Range<usize>,
+            reversed: bool,
+            new_text: &str,
+        ) -> (Range<usize>, bool) {
+            self.select(cx, range, reversed);
+            self.engine.remote_type(new_text);
+            self.settle(cx, |cx| self.text(cx) == new_text);
+            self.selection(cx)
+        }
+    }
+
+    #[gpui::test]
+    fn first_frame_seeds_the_box_and_a_later_reset_clears_it(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "started on my phone", SYNCED);
+        // Adopting the engine's text is not a user edit.
+        rig.quiesce(cx);
+        assert!(rig.engine.calls(methods::EDIT_DRAFT).is_empty());
+
+        rig.engine.discard();
+        rig.settle(cx, |cx| rig.text(cx).is_empty());
+        rig.quiesce(cx);
+        assert!(
+            rig.engine.calls(methods::EDIT_DRAFT).is_empty(),
+            "applying a discard must not echo an edit"
+        );
+    }
+
+    #[gpui::test]
+    fn caret_and_selection_survive_remote_edits(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "hello world", SYNCED);
+
+        // Before the caret: the caret shifts by the inserted bytes.
+        let (selection, _) = rig.remote_edit_with_selection(cx, 6..6, false, "well hello world");
+        assert_eq!(selection, 11..11);
+
+        // After the caret: untouched.
+        let (selection, _) =
+            rig.remote_edit_with_selection(cx, 11..11, false, "well hello world!!");
+        assert_eq!(selection, 11..11);
+
+        // A reversed selection keeps its direction, and an insertion at its start stays
+        // outside it: the edge rides the character it was anchored to.
+        let (selection, reversed) =
+            rig.remote_edit_with_selection(cx, 11..16, true, "well hello brave world!!");
+        assert_eq!(selection, 17..22, "still selects `world`");
+        assert!(reversed);
+
+        // Inside the selection: the edges hold, the selection grows.
+        let (selection, reversed) =
+            rig.remote_edit_with_selection(cx, 11..22, false, "well hello brave new world!!");
+        assert_eq!(selection, 11..26);
+        assert!(!reversed);
+    }
+
+    #[gpui::test]
+    fn caret_offsets_are_utf8_bytes_through_multibyte_text(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "héllo 🦀", SYNCED);
+        let end = "héllo 🦀".len();
+        let (selection, _) = rig.remote_edit_with_selection(cx, end..end, false, "→ héllo 🦀");
+        assert_eq!(selection, end + "→ ".len()..end + "→ ".len());
+        let text = rig.text(cx);
+        assert!(text.is_char_boundary(selection.start));
+    }
+
+    #[gpui::test]
+    fn remote_apply_neither_follows_the_cursor_nor_scrolls(cx: &mut TestAppContext) {
+        let long = (0..300)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rig = Rig::seeded(cx, &long, SYNCED);
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(rig.window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        draw(cx);
+        let input = rig.input(cx);
+        rig.type_text(cx, "!");
+        let revision = input.update(cx, |input, _| {
+            assert!(!input.undo_stack.is_empty());
+            // The user has scrolled away from the caret (a wheel scroll pauses following).
+            input.follow_cursor = false;
+            input.scroll_top = 30.0;
+            input.edit_revision
+        });
+        draw(cx);
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.scroll_top, 30.0, "the fixture must be scrollable");
+        });
+
+        rig.engine.remote_type(&format!("prepended\n{long}"));
+        rig.settle(cx, |cx| rig.text(cx).starts_with("prepended"));
+        draw(cx);
+
+        input.read_with(cx, |input, _| {
+            assert!(!input.follow_cursor, "a remote edit must not jump the view");
+            assert_eq!(input.scroll_top, 30.0, "a remote edit must not scroll");
+            assert_ne!(
+                input.edit_revision, revision,
+                "pending paste rewrites abort"
+            );
+            assert!(
+                input.undo_stack.is_empty(),
+                "undo holds whole-content snapshots"
+            );
+            assert!(input.redo_stack.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn ime_composition_defers_remote_application_until_commit(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "abc", SYNCED);
+        rig.window
+            .update(cx, |composer, window, cx| {
+                composer.input.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+                });
+            })
+            .unwrap();
+        assert_eq!(rig.text(cx), "abcni");
+
+        rig.engine.remote_type("abc remote");
+        rig.settle(cx, |cx| {
+            rig.state
+                .read_with(cx, |state, _| state.draft_has_incoming("chat"))
+        });
+        rig.quiesce(cx);
+        assert_eq!(rig.text(cx), "abcni", "composition is never disturbed");
+        assert!(
+            rig.engine.calls(methods::EDIT_DRAFT).is_empty(),
+            "half-composed text is not part of the draft"
+        );
+
+        rig.window
+            .update(cx, |composer, window, cx| {
+                composer.input.update(cx, |input, cx| {
+                    input.replace_text_in_range(None, "你", window, cx);
+                });
+            })
+            .unwrap();
+        rig.settle(cx, |cx| {
+            let text = rig.text(cx);
+            text.contains("remote") && text.contains('你') && rig.engine.text() == text
+        });
+        assert!(!rig.text(cx).contains("ni"));
+    }
+
+    #[gpui::test]
+    fn ime_commit_without_an_edit_event_still_applies_the_deferred_update(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "abc", SYNCED);
+        rig.window
+            .update(cx, |composer, window, cx| {
+                composer.input.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+                });
+            })
+            .unwrap();
+        rig.engine.remote_type("abc remote");
+        rig.settle(cx, |cx| {
+            rig.state
+                .read_with(cx, |state, _| state.draft_has_incoming("chat"))
+        });
+        // `unmark_text` keeps the composed text and emits only `CursorMoved`.
+        rig.window
+            .update(cx, |composer, window, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.unmark_text(window, cx));
+            })
+            .unwrap();
+        rig.settle(cx, |cx| {
+            let text = rig.text(cx);
+            text.contains("remote") && text.contains("ni") && rig.engine.text() == text
+        });
+    }
+
+    #[gpui::test]
+    fn programmatic_replacements_are_not_echoed_as_edits(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "hello", SYNCED);
+        let input = rig.input(cx);
+        input.update(cx, |input, cx| input.set_text("loaded elsewhere", cx));
+        input.update(cx, |input, cx| input.set_text("", cx));
+        rig.quiesce(cx);
+        assert!(rig.engine.calls(methods::EDIT_DRAFT).is_empty());
+        assert_eq!(rig.engine.text(), "hello");
+    }
+
+    #[gpui::test]
+    fn typing_sends_one_coalesced_edit_another_replica_can_import(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "hello", SYNCED);
+        let baseline =
+            DraftDoc::from_snapshot(&rig.engine.0.lock().unwrap().doc.snapshot()).unwrap();
+        rig.type_text(cx, " world");
+        rig.settle(cx, |_| !rig.engine.calls(methods::EDIT_DRAFT).is_empty());
+        rig.quiesce(cx);
+
+        let edits = rig.engine.calls(methods::EDIT_DRAFT);
+        assert_eq!(edits.len(), 1, "six keystrokes, one push");
+        assert_eq!(edits[0]["chatId"], "chat");
+        let update = BASE64.decode(edits[0]["update"].as_str().unwrap()).unwrap();
+        baseline.import(&update).unwrap();
+        assert_eq!(baseline.text(), "hello world");
+        assert_eq!(rig.engine.text(), "hello world");
+        assert_eq!(rig.text(cx), "hello world");
+    }
+
+    #[gpui::test]
+    fn concurrent_typing_on_two_devices_merges(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "hello", SYNCED);
+        rig.select(cx, 5..5, false);
+        rig.engine.remote_type("hello there");
+        rig.type_text(cx, "!");
+        rig.settle(cx, |cx| {
+            let text = rig.text(cx);
+            text.contains("there") && text.contains('!') && rig.engine.text() == text
+        });
+    }
+
+    #[gpui::test]
+    fn without_the_capability_drafts_stay_local(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx, "server draft", &[]);
+        rig.quiesce(cx);
+        assert!(rig.state.read_with(cx, |state, _| state.draft.is_none()));
+        assert!(
+            !rig.state
+                .read_with(cx, |state, _| state.draft_active("chat"))
+        );
+        assert_eq!(rig.text(cx), "");
+
+        rig.type_text(cx, "mine");
+        rig.quiesce(cx);
+        assert_eq!(
+            rig.engine.draft_call_count(),
+            0,
+            "no watch and no draft RPC"
+        );
+
+        // Today's behaviour: the per-chat map carries the draft across navigation.
+        rig.state.update(cx, |state, cx| {
+            state.selected_chat = Some("other".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(rig.text(cx), "");
+        rig.state.update(cx, |state, cx| {
+            state.selected_chat = Some("chat".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(rig.text(cx), "mine");
+        assert_eq!(rig.engine.draft_call_count(), 0);
+    }
+
+    #[gpui::test]
+    fn the_new_chat_canvas_never_syncs(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx, "server draft", SYNCED);
+        rig.settle(cx, |cx| {
+            rig.state
+                .read_with(cx, |state, _| state.draft_text("chat").is_some())
+        });
+        rig.state.update(cx, |state, cx| {
+            state.selected_chat = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(rig.text(cx), "");
+        rig.type_text(cx, "canvas");
+        rig.quiesce(cx);
+        assert!(rig.engine.calls(methods::EDIT_DRAFT).is_empty());
+        assert_eq!(rig.engine.text(), "server draft");
+    }
+
+    #[gpui::test]
+    fn submit_discards_the_draft_everywhere(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "ship it", SYNCED);
+        rig.window
+            .update(cx, |composer, _, cx| composer.on_submit(cx))
+            .unwrap();
+        rig.settle(cx, |_| !rig.engine.calls(methods::CLEAR_DRAFT).is_empty());
+        rig.quiesce(cx);
+        assert_eq!(rig.engine.calls(methods::CLEAR_DRAFT).len(), 1);
+        assert_eq!(rig.engine.calls(methods::CLEAR_DRAFT)[0]["chatId"], "chat");
+    }
+
+    #[gpui::test]
+    fn a_failed_send_restores_the_text_as_a_fresh_draft(cx: &mut TestAppContext) {
+        // The fake engine rejects every non-draft method, so the send fails.
+        let rig = Rig::seeded(cx, "ship it", SYNCED);
+        rig.window
+            .update(cx, |composer, _, cx| composer.on_submit(cx))
+            .unwrap();
+        rig.settle(cx, |cx| {
+            rig.window
+                .read_with(cx, |composer, _| composer.failure.is_some())
+                .unwrap()
+        });
+        rig.settle(cx, |cx| {
+            rig.text(cx) == "ship it" && rig.engine.text() == "ship it"
+        });
+        assert_eq!(rig.engine.calls(methods::CLEAR_DRAFT).len(), 1);
+        assert!(!rig.engine.calls(methods::EDIT_DRAFT).is_empty());
+    }
+
+    #[gpui::test]
+    fn text_typed_before_the_first_frame_is_never_dropped(cx: &mut TestAppContext) {
+        // Nothing on the engine yet: what was typed becomes the draft.
+        let rig = Rig::new(cx, "", SYNCED);
+        rig.type_text(cx, "mine");
+        rig.settle(cx, |_| rig.engine.text() == "mine");
+        assert_eq!(rig.text(cx), "mine");
+    }
+
+    #[gpui::test]
+    fn text_typed_before_a_non_empty_first_frame_merges_with_it(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx, "theirs", SYNCED);
+        rig.type_text(cx, "mine");
+        rig.settle(cx, |cx| {
+            let text = rig.text(cx);
+            text.contains("theirs") && text.contains("mine") && rig.engine.text() == text
+        });
+    }
+
+    #[gpui::test]
+    fn workspace_commands_keep_the_synced_draft(cx: &mut TestAppContext) {
+        let rig = Rig::seeded(cx, "", SYNCED);
+        rig.window
+            .update(cx, |composer, _, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("/model keep this draft", cx));
+                composer.update_slash("/model keep this draft", 6, cx);
+                composer.accept_slash(cx);
+                assert_eq!(composer.input.read(cx).text(), "keep this draft");
+            })
+            .unwrap();
+        // The token removal is a user edit: the draft shrinks to what remains, never clears.
+        rig.settle(cx, |_| rig.engine.text() == "keep this draft");
+        rig.quiesce(cx);
+        assert!(rig.engine.calls(methods::CLEAR_DRAFT).is_empty());
+    }
+
+    #[gpui::test]
+    fn mention_and_slash_state_never_hold_ranges_from_before_a_remote_splice(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = Rig::seeded(cx, "see @src", SYNCED);
+        rig.window
+            .update(cx, |composer, _, cx| {
+                composer.update_slash("/stale", 6, cx);
+                composer.mention.token = Some(MentionToken {
+                    range: 4..8,
+                    query: "src".into(),
+                });
+                composer.slash.token = Some(MentionToken {
+                    range: 0..6,
+                    query: "stale".into(),
+                });
+            })
+            .unwrap();
+        rig.select(cx, 8..8, false);
+        rig.engine.remote_type("PRE see @src");
+        rig.settle(cx, |cx| rig.text(cx) == "PRE see @src");
+        rig.window
+            .read_with(cx, |composer, _| {
+                assert!(composer.slash.token.is_none(), "slash token was reset");
+                let token = composer.mention.token.as_ref().expect("recomputed");
+                assert_eq!(token.range, 8..12, "mention range follows the moved text");
+                assert_eq!(token.query, "src");
+            })
+            .unwrap();
     }
 }
 

@@ -12313,6 +12313,7 @@ version = "0.2.100"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "futures",
  "serde",
  "serde_json",
@@ -12440,6 +12441,7 @@ dependencies = [
  "gpui_tokio",
  "image",
  "libc",
+ "loro",
  "mermaid-rs-renderer",
  "mimalloc",
  "objc",

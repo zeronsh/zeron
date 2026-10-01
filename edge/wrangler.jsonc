@@ -41,7 +41,8 @@
       { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
       { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
-      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      { "name": "DRAFT_ROOMS", "class_name": "DraftRoom" }
     ]
   },
   "migrations": [
@@ -61,7 +62,13 @@
       "tag": "v3",
       "new_sqlite_classes": ["ChatRoom"]
     },
-    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] }
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    {
+      // Synced composer drafts (docs/draft-sync.md) — one tiny Loro-doc room
+      // per (org, user, chat), discarded on send.
+      "tag": "v5",
+      "new_sqlite_classes": ["DraftRoom"]
+    }
   ],
   "r2_buckets": [
     {

@@ -5,6 +5,7 @@ declare module "cloudflare:test" {
     DEVICE_ROOMS: DurableObjectNamespace;
     TEST_LOG: DurableObjectNamespace;
     CHAT_ROOMS: DurableObjectNamespace;
+    DRAFT_ROOMS: DurableObjectNamespace;
     PREVIEW_ROOMS: DurableObjectNamespace;
     REGISTRY_ROOMS: DurableObjectNamespace;
   }

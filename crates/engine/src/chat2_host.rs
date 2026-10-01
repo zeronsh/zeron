@@ -239,7 +239,50 @@ pub struct EdgeCheckpointFetcher {
     priority: zeron_sync::budget::Priority,
     http: reqwest::Client,
     edge: EdgeConfig,
-    chat_id: String,
+    room: RoomPath,
+}
+
+/// Where a room's HTTP routes live: `/chat2/{chatId}` for transcript rooms,
+/// `/draft/{orgId}/{chatId}` (+ a live `?epoch=`) for composer-draft rooms.
+/// The checkpoint fetcher and rows transport are byte-identical between the
+/// two; only the URL differs, so both share these types.
+#[derive(Clone)]
+pub(crate) struct RoomPath {
+    prefix: String,
+    /// Read at request time so a fetch started after an epoch change never
+    /// carries the old epoch. `None` for chat2 rooms.
+    epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
+}
+
+impl RoomPath {
+    pub(crate) fn chat2(chat_id: &str) -> Self {
+        Self {
+            prefix: format!("/chat2/{chat_id}"),
+            epoch: None,
+        }
+    }
+
+    pub(crate) fn draft(
+        org_id: &str,
+        chat_id: &str,
+        epoch: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        Self {
+            prefix: format!("/draft/{org_id}/{chat_id}"),
+            epoch: Some(epoch),
+        }
+    }
+
+    pub(crate) fn url(&self, edge: &EdgeConfig, route: &str) -> String {
+        let mut url = format!("{}{}/{route}", edge.url.trim_end_matches('/'), self.prefix);
+        if let Some(epoch) = &self.epoch {
+            url.push_str(&format!(
+                "?epoch={}",
+                epoch.load(std::sync::atomic::Ordering::Acquire)
+            ));
+        }
+        url
+    }
 }
 
 impl EdgeCheckpointFetcher {
@@ -249,11 +292,15 @@ impl EdgeCheckpointFetcher {
     }
 
     pub fn new(http: reqwest::Client, edge: EdgeConfig, chat_id: impl Into<String>) -> Self {
+        Self::for_room(http, edge, RoomPath::chat2(&chat_id.into()))
+    }
+
+    pub(crate) fn for_room(http: reqwest::Client, edge: EdgeConfig, room: RoomPath) -> Self {
         Self {
             priority: zeron_sync::budget::Priority::Interactive,
             http,
             edge,
-            chat_id: chat_id.into(),
+            room,
         }
     }
 }
@@ -263,11 +310,7 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
         let priority = self.priority;
         let http = self.http.clone();
         let edge = self.edge.clone();
-        let url = format!(
-            "{}/chat2/{}/checkpoint",
-            edge.url.trim_end_matches('/'),
-            self.chat_id
-        );
+        let url = self.room.url(&edge, "checkpoint");
         Box::pin(async move {
             let mut got: Vec<u8> = Vec::new();
             let mut seen_seq: Option<String> = None;
@@ -355,7 +398,7 @@ pub struct EdgeChatTransport {
     priority: zeron_sync::budget::Priority,
     http: reqwest::Client,
     edge: EdgeConfig,
-    chat_id: String,
+    room: RoomPath,
     device_id: String,
 }
 
@@ -371,21 +414,26 @@ impl EdgeChatTransport {
         chat_id: impl Into<String>,
         device_id: impl Into<String>,
     ) -> Self {
+        Self::for_room(http, edge, RoomPath::chat2(&chat_id.into()), device_id)
+    }
+
+    pub(crate) fn for_room(
+        http: reqwest::Client,
+        edge: EdgeConfig,
+        room: RoomPath,
+        device_id: impl Into<String>,
+    ) -> Self {
         Self {
             priority: zeron_sync::budget::Priority::Interactive,
             http,
             edge,
-            chat_id: chat_id.into(),
+            room,
             device_id: device_id.into(),
         }
     }
 
     fn rows_url(&self) -> String {
-        format!(
-            "{}/chat2/{}/rows",
-            self.edge.url.trim_end_matches('/'),
-            self.chat_id
-        )
+        self.room.url(&self.edge, "rows")
     }
 }
 

@@ -506,6 +506,12 @@ impl EngineHandle {
 
     #[cfg(test)]
     pub(crate) fn from_test_client(client: RpcClient) -> Self {
+        Self::from_test_client_with(client, Vec::new())
+    }
+
+    /// [`Self::from_test_client`] for an engine that advertises `capabilities`.
+    #[cfg(test)]
+    pub(crate) fn from_test_client_with(client: RpcClient, capabilities: Vec<String>) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -516,7 +522,7 @@ impl EngineHandle {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: Vec::new(),
+                capabilities,
             },
             deferred_state: None,
         }
@@ -776,6 +782,8 @@ pub struct AppState {
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
     queue_task: Option<Task<()>>,
+    /// Live-synced composer draft of the selected chat (`draft_sync.rs`).
+    pub(crate) draft: Option<crate::draft_sync::DraftSync>,
     change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
@@ -854,6 +862,7 @@ impl AppState {
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
             queue_task: None,
+            draft: None,
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
@@ -1063,6 +1072,7 @@ impl AppState {
             self.transcript_task = None;
             self.queue.clear();
             self.queue_task = None;
+            self.draft = None;
         }
     }
 
@@ -1994,6 +2004,7 @@ impl AppState {
     /// account while the local profile is opening.
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
         self.engine = None;
+        self.draft = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
         self.change_request_tasks.clear();
@@ -2123,6 +2134,7 @@ impl AppState {
             return;
         };
         self.transcript_task = Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+        self.start_draft_watch(&chat_id, cx);
         if handle
             .engine_info()
             .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
@@ -2257,6 +2269,7 @@ impl AppState {
         if let Some(chat_id) = self.selected_chat.clone() {
             self.transcript_task =
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+            self.start_draft_watch(&chat_id, cx);
             if handle
                 .engine_info()
                 .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
@@ -2452,6 +2465,9 @@ impl AppState {
         self.transcript_task = None;
         self.queue.clear();
         self.queue_task = None;
+        if self.draft.as_ref().map(|d| d.chat_id.as_str()) != chat_id.as_deref() {
+            self.stop_draft_watch(cx);
+        }
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) keeps the current project pick.

@@ -1285,6 +1285,12 @@ impl DocHost {
     /// Materialize one authoritative local document without acquiring a network
     /// connection. Durable publication is installed before exposing any writer.
     pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        // `draft/{chatId}` rows share the docs store but are composer drafts, never chats. Real
+        // chat ids are `[A-Za-z0-9_-]+`; refuse anything in the draft namespace outright rather
+        // than parse a draft row as a transcript.
+        if crate::draft_host::is_draft_doc_id(chat_id) {
+            return Err(EngineError::Other(format!("{chat_id} is not a chat")));
+        }
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another

@@ -21,6 +21,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 zeron-doc.workspace = true
+base64 = "0.22"
 
 # Deterministic stalled-transport deadlines.
 tokio = { workspace = true, features = ["test-util"] }

@@ -35,6 +35,11 @@
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
  *   POST /chat2/:chatId/reset
+ *   GET  /draft/:orgId/:chatId/ws      — synced composer draft room (wss, ?epoch=N)
+ *   GET|POST /draft/:orgId/:chatId/{checkpoint,rows} — ?epoch=N
+ *   GET  /draft/:orgId/:chatId/epoch
+ *   POST /draft/:orgId/:chatId/discard — ?epoch=N; wipes the draft, bumps the epoch
+ *   GET  /draft/:orgId/:chatId/stats
  */
 import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
@@ -45,9 +50,11 @@ import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
+import { DraftRoom } from "./draft-room";
+import { draftRoute } from "./draft-route";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, DraftRoom, PreviewRoom };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -163,6 +170,12 @@ export default {
 
     const preview = previewRoute(request, env, auth);
     if (preview) return preview;
+
+    // ── draft rooms (docs/draft-sync.md): per-user, per-chat composer drafts.
+    //    Org claim must match the URL; the room name embeds the caller's OWN
+    //    user id (draft-route.ts). ───────────────────────────────────────────
+    const draft = await draftRoute(request, env, auth);
+    if (draft) return draft;
 
     // ── session rooms ───────────────────────────────────────────────────────
     if (parts[0] === "session" && parts[1] && ID_RE.test(parts[1]) && parts[2] === "ws") {

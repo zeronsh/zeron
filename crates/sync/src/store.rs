@@ -455,6 +455,21 @@ impl DocsStore {
         Ok(())
     }
 
+    /// Doc ids of snapshot rows that start with `prefix` (a literal prefix, not a LIKE pattern).
+    /// Used to find namespaced side docs (composer drafts) without touching chat rows.
+    pub fn doc_ids_with_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut query = conn.prepare(
+                "SELECT doc_id FROM snapshots WHERE substr(doc_id, 1, length(?1)) = ?1 ORDER BY doc_id",
+            )?;
+            let ids = query
+                .query_map(params![prefix], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ids)
+        })
+    }
+
     /// Whether a snapshot row exists for `doc_id` — presence only, no blob read.
     pub fn has_snapshot(&self, doc_id: &str) -> Result<bool, StoreError> {
         store_blocking(|| self.has_snapshot_blocking(doc_id))

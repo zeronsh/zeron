@@ -93,7 +93,7 @@ The following product work is intentionally deferred:
 
 ## 2. Data model — all Loro
 
-Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row protocol (loro updates as append-only rows + Range-resumable checkpoints, ChatRoom DO) and the registry rides its own row-frame protocol; local-only profiles persist the same docs without joining rooms:
+Two persistent doc kinds (plus the throwaway composer draft below). When sync is enabled, session docs ride the chat2 row protocol (loro updates as append-only rows + Range-resumable checkpoints, ChatRoom DO) and the registry rides its own row-frame protocol; local-only profiles persist the same docs without joining rooms:
 
 1. **Session doc** (per chat) — the transcript + durable command queue. Schema is a Rust port of
    `packages/session-doc` (same container names/shapes so the edge's tail materializer keeps
@@ -109,6 +109,8 @@ Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row 
    Writer discipline: each device writes its own device and session-status rows, rows for chats it hosts, and git stamps for spaces it owns. Creates, renames, archives, and seen marks are LWW sets accepted from any device. `deleteSpace` tombstones the space and every chat/session row in it in one commit. Presence uses ephemeral room frames rather than durable heartbeat writes.
 
    *Why one registry and not N tiny docs:* the sidebar needs one subscription for the whole list (grouping, resort animations, unseen markers). Its rows contain indexes rather than transcripts, so one local snapshot and, when enabled, one room connection remain bounded and cheap.
+
+   **Composer draft** (per chat, a third, throwaway doc kind) — one tiny Loro doc with a single `LoroText`, synced through its own `/draft/{orgId}/{chatId}` room (`DraftRoom` DO, the chat2 frames without the sidecars) so the text typed into a chat's composer follows the user across devices and merges concurrent typing. Sending bumps the room's epoch and deletes its rows and checkpoint, so the typing history never survives (or bloats a transcript); the engine's `DraftHost` (`crates/engine/src/draft_host.rs`, RPCs `WatchDraft`/`EditDraft`/`ClearDraft`, always served by the local engine) owns the room client and never routes drafts through the chat outbox or sync scheduler. Design: `docs/draft-sync.md`.
 
 3. **Mirror layer** (`zeron-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
    schema, **incremental** application of `doc.subscribe` diffs into cached state (no full

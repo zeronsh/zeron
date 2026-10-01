@@ -10,6 +10,7 @@
 
 pub mod commands;
 pub mod constants;
+pub mod draft;
 pub mod parts;
 pub mod queue;
 pub mod rebuild;
@@ -20,6 +21,7 @@ pub mod workspace;
 
 pub use commands::*;
 pub use constants::*;
+pub use draft::*;
 pub use parts::*;
 pub use queue::*;
 pub use rebuild::*;
