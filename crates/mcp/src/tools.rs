@@ -17,7 +17,7 @@ use zeron_proto::{
     Space, UserInputAnswer,
 };
 
-use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
+use crate::transcript::{RenderOptions, RenderedMessage, SubagentRef, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
 /// Default and ceiling for the blocking waits.
@@ -133,6 +133,17 @@ fn catalog() -> Vec<ToolDef> {
             name: "read_chat",
             description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line.",
             input_schema: chat_key_schema(json!({
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
+                "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
+                "include_reasoning": { "type": "boolean", "default": false },
+                "include_tools": { "type": "boolean", "default": true }
+            })),
+        },
+        ToolDef {
+            name: "read_subagent",
+            description: "Read the transcript of a subagent a chat spawned (what it said, which tools it ran, whether it is still running). Spawn chips appear in read_chat as `subagents` with an id and a status; omit `subagent` to list them all for the chat instead. Works for running, finished, and failed subagents, so use it to see why one stopped before deciding to continue it or start over. To continue or send a follow-up to a subagent of your own, do NOT spawn a new one: call SendMessage with the agent's id (the `agentId` in its Agent result) — it resumes the same subagent with its context intact, even after it finished.",
+            input_schema: chat_key_schema(json!({
+                "subagent": { "type": "string", "description": "Subagent id from read_chat, a unique fragment of it (e.g. the spawn id), or a unique fragment of its label. Omit to list the chat's subagents." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
                 "include_reasoning": { "type": "boolean", "default": false },
@@ -260,6 +271,18 @@ struct CreateChatArgs {
     #[serde(default)]
     wait: bool,
     timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ReadSubagentArgs {
+    chat: String,
+    subagent: Option<String>,
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default)]
+    include_reasoning: bool,
+    include_tools: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -415,6 +438,7 @@ impl Tools {
             "create_chats" => self.batch(parse(args)?, true).await,
             "send_messages" => self.batch(parse(args)?, false).await,
             "read_chat" => self.read_chat(parse(args)?).await,
+            "read_subagent" => self.read_subagent(parse(args)?).await,
             "send_message" => self.send_message(parse(args)?).await,
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
@@ -794,6 +818,46 @@ impl Tools {
         }))
     }
 
+    async fn read_subagent(&self, args: ReadSubagentArgs) -> anyhow::Result<Value> {
+        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let entries = self.zeron.transcript(&chat.id).await?;
+        let spawned: Vec<SubagentRef> = render_entries(&entries, RenderOptions::default())
+            .into_iter()
+            .flat_map(|m| m.subagents)
+            .collect();
+        let key = args.subagent.as_deref().map(str::trim).unwrap_or_default();
+        if key.is_empty() {
+            return Ok(json!({
+                "chatId": chat.id,
+                "title": chat.title,
+                "subagents": spawned,
+            }));
+        }
+        let found = pick_subagent(&spawned, key)?;
+        let running = found.status == Some("running");
+        let entries = self.zeron.subagent_transcript(&found.id, running).await?;
+        let rendered = render_entries(
+            &entries,
+            RenderOptions {
+                include_reasoning: args.include_reasoning,
+                include_tools: args.include_tools.unwrap_or(true),
+            },
+        );
+        let total = rendered.len();
+        let limit = args.limit.unwrap_or(40).clamp(1, 500);
+        let end = total.saturating_sub(args.offset);
+        let start = end.saturating_sub(limit);
+        Ok(json!({
+            "chatId": chat.id,
+            "subagent": found,
+            "total": total,
+            "returned": end - start,
+            "olderRemaining": start,
+            "newerSkipped": total - end,
+            "messages": &rendered[start..end],
+        }))
+    }
+
     async fn send_message(&self, args: SendArgs) -> anyhow::Result<Value> {
         let text = args.text.trim();
         if text.is_empty() {
@@ -1068,6 +1132,35 @@ impl Tools {
 }
 
 /// claude-code when it is offered here, else the first available harness.
+/// Exact id first, then a unique fragment of the id or of the spawn label.
+fn pick_subagent(spawned: &[SubagentRef], key: &str) -> anyhow::Result<SubagentRef> {
+    if let Some(exact) = spawned.iter().find(|s| s.id == key) {
+        return Ok(exact.clone());
+    }
+    let needle = key.to_lowercase();
+    let hits: Vec<&SubagentRef> = spawned
+        .iter()
+        .filter(|s| {
+            s.id.to_lowercase().contains(&needle) || s.name.to_lowercase().contains(&needle)
+        })
+        .collect();
+    match hits.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => anyhow::bail!(
+            "no subagent matches {key:?}; omit `subagent` to list this chat's {}",
+            spawned.len()
+        ),
+        many => anyhow::bail!(
+            "{key:?} matches {} subagents ({}); use a longer fragment or the full id",
+            many.len(),
+            many.iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
     if harnesses.is_empty() {
         return Ok(HarnessId::ClaudeCode);
@@ -1102,6 +1195,9 @@ mod tests {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        /// Alpha spawned two subagents: `--sub--live` (running, doc only)
+        /// and `--sub--frozen` (done, with a blob).
+        alpha_subagents: bool,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1148,6 +1244,47 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
+                methods::WATCH_DOC_MESSAGES
+                    if params["chatId"].as_str() == Some("chat-alpha-1--sub--live") =>
+                {
+                    stream(json!({ "reset": [
+                        { "id": "s1", "role": "assistant", "createdAt": 3, "deviceId": "dev-local",
+                          "status": "streaming",
+                          "parts": [{ "kind": "text", "id": "t", "text": "still reading" }] }
+                    ]}))
+                }
+                methods::FETCH_TOOL_BLOB => {
+                    if params["blobRef"] != "chat-alpha-1/chat-alpha-1--sub--frozen" {
+                        return Err(RpcError::Failed("no such blob".into()));
+                    }
+                    let entries = json!([
+                        { "id": "s1", "role": "assistant", "createdAt": 3, "deviceId": "dev-local",
+                          "status": "complete",
+                          "parts": [{ "kind": "text", "id": "t", "text": "found 3 bugs" }] }
+                    ]);
+                    RpcReply::Value(json!({ "text": entries.to_string() }))
+                }
+                methods::WATCH_DOC_MESSAGES
+                    if self.alpha_subagents
+                        && params["chatId"].as_str() == Some("chat-alpha-1") =>
+                {
+                    let chip = |suffix: &str, label: &str, status: &str| {
+                        json!({
+                            "kind": "tool", "id": suffix, "resolved": true,
+                            "call": { "kind": "unknown", "name": label },
+                            "subagentRef": format!("chat-alpha-1--sub--{suffix}"),
+                            "subagentStatus": status
+                        })
+                    };
+                    stream(json!({ "reset": [
+                        { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
+                          "status": "complete",
+                          "parts": [
+                            chip("live", "Agent: scan the parser", "running"),
+                            chip("frozen", "Agent: audit the lexer", "done")
+                          ] }
+                    ]}))
+                }
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
@@ -1190,6 +1327,57 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn read_subagent_lists_and_reads_running_and_frozen_transcripts() {
+        let world = Arc::new(World {
+            alpha_subagents: true,
+            ..World::default()
+        });
+        let tools = tools(world, Origin::default());
+
+        let read = tools
+            .call("read_chat", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(read["messages"][0]["subagents"][0]["status"], "running");
+
+        let listed = tools
+            .call("read_subagent", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(listed["subagents"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["subagents"][1]["name"], "Agent: audit the lexer");
+
+        let live = tools
+            .call(
+                "read_subagent",
+                json!({ "chat": "alpha", "subagent": "live" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(live["messages"][0]["text"], "still reading");
+
+        // A label fragment resolves; the finished one comes from its blob.
+        let frozen = tools
+            .call(
+                "read_subagent",
+                json!({ "chat": "alpha", "subagent": "lexer" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(frozen["subagent"]["status"], "done");
+        assert_eq!(frozen["messages"][0]["text"], "found 3 bugs");
+
+        let err = tools
+            .call(
+                "read_subagent",
+                json!({ "chat": "alpha", "subagent": "Agent" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("matches 2 subagents"), "{err}");
     }
 
     #[tokio::test]

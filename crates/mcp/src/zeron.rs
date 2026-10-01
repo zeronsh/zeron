@@ -255,6 +255,32 @@ impl Zeron {
         serde_json::from_value(value).context("ListModels: unexpected shape")
     }
 
+    /// A subagent's transcript by its doc id (`{chatId}--sub--{spawnId}`).
+    /// A finished subagent is frozen into a static blob that never wakes its
+    /// room; a running one (or one whose blob is missing) is read from the
+    /// live doc, exactly as the desktop's subagent tab does.
+    pub async fn subagent_transcript(
+        &self,
+        doc_id: &str,
+        running: bool,
+    ) -> anyhow::Result<Vec<SessionMessageEntry>> {
+        if !running && let Some((chat_id, _)) = doc_id.split_once("--sub--") {
+            let blob = self
+                .call(
+                    methods::FETCH_TOOL_BLOB,
+                    json!({ "blobRef": format!("{chat_id}/{doc_id}") }),
+                )
+                .await;
+            if let Ok(value) = blob
+                && let Some(text) = value.get("text").and_then(Value::as_str)
+                && let Ok(entries) = serde_json::from_str(text)
+            {
+                return Ok(entries);
+            }
+        }
+        self.transcript(doc_id).await
+    }
+
     /// The full transcript: attach, take the opening `reset` frame, detach.
     pub async fn transcript(&self, chat_id: &str) -> anyhow::Result<Vec<SessionMessageEntry>> {
         let mut rx = self

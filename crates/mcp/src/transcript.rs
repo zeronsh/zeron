@@ -7,7 +7,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
 #[derive(Debug, Clone, Copy)]
@@ -46,11 +46,27 @@ pub struct RenderedMessage {
     /// One line per tool call, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// Subagents this message spawned. Pass `id` to `read_subagent`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<SubagentRef>,
     /// An unanswered question the agent is blocked on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_input: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+}
+
+/// A subagent's spawn chip: enough to find and read its own transcript.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentRef {
+    /// The subagent's transcript id (`{chatId}--sub--{spawnId}`).
+    pub id: String,
+    /// The spawn call's label, e.g. `Agent: audit the parser`.
+    pub name: String,
+    /// `running`, `done`, or `failed`; absent when the engine never stamped one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
 }
 
 /// Render entries in order, folding continuation entries into the message
@@ -92,6 +108,7 @@ fn fold_into(parent: &mut RenderedMessage, child: RenderedMessage) {
         _ => {}
     }
     parent.tools.extend(child.tools);
+    parent.subagents.extend(child.subagents);
     parent.errors.extend(child.errors);
     if child.pending_input.is_some() {
         parent.pending_input = child.pending_input;
@@ -106,6 +123,7 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
     let mut text_parts: Vec<&str> = Vec::new();
     let mut reasoning_parts: Vec<&str> = Vec::new();
     let mut tools = Vec::new();
+    let mut subagents = Vec::new();
     let mut pending_input = None;
     let mut errors = Vec::new();
     for part in &entry.parts {
@@ -126,8 +144,21 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
                 is_error,
                 resolved,
                 output,
+                subagent_ref,
+                subagent_status,
                 ..
             } => {
+                if let Some(id) = subagent_ref {
+                    subagents.push(SubagentRef {
+                        id: id.clone(),
+                        name: tool_line(call, false, true, None),
+                        status: subagent_status.map(|s| match s {
+                            SubagentStatus::Running => "running",
+                            SubagentStatus::Done => "done",
+                            SubagentStatus::Failed => "failed",
+                        }),
+                    });
+                }
                 if options.include_tools {
                     tools.push(tool_line(call, *is_error, *resolved, output.as_deref()));
                 }
@@ -161,6 +192,7 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
         text: text_parts.join("\n\n"),
         reasoning: (!reasoning_parts.is_empty()).then(|| reasoning_parts.join("\n\n")),
         tools,
+        subagents,
         pending_input,
         errors,
     }
@@ -234,6 +266,43 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
         }
+    }
+
+    #[test]
+    fn spawn_chips_surface_their_subagent_ref_and_status() {
+        let chip = |id: &str, status| MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: "Agent: audit".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: Some(format!("chat--sub--{id}")),
+            subagent_status: status,
+            subagent_tail: None,
+        };
+        let entries = vec![entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                chip("x", Some(SubagentStatus::Running)),
+                chip("y", Some(SubagentStatus::Failed)),
+            ],
+        )];
+        let rendered = render_entries(&entries, RenderOptions::default());
+        let refs = &rendered[0].subagents;
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].id, "chat--sub--x");
+        assert_eq!(refs[0].name, "Agent: audit");
+        assert_eq!(refs[0].status, Some("running"));
+        assert_eq!(refs[1].status, Some("failed"));
     }
 
     #[test]

@@ -110,11 +110,27 @@ name (default: the local engine's device).
 | `create_chats`     | Concurrent `create_chat` requests with per-request results |
 | `send_messages`    | Concurrent `send_message` requests with per-request results |
 | `read_chat`        | `WatchDocMessages` opening `reset` frame, rendered        |
+| `read_subagent`    | chat transcript for spawn chips, then the subagent's frozen blob (`FetchToolBlob`) or live doc |
 | `send_message`     | `QueueCommand` Run / Steer, or `QueueMessage`             |
 | `wait_for_turn`    | `WatchSessions` until the chat settles                    |
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+
+A subagent's work never lands in its parent's transcript: the parent keeps
+one spawn chip, and the subagent streams into its own doc
+(`{chatId}--sub--{spawnId}`), frozen to a blob when it finishes. `read_chat`
+lists each chip's `subagents` (`id`, `name`, `status`: running/done/failed);
+`read_subagent { chat, subagent }` reads that transcript the way the desktop's
+subagent tab does — live doc while running, blob once settled with the live doc
+as fallback. Without `subagent` it lists the chat's subagents. `subagent`
+accepts the full id or a unique fragment of the id or spawn label.
+
+Continuing a subagent is not an MCP call: Claude's own `SendMessage` tool
+(`to` = the `agentId` from the Agent result) resumes the same subagent with its
+context, finished or not, in the same run or after a restart (live-verified on
+2.1.284). The harness routes the resumed traffic back onto the original spawn
+chip and its transcript.
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
