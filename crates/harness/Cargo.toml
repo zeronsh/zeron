@@ -23,6 +23,7 @@ required-features = ["native-fixture"]
 
 [dependencies]
 zeron-proto.workspace = true
+zeron-sandbox.workspace = true
 base64 = "0.22"
 reqwest.workspace = true
 tokio.workspace = true

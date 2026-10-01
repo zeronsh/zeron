@@ -61,9 +61,13 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
+    RunRequest, SlashCommand, SteeringMode, TodoItem, TodoStatus, ToolCall, UserInputAnswer,
+    UserInputQuestion,
 };
 
+use zeron_proto::{ActionKind, PermissionMode};
+
+use crate::policy::{Action, Decision, Gate, SharedGate};
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, shutdown_child};
 
@@ -282,19 +286,21 @@ impl OpencodeHarness {
         &self,
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
+        ask_permissions: bool,
+        policy: Option<&zeron_proto::AgentPolicy>,
     ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
+        Server::spawn(&exe, cwd, self.startup_timeout, mcp, ask_permissions, policy).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
     /// commands cache so concurrent picker/composer fetches share one boot.
     async fn probe_models(&self) -> Result<Vec<Model>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        let mut server = self.server(None, None).await?;
+        let mut server = self.server(None, None, false, None).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
             let mut models = models_from_providers(&providers);
@@ -326,7 +332,7 @@ impl OpencodeHarness {
         if let Some(commands) = self.commands_cache.get() {
             return Ok(commands.clone());
         }
-        let mut server = self.server(None, None).await?;
+        let mut server = self.server(None, None, false, None).await?;
         let result = server
             .commands_wire(None)
             .await
@@ -407,7 +413,7 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None).await?;
+        let mut server = self.server(Some(directory), None, false, None).await?;
         let result = server.commands_wire(Some(directory)).await;
         server.shutdown(self.kill_grace).await;
         let commands = result?;
@@ -427,13 +433,24 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None).await?;
+        let mut server = self.server(Some(directory), None, false, None).await?;
         let result = server
             .commands_wire(Some(directory))
             .await
             .map(|v| commands_from_wire(&v));
         server.shutdown(self.kill_grace).await;
         result
+    }
+
+    /// Every mode: outside Bypass the server is configured to ask before
+    /// every tool and each `permission.asked` is answered by the policy;
+    /// Plan also selects opencode's own `plan` agent.
+    fn policy_caps(&self) -> zeron_proto::PolicyCaps {
+        zeron_proto::PolicyCaps {
+            sandboxes: crate::sandboxing::os_sandboxes(),
+            native_plan: true,
+            ..zeron_proto::PolicyCaps::all_modes()
+        }
     }
 
     async fn run(
@@ -447,7 +464,17 @@ impl Harness for OpencodeHarness {
         let initial_native_command_selected = selected_native_command(&request.prompt, self.id());
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), request.mcp.as_ref()).await?;
+        // Bypass keeps opencode's own permission config exactly as before;
+        // every other mode makes the server ask so the policy answers.
+        let ask_permissions = request.policy.mode != zeron_proto::PermissionMode::Bypass;
+        let server = self
+            .server(
+                cwd.as_deref(),
+                request.mcp.as_ref(),
+                ask_permissions,
+                Some(&request.policy),
+            )
+            .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -588,18 +615,32 @@ impl Server {
 
     /// Spawn `opencode serve` on a free loopback port with a per-run Basic
     /// password, and wait for a generation-bearing health answer (which
-    /// also resolves [`Protocol`]).
+    /// also resolves [`Protocol`]). `ask_permissions` makes the server ask
+    /// before every tool (see [`ask_for_permissions`]) so Zeron's policy
+    /// answers them; without it opencode's own defaults stand.
     async fn spawn(
         exe: &std::path::Path,
         cwd: Option<&str>,
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
+        ask_permissions: bool,
+        policy: Option<&zeron_proto::AgentPolicy>,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
         })?;
         let password = uuid::Uuid::new_v4().to_string();
-        let mut cmd = Command::new(exe);
+        // Probes run unconfined; a run's server runs in its chat's sandbox.
+        let mut cmd = match policy {
+            Some(policy) => crate::sandboxing::policy_command(
+                HarnessId::Opencode,
+                policy,
+                mcp,
+                exe,
+                std::path::Path::new(cwd.unwrap_or_default()),
+            )?,
+            None => Command::new(exe),
+        };
         cmd.arg("serve")
             .arg("--port")
             .arg(port.to_string())
@@ -607,6 +648,8 @@ impl Server {
             .arg("127.0.0.1")
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_CLIENT", "zeron");
+        let inherited = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+        let mut inline: Option<Value> = None;
         if let Some(mcp) = mcp {
             let version_exe = exe.to_path_buf();
             let version = tokio::task::spawn_blocking(move || {
@@ -624,14 +667,20 @@ impl Server {
             } else {
                 Protocol::V1
             };
-            cmd.env(
-                "OPENCODE_CONFIG_CONTENT",
-                mcp_config(
-                    std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
-                    mcp,
-                    protocol,
-                )?,
-            );
+            let mut config = inline_config(inherited.as_deref())?;
+            add_mcp(&mut config, mcp, protocol)?;
+            inline = Some(config);
+        }
+        if ask_permissions {
+            let mut config = match inline.take() {
+                Some(config) => config,
+                None => inline_config(inherited.as_deref())?,
+            };
+            ask_for_permissions(&mut config);
+            inline = Some(config);
+        }
+        if let Some(config) = inline {
+            cmd.env("OPENCODE_CONFIG_CONTENT", config.to_string());
         }
         crate::compose_child_path(&mut cmd, exe);
         if let Some(cwd) = cwd {
@@ -1295,6 +1344,165 @@ fn unwrap_data(value: Value) -> Value {
         .unwrap_or(value)
 }
 
+/// opencode's built-in read-only planning agent (1.x and 2.x).
+const PLAN_AGENT: &str = "plan";
+/// opencode's default building agent.
+const BUILD_AGENT: &str = "build";
+
+/// The server offers the primary `plan` agent (1.x `GET /agent` lists
+/// `{name}`, 2.x `GET /api/agent` lists `{id, name}`). A user can disable
+/// it; then Plan rests on the policy alone.
+async fn has_plan_agent(server: &Server, dir: Option<&str>) -> bool {
+    let path = match server.protocol().await {
+        Protocol::V1 => "/agent",
+        Protocol::V2 => "/api/agent",
+    };
+    let Ok(agents) = server.get_json(path, dir).await else {
+        return false;
+    };
+    unwrap_data(agents)
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|agent| {
+            let id = agent
+                .get("id")
+                .or_else(|| agent.get("name"))
+                .and_then(Value::as_str);
+            id == Some(PLAN_AGENT)
+                && agent.get("mode").and_then(Value::as_str) != Some("subagent")
+                && agent.get("hidden").and_then(Value::as_bool) != Some(true)
+        })
+}
+
+/// A `permission.asked` request as a policy [`Action`]; `None` for
+/// opencode's internal bookkeeping (todos, questions, subagent spawns),
+/// which is always allowed. 1.x carries `{permission, patterns, metadata}`
+/// (older builds `{type, pattern}`), 2.x `{action, resources, metadata}`.
+fn permission_action(props: &Value) -> Option<Action> {
+    let name = ["permission", "action", "type"]
+        .iter()
+        .find_map(|key| props.get(*key).and_then(Value::as_str))
+        .unwrap_or_default();
+    if OPENCODE_INTERNAL_PERMISSIONS.contains(&name) {
+        return None;
+    }
+    let values: Vec<String> = ["patterns", "resources", "pattern"]
+        .iter()
+        .find_map(|key| match props.get(*key) {
+            Some(Value::Array(items)) => Some(
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            Some(Value::String(one)) => Some(vec![one.clone()]),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let metadata = props.get("metadata").unwrap_or(&Value::Null);
+    let meta = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| metadata.get(*key).and_then(Value::as_str))
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    // Patterns name the things acted on; `*` (and globs ending in one) are
+    // scopes, not paths.
+    let paths = |values: &[String]| -> Vec<PathBuf> {
+        values
+            .iter()
+            .map(|v| v.trim_end_matches('*').trim_end_matches('/'))
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .collect()
+    };
+    let path_action = |kind: ActionKind| {
+        let mut action = Action::new(kind, name);
+        action.paths = match meta(&["filepath", "filePath", "path"]) {
+            Some(path) => vec![PathBuf::from(path)],
+            None => paths(&values),
+        };
+        action
+    };
+    let action = match name {
+        "bash" | "shell" | "exec" => Action::exec(
+            name,
+            meta(&["command"]).unwrap_or_else(|| values.join("\n")),
+        ),
+        "edit" | "write" | "patch" | "multiedit" | "apply_patch" => path_action(ActionKind::Edit),
+        "read" | "list" | "lsp" | "external_directory" => path_action(ActionKind::Read),
+        // Their patterns are search expressions, not paths.
+        "glob" | "grep" | "codesearch" => Action::new(ActionKind::Read, name),
+        "webfetch" | "websearch" => {
+            let mut action = Action::new(ActionKind::Network, name);
+            action.host = meta(&["url"])
+                .or_else(|| values.first().cloned())
+                .and_then(|url| reqwest::Url::parse(&url).ok())
+                .and_then(|url| url.host_str().map(str::to_owned));
+            action
+        }
+        "doom_loop" => Action::new(ActionKind::Other, name),
+        // Everything else is a tool opencode doesn't build in: an MCP
+        // server's (or a plugin's).
+        other => {
+            let mut action = Action::new(ActionKind::Mcp, other);
+            action.mcp = Some(other.to_owned());
+            action
+        }
+    };
+    Some(action)
+}
+
+/// opencode's `plan` agent writes its plan to a file of its own (2.x
+/// `~/.opencode/plan/`, 1.x `<project>/.opencode/plans/`): the one edit
+/// Plan allows.
+fn is_plan_file(action: &Action, workspace: &std::path::Path) -> bool {
+    if action.kind != ActionKind::Edit || action.paths.is_empty() {
+        return false;
+    }
+    let mut dirs = vec![workspace.join(".opencode").join("plans")];
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join(".opencode").join("plan"));
+    }
+    action.paths.iter().all(|path| {
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            workspace.join(path)
+        };
+        path.is_absolute()
+            && dirs
+                .iter()
+                .any(|dir| dir.is_absolute() && crate::policy::inside_workspace(&path, dir))
+    })
+}
+
+/// The policy's answer to one owned `permission.asked`: `(reply, message)`
+/// for opencode — `once` (never the durable `always`: a "Always allow"
+/// answer becomes a rule in the gate for this run), or `reject` with the
+/// reason, which opencode hands the model as feedback instead of ending
+/// the turn.
+async fn permission_reply(
+    gate: &SharedGate,
+    props: &Value,
+    workspace: &std::path::Path,
+    request_input: &RequestInput,
+) -> (&'static str, Option<String>) {
+    let Some(action) = permission_action(props) else {
+        return ("once", None);
+    };
+    if gate.mode() == PermissionMode::Plan && is_plan_file(&action, workspace) {
+        return ("once", None);
+    }
+    match gate.settle(&action, &**request_input).await {
+        Decision::Allow => ("once", None),
+        Decision::Deny(reason) => ("reject", Some(reason)),
+        Decision::Ask => ("reject", None),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -1489,11 +1697,23 @@ async fn run_session(session: Session) {
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
     let dir = directory.as_deref();
 
-    let agent = request
+    let requested_agent = request
         .model_options
         .get("agent")
         .and_then(Value::as_str)
         .filter(|a| !a.is_empty());
+    // Outside Bypass every `permission.asked` goes through the policy.
+    let gate = (request.policy.mode != PermissionMode::Bypass)
+        .then(|| SharedGate::new(Gate::new(request.policy.clone(), request.cwd.clone())));
+    let plan_mode = request.policy.mode == PermissionMode::Plan;
+    // Plan runs on opencode's own read-only `plan` agent when the server has
+    // one; the policy refuses edits either way.
+    let plan_agent = if plan_mode {
+        has_plan_agent(&server, dir).await.then_some(PLAN_AGENT)
+    } else {
+        None
+    };
+    let agent = plan_agent.or(requested_agent);
 
     // ---- session create/resume -------------------------------------------
     let setup = async {
@@ -1507,16 +1727,29 @@ async fn run_session(session: Session) {
                             .and_then(Value::as_str)
                             .unwrap_or(resume)
                             .to_owned();
-                        if server.protocol().await == Protocol::V2
-                            && let Some(agent) = agent
-                        {
-                            server
-                                .post_json(
-                                    &format!("/api/session/{id}/agent"),
-                                    dir,
-                                    &json!({"agent": agent}),
-                                )
-                                .await?;
+                        if server.protocol().await == Protocol::V2 {
+                            if let Some(agent) = agent {
+                                server
+                                    .post_json(
+                                        &format!("/api/session/{id}/agent"),
+                                        dir,
+                                        &json!({"agent": agent}),
+                                    )
+                                    .await?;
+                            } else if !plan_mode
+                                && info.get("agent").and_then(Value::as_str) == Some(PLAN_AGENT)
+                            {
+                                // The agent is the session's (2.x): a session a
+                                // Plan run left on `plan` goes back to building
+                                // once the chat leaves Plan. Best effort.
+                                let _ = server
+                                    .post_json(
+                                        &format!("/api/session/{id}/agent"),
+                                        dir,
+                                        &json!({"agent": BUILD_AGENT}),
+                                    )
+                                    .await;
+                            }
                         }
                         id
                     }
@@ -1692,6 +1925,7 @@ async fn run_session(session: Session) {
             model: model.as_ref(),
             variant: variant.as_deref(),
             attachments: &request.attachments,
+            agent: plan_agent,
         },
     )
     .await
@@ -1803,6 +2037,7 @@ async fn run_session(session: Session) {
                         model: model.as_ref(),
                         variant: variant.as_deref(),
                         attachments: &[],
+                        agent: plan_agent,
                     },
                 )
                 .await
@@ -2006,6 +2241,7 @@ async fn run_session(session: Session) {
                                     model: model.as_ref(),
                                     variant: variant.as_deref(),
                                     attachments: &[],
+                                    agent: plan_agent,
                                 },
                             )
                             .await
@@ -2163,6 +2399,8 @@ async fn run_session(session: Session) {
                             turn: &mut turn,
                             pending_usage: &mut pending_usage,
                             context_windows: &context_windows,
+                            gate: gate.as_ref(),
+                            workspace: &request.cwd,
                         }).await;
                         match outcome {
                             BusOutcome::Continue => maybe_preempt!(),
@@ -2387,6 +2625,9 @@ struct TurnSpec<'a> {
     model: Option<&'a (String, String)>,
     variant: Option<&'a str>,
     attachments: &'a [String],
+    /// 1.x: the agent rides every turn (Plan's `plan` agent). 2.x sets it
+    /// on the session instead.
+    agent: Option<&'a str>,
 }
 
 fn command_body_v2(
@@ -2431,6 +2672,7 @@ async fn post_prompt(
         model,
         variant,
         attachments,
+        agent,
     } = spec;
     let protocol = server.protocol().await;
     if let Some((name, arguments)) =
@@ -2444,10 +2686,13 @@ async fn post_prompt(
         }
         // 1.x names the args `arguments`; 2.x `text`.
         let (path, cmd_body) = match protocol {
-            Protocol::V1 => (
-                format!("/session/{session_id}/command"),
-                json!({ "command": name, "arguments": arguments }),
-            ),
+            Protocol::V1 => {
+                let mut body = json!({ "command": name, "arguments": arguments });
+                if let Some(agent) = agent {
+                    body["agent"] = json!(agent);
+                }
+                (format!("/session/{session_id}/command"), body)
+            }
             Protocol::V2 => (
                 format!("/api/session/{session_id}/command"),
                 command_body_v2(server.version.get(), name, &arguments, attachments),
@@ -2495,15 +2740,18 @@ async fn post_prompt(
         return Ok(());
     }
     let (path, body) = match protocol {
-        Protocol::V1 => (
-            format!("/session/{session_id}/prompt_async"),
-            prompt_body(
+        Protocol::V1 => {
+            let mut body = prompt_body(
                 prompt,
                 model.map(|(provider, model)| (provider.as_str(), model.as_str())),
                 variant,
                 attachments,
-            ),
-        ),
+            );
+            if let Some(agent) = agent {
+                body["agent"] = json!(agent);
+            }
+            (format!("/session/{session_id}/prompt_async"), body)
+        }
         Protocol::V2 => (
             format!("/api/session/{session_id}/prompt"),
             prompt_body_v2(prompt, attachments),
@@ -2592,6 +2840,9 @@ struct BusCtx<'a> {
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
     context_windows: &'a HashMap<String, u64>,
+    /// Outside Bypass: the policy answering `permission.asked`.
+    gate: Option<&'a SharedGate>,
+    workspace: &'a str,
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2643,6 +2894,8 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         turn,
         pending_usage,
         context_windows,
+        gate,
+        workspace,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
     // /event feed (tests) delivers the payload directly.
@@ -2988,6 +3241,14 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             } else {
                 "reply"
             };
+            let policy = gate.cloned().map(|gate| {
+                (
+                    gate,
+                    props.clone(),
+                    PathBuf::from(workspace),
+                    Arc::clone(request_input),
+                )
+            });
             tokio::spawn(async move {
                 let server = Server {
                     child: None,
@@ -2998,17 +3259,23 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     protocol: protocol_cell,
                     version: tokio::sync::OnceCell::new(),
                 };
-                // Like Claude and Codex, normal Zeron sessions run unattended,
-                // regardless of RunRequest.auto_approve. Approve each owned
-                // request without writing durable permission rules via "always".
-                // Genuine agent questions use the separate question.asked path.
-                let reply = "once";
+                // Bypass: approve each owned request (Zeron's unattended
+                // default, regardless of RunRequest.auto_approve). Otherwise
+                // the policy answers, asking the user when it says to.
+                // Neither writes opencode's durable "always" rules. Genuine
+                // agent questions use the separate question.asked path.
+                let (reply, message) = match &policy {
+                    None => ("once", None),
+                    Some((gate, props, workspace, request_input)) => {
+                        permission_reply(gate, props, workspace, request_input).await
+                    }
+                };
+                let mut body = json!({ reply_key: reply });
+                if let Some(message) = message {
+                    body["message"] = json!(message);
+                }
                 if server
-                    .post_json(
-                        &reply_path,
-                        dir_owned.as_deref(),
-                        &json!({ reply_key: reply }),
-                    )
+                    .post_json(&reply_path, dir_owned.as_deref(), &body)
                     .await
                     .is_err()
                     && let Some(fallback_path) = fallback_path
@@ -3615,13 +3882,13 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: t
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    done: t.get("status").and_then(Value::as_str) == Some("completed"),
+                .map(|t| {
+                    TodoItem::new(
+                        t.get("content").and_then(Value::as_str).unwrap_or_default(),
+                        TodoStatus::parse(
+                            t.get("status").and_then(Value::as_str).unwrap_or_default(),
+                        ),
+                    )
                 })
                 .collect(),
         },
@@ -4236,17 +4503,115 @@ mod context_tests {
 
 /// Inline config is the final user config layer. Preserve inherited overrides
 /// and other MCP servers; never write chat identity into a shared config file.
+#[cfg(test)]
 fn mcp_config(
     inherited: Option<&str>,
     mcp: &zeron_proto::McpServer,
     protocol: Protocol,
 ) -> Result<String, HarnessError> {
-    let mut config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
+    let mut config = inline_config(inherited)?;
+    add_mcp(&mut config, mcp, protocol)?;
+    Ok(config.to_string())
+}
+
+/// The inherited `OPENCODE_CONFIG_CONTENT` (an object), or an empty one.
+fn inline_config(inherited: Option<&str>) -> Result<Value, HarnessError> {
+    let config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
         Some(raw) => deser_hjson::from_str(raw).map_err(|_| {
             HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be a valid config object".into())
         })?,
         None => json!({}),
     };
+    if !config.is_object() {
+        return Err(HarnessError::Protocol(
+            "OPENCODE_CONFIG_CONTENT must be an object".into(),
+        ));
+    }
+    Ok(config)
+}
+
+/// opencode permissions that aren't actions on the world: asking for them
+/// would only interrupt the agent's own bookkeeping (and `question` already
+/// reaches the user through `question.asked`). A subagent's own tools still
+/// ask, through its child session.
+const OPENCODE_INTERNAL_PERMISSIONS: &[&str] = &[
+    "question",
+    "todowrite",
+    "todoread",
+    "task",
+    "subagent",
+    "skill",
+    "plan_enter",
+    "plan_exit",
+];
+
+/// Make opencode ask before every tool, so each request reaches Zeron's
+/// policy as `permission.asked` (opencode's defaults allow edits and shell
+/// commands outright). Same `permission` block on 1.x and 2.x. The inline
+/// config is the last config layer, so these rules land after the user's
+/// global ones; the user's own `deny`s and `ask`s stay, their `allow`s
+/// become `ask` (the policy may still allow). The primary agents get the
+/// same overlay because per-agent permission config outranks the global
+/// block. Internal bookkeeping tools stay allowed.
+fn ask_for_permissions(config: &mut Value) {
+    fn ask_instead_of_allow(rule: &Value) -> Value {
+        match rule {
+            Value::String(effect) if effect == "allow" => json!("ask"),
+            Value::Object(patterns) => Value::Object(
+                patterns
+                    .iter()
+                    .map(|(pattern, effect)| (pattern.clone(), ask_instead_of_allow(effect)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    fn overlay(existing: Option<&Value>) -> Value {
+        let mut out = serde_json::Map::new();
+        // `*` first: opencode evaluates rules last-match-wins, so the
+        // specific entries after it keep their meaning.
+        let wildcard = match existing {
+            Some(Value::String(effect)) if effect == "deny" => json!("deny"),
+            Some(Value::Object(map)) if map.get("*") == Some(&json!("deny")) => json!("deny"),
+            _ => json!("ask"),
+        };
+        out.insert("*".into(), wildcard);
+        if let Some(Value::Object(map)) = existing {
+            for (permission, rule) in map {
+                if permission != "*" {
+                    out.insert(permission.clone(), ask_instead_of_allow(rule));
+                }
+            }
+        }
+        for internal in OPENCODE_INTERNAL_PERMISSIONS {
+            if out.get(*internal) != Some(&json!("deny")) {
+                out.insert((*internal).into(), json!("allow"));
+            }
+        }
+        Value::Object(out)
+    }
+    let Some(object) = config.as_object_mut() else {
+        return;
+    };
+    let global = overlay(object.get("permission"));
+    object.insert("permission".into(), global);
+    let agents = object.entry("agent").or_insert_with(|| json!({}));
+    if let Some(agents) = agents.as_object_mut() {
+        for name in ["build", "plan"] {
+            let agent = agents.entry(name).or_insert_with(|| json!({}));
+            if let Some(agent) = agent.as_object_mut() {
+                let permission = overlay(agent.get("permission"));
+                agent.insert("permission".into(), permission);
+            }
+        }
+    }
+}
+
+fn add_mcp(
+    config: &mut Value,
+    mcp: &zeron_proto::McpServer,
+    protocol: Protocol,
+) -> Result<(), HarnessError> {
     let object = config.as_object_mut().ok_or_else(|| {
         HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be an object".into())
     })?;
@@ -4274,7 +4639,7 @@ fn mcp_config(
         Protocol::V2 => server["disabled"] = json!(false),
     }
     servers.insert(mcp.name.clone(), server);
-    Ok(config.to_string())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4322,6 +4687,8 @@ http.createServer((req, res) => {{
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&first),
+                false,
+                None,
             )
             .await
             .unwrap();
@@ -4330,6 +4697,8 @@ http.createServer((req, res) => {{
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&second),
+                false,
+                None,
             )
             .await
             .unwrap();

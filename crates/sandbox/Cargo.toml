@@ -1,0 +1,29 @@
+[package]
+name = "zeron-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zeron-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+
+# Landlock (MIT OR Apache-2.0) and seccompiler (Apache-2.0 OR BSD-3-Clause,
+# rust-vmm/Firecracker) only exist for Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The Linux tests re-exec their own binary as the Landlock helper, so they own
+# `main` instead of using libtest.
+[[test]]
+name = "linux"
+path = "tests/linux.rs"
+harness = false

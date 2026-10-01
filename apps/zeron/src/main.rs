@@ -145,6 +145,9 @@ fn spawn_malloc_trimmer() {
 }
 
 fn main() -> anyhow::Result<()> {
+    // A sandboxed agent's launcher (docs/sandbox.md): confines itself and
+    // becomes the agent, never returning.
+    zeron_sandbox::run_helper_if_requested();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--noop-browser")) {
         return Ok(());
     }

@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SteeringMode, TodoItem, ToolCall,
+    RunRequest, SteeringMode, TodoItem, TodoStatus, ToolCall,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -236,6 +236,15 @@ impl Harness for CursorHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
     }
+    /// Bypass only: the @cursor/sdk hard-codes `ignoreApprovals`, so the
+    /// agent never asks before a tool and no policy can answer for it. The
+    /// stricter modes wait for an OS sandbox that confines the process.
+    fn policy_caps(&self) -> zeron_proto::PolicyCaps {
+        zeron_proto::PolicyCaps {
+            sandboxes: crate::sandboxing::os_sandboxes(),
+            ..zeron_proto::PolicyCaps::bypass_only()
+        }
+    }
     /// "Installed" means the user's own cursor-agent CLI is present — the
     /// user-visible signal they use Cursor (the SDK itself is a managed
     /// install zeron performs on demand).
@@ -305,7 +314,12 @@ impl Harness for CursorHarness {
             None
         };
         let (exe, args) = self.resolve_shim().await?;
-        let mut cmd = Command::new(&exe);
+        let mut cmd = crate::sandboxing::agent_command(
+            HarnessId::Cursor,
+            &request,
+            &exe,
+            std::path::Path::new(&request.cwd),
+        )?;
         cmd.args(&args);
         if lease.is_some() {
             cmd.env("ZERON_CURSOR_STATE_DIR", state::state_root());
@@ -767,15 +781,19 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: t
-                        .get("content")
-                        .or_else(|| t.get("text"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into(),
-                    done: t.get("status").and_then(Value::as_str) == Some("completed")
-                        || t.get("completed").and_then(Value::as_bool) == Some(true),
+                .map(|t| {
+                    let status = if t.get("completed").and_then(Value::as_bool) == Some(true) {
+                        TodoStatus::Completed
+                    } else {
+                        TodoStatus::parse(t.get("status").and_then(Value::as_str).unwrap_or(""))
+                    };
+                    TodoItem::new(
+                        t.get("content")
+                            .or_else(|| t.get("text"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                        status,
+                    )
                 })
                 .collect(),
         },
@@ -1018,5 +1036,17 @@ mod tests {
                 }),
             }]
         );
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_offers_only_bypass() {
+        let caps = CursorHarness::new().policy_caps();
+        assert_eq!(caps.modes, vec![zeron_proto::PermissionMode::Bypass]);
+        assert_eq!(caps.sandboxes, crate::sandboxing::os_sandboxes());
     }
 }

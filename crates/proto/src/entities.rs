@@ -158,6 +158,9 @@ pub struct ChatConfig {
     #[serde(default)]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub sandbox: SandboxLevel,
+    /// The chat's permission mode and sandbox (absent = `Bypass`).
+    #[serde(default)]
+    pub policy: crate::AgentPolicy,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.

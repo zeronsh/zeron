@@ -15,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
     let (steer, steering) = mpsc::channel(64);
     let interrupt = CancellationToken::new();
     let request = RunRequest {
+        policy: Default::default(),
         mcp: None,
         prompt: "This is a conversational steering test. Start writing 200 numbered lines explaining how rain forms, with a full sentence on each line. Do not use tools. If I send a bare digit while you write, that REPLACES the prior request: stop explaining and reply only LATEST:<digit>, using the latest digit received. Do not respond separately to superseded digits.".into(),
         harness: None, model: Some(model), reasoning: None,

@@ -15,6 +15,7 @@ zeron-rpc.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
 zeron-mcp.workspace = true
+zeron-sandbox.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

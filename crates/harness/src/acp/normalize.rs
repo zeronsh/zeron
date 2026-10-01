@@ -9,7 +9,7 @@
 //! statuses are snake_case).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff};
+use zeron_proto::{AgentEvent, SlashCommand, TodoItem, TodoStatus, ToolCall, ToolDiff};
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
 /// fold applies its own (smaller) cap before anything persists; this one only
@@ -403,9 +403,11 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|e| TodoItem {
-                    text: str_field(e, "content"),
-                    done: e.get("status").and_then(Value::as_str) == Some("completed"),
+                .map(|e| {
+                    TodoItem::new(
+                        str_field(e, "content"),
+                        TodoStatus::parse(e.get("status").and_then(Value::as_str).unwrap_or("")),
+                    )
                 })
                 .collect();
             // The plan has no wire id; a stable synthetic id makes every
@@ -484,16 +486,20 @@ pub(crate) fn parse_commands(value: Option<&Value>) -> Vec<SlashCommand> {
 }
 
 /// `session/request_permission` options (`{optionId, name, kind}`) → the
-/// preferred auto-approve choice: `allow_always` > `allow_once` > first.
+/// preferred auto-approve choice: `allow_always` > `allow_once` > the first
+/// option that isn't a reject. Never a `reject_*` option: with nothing to
+/// allow with, the caller answers `cancelled`.
 pub(crate) fn preferred_allow_option(options: &[Value]) -> Option<String> {
-    let by_kind = |kind: &str| {
-        options
-            .iter()
-            .find(|o| o.get("kind").and_then(Value::as_str) == Some(kind))
+    let kind = |o: &Value| {
+        o.get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
     };
+    let by_kind = |wanted: &str| options.iter().find(|o| kind(o) == wanted);
     by_kind("allow_always")
         .or_else(|| by_kind("allow_once"))
-        .or_else(|| options.first())
+        .or_else(|| options.iter().find(|o| !kind(o).starts_with("reject")))
         .map(|o| str_field(o, "optionId"))
         .filter(|id| !id.is_empty())
 }
@@ -659,14 +665,8 @@ mod tests {
                 id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
                 call: ToolCall::Todo {
                     items: vec![
-                        TodoItem {
-                            text: "read code".into(),
-                            done: true
-                        },
-                        TodoItem {
-                            text: "write fix".into(),
-                            done: false
-                        },
+                        TodoItem::new("read code", TodoStatus::Completed),
+                        TodoItem::new("write fix", TodoStatus::InProgress),
                     ]
                 },
             }
@@ -734,8 +734,17 @@ mod tests {
             json!({ "optionId": "no", "name": "Reject", "kind": "reject_once" }),
         ];
         assert_eq!(preferred_allow_option(&options), Some("always".into()));
-        let only_reject = vec![json!({ "optionId": "no", "kind": "reject_once" })];
-        assert_eq!(preferred_allow_option(&only_reject), Some("no".into()));
+        // A reject is never the "allow": nothing to allow with → cancelled.
+        let only_reject = vec![
+            json!({ "optionId": "no", "kind": "reject_once" }),
+            json!({ "optionId": "never", "kind": "reject_always" }),
+        ];
+        assert_eq!(preferred_allow_option(&only_reject), None);
+        let reject_first = vec![
+            json!({ "optionId": "no", "kind": "reject_once" }),
+            json!({ "optionId": "go", "name": "Proceed" }),
+        ];
+        assert_eq!(preferred_allow_option(&reject_first), Some("go".into()));
         assert_eq!(preferred_allow_option(&[]), None);
     }
 

@@ -414,6 +414,8 @@ impl DemoHost {
                         None,
                     );
                 }
+                // The demo host has no goal controller.
+                SessionCommandPayload::Goal { .. } => {}
             }
         }
         if !lock(&self.turns).contains_key(chat_id) {

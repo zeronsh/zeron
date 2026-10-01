@@ -38,6 +38,7 @@ fn harness() -> ClaudeHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,
@@ -930,4 +931,183 @@ async fn an_unreplayed_steer_releases_the_turn_end() {
     assert_eq!(done, DoneStatus::Completed);
     assert_eq!(steered, 1);
     assert!(started.elapsed() >= std::time::Duration::from_secs(4));
+}
+
+// ---------------------------------------------------------------------------
+// Permission modes (Zeron's policy over the stdio permission channel)
+// ---------------------------------------------------------------------------
+
+/// Controls answering successive questions with `answers` (the last one
+/// repeats), recording every question asked.
+fn answering(
+    answers: Vec<&'static str>,
+) -> (
+    RunControls,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+    mpsc::Sender<SteerMessage>,
+) {
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::default();
+    let seen = asked.clone();
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let controls = RunControls {
+        execution_lease: None,
+        request_input: Box::new(move |questions| {
+            let mut seen = seen.lock().unwrap();
+            let label = answers[seen.len().min(answers.len() - 1)];
+            seen.extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(
+                questions
+                    .iter()
+                    .map(|q| UserInputAnswer {
+                        question_id: q.id.clone(),
+                        labels: vec![label.into()],
+                    })
+                    .collect(),
+            );
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    (controls, asked, steer_tx)
+}
+
+/// Run a gate scenario under `mode`; returns the fake's verdict transcript
+/// and the questions asked.
+async fn gated(
+    scenario: &str,
+    mode: zeron_proto::PermissionMode,
+    auto_approve: bool,
+    answers: Vec<&'static str>,
+) -> (String, Vec<UserInputQuestion>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(scenario);
+    req.cwd = dir.path().display().to_string();
+    req.auto_approve = auto_approve;
+    req.policy = zeron_proto::AgentPolicy::with_mode(mode);
+    let (controls, asked, _steer) = answering(answers);
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let asked = asked.lock().unwrap().clone();
+    (text, asked)
+}
+
+#[tokio::test]
+async fn bypass_keeps_todays_flags_and_allows_everything() {
+    use zeron_proto::PermissionMode::Bypass;
+    let all_allowed = "|cr-1:allow|cr-2:allow|cr-3:allow|cr-4:allow|cr-5:allow";
+    let (text, asked) = gated("scenario:gate", Bypass, true, vec!["Deny"]).await;
+    assert_eq!(text, format!("args:bypassPermissions:yes{all_allowed}"));
+    assert!(asked.is_empty());
+    // The desktop's default: the CLI's `default` mode, every request allowed.
+    let (text, asked) = gated("scenario:gate", Bypass, false, vec!["Deny"]).await;
+    assert_eq!(text, format!("args:default:no{all_allowed}"));
+    assert!(asked.is_empty());
+}
+
+#[tokio::test]
+async fn ask_mode_asks_and_honours_once_deny_and_always() {
+    use zeron_proto::PermissionMode::Ask;
+    let (text, asked) = gated(
+        "scenario:gate",
+        Ask,
+        true,
+        vec!["Allow once", "Always allow", "Deny", "Allow once"],
+    )
+    .await;
+    assert_eq!(
+        text, "args:default:no|cr-1:allow|cr-2:allow|cr-3:deny-user|cr-4:allow|cr-5:allow",
+        "the second identical curl rides the Always-allow rule"
+    );
+    assert_eq!(asked.len(), 4, "{asked:?}");
+    let q = &asked[0];
+    assert!(q.id.starts_with(zeron_proto::policy::APPROVAL_QUESTION_PREFIX));
+    assert_eq!(q.header, "Permission");
+    assert!(q.question.contains("cargo test"), "{}", q.question);
+    assert_eq!(
+        q.options,
+        vec![
+            zeron_proto::policy::APPROVAL_ALLOW_ONCE.to_string(),
+            zeron_proto::policy::APPROVAL_ALLOW_ALWAYS.into(),
+            zeron_proto::policy::APPROVAL_DENY.into(),
+        ]
+    );
+    assert!(asked[1].question.contains("curl https://example.com"));
+    assert!(asked[3].question.contains("src/a.rs"));
+}
+
+#[tokio::test]
+async fn auto_mode_runs_dev_commands_asks_risky_and_refuses_destructive() {
+    use zeron_proto::PermissionMode::Auto;
+    let (text, asked) = gated("scenario:gate", Auto, true, vec!["Deny"]).await;
+    assert_eq!(
+        text,
+        "args:default:no|cr-1:allow|cr-2:deny-user|cr-3:deny-auto|cr-4:allow|cr-5:deny-user"
+    );
+    assert_eq!(asked.len(), 2, "only the two curls ask: {asked:?}");
+    assert!(asked.iter().all(|q| q.question.contains("curl")));
+}
+
+#[tokio::test]
+async fn accept_edits_allows_project_edits_without_asking() {
+    use zeron_proto::PermissionMode::AcceptEdits;
+    let (text, asked) = gated("scenario:gate", AcceptEdits, true, vec!["Deny"]).await;
+    assert_eq!(
+        text,
+        "args:acceptEdits:no|cr-1:deny-user|cr-2:deny-user|cr-3:deny-user|cr-4:allow|cr-5:deny-user"
+    );
+    assert!(
+        !asked.iter().any(|q| q.question.contains("a.rs")),
+        "{asked:?}"
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_is_native_and_refuses_edits() {
+    use zeron_proto::PermissionMode::Plan;
+    let (text, asked) = gated("scenario:gate", Plan, true, vec!["Allow once"]).await;
+    assert_eq!(
+        text,
+        "args:plan:no|cr-1:deny-plan|cr-2:deny-plan|cr-3:deny-plan|cr-4:deny-plan|cr-5:deny-plan"
+    );
+    assert!(asked.is_empty(), "{asked:?}");
+}
+
+#[tokio::test]
+async fn approving_the_plan_leaves_plan_mode_for_ask() {
+    use zeron_proto::PermissionMode::Plan;
+    let (text, asked) = gated("scenario:plan-exit", Plan, true, vec!["Allow once"]).await;
+    assert_eq!(text, "args:plan:no|cr-1:allow-setmode|cr-2:allow");
+    assert_eq!(
+        asked.len(),
+        2,
+        "the plan, then the edit under Ask: {asked:?}"
+    );
+    assert!(asked[0].question.contains("ExitPlanMode"));
+}
+
+#[test]
+fn claude_honours_every_mode_with_a_native_plan() {
+    let caps = ClaudeHarness::new().policy_caps();
+    assert_eq!(caps.modes, zeron_proto::PermissionMode::ALL.to_vec());
+    assert_eq!(caps.sandboxes, zeron_harness::sandboxing::os_sandboxes());
+    assert!(caps.native_plan);
+    assert!(!caps.live_mode_switch);
 }

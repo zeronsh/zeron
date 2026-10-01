@@ -59,6 +59,11 @@ pub struct SessionMessageEntry {
     /// the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
+    /// Set when a user-role entry was written by the engine on someone's
+    /// behalf (a goal-mode round prompt) rather than typed by the user.
+    /// Additive: older readers ignore it and render a plain user bubble.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<zeron_proto::MessageOrigin>,
 }
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
@@ -372,6 +377,58 @@ impl SessionDoc {
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
         self.doc.commit();
+        Ok(())
+    }
+
+    /// The chat's goal (`/goal`), if it has one. Host-only writer; one atomic
+    /// JSON value so rounds, verdicts and budgets never tear on sync. A value
+    /// an older or newer build wrote in an unreadable shape reads as no goal.
+    pub fn goal(&self) -> Option<zeron_proto::Goal> {
+        let loro::ValueOrContainer::Value(LoroValue::String(value)) =
+            self.doc.get_map("meta").get("goal")?
+        else {
+            return None;
+        };
+        serde_json::from_str(&value).ok()
+    }
+
+    /// Replace the goal. No-op when unchanged, so a controller tick that
+    /// decides nothing never creates a commit (and thereby another tick).
+    pub fn set_goal(&self, goal: &zeron_proto::Goal) -> Result<(), DocError> {
+        if self.goal().as_ref() == Some(goal) {
+            return Ok(());
+        }
+        self.doc
+            .get_map("meta")
+            .insert("goal", serde_json::to_string(goal)?)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    pub fn clear_goal(&self) -> Result<bool, DocError> {
+        let meta = self.doc.get_map("meta");
+        if meta.get("goal").is_none() {
+            return Ok(false);
+        }
+        meta.delete("goal")?;
+        self.doc.commit();
+        Ok(true)
+    }
+
+    /// Marks a hidden child-ask chat (`ask` primitive): its id. Boot recovery
+    /// never auto-resumes such a chat — nobody is waiting for its answer.
+    pub fn ask_child(&self) -> Option<String> {
+        match self.doc.get_map("meta").get("askChild") {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn set_ask_child(&self, ask_id: &str) -> Result<(), DocError> {
+        if self.ask_child().as_deref() != Some(ask_id) {
+            self.doc.get_map("meta").insert("askChild", ask_id)?;
+            self.doc.commit();
+        }
         Ok(())
     }
 
@@ -814,6 +871,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     if let Some(duration_ms) = entry.duration_ms {
         map.insert("durationMs", duration_ms)?;
     }
+    if let Some(origin) = &entry.origin {
+        map.insert(
+            "origin",
+            loro_value_from_json(&serde_json::to_value(origin)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -927,6 +990,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         continuation_of: Option<String>,
         #[serde(default)]
         duration_ms: Option<i64>,
+        #[serde(default)]
+        origin: Option<serde_json::Value>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -938,6 +1003,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             status: raw.status,
             continuation_of: raw.continuation_of,
             duration_ms: raw.duration_ms,
+            origin: decode_origin(raw.origin.as_ref()),
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -946,6 +1012,11 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         // is exactly what tonight looked like.
         Err(strict_err) => salvage_entry(v, strict_err),
     }
+}
+
+/// An unreadable origin costs only the marker styling, never the entry.
+fn decode_origin(value: Option<&serde_json::Value>) -> Option<zeron_proto::MessageOrigin> {
+    serde_json::from_value(value?.clone()).ok()
 }
 
 /// Field-level salvage for entries the strict shape rejects. Missing
@@ -1003,6 +1074,7 @@ fn salvage_entry(
             .and_then(|s| serde_json::from_value(s.clone()).ok()),
         continuation_of: str_field("continuationOf"),
         duration_ms: obj.get("durationMs").and_then(|x| x.as_i64()),
+        origin: decode_origin(obj.get("origin")),
     })
 }
 
@@ -1139,6 +1211,7 @@ impl<'a> SegmentWriter<'a> {
         write_entry_scalar_fields(
             &map,
             &SessionMessageEntry {
+                origin: None,
                 id: entry_id.into(),
                 role: MessageRole::Assistant,
                 parts: vec![],
@@ -1420,6 +1493,7 @@ mod tests {
             source_title: "Main conversation".into(),
         };
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             duration_ms: None,
             id: "fork:side".into(),
             role: MessageRole::System,
@@ -1442,6 +1516,7 @@ mod tests {
         let doc = SessionDoc::init("whale").unwrap();
         for segment in 0..4 {
             doc.push_message(&SessionMessageEntry {
+                origin: None,
                 id: format!("segment-{segment}"),
                 role: MessageRole::Assistant,
                 parts: (0..100)
@@ -1521,6 +1596,7 @@ mod tests {
 
     fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {
+            origin: None,
             id: id.into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -1550,6 +1626,64 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn todo_status_survives_the_doc_and_refreshes_in_place() {
+        use zeron_proto::{TodoItem, TodoStatus};
+        let todo = |items: Vec<TodoItem>| MessagePart::Tool {
+            // The ACP/Codex plan reuses one id for every update.
+            id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+            call: ToolCall::Todo { items },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        let doc = SessionDoc::init("c1").unwrap();
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
+        let first = todo(vec![
+            TodoItem::new("read", TodoStatus::InProgress),
+            TodoItem::new("fix", TodoStatus::Pending),
+        ]);
+        w.sync(std::slice::from_ref(&first)).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, vec![first]);
+        // The next plan update rewrites the same part, in-progress moved on.
+        let second = todo(vec![
+            TodoItem::new("read", TodoStatus::Completed),
+            TodoItem::new("fix", TodoStatus::InProgress),
+        ]);
+        w.sync(std::slice::from_ref(&second)).unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[0].parts, vec![second]);
+    }
+
+    #[test]
+    fn legacy_todo_part_without_status_still_reads() {
+        // Written by a build that only knew `done`.
+        let part: DocPartJson = serde_json::from_value(serde_json::json!({
+            "id": "t", "kind": "tool", "isError": false,
+            "call": { "kind": "todo", "items": [
+                { "text": "a", "done": true }, { "text": "b", "done": false }
+            ]}
+        }))
+        .unwrap();
+        let MessagePart::Tool {
+            call: ToolCall::Todo { items },
+            ..
+        } = from_doc_part(part)
+        else {
+            panic!("a legacy todo part must still decode");
+        };
+        assert_eq!(items[0].status(), zeron_proto::TodoStatus::Completed);
+        assert_eq!(items[1].status(), zeron_proto::TodoStatus::Pending);
     }
 
     #[test]
@@ -1687,6 +1821,7 @@ mod tests {
     fn resolve_input_stamps_the_part_in_place() {
         let doc = SessionDoc::init("chat-1").unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "m1".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Input {
@@ -1941,6 +2076,7 @@ mod tests {
     fn pre_strip_doc_parts_still_round_trip() {
         let doc = SessionDoc::init("chat-3").unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "m1".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Tool {
@@ -2138,5 +2274,138 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+    use zeron_proto::{Goal, GoalLimits, GoalStatus, MessageOrigin};
+
+    fn goal() -> Goal {
+        Goal::new("g1", "Ship it", &GoalLimits::default(), 1).unwrap()
+    }
+
+    #[test]
+    fn goal_round_trips_replicates_and_clears() {
+        let host = SessionDoc::init("chat").unwrap();
+        assert_eq!(host.goal(), None);
+        let mut g = goal();
+        host.set_goal(&g).unwrap();
+        assert_eq!(host.goal(), Some(g.clone()));
+
+        let replica = SessionDoc::from_doc(LoroDoc::new());
+        replica
+            .doc()
+            .import(&host.export_snapshot().unwrap())
+            .unwrap();
+        assert_eq!(replica.goal(), Some(g.clone()));
+
+        // An unchanged write makes no commit (a controller tick that decides
+        // nothing must not wake the next tick).
+        let before = host.doc().oplog_vv();
+        host.set_goal(&g).unwrap();
+        assert_eq!(host.doc().oplog_vv(), before);
+
+        g.status = GoalStatus::Paused;
+        host.set_goal(&g).unwrap();
+        assert_eq!(host.goal().unwrap().status, GoalStatus::Paused);
+
+        let rebuilt = crate::rebuild_thin_doc(&host).unwrap().doc;
+        assert_eq!(rebuilt.goal(), host.goal());
+
+        assert!(host.clear_goal().unwrap());
+        assert!(!host.clear_goal().unwrap());
+        assert_eq!(host.goal(), None);
+    }
+
+    #[test]
+    fn an_unreadable_goal_value_reads_as_no_goal() {
+        let doc = SessionDoc::init("chat").unwrap();
+        doc.doc()
+            .get_map("meta")
+            .insert("goal", "{not json")
+            .unwrap();
+        doc.doc().commit();
+        assert_eq!(doc.goal(), None);
+    }
+
+    #[test]
+    fn message_origin_round_trips_and_old_entries_have_none() {
+        let doc = SessionDoc::init("chat").unwrap();
+        let mut entry = SessionMessageEntry {
+            id: "u1".into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "go on".into(),
+            }],
+            created_at: 1,
+            device_id: "d".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+            origin: Some(MessageOrigin::Goal {
+                goal_id: "g1".into(),
+                round: 2,
+                title: "Fix the test".into(),
+            }),
+        };
+        doc.push_message(&entry).unwrap();
+        entry.id = "u2".into();
+        entry.origin = None;
+        doc.push_message(&entry).unwrap();
+        let read = doc.read_entries().unwrap();
+        assert!(matches!(
+            read[0].origin,
+            Some(MessageOrigin::Goal { round: 2, .. })
+        ));
+        assert_eq!(read[1].origin, None);
+        // A user entry without the field serializes exactly as before.
+        let json = serde_json::to_value(&read[1]).unwrap();
+        assert!(json.get("origin").is_none());
+    }
+
+    #[test]
+    fn goal_command_entries_round_trip_through_the_ledger() {
+        use zeron_proto::GoalCommand;
+        let doc = SessionDoc::init("chat").unwrap();
+        let entry = SessionCommandEntry {
+            id: "c1".into(),
+            payload: crate::SessionCommandPayload::Goal {
+                command: GoalCommand::Pause,
+            },
+            issued_by: "dev".into(),
+            issued_at: 1,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        };
+        doc.queue_command(&entry).unwrap();
+        let read = doc.read_commands().unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].kind(), crate::SessionCommandKind::Goal);
+        assert_eq!(read[0].payload, entry.payload);
+    }
+
+    #[test]
+    fn a_command_kind_this_build_does_not_know_is_skipped_not_fatal() {
+        // What an OLDER host sees of a Goal command: an unknown payload tag.
+        let doc = SessionDoc::init("chat").unwrap();
+        let commands = doc.doc().get_list("commands");
+        let map = commands.push_container(LoroMap::new()).unwrap();
+        map.insert("id", "c1").unwrap();
+        map.insert("kind", "teleport").unwrap();
+        map.insert(
+            "payload",
+            loro_value_from_json(&serde_json::json!({"kind": "teleport"})),
+        )
+        .unwrap();
+        map.insert("issuedBy", "d").unwrap();
+        map.insert("issuedAt", 1i64).unwrap();
+        map.insert("status", "pending").unwrap();
+        doc.doc().commit();
+        assert!(doc.read_commands().unwrap().is_empty());
     }
 }
