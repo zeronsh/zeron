@@ -539,7 +539,6 @@ pub struct Pickers {
     /// The compact picker's provider page, entered from the panel's
     /// provider button; exclusive with [`Self::compact_model_list`].
     compact_providers: bool,
-    compact_control: compact::CompactControl,
     effort_dragging: bool,
     compact_motion: compact::CompactMotion,
     compact_keyboard: bool,
@@ -774,7 +773,6 @@ impl Pickers {
             open_model_height: model_menu_height(0),
             compact_model_list: false,
             compact_providers: false,
-            compact_control: compact::CompactControl::default(),
             effort_dragging: false,
             compact_motion: compact::CompactMotion::default(),
             compact_keyboard: false,
@@ -1165,7 +1163,6 @@ impl Pickers {
         }
         if kind == PickerKind::HarnessModel {
             self.open_model_height = model_menu_height(self.setting_groups(cx).len());
-            self.compact_control = compact::CompactControl::Model;
             self.compact_model_list = false;
             self.compact_providers = false;
             self.effort_dragging = false;
@@ -2071,7 +2068,6 @@ impl Pickers {
         }
         self.pick_model(row.model.id, cx);
         if self.compact_model_picker(cx) {
-            self.compact_control = compact::CompactControl::Model;
             self.compact_model_list = false;
             self.focus_on_mount = true;
         }
@@ -4697,9 +4693,6 @@ impl Pickers {
     }
 
     fn open_setting(&mut self, scope: SettingScope, id: ModelSetting, cx: &mut Context<Self>) {
-        if self.compact_model_picker(cx) {
-            self.compact_control = compact::CompactControl::Option(id.clone());
-        }
         self.cancel_setting_hover();
         self.setting_hover.reset();
         self.setting_active = self
@@ -5134,7 +5127,6 @@ impl Pickers {
             ),
         );
         self.compact_model_list = false;
-        self.compact_control = compact::CompactControl::Model;
         self.compact_keyboard = false;
         self.active = 0;
         self.catalog_rev += 1;
@@ -7722,9 +7714,7 @@ mod tests {
         }
     }
     #[gpui::test]
-    fn compact_keyboard_reaches_every_control_and_returns_to_models(cx: &mut gpui::TestAppContext) {
-        use compact::CompactControl;
-        let haptics_before = crate::haptics::step_count();
+    fn compact_panel_shortcuts_drive_models_providers_and_effort(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
@@ -7732,38 +7722,31 @@ mod tests {
             settings.compact_model_picker = true;
             crate::settings::init(settings, dir.path(), cx);
         });
+        let laddered = |id: &str, label: &str| {
+            let mut model = bare_model(id, label);
+            model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
+            model
+        };
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut picker = Pickers::new(state, cx);
             picker.config.harness = Some(HarnessId::Codex);
-            picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
-            let mut model = bare_model("model", "Model");
-            model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
-            model.options = vec![ModelOption {
-                id: "serviceTier".into(),
-                label: "Service tier".into(),
-                default_choice: "standard".into(),
-                choices: ["standard", "fast"]
-                    .map(|id| ModelOptionChoice {
-                        id: id.into(),
-                        label: id.into(),
-                    })
-                    .to_vec(),
-            }];
-            model.options.push(ModelOption {
-                id: "contextWindow".into(),
-                label: "Context window".into(),
-                default_choice: "standard".into(),
-                choices: ["standard", "large"]
-                    .map(|id| ModelOptionChoice {
-                        id: id.into(),
-                        label: id.into(),
-                    })
-                    .to_vec(),
-            });
-            picker
-                .models
-                .insert(HarnessId::Codex, Loadable::Ready(vec![model]));
+            picker.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::ClaudeCode, "Claude"),
+            ]);
+            picker.models.insert(
+                HarnessId::Codex,
+                Loadable::Ready(vec![
+                    laddered("model", "Model"),
+                    laddered("other", "Other model"),
+                    laddered("third", "Third model"),
+                ]),
+            );
+            picker.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![laddered("claude", "Claude model")]),
+            );
             picker
         });
         handle
@@ -7771,107 +7754,98 @@ mod tests {
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down enter");
+        // Down opens the list on the model after the selected one; Enter
+        // picks it and lands back on the panel.
+        cx.simulate_keystrokes(handle.into(), "down");
         handle
             .read_with(cx, |picker, cx| {
-                assert_eq!(picker.compact_control, CompactControl::Fast);
-                assert_eq!(picker.resolved(cx).model_options["serviceTier"], "fast");
+                assert!(picker.compact_model_list);
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "other");
             })
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "enter");
         handle
             .read_with(cx, |picker, cx| {
-                assert_eq!(picker.compact_control, CompactControl::Fast);
-                assert!(
-                    !picker
-                        .resolved(cx)
-                        .model_options
-                        .contains_key("serviceTier"),
-                    "Fast mode toggles back to the model default"
-                );
+                assert!(!picker.compact_model_list);
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
             })
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down home home");
+        // Up opens it on the model before; Escape steps back without a pick.
+        cx.simulate_keystrokes(handle.into(), "up");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(picker.compact_model_list);
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "model");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "escape");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(!picker.compact_model_list);
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
+            })
+            .unwrap();
+        // In the list, ⌘⇧F stars the highlighted model without picking it,
+        // and the highlight follows that model through the re-sort.
+        cx.simulate_keystrokes(handle.into(), "down");
+        cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(picker.defaults.is_favorite(HarnessId::Codex, "third"));
+                assert_eq!(picker.active, 0, "Favorite should move to the first row");
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "third");
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(!picker.defaults.is_favorite(HarnessId::Codex, "third"));
+                assert_eq!(
+                    picker.active, 2,
+                    "Focus must follow the unstarred model back"
+                );
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "third");
+            })
+            .unwrap();
+        // Tab cycles providers in place, each at its last-used model.
+        cx.simulate_keystrokes(handle.into(), "escape");
+        cx.simulate_keystrokes(handle.into(), "tab");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(!picker.compact_model_list && !picker.compact_providers);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "tab");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::Codex));
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            })
+            .unwrap();
+        // Left/Right and Home/End set the effort, one haptic per change
+        // and none at an unchanged endpoint.
+        let haptics_before = handle
+            .read_with(cx, |_, _| crate::haptics::step_count())
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "home home");
         handle
             .read_with(cx, |picker, cx| {
                 assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::Low))
             })
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "end end down enter");
+        cx.simulate_keystrokes(handle.into(), "right right left right");
         handle
             .read_with(cx, |picker, cx| {
                 assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
-                assert_eq!(
-                    crate::haptics::step_count() - haptics_before,
-                    2,
-                    "One haptic per changed step, none at an unchanged endpoint"
-                );
-                assert_eq!(
-                    picker.setting_menu,
-                    Some(ModelSetting::Option("contextWindow".into()))
-                );
-            })
-            .unwrap();
-        // Tab wraps to the provider button, which opens the provider page;
-        // Escape returns onto it, and the model button is the next control.
-        cx.simulate_keystrokes(handle.into(), "escape tab enter");
-        handle
-            .read_with(cx, |picker, _| assert!(picker.compact_providers))
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "escape");
-        handle
-            .read_with(cx, |picker, _| {
-                assert!(!picker.compact_providers);
-                assert_eq!(picker.compact_control, CompactControl::Provider);
-                assert!(
-                    !picker.compact_keyboard,
-                    "Escape back must not light the focus ring"
-                );
-            })
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down enter");
-        handle
-            .read_with(cx, |picker, _| assert!(picker.compact_model_list))
-            .unwrap();
-        handle
-            .update(cx, |picker, _, cx| {
-                if let Some(Loadable::Ready(models)) = picker.models.get_mut(&HarnessId::Codex) {
-                    models.push(bare_model("other", "Other model"));
-                }
-                picker.catalog_rev += 1;
-                cx.notify();
-            })
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down");
-        cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
-        handle
-            .read_with(cx, |picker, cx| {
-                assert!(picker.defaults.is_favorite(HarnessId::Codex, "other"));
-                assert_eq!(picker.active, 0, "Favorite should move to the first row");
-                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "other");
-                assert_eq!(picker.selected_model(cx).unwrap().id, "model");
-            })
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
-        handle
-            .read_with(cx, |picker, cx| {
-                assert!(!picker.defaults.is_favorite(HarnessId::Codex, "other"));
-                assert!(!picker.defaults.is_favorite(HarnessId::Codex, "model"));
-                assert_eq!(
-                    picker.active, 1,
-                    "Focus must follow the unstarred model back"
-                );
-                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "other");
-            })
-            .unwrap();
-        // Back from the list onto Model; the provider button sits before it.
-        cx.simulate_keystrokes(handle.into(), "escape shift-tab shift-tab");
-        handle
-            .read_with(cx, |picker, _| {
-                assert_eq!(
-                    picker.compact_control,
-                    CompactControl::Option(ModelSetting::Option("contextWindow".into()))
-                )
+                assert_eq!(crate::haptics::step_count() - haptics_before, 4);
             })
             .unwrap();
     }

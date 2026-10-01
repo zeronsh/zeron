@@ -1,16 +1,6 @@
 //! Alternate presentation of the same model and option mutations.
 use super::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub(super) enum CompactControl {
-    Provider,
-    #[default]
-    Model,
-    Fast,
-    Effort,
-    Option(ModelSetting),
-}
-
 pub(super) const COMPACT_WIDTH: f32 = 256.0;
 /// One-line model rows (plus the 2px gap) so about seven fit at once.
 pub(super) const COMPACT_ROW_HEIGHT: f32 = 32.0;
@@ -240,7 +230,7 @@ impl Pickers {
                 el.bg(crate::theme::ink(0.05))
             })
             .when(self.compact_keyboard && self.active == ix, |el| {
-                el.aria_active_descendant().shadow(focus_outline(&theme))
+                el.aria_active_descendant()
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered && (this.active != ix || this.compact_keyboard) {
@@ -384,14 +374,8 @@ impl Pickers {
         cx.notify();
     }
 
-    /// Back from either list page to the panel, onto the control that
-    /// opened it.
+    /// Back from either list page to the panel.
     pub(super) fn show_compact_panel(&mut self, cx: &mut Context<Self>) {
-        self.compact_control = if self.compact_providers {
-            CompactControl::Provider
-        } else {
-            CompactControl::Model
-        };
         self.compact_model_list = false;
         self.compact_providers = false;
         self.focus_on_mount = true;
@@ -518,7 +502,7 @@ impl Pickers {
                             el.bg(crate::theme::ink(0.05))
                         })
                         .when(self.compact_keyboard && self.active == ix, |el| {
-                            el.aria_active_descendant().shadow(focus_outline(&theme))
+                            el.aria_active_descendant()
                         })
                         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                             if *hovered && (this.active != ix || this.compact_keyboard) {
@@ -721,28 +705,6 @@ impl Pickers {
             && !matches!(id, ModelSetting::Option(id) if hidden.contains(id))
     }
 
-    fn compact_controls(&self, cx: &App) -> Vec<CompactControl> {
-        let mut controls = Vec::new();
-        if !self.harness_locked(cx) {
-            controls.push(CompactControl::Provider);
-        }
-        controls.push(CompactControl::Model);
-        if self.compact_fast_choice(cx).is_some() {
-            controls.push(CompactControl::Fast);
-        }
-        if self.compact_effort(cx).is_some() {
-            controls.push(CompactControl::Effort);
-        }
-        let hidden = self.compact_hidden_options(cx);
-        controls.extend(
-            self.setting_groups(cx)
-                .into_iter()
-                .filter(|g| Self::compact_option_visible(&g.id, &hidden))
-                .map(|g| CompactControl::Option(g.id)),
-        );
-        controls
-    }
-
     pub(super) fn pick_compact_effort(
         &mut self,
         effort: CompactEffort,
@@ -852,62 +814,34 @@ impl Pickers {
         self.popover_frame_flush(COMPACT_WIDTH, content, cx)
     }
 
+    /// The panel's shortcuts, live only while it is the picker's page: Up
+    /// and Down open the model list on the model beside the selected one,
+    /// Tab cycles providers, Left/Right (Home/End) set the effort.
     pub(super) fn compact_panel_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         self.compact_keyboard = true;
-        let controls = self.compact_controls(cx);
-        if !controls.contains(&self.compact_control) {
-            self.compact_control = CompactControl::Model;
-        }
         match event.keystroke.key.as_str() {
             "escape" => self.animate_close(cx),
-            "up" | "down" | "tab" => {
-                let current = controls
-                    .iter()
-                    .position(|control| *control == self.compact_control);
-                let backwards = event.keystroke.key == "up"
-                    || (event.keystroke.key == "tab" && event.keystroke.modifiers.shift);
-                let next =
-                    popover::menu_step(current, controls.len(), if backwards { -1 } else { 1 })
-                        .unwrap_or(0);
-                self.compact_control = controls[next].clone();
-                self.active = match &self.compact_control {
-                    CompactControl::Option(id) => self
-                        .setting_groups(cx)
-                        .iter()
-                        .position(|g| &g.id == id)
-                        .map(|i| self.model_rows_len(cx) + i)
-                        .unwrap_or(NO_ACTIVE_ROW),
-                    _ => NO_ACTIVE_ROW,
+            "up" | "down" => {
+                self.show_compact_models(cx);
+                let delta = if event.keystroke.key == "up" { -1 } else { 1 };
+                if let Some(next) =
+                    popover::menu_step(Some(self.active), self.model_rows_len(cx), delta)
+                {
+                    self.active = next;
+                    self.model_scroll
+                        .scroll_to_item(next, gpui::ScrollStrategy::Nearest);
+                }
+            }
+            "enter" | "space" => self.show_compact_models(cx),
+            "tab" => {
+                let delta = if event.keystroke.modifiers.shift {
+                    -1
+                } else {
+                    1
                 };
-                if let CompactControl::Option(id) = &self.compact_control {
-                    let hidden = self.compact_hidden_options(cx);
-                    let index = self
-                        .setting_groups(cx)
-                        .iter()
-                        .filter(|g| Self::compact_option_visible(&g.id, &hidden))
-                        .position(|g| &g.id == id)
-                        .unwrap_or(0);
-                    self.menu_scroll
-                        .set_offset(gpui::point(px(0.0), px(-(index as f32 * 28.0))));
-                }
+                self.cycle_compact_provider(delta, cx);
             }
-            "enter" | "space" => match self.compact_control.clone() {
-                CompactControl::Provider => self.show_compact_providers(cx),
-                CompactControl::Model => self.show_compact_models(cx),
-                CompactControl::Fast => {
-                    if let Some((option, choice, default, _)) = self.compact_fast_choice(cx) {
-                        self.pick_option(option, choice, default, cx);
-                    }
-                }
-                CompactControl::Option(id) => self.open_setting(SettingScope::Tray, id, cx),
-                CompactControl::Effort => {}
-            },
-            "right" if matches!(self.compact_control, CompactControl::Option(_)) => {
-                if let CompactControl::Option(id) = self.compact_control.clone() {
-                    self.open_setting(SettingScope::Tray, id, cx);
-                }
-            }
-            "left" | "right" | "home" | "end" if self.compact_control == CompactControl::Effort => {
+            "left" | "right" | "home" | "end" => {
                 if let Some(effort) = self.compact_effort(cx) {
                     let last = effort.labels.len().saturating_sub(1);
                     let next = match event.keystroke.key.as_str() {
@@ -923,6 +857,21 @@ impl Pickers {
         }
         cx.notify();
         cx.stop_propagation();
+    }
+
+    /// Tab on the panel: the next provider on offer, wrapping, at its
+    /// last-used model. A chat's fixed provider stays put.
+    fn cycle_compact_provider(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.harness_locked(cx) {
+            return;
+        }
+        let providers = self.rail_descriptors(cx);
+        let current = self
+            .effective_harness(cx)
+            .and_then(|harness| providers.iter().position(|d| d.id == harness));
+        if let Some(next) = popover::menu_step(current, providers.len(), delta) {
+            self.pick_compact_provider(providers[next].id, cx);
+        }
     }
 
     pub(super) fn render_compact_model_panel(
@@ -945,11 +894,6 @@ impl Pickers {
             .unwrap_or_else(|| "Default".into());
         let model_accessible: SharedString =
             format!("{} · {} · Change model", effort, label).into();
-        let provider_focus =
-            self.compact_keyboard && self.compact_control == CompactControl::Provider;
-        let model_focus = self.compact_keyboard && self.compact_control == CompactControl::Model;
-        let fast_focus = self.compact_keyboard && self.compact_control == CompactControl::Fast;
-        let effort_focus = self.compact_keyboard && self.compact_control == CompactControl::Effort;
         let now = std::time::Instant::now();
         let reduced = cx.reduce_motion();
         // Fast mode alone brings the fill to life: a sheen and speed streaks
@@ -1007,9 +951,6 @@ impl Pickers {
             .justify_center()
             .cursor_pointer()
             .on_hover(motion::hover_listener(model_key))
-            .when(model_focus, |el| {
-                el.aria_active_descendant().shadow(focus_outline(&theme))
-            })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.compact_keyboard = false;
                 this.show_compact_models(cx);
@@ -1108,9 +1049,6 @@ impl Pickers {
                     .cursor_pointer()
                     .bg(crate::theme::ink(0.05 * fast_hover))
                     .on_hover(motion::hover_listener(fast_key))
-                    .when(fast_focus, |el| {
-                        el.aria_active_descendant().shadow(focus_outline(&theme))
-                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.compact_keyboard = false;
                         this.pick_option(option.clone(), choice.clone(), default, cx);
@@ -1188,9 +1126,6 @@ impl Pickers {
                         .aria_label(SharedString::from(format!("{name} · Change provider")))
                         .cursor_pointer()
                         .on_hover(motion::hover_listener(provider_key))
-                        .when(provider_focus, |el| {
-                            el.aria_active_descendant().shadow(focus_outline(&theme))
-                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.compact_keyboard = false;
                             this.show_compact_providers(cx);
@@ -1249,7 +1184,6 @@ impl Pickers {
             let slider = div()
                 .id("compact-effort-slider")
                 .role(gpui::Role::Slider)
-                .when(effort_focus, |el| el.aria_active_descendant())
                 .aria_label("Reasoning effort")
                 .aria_value(effort.clone())
                 .aria_numeric_value(selected as f64)
@@ -1266,7 +1200,6 @@ impl Pickers {
                     cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                         window.focus(&this.focus, cx);
                         this.compact_keyboard = false;
-                        this.compact_control = CompactControl::Effort;
                         this.active = NO_ACTIVE_ROW;
                         this.effort_dragging = true;
                         this.pick_effort_at(event.position.x, cx);
@@ -1371,8 +1304,7 @@ impl Pickers {
                             }]))
                         })
                         .child(
-                            crate::glass::thumb(place(div()), &theme)
-                                .when(effort_focus, |el| el.border_2().border_color(theme.text)),
+                            crate::glass::thumb(place(div()), &theme),
                         )
                 });
             // The rail starts on the same edge as the title and row labels.
@@ -1619,16 +1551,6 @@ mod tests {
         assert_eq!(effort_index(100.0, 200.0, 5), Some(2));
         assert_eq!(effort_index(250.0, 200.0, 5), Some(4));
     }
-}
-
-fn focus_outline(theme: &Theme) -> Vec<gpui::BoxShadow> {
-    vec![gpui::BoxShadow {
-        color: theme.text.opacity(0.8),
-        offset: gpui::point(px(0.0), px(0.0)),
-        blur_radius: px(0.0),
-        spread_radius: px(2.0),
-        inset: true,
-    }]
 }
 
 struct PickerHint(SharedString);
