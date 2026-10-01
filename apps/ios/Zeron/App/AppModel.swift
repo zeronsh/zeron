@@ -228,9 +228,31 @@ final class AppModel {
         newSessionImages = []
     }
 
-    func didEnterBackground() { client?.onBackground() }
+    /// Serializes the core's lifecycle calls: a foreground that follows
+    /// quickly must not overtake a background flush that is still running.
+    private let lifecycleQueue = DispatchQueue(label: "sh.zeron.lifecycle")
+
+    /// The core's flush is blocking disk I/O, so it runs off the main thread;
+    /// the assertion keeps iOS from suspending the process between this
+    /// callback returning and the write finishing.
+    func didEnterBackground() {
+        guard let client else { return }
+        var task = UIBackgroundTaskIdentifier.invalid
+        let end = {
+            guard task != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(task)
+            task = .invalid
+        }
+        // Out of time: iOS suspends us regardless, but the task must be ended.
+        task = UIApplication.shared.beginBackgroundTask(withName: "sh.zeron.flush", expirationHandler: end)
+        lifecycleQueue.async {
+            client.onBackground()
+            DispatchQueue.main.async(execute: end)
+        }
+    }
+
     func willEnterForeground() {
-        client?.onForeground()
+        if let client { lifecycleQueue.async { client.onForeground() } }
         refreshWorkspace()
     }
 
