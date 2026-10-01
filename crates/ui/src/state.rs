@@ -582,8 +582,18 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
 pub use zeron_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
-    parse_auth_state, project_label, sort_active, sort_chats, sort_spaces, sort_tabs,
+    parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
+
+/// What a session row shows that ticks with the clock rather than with its
+/// content: the staleness-checked indicator and running-subagent count. A
+/// change in either must repaint even when the row itself is untouched.
+fn session_presence(session: &Session, now: DateTime<Utc>) -> (Indicator, u32) {
+    (
+        effective_indicator(Some(session), now),
+        running_subagents(Some(session), now),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Org gate (pure)
@@ -677,7 +687,7 @@ pub struct AppState {
     device_presentation: Option<Vec<(Device, bool, String)>>,
     // Presence ticks also retire stale remote session indicators. Remember
     // their last published appearance even when the device rows stay online.
-    session_presence_presentation: Vec<Indicator>,
+    session_presence_presentation: Vec<(Indicator, u32)>,
     /// Live edge posture (WatchConnectivity): drives the connection pill,
     /// composer honesty ("will queue"), and the Queued send badges.
     pub connectivity: zeron_proto::Connectivity,
@@ -1073,7 +1083,7 @@ impl AppState {
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
         let presence: Vec<_> = sessions
             .iter()
-            .map(|session| effective_indicator(Some(session), now))
+            .map(|session| session_presence(session, now))
             .collect();
         let presentation: Vec<_> = sessions
             .iter()
@@ -1303,7 +1313,7 @@ impl AppState {
         let session_presence: Vec<_> = self
             .sessions
             .iter()
-            .map(|session| effective_indicator(Some(session), now))
+            .map(|session| session_presence(session, now))
             .collect();
         let changed = self.device_presentation.as_ref() != Some(&presentation)
             || self.session_presence_presentation != session_presence;
@@ -1945,6 +1955,13 @@ impl AppState {
 
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
+    }
+
+    /// Subagents running under `chat_id` right now (the engine's count on its
+    /// session row; 0 once that row goes stale). Every device can ask, opened
+    /// chat or not.
+    pub fn running_subagents_for(&self, chat_id: &str, now: DateTime<Utc>) -> u32 {
+        running_subagents(self.session_for(chat_id), now)
     }
 
     /// Staleness-checked status dot for a chat row. A send in flight reads as
@@ -3677,6 +3694,7 @@ mod tests {
     ) -> Session {
         Session {
             last_completed_turn: None,
+            running_subagents: 0,
             chat_id: chat_id.into(),
             device_id: "dev".into(),
             status,
@@ -3921,6 +3939,7 @@ mod tests {
         let now = Utc::now();
         let mut row = Session {
             last_completed_turn: None,
+            running_subagents: 0,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -3952,6 +3971,7 @@ mod tests {
         let now = Utc::now();
         state.sessions = vec![Session {
             last_completed_turn: None,
+            running_subagents: 0,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,

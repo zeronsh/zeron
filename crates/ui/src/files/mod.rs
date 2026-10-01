@@ -29,6 +29,7 @@ pub mod model;
 pub mod preview;
 pub mod search;
 mod sections;
+mod subagents;
 pub mod tree;
 pub mod watch;
 

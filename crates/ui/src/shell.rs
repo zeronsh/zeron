@@ -6978,6 +6978,20 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
+        // Subagents running under this chat show as a "● N" pill beside the
+        // row's own activity indicator, never in place of it: the pill takes
+        // the time stamp's spot (compact) or leads the status (regular), and
+        // keeps showing after the parent's own turn has settled.
+        let running_subagents = self.state.read(cx).running_subagents_for(&id, Utc::now());
+        let subagent_pill = |suffix: &str| {
+            (running_subagents > 0).then(|| {
+                crate::running_pill::running_pill(
+                    format!("{row_id}-subagents-{suffix}"),
+                    running_subagents,
+                    theme,
+                )
+            })
+        };
         let compact_status = compact.then(|| {
             let glyph = if working {
                 loaders::mini_glyph_spinner(
@@ -7125,20 +7139,33 @@ impl Shell {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(4.0))
-                        .child(glyph)
+                        .gap(px(6.0))
+                        .children(subagent_pill("label"))
                         .child(
                             div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(status_color)
-                                .child(SharedString::from(label)),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(glyph)
+                                .child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(status_color)
+                                        .child(SharedString::from(label)),
+                                ),
                         )
                         .into_any_element()
                 }
                 None => div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
+                    .children(subagent_pill("idle"))
                     .child(time_ago.clone())
                     .into_any_element(),
             }
@@ -7443,6 +7470,12 @@ impl Shell {
                         let text_hint = compact_jump_label
                             .as_ref()
                             .is_some_and(|label| label.chars().count() > 3);
+                        // Running subagents take the time stamp's place; the
+                        // jump hint still wins while its modifier is held.
+                        let pill = compact_jump_label
+                            .is_none()
+                            .then(|| subagent_pill("compact"))
+                            .flatten();
                         el.child(
                             div()
                                 .debug_selector({
@@ -7452,13 +7485,21 @@ impl Shell {
                                 .when(text_hint, |el| {
                                     el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
                                 })
-                                .when(!text_hint, |el| el.w(px(30.0)))
+                                // A pill can be wider than the plain time.
+                                .when(!text_hint, |el| el.min_w(px(30.0)))
                                 .flex_none()
+                                .flex()
+                                .flex_row()
+                                .justify_end()
                                 .whitespace_nowrap()
-                                .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(subline)
-                                .child(compact_jump_label.unwrap_or(time_ago)),
+                                .child(match pill {
+                                    Some(pill) => pill,
+                                    None => compact_jump_label
+                                        .unwrap_or(time_ago)
+                                        .into_any_element(),
+                                }),
                         )
                     }),
             )

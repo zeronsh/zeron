@@ -50,6 +50,7 @@ pub mod popover;
 pub mod project_actions;
 pub mod queue;
 pub mod rail;
+pub mod running_pill;
 pub mod settings;
 pub mod shell;
 pub mod sound;

@@ -268,6 +268,83 @@ fn mini_spinner_cells(
         }))
 }
 
+/// A rounded fill that breathes on the zeron pulse clock between `floor` and
+/// `peak` opacity, filling whatever positioned box it is placed in. Like [`pulse_dot`] it repaints from its own cached
+/// view, so the surrounding chrome stays still.
+pub fn pulse_glow(
+    key: impl Into<SharedString>,
+    radius: f32,
+    tint: gpui::Hsla,
+    floor: f32,
+    peak: f32,
+) -> impl IntoElement {
+    PulseGlow {
+        key: key.into(),
+        style: GlowStyle {
+            radius,
+            tint,
+            floor,
+            peak,
+        },
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct GlowStyle {
+    radius: f32,
+    tint: gpui::Hsla,
+    floor: f32,
+    peak: f32,
+}
+
+#[derive(IntoElement)]
+struct PulseGlow {
+    key: SharedString,
+    style: GlowStyle,
+}
+
+impl RenderOnce for PulseGlow {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let style = self.style;
+        let view = window.with_global_id(self.key.into(), |id, window| {
+            window.with_element_state(id, |previous: Option<Entity<PulseGlowView>>, _| {
+                let view = previous.unwrap_or_else(|| cx.new(|_| PulseGlowView { style }));
+                view.update(cx, |view, cx| {
+                    if view.style != style {
+                        view.style = style;
+                        cx.notify();
+                    }
+                });
+                (view.clone(), view)
+            })
+        });
+        view.cached(gpui::StyleRefinement::default().size_full())
+    }
+}
+
+struct PulseGlowView {
+    style: GlowStyle,
+}
+
+impl Render for PulseGlowView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let GlowStyle {
+            radius,
+            tint,
+            floor,
+            peak,
+        } = self.style;
+        let delta = motion::pulse_delta_slow(&ZERON_PULSE, cx.entity_id(), cx);
+        // pulse_opacity spans 0.08..1; renormalise to 0..1 before mapping.
+        let wave = (motion::pulse_opacity(delta) - 0.08) / 0.92;
+        div()
+            .size_full()
+            .rounded(px(radius))
+            .bg(tint)
+            .opacity(motion::lerp(floor, peak, wave))
+    }
+}
+
 /// Stroke width of [`upload_progress_ring`].
 const RING_STROKE: f32 = 2.5;
 /// Polyline segments for a full circle — plenty for a ≤40px ring.

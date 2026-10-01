@@ -414,6 +414,7 @@ pub(crate) fn seed(
         if let Some(status) = demo.status {
             doc.upsert_session(&Session {
                 last_completed_turn: None,
+                running_subagents: 0,
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,
