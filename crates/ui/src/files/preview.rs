@@ -99,7 +99,7 @@ pub(super) struct FilePreviewState {
     images_visible: bool,
     documents: HashMap<String, FileDocument>,
     document_recency: VecDeque<String>,
-    active: Option<String>,
+    pub(super) active: Option<String>,
     highlights: HashMap<String, HighlightedFile>,
     syntax_cache: SyntaxHighlightCache,
     list: ListState,
@@ -2367,14 +2367,27 @@ impl FilesSurface {
                     .child((*part).to_string()),
             );
         }
-        crumbs = crumbs
+        // Clicking the path swaps it for an editable field.
+        let crumbs = crumbs
+            .cursor_text()
+            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+            .px(px(4.0))
+            .hover(|style| style.bg(crate::theme::ink(0.055)))
+            .role(gpui::Role::Button)
+            .aria_label("Edit file path")
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default()
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.begin_path_edit(window, cx)))
             .tooltip(move |_, cx| {
                 cx.new(|_| FileEditorTooltip {
                     text: tooltip_path.clone(),
                 })
                 .into()
             })
-            .tooltip_show_delay(Duration::from_millis(350));
+            .tooltip_show_delay(Duration::from_millis(350))
+            .into_any_element();
+        let crumbs = self.render_path_field(theme, cx).unwrap_or(crumbs);
         toolbar(theme)
             .pr(px(crate::surface_chrome::CONTROL_GAP))
             .child(

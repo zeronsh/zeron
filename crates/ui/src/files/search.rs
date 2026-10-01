@@ -4,7 +4,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Context, ListSizingBehavior, SharedString, Task, Window, div, list, prelude::*, px,
+    AnyElement, Context, ListSizingBehavior, MouseButton, MouseDownEvent, SharedString, Task,
+    Window, div, list, prelude::*, px,
 };
 use zeron_proto::{
     ListWorkspaceDirectoryRequest, SearchWorkspaceFilesRequest, WorkspaceEntryKind,
@@ -634,6 +635,22 @@ impl FilesSurface {
                 this.search_state.active = index;
                 this.activate_search_result(cx);
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let path = row.path.clone();
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.on_row_secondary_click(
+                            path.clone(),
+                            is_directory,
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            )
             .on_drag(drag_payload, |payload, _, _, cx| {
                 cx.stop_propagation();
                 workspace_path_drag_ghost(payload, cx)

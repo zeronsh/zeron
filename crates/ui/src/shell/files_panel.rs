@@ -177,6 +177,12 @@ impl Shell {
                     {
                         this.add_file_surface(path.clone(), window, cx);
                     }
+                    FilesEvent::AttachPath { path, is_directory } => {
+                        this.composer.update(cx, |composer, cx| {
+                            composer.add_workspace_path(path, *is_directory, window, cx)
+                        });
+                        cx.notify();
+                    }
                     FilesEvent::OpenWebLink(activation) => {
                         if let crate::markdown::render::LinkOutcome::External(url) =
                             this.activate_session_link(activation, window, cx)

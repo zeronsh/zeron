@@ -2183,6 +2183,12 @@ impl ComposerInput {
         cx.notify();
     }
 
+    /// Select the whole text, as the Select All action does.
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx);
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.invalidate_mention_tooltip();
         self.edit_revision = self.edit_revision.wrapping_add(1);

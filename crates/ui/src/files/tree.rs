@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, KeyDownEvent, ListSizingBehavior, MouseButton, Window, div, list,
-    prelude::*, px,
+    AnyElement, Context, KeyDownEvent, ListSizingBehavior, MouseButton, MouseDownEvent, Window,
+    div, list, prelude::*, px,
 };
 use zeron_proto::WorkspaceEntryKind;
 
@@ -292,6 +292,22 @@ impl FilesSurface {
                         this.tree_focus.focus(window, cx);
                         this.activate_tree_path(path.clone(), cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener({
+                            let path = row.path.clone();
+                            move |this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.on_row_secondary_click(
+                                    path.clone(),
+                                    is_directory,
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        }),
+                    )
                     .on_drag(drag_payload, |payload, _, _, cx| {
                         cx.stop_propagation();
                         workspace_path_drag_ghost(payload, cx)
@@ -440,6 +456,10 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) {
         let handled = match event.keystroke.key.as_str() {
+            "escape" if self.tree_context_menu_open() => {
+                self.close_tree_context_menu(cx);
+                true
+            }
             "up" => {
                 self.tree.select_previous();
                 true

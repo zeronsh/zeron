@@ -26,10 +26,12 @@ mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;
 pub mod model;
+mod path_bar;
 pub mod preview;
 pub mod search;
 mod sections;
 pub mod tree;
+mod tree_menu;
 pub mod watch;
 
 use client::{FilesRequestContext, WorkspaceFilesClient};
@@ -149,6 +151,12 @@ pub(crate) fn workspace_path_drag_ghost(
 pub enum FilesEvent {
     OpenFile(String),
     RevealFile(String),
+    /// The row menu's "Add to chat": mention this workspace path in the
+    /// composer.
+    AttachPath {
+        path: String,
+        is_directory: bool,
+    },
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
     FileRenamed {
@@ -234,6 +242,14 @@ pub struct FilesSurface {
     pending_line_navigation: Option<(u32, Option<u32>)>,
     line_navigation_generation: u64,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
+    tree_context_menu: crate::popover::Popup<tree_menu::TreeContextMenu>,
+    /// The editor header's editable path (editor presentation only).
+    path_input: Option<Entity<ComposerInput>>,
+    path_edit: Option<path_bar::PathEdit>,
+    path_check: Option<Task<()>>,
+    /// Enter was pressed in the path field; the next render commits it
+    /// (input events carry no window).
+    path_submit_requested: bool,
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
     started: bool,
@@ -241,6 +257,7 @@ pub struct FilesSurface {
     sections: sections::ExplorerSections,
     _observe: Subscription,
     _search_events: Subscription,
+    _path_events: Option<Subscription>,
 }
 
 impl Render for FilesSurface {
@@ -248,6 +265,10 @@ impl Render for FilesSurface {
         if std::mem::take(&mut self.search_restore_tree_focus) {
             self.tree_focus.focus(window, cx);
         }
+        if std::mem::take(&mut self.path_submit_requested) {
+            self.commit_path_edit(window, cx);
+        }
+        self.poll_path_blur(window, cx);
         let theme = crate::theme::Theme::of(cx).clone();
         let is_editor = self.presentation.is_editor();
         // Both presentations carry a secondary header of the same height
@@ -264,6 +285,7 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        let tree_context_menu = self.render_tree_context_menu(&theme, cx);
         // The explorer docks its Subagents / Chats sections under the tree;
         // an editor surface has no footer.
         let sections = (!is_editor).then(|| self.render_sections(&theme, cx));
@@ -283,6 +305,7 @@ impl Render for FilesSurface {
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(sections)
             .children(editor_context_menu)
+            .children(tree_context_menu)
     }
 }
 
@@ -517,6 +540,23 @@ impl FilesSurface {
                 .with_accessibility_role(gpui::Role::SearchInput)
                 .with_text_metrics(11.0, 16.0)
         });
+        let path_input = presentation.is_editor().then(|| {
+            cx.new(|cx| {
+                ComposerInput::new("Path to a file", cx)
+                    .with_single_line()
+                    .with_text_metrics(11.0, 16.0)
+            })
+        });
+        let path_events = path_input.as_ref().map(|input| {
+            cx.subscribe(input, |this: &mut Self, _, event, cx| match event {
+                ComposerInputEvent::Edited => this.on_path_input_edited(cx),
+                ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
+                    this.path_submit_requested = true;
+                    cx.notify();
+                }
+                _ => {}
+            })
+        });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => this.on_search_edited(cx),
             ComposerInputEvent::Submitted
@@ -596,12 +636,18 @@ impl FilesSurface {
             pending_line_navigation: None,
             line_navigation_generation: 0,
             editor_context_menu: crate::popover::Popup::default(),
+            tree_context_menu: crate::popover::Popup::default(),
+            path_input,
+            path_edit: None,
+            path_check: None,
+            path_submit_requested: false,
             loads: HashMap::new(),
             error: None,
             started: false,
             sections: sections::ExplorerSections::default(),
             _observe: observe,
             _search_events: search_events,
+            _path_events: path_events,
         };
         surface.sync_target(cx);
         surface
@@ -1035,6 +1081,9 @@ impl FilesSurface {
         self.watch_sequence = None;
         self.watch_error = None;
         self.editor_context_menu = crate::popover::Popup::default();
+        self.tree_context_menu = crate::popover::Popup::default();
+        self.path_edit = None;
+        self.path_check = None;
         self.preview.reset();
         self.pending_line_navigation = None;
         self.line_navigation_generation = self.line_navigation_generation.wrapping_add(1);
