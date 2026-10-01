@@ -6,6 +6,22 @@ where; Kotlin paints, scrolls and handles gestures.** The transcript's text
 measurement, markdown layout, prefix-sum virtualization and display lists are
 the exact code iOS runs — see [`docs/mobile-rewrite.md`](../../docs/mobile-rewrite.md).
 
+The phone is a regular Zeron device: the `:runtime` module boots a proot
+Linux guest running the Zeron engine, which owns the account and runs coding
+agents **on the phone**, and the app is that device's viewer — it signs in
+through the engine, shares its device id and takes its edge bearer. Other
+devices start sessions on the phone and the phone on them; see
+[`docs/android.md`](../../docs/android.md). First run offers Sign in,
+Continue without an account (the phone's local workspace), and an offline
+demo.
+
+Sessions come with the desktop's developer tools, on any device's
+workspace: a file tree with git markers and fuzzy find, a highlighting
+editor with conflict-checked saves, Markdown / image / PDF previews, engine
+terminals (the desktop's emulator, an extra-keys row), an in-app browser for
+workspace HTML and dev-server previews, and Save to Downloads for a file, a
+folder or a whole project — see docs/android.md § Developer tools.
+
 The UI is Material 3 Expressive (`MaterialExpressiveTheme`, expressive motion,
 flexible app bars, shape-morphing loading indicators, connected button groups,
 segmented lists) themed with Zeron's own palette and Geist type.
@@ -13,8 +29,9 @@ segmented lists) themed with Zeron's own palette and Geist type.
 ## Build & run
 
 Requires JDK 21, the Android SDK (platform 37, NDK 29.0.14206865), and Rust
-with `cargo install cargo-ndk` and
-`rustup target add aarch64-linux-android x86_64-linux-android`.
+with `cargo install cargo-ndk cargo-zigbuild`, zig, `patchelf`, and
+`rustup target add aarch64-linux-android x86_64-linux-android
+aarch64-unknown-linux-musl x86_64-unknown-linux-musl`.
 
 ```sh
 cd apps/android
@@ -25,24 +42,83 @@ The `buildCore` task runs `scripts/android/build-core.sh`, which builds
 `crates/mobile` for Android (`jniLibs`) and generates its Kotlin bindings into
 `target/android-core/`. `-PzeronSkipCore` reuses the last build while
 iterating on Kotlin; `ZERON_ANDROID_ABIS=arm64-v8a` builds one ABI.
+The on-device engine's payload — proot and its libs, the static musl engine,
+the Alpine rootfs — comes from `scripts/android/fetch-proot.sh`,
+`build-engine.sh` and `fetch-rootfs.sh` (into `target/android-runtime/`),
+which the build runs only while their outputs are missing
+(`-PzeronSkipRuntime` never runs them). `:app` packages them with
+`useLegacyPackaging = true` and unstripped; see docs/android.md § Build.
+`./gradlew :app:testDebugUnitTest` runs the JVM tests.
 `scripts/android/gen-icons.sh` rasterizes the shared tool/file SVG icons
 (needs `rsvg-convert`). The Geist fonts are read straight from the iOS app's
 `Fonts/` folder, so both platforms measure and draw the same bytes.
 
+## Performance
+
+`core/Perf.kt` times interactions in debug builds (`adb logcat -s ZeronPerf`); `scripts/android/measure-tab-switch.sh`
+drives the Sessions/Settings switch through the debug broadcast and prints medians. The tab pages stay composed and
+are shown by layer properties (`ui/TabHost.kt`): see [`docs/android-perf.md`](../../docs/android-perf.md).
+
+## Sounds and haptics
+
+`feedback/` is the app's sensory layer: `Feedback.kt` is the vocabulary
+(`Haptic`, `Cue`) every screen speaks, `AndroidFeedback` plays it (platform
+haptic constants, `VibrationEffect` primitives, a preloaded `SoundPool`),
+`FeedbackGate` decides whether and when (switches, system touch / silent / DND,
+foreground only, rate limits), and `FeedbackCompose` holds the hooks
+(`LocalFeedback`, `tapAction`, `feedbackAction`, `toggleAction`,
+`OpenCloseFeedback`, `feedbackClickable`). Non-Compose code uses
+`AppFeedback.current`. Settings, Sounds & haptics has the switches and previews.
+`DeviceFeedback.kt` turns the phone engine's setup / failure and file-transfer
+state changes into one-shot cues (`EngineTransitions`, `DeviceFeedbackPolicy`).
+
+```sh
+adb logcat -s ZeronFeedback          # one line per haptic / cue, or why it was skipped
+adb shell dumpsys vibrator_manager   # what the motor was asked to play
+adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android \
+  --es kind done|input|failed [--ez background true]   # debug builds: a session event
+                                   # (also engine-setup|engine-failed|transfer-asked|received|sent|failed)
+python3 scripts/generate-android-sounds.py && python3 scripts/audit-android-sounds.py
+```
+
+Full design, tables and policy: [`docs/sound-design/android.md`](../../docs/sound-design/android.md).
+All sounds, including the mastered session chimes (also the notification
+channel sounds), are generated from `crates/ui/assets/sounds` and the audition set by
+`scripts/generate-android-sounds.py` and committed under `app/src/main/res/raw`.
+
 ## Layout
 
 ```
-core/        AppModel (owns CoreClient, republishes snapshots as flows),
-             CredentialStore, Fonts + AndroidMeasurer (Minikin fallback
-             measurement for glyphs Geist lacks)
+core/        AppModel (the device's CoreClient built from its engine via
+             EngineLink, sign-in through the engine, snapshots as flows),
+             Devices (identity key, machine grouping), Fonts +
+             AndroidMeasurer (Minikin fallback measurement for glyphs Geist
+             lacks), PhoneEngine (the :runtime engine as the UI sees it),
+             Agents (harness install and agent sign-in over host_call),
+             Favorites (starred models), Notifier (local session and
+             file-transfer notifications: channels with the app's chimes),
+             Transfers + TransferCenter (device file transfer: polling,
+             Downloads copies, the share outbox)
+feedback/    Haptics and sound: vocabulary, engine, gate, SoundPool bank,
+             Compose hooks, settings, session-event and transfer-event
+             policies, engine-state transitions
 design/      ZeronTheme (Material 3 Expressive), transcript palette
 transcript/  TranscriptState (layout engine + viewport: anchoring, follow the
              tail), Transcript (virtualized rows over LayoutFrame), RowModel
              (canvas painter for Rust display lists, streaming veil, fades),
              Widgets (copy, disclosures, tool rail, shimmer, images…)
-ui/          Sign-in, sessions, session + composer, new session, search,
-             settings
+ui/          First run, sessions, session + composer, new session, search,
+             settings, This phone (engine page), coding agents, transfers,
+             the Share to Zeron sheet (ShareActivity)
+tools/       Developer tools: Workspace (host-RPC file API, streams),
+             FilesScreen, FileScreen (editor, Markdown, images, PDF),
+             TerminalScreen/TerminalView/Terminals, BrowserScreen + Browser
+             (workspace pages, previews), Downloads (Save to Downloads),
+             Links (transcript link routing)
 ```
+
+`../runtime` (`sh.zeron.runtime`) is the on-device engine: guest bootstrap,
+`RuntimeService`, health and logs, behind `ZeronRuntime.get(context)`.
 
 ## Launch extras
 
@@ -58,7 +134,12 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez demo true` | Offline demo workspace (Rust `DemoHost`) |
 | `--ez fast true` / `--ez longreply true` | Demo stream speed / reply length |
 | `--ez big true` / `--ez huge true` | Demo transcripts with 120 / 600 turns |
-| `--es route chat:<id>` / `new` / `search` / `settings` | Open a screen at launch |
-| `--ez signedout true` | Clear stored credentials |
+| `--ez local true` | Skip the first-run screen: continue without an account |
+| `--es server <url> --es server-token <t>` | Developer custom server (`zeron local-edge`); `--es server none` clears it |
+| `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` / `transfers` / `sounds` | Open a screen at launch |
+| `--es route subagents:<chat>` / `subagent:<chat>\|<doc>` | Open the Subagents panel / a subagent (Demo: `chat-fanout`) |
+| `--es route files:<chat>` / `terminal:<chat>` / `file:<chat>\|<path>` / `browser:<chat>\|<url>` | Open a developer tool at launch (`space:<id>` instead of a chat id for a project) |
+| `--es route badges` / `badges:rows` | Debug builds only: the subagent count badges on the real tile / in real rows and header buttons (`scripts/android/measure-badges.py` measures a screenshot) |
+| `--ez signedout true` | Back to the first-run screen (the engine keeps its sign-in) |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |
 | `--es wallpaper-effect <none\|dither\|ascii\|halftone\|scanlines>` | Wallpaper effect |

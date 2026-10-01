@@ -123,6 +123,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             last_ago_ms: DAY,
+            status: Some(SessionStatus::Idle),
             created_ago_ms: 2 * DAY,
             ..chat(
                 "chat-deploy",
@@ -193,6 +194,35 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 STUDIO,
                 "Draft the launch post",
                 "## Outline",
+            )
+        },
+        DemoChat {
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 3 * MIN,
+            created_ago_ms: 45 * MIN,
+            model: "claude-opus-5",
+            ..chat(
+                "chat-fanout",
+                Some("space-zeron"),
+                MAC,
+                "Audit every sync path",
+                "Two more for the edges, then I'll write it up:",
+            )
+        },
+        DemoChat {
+            // The turn is over (unseen, so "Done"); its subagents are not.
+            status: Some(SessionStatus::Idle),
+            last_ago_ms: 12 * MIN,
+            created_ago_ms: 20 * MIN,
+            seen: false,
+            model: "claude-sonnet-5",
+            reasoning: Medium,
+            ..chat(
+                "chat-background",
+                Some("space-zeron"),
+                MAC,
+                "Background test sweep",
+                "Lint is clean. The e2e suite and the layout benchmark keep running in the background",
             )
         },
         DemoChat {
@@ -413,7 +443,10 @@ pub(crate) fn seed(
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {
             doc.upsert_session(&Session {
-                last_completed_turn: None,
+                last_completed_turn: (status == SessionStatus::Idle)
+                    .then(|| format!("{}-a0", demo.id)),
+                running_subagents: super::transcripts::running_subagents(demo.id),
+                pending_callbacks: u32::from(demo.id == "chat-deploy"),
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,

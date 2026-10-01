@@ -345,6 +345,9 @@ struct PersistedState {
 /// (`zeron_sync::RegistryClient`) and the engine host drive it under a lock.
 pub struct RegistryDoc {
     device_id: String,
+    /// The writer suffix of this replica's HLCs; `None` = [`Self::device_id`].
+    /// See [`Self::set_clock_writer`].
+    clock_writer: Option<String>,
     /// kind → id → row (server truth).
     authoritative: HashMap<String, HashMap<String, RegistryRow>>,
     server_seq: u64,
@@ -360,6 +363,7 @@ impl RegistryDoc {
     pub fn new(device_id: impl Into<String>) -> Self {
         Self {
             device_id: device_id.into(),
+            clock_writer: None,
             authoritative: HashMap::new(),
             server_seq: 0,
             gc_floor: 0,
@@ -371,6 +375,16 @@ impl RegistryDoc {
 
     pub fn device_id(&self) -> &str {
         &self.device_id
+    }
+
+    /// Stamp this replica's HLCs with `writer` instead of the device id. For
+    /// a second replica writing as the same device (a viewer sharing its
+    /// engine's device id): with independent clocks, both could otherwise
+    /// mint the identical HLC for one field, and the edge keeps only the
+    /// first. Rows still say `deviceId`; only the clock tiebreaker differs.
+    pub fn set_clock_writer(&mut self, writer: impl Into<String>) {
+        let writer = writer.into();
+        self.clock_writer = (writer != self.device_id).then_some(writer);
     }
 
     /// Sync cursor: the last server seq this replica has fully applied.
@@ -586,7 +600,10 @@ impl RegistryDoc {
     }
 
     fn next_hlc(&mut self) -> String {
-        let device = self.device_id.clone();
+        let device = self
+            .clock_writer
+            .clone()
+            .unwrap_or_else(|| self.device_id.clone());
         self.clock.next(Self::now_ms(), &device)
     }
 
@@ -1176,6 +1193,8 @@ impl RegistryDoc {
             ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
+            ("runningSubagents", json!(session.running_subagents)),
+            ("pendingCallbacks", json!(session.pending_callbacks)),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1352,6 +1371,8 @@ impl RegistryDoc {
                     ("lastCompletedTurn", json!(session.last_completed_turn)),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
+                    ("runningSubagents", json!(session.running_subagents)),
+                    ("pendingCallbacks", json!(session.pending_callbacks)),
                 ]),
             );
         }

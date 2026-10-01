@@ -1,10 +1,14 @@
 //! Edge auth — `/auth/exchange`, `/auth/orgs`, `/auth/refresh`
 //! (edge/src/auth-routes.ts), plus the per-client bearer provider.
 //!
-//! Two live modes, mirroring the engine:
+//! Four live modes, mirroring the engine:
 //! - WorkOS: paste-code exchange → access/refresh pair; a refresh scoped to an
 //!   organization adds the `org_id` claim the registry room requires.
 //! - Dev (`AUTH_MODE=dev` edge): the bearer IS `userId@orgId`.
+//! - Local (an engine's embedded local edge): the bearer is its shared secret.
+//! - Engine (the engine on this device owns the account): the bearer is the
+//!   engine's, fetched over IPC and cached until just inside the engine's own
+//!   refresh window — the engine is the one refresher ([`crate::engine`]).
 //!
 //! WorkOS refresh tokens are single-use: [`TokenProvider`] single-flights every
 //! refresh (a cold launch's N room dials used to race N refreshes with the
@@ -297,7 +301,8 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
 
 enum Mode {
     Demo,
-    Dev {
+    /// A fixed bearer: the dev edge's `userId@orgId`, or a local edge's secret.
+    Static {
         bearer: String,
     },
     WorkOs {
@@ -306,10 +311,31 @@ enum Mode {
         tokens: Arc<Mutex<AuthTokens>>,
         refresh_gate: Arc<tokio::sync::Mutex<()>>,
     },
+    Engine(Arc<EngineBearer>),
 }
 
-/// Per-client bearer source: dev bearer, or a WorkOS access token refreshed
-/// (single-flight) when inside the early-refresh margin.
+/// [`Mode::Engine`]: the engine's bearer, cached as `(bearer, re-ask at ms)`
+/// (`None` = never expires), single-flighted through `gate`.
+struct EngineBearer {
+    link: Arc<crate::engine::EngineLink>,
+    user_id: String,
+    org_id: String,
+    cache: Mutex<Option<(String, Option<i64>)>>,
+    gate: tokio::sync::Mutex<()>,
+}
+
+impl EngineBearer {
+    fn cached(&self, now_ms: i64) -> Option<String> {
+        match &*lock(&self.cache) {
+            Some((bearer, None)) => Some(bearer.clone()),
+            Some((bearer, Some(until))) if now_ms < *until => Some(bearer.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// Per-client bearer source: a static (dev / local-edge) bearer, or a WorkOS
+/// access token refreshed (single-flight) when inside the early-refresh margin.
 pub(crate) struct TokenProvider {
     mode: Mode,
     events: Arc<EventPump>,
@@ -325,12 +351,15 @@ impl TokenProvider {
         use crate::config::Credentials;
         let mode = match credentials {
             Credentials::Demo(_) => Mode::Demo,
-            Credentials::Dev { user_id, org_id } => Mode::Dev {
+            Credentials::Dev { user_id, org_id } => Mode::Static {
                 bearer: if org_id.is_empty() {
                     user_id.clone()
                 } else {
                     format!("{user_id}@{org_id}")
                 },
+            },
+            Credentials::Local { token } => Mode::Static {
+                bearer: token.clone(),
             },
             Credentials::WorkOs { org_id, tokens, .. } => Mode::WorkOs {
                 edge_url: edge_url.to_owned(),
@@ -338,6 +367,18 @@ impl TokenProvider {
                 tokens: Arc::new(Mutex::new(tokens.clone())),
                 refresh_gate: Arc::new(tokio::sync::Mutex::new(())),
             },
+            Credentials::Engine {
+                ipc_url,
+                ipc_token,
+                user_id,
+                org_id,
+            } => Mode::Engine(Arc::new(EngineBearer {
+                link: crate::engine::EngineLink::new(ipc_url.clone(), ipc_token.clone()),
+                user_id: user_id.clone(),
+                org_id: org_id.clone(),
+                cache: Mutex::new(None),
+                gate: tokio::sync::Mutex::new(()),
+            })),
         };
         Self {
             mode,
@@ -362,7 +403,7 @@ impl TokenProvider {
             Mode::Demo => Err(ClientError::Auth(
                 "demo mode has no edge credentials".into(),
             )),
-            Mode::Dev { bearer } => Ok(bearer.clone()),
+            Mode::Static { bearer } => Ok(bearer.clone()),
             Mode::WorkOs {
                 edge_url,
                 org_id,
@@ -394,8 +435,81 @@ impl TokenProvider {
                     Err(err) => Err(ClientError::Auth(format!("token refresh aborted: {err}"))),
                 }
             }
+            Mode::Engine(engine) => {
+                if let Some(bearer) = engine.cached(chrono::Utc::now().timestamp_millis()) {
+                    return Ok(bearer);
+                }
+                if self.expired.load(Ordering::Acquire) {
+                    return Err(ClientError::Auth("signed out".into()));
+                }
+                // Its own task, like a WorkOS refresh: a caller's timeout
+                // must not drop a fetch the other dials are queued behind.
+                let task =
+                    engine_bearer_task(engine.clone(), self.events.clone(), self.expired.clone());
+                match crate::runtime::shared().spawn(task).await {
+                    Ok(result) => result,
+                    Err(err) => Err(ClientError::Network(format!(
+                        "engine bearer fetch aborted: {err}"
+                    ))),
+                }
+            }
         }
     }
+}
+
+/// Single-flight `EdgeBearer` fetch. The engine answering for another
+/// account (or none) ends this client's session, like a rejected refresh; an
+/// unreachable engine (restarting) keeps using the last bearer.
+async fn engine_bearer_task(
+    engine: Arc<EngineBearer>,
+    events: Arc<EventPump>,
+    expired: Arc<AtomicBool>,
+) -> Result<String> {
+    let _gate = engine.gate.lock().await;
+    if let Some(bearer) = engine.cached(chrono::Utc::now().timestamp_millis()) {
+        return Ok(bearer);
+    }
+    if expired.load(Ordering::Acquire) {
+        return Err(ClientError::Auth("signed out".into()));
+    }
+    let reply = match engine.link.edge_bearer().await {
+        Ok(reply) => reply,
+        Err(err) => {
+            let stale = lock(&engine.cache)
+                .as_ref()
+                .map(|(bearer, _)| bearer.clone());
+            return match stale {
+                Some(bearer) => {
+                    tracing::warn!(error = %err, "engine bearer fetch failed; using the last one");
+                    Ok(bearer)
+                }
+                None => Err(ClientError::Network(err.to_string())),
+            };
+        }
+    };
+    let bearer = reply.bearer.filter(|_| !reply.signed_out);
+    let reason = match &bearer {
+        None => Some("the engine signed out".to_owned()),
+        Some(_) if reply.user_id != engine.user_id || reply.org_id != engine.org_id => {
+            Some("the engine now serves another account".to_owned())
+        }
+        Some(_) => None,
+    };
+    if let Some(reason) = reason {
+        *lock(&engine.cache) = None;
+        if !expired.swap(true, Ordering::AcqRel) {
+            events.ordered(ClientEvent::AuthExpired {
+                reason: reason.clone(),
+            });
+        }
+        return Err(ClientError::Auth(reason));
+    }
+    let bearer = bearer.expect("checked above");
+    let reask = reply
+        .expires_at_ms
+        .map(|at| at - crate::engine::REASK_BEFORE_EXPIRY_MS);
+    *lock(&engine.cache) = Some((bearer.clone(), reask));
+    Ok(bearer)
 }
 
 /// Single-flight refresh (the gate is held for the whole exchange) that
@@ -584,6 +698,175 @@ mod tests {
         };
         let tokens = TokenProvider::new(&credentials, "http://unused", events);
         assert_eq!(tokens.bearer().await.unwrap(), "wing@acme");
+    }
+
+    /// A fake engine IPC answering `EdgeBearer` from `answer` (called with
+    /// the fetch number; a JSON string answers as an error), counting fetches.
+    async fn fake_engine(
+        answer: impl Fn(usize) -> serde_json::Value + Send + Sync + 'static,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        struct Engine<F> {
+            answer: F,
+            fetches: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl<F: Fn(usize) -> serde_json::Value + Send + Sync + 'static> zeron_rpc::RpcService
+            for Engine<F>
+        {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> std::result::Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+                assert_eq!(method, zeron_rpc::methods::EDGE_BEARER);
+                let n = self.fetches.fetch_add(1, Ordering::SeqCst);
+                // Slow enough that concurrent callers overlap.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                match (self.answer)(n) {
+                    serde_json::Value::String(err) => Err(zeron_rpc::RpcError::Failed(err)),
+                    reply => zeron_rpc::RpcReply::value(&reply),
+                }
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tokio::spawn(zeron_rpc::serve_ws_listener_with_token(
+            listener,
+            Arc::new(Engine {
+                answer,
+                fetches: fetches.clone(),
+            }),
+            Some("ipc-secret".into()),
+        ));
+        (url, fetches)
+    }
+
+    fn engine_provider(ipc_url: &str) -> (TokenProvider, Arc<Collect>) {
+        let collect = Arc::new(Collect(Mutex::new(Vec::new())));
+        let events = EventPump::new(collect.clone());
+        events.start(tokio_util::sync::CancellationToken::new());
+        let credentials = crate::config::Credentials::Engine {
+            ipc_url: ipc_url.into(),
+            ipc_token: Some("ipc-secret".into()),
+            user_id: "user_1".into(),
+            org_id: "org_1".into(),
+        };
+        (
+            TokenProvider::new(&credentials, "http://unused", events),
+            collect,
+        )
+    }
+
+    fn edge_bearer(bearer: &str, expires_at_ms: Option<i64>) -> serde_json::Value {
+        serde_json::json!({
+            "edgeUrl": "https://edge.zeron.sh",
+            "userId": "user_1",
+            "orgId": "org_1",
+            "bearer": bearer,
+            "expiresAtMs": expires_at_ms,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn engine_bearer_is_fetched_once_and_reasked_inside_the_engines_slack() {
+        // Each answer expires just past the re-ask margin: cached ~400ms.
+        let (ipc, fetches) = fake_engine(|n| {
+            let expires =
+                chrono::Utc::now().timestamp_millis() + crate::engine::REASK_BEFORE_EXPIRY_MS + 400;
+            edge_bearer(&format!("access-{n}"), Some(expires))
+        })
+        .await;
+        let (tokens, events) = engine_provider(&ipc);
+        let tokens = Arc::new(tokens);
+        let calls = (0..8).map(|_| {
+            let tokens = tokens.clone();
+            tokio::spawn(async move { tokens.bearer().await })
+        });
+        for call in futures::future::join_all(calls).await {
+            assert_eq!(call.unwrap().unwrap(), "access-0");
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1, "single-flight fetch");
+        // Cached until the re-ask point, then the engine's rotated token.
+        assert_eq!(tokens.bearer().await.unwrap(), "access-0");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(tokens.bearer().await.unwrap(), "access-1");
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        // The client never refreshes or reports tokens of its own.
+        assert!(
+            lock(&events.0)
+                .iter()
+                .all(|e| !matches!(e, ClientEvent::AuthRefreshed(_)))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn engine_static_bearer_is_cached_and_a_failed_fetch_keeps_the_last_one() {
+        let (ipc, fetches) = fake_engine(|_| edge_bearer("local-secret", None)).await;
+        let (tokens, _) = engine_provider(&ipc);
+        assert_eq!(tokens.bearer().await.unwrap(), "local-secret");
+        assert_eq!(tokens.bearer().await.unwrap(), "local-secret");
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        // An expiring bearer, then the engine can't answer (restarting,
+        // offline refresh): the last bearer is used — a rejected dial
+        // retries later — and the client never signs out over it.
+        let (ipc, fetches) = fake_engine(|n| match n {
+            0 => edge_bearer("short", Some(chrono::Utc::now().timestamp_millis())),
+            _ => serde_json::json!("could not reach the edge during refresh"),
+        })
+        .await;
+        let (tokens, events) = engine_provider(&ipc);
+        assert_eq!(tokens.bearer().await.unwrap(), "short");
+        assert_eq!(tokens.bearer().await.unwrap(), "short");
+        assert_eq!(fetches.load(Ordering::SeqCst), 2, "re-asked once expired");
+        // No engine at all and nothing cached: a transient network error.
+        let (dead, _) = engine_provider("ws://127.0.0.1:9");
+        assert!(matches!(dead.bearer().await, Err(ClientError::Network(_))));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            lock(&events.0)
+                .iter()
+                .all(|e| !matches!(e, ClientEvent::AuthExpired { .. }))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn engine_signing_out_or_switching_accounts_expires_the_client_once() {
+        let (ipc, _) = fake_engine(|_| {
+            serde_json::json!({
+                "edgeUrl": "https://edge.zeron.sh",
+                "userId": "user_1",
+                "orgId": "org_1",
+                "signedOut": true,
+            })
+        })
+        .await;
+        let (tokens, events) = engine_provider(&ipc);
+        assert!(matches!(tokens.bearer().await, Err(ClientError::Auth(_))));
+        assert!(matches!(tokens.bearer().await, Err(ClientError::Auth(_))));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let expired = |events: &Collect| {
+            lock(&events.0)
+                .iter()
+                .filter(|e| matches!(e, ClientEvent::AuthExpired { .. }))
+                .count()
+        };
+        assert_eq!(expired(&events), 1);
+
+        let (ipc, _) = fake_engine(|_| {
+            serde_json::json!({
+                "edgeUrl": "https://edge.zeron.sh",
+                "userId": "someone_else",
+                "orgId": "org_1",
+                "bearer": "theirs",
+            })
+        })
+        .await;
+        let (tokens, events) = engine_provider(&ipc);
+        assert!(matches!(tokens.bearer().await, Err(ClientError::Auth(_))));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(expired(&events), 1);
     }
 
     #[test]

@@ -44,6 +44,104 @@ fn question_script() -> Vec<UserInputQuestion> {
     ]
 }
 
+type TimelineStep = (std::time::Duration, Vec<AgentEvent>);
+
+/// Parse a `ZERON_MOCK_TIMELINE` file (see [`MockHarness::run`]).
+fn parse_timeline(text: &str) -> Result<Vec<TimelineStep>, HarnessError> {
+    let tag = |id: &str, event: AgentEvent| AgentEvent::Subagent {
+        parent_tool_use_id: id.to_owned(),
+        event: Box::new(event),
+    };
+    let mut steps = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| HarnessError::Protocol(format!("timeline line {}: {why}", n + 1));
+        let mut words = line.splitn(3, char::is_whitespace);
+        let ms: u64 = words
+            .next()
+            .and_then(|w| w.parse().ok())
+            .ok_or_else(|| bad("expected a leading millisecond wait"))?;
+        let command = words.next().ok_or_else(|| bad("missing command"))?;
+        let arg = words.next().unwrap_or("").trim();
+        let id_required = || {
+            if arg.is_empty() {
+                Err(bad("missing subagent id"))
+            } else {
+                Ok(arg)
+            }
+        };
+        let events = match command {
+            "text" => vec![AgentEvent::TextDelta {
+                text: format!("{arg} "),
+            }],
+            "done" => vec![AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: Some("mock-timeline".into()),
+            }],
+            "spawn" => {
+                let id = id_required()?;
+                vec![
+                    AgentEvent::ToolCall {
+                        id: id.to_owned(),
+                        call: zeron_proto::ToolCall::Unknown {
+                            name: format!("Agent: {id}"),
+                            input: Some(serde_json::json!({
+                                "description": id,
+                                "prompt": format!("Work on {id}"),
+                            })),
+                        },
+                    },
+                    tag(
+                        id,
+                        AgentEvent::UserMessage {
+                            text: format!("Work on {id}"),
+                        },
+                    ),
+                ]
+            }
+            "say" => {
+                let id = id_required()?;
+                vec![tag(
+                    id,
+                    AgentEvent::TextDelta {
+                        text: format!("{id} is still working.\n\n"),
+                    },
+                )]
+            }
+            "steer" => {
+                let id = id_required()?;
+                vec![tag(
+                    id,
+                    AgentEvent::Steered {
+                        assistant_message_id: None,
+                        next_assistant_message_id: None,
+                    },
+                )]
+            }
+            "finish" => {
+                let id = id_required()?;
+                vec![tag(
+                    id,
+                    AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    },
+                )]
+            }
+            other => return Err(bad(&format!("unknown command `{other}`"))),
+        };
+        steps.push((std::time::Duration::from_millis(ms), events));
+    }
+    Ok(steps)
+}
+
 #[async_trait]
 impl Harness for MockHarness {
     fn id(&self) -> HarnessId {
@@ -99,6 +197,58 @@ impl Harness for MockHarness {
         _request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // Dev/testing knob: `ZERON_MOCK_TIMELINE=<file>` replaces the whole run
+        // with a timeline read from the file at run start, then holds the
+        // stream open until interrupted. One step per line, `<ms> <command>
+        // [arg]`, `<ms>` being the wait since the previous step (`#` starts a
+        // comment):
+        //   text <words>   main-thread text
+        //   done           the parent turn ends (the session parks)
+        //   spawn <id>     a subagent chip plus its opening tagged message
+        //   say <id>       the subagent streams a line
+        //   steer <id>     the parent steers (re-opens) the subagent
+        //   finish <id>    the subagent settles
+        // This is how a rig puts "the parent is idle, children come and go
+        // over minutes" on a real engine -- the one shape the other knobs
+        // cannot hold for longer than a scripted burst.
+        if let Some(path) = std::env::var_os("ZERON_MOCK_TIMELINE") {
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                HarnessError::Protocol(format!(
+                    "ZERON_MOCK_TIMELINE {}: {e}",
+                    path.to_string_lossy()
+                ))
+            })?;
+            let steps = parse_timeline(&text)?;
+            let interrupt = controls.interrupt.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for (wait, events) in steps {
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = interrupt.cancelled() => return,
+                    }
+                    for event in events {
+                        if tx.send(Ok(event)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                interrupt.cancelled().await;
+                let _ = tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }))
+                    .await;
+            });
+            return Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed());
+        }
+
         // Optional pacing knob for demos/manual testing: `ZERON_MOCK_DELAY_MS`
         // spaces the scripted events out so live-run UI states (working
         // indicator, streaming fade, trailing tool-group auto-open) are
@@ -583,5 +733,41 @@ impl Harness for MockHarness {
                 event
             })
             .boxed())
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn a_timeline_parses_into_waits_and_events() {
+        let steps = parse_timeline(
+            "# comment\n0 text hello world\n100 spawn a\n250 say a\n0 done\n5000 finish a # tail\n",
+        )
+        .unwrap();
+        assert_eq!(steps.len(), 5);
+        assert_eq!(steps[1].0, std::time::Duration::from_millis(100));
+        assert!(matches!(
+            &steps[1].1[..],
+            [AgentEvent::ToolCall { id, .. }, AgentEvent::Subagent { parent_tool_use_id, .. }]
+                if id == "a" && parent_tool_use_id == "a"
+        ));
+        assert!(
+            matches!(&steps[4].1[..], [AgentEvent::Subagent { event, .. }]
+            if matches!(**event, AgentEvent::Done { .. }))
+        );
+    }
+
+    #[test]
+    fn bad_timeline_lines_say_which_line() {
+        for (text, needle) in [
+            ("spawn a", "leading millisecond"),
+            ("10 spawn", "missing subagent id"),
+            ("10 dance a", "unknown command"),
+        ] {
+            let err = parse_timeline(text).unwrap_err().to_string();
+            assert!(err.contains("line 1") && err.contains(needle), "{err}");
+        }
     }
 }

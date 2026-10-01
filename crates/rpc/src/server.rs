@@ -135,13 +135,39 @@ async fn handle_request(
     }
 }
 
-/// Accept WebSocket connections forever, serving each with `service`.
+/// The IPC shared secret (`ZERON_IPC_TOKEN`), when this process runs with one.
+///
+/// Loopback is reachable by every local process; on Android that is every app
+/// on the device (docs/android.md). With a token set, the engine's IPC server
+/// refuses upgrades that do not present it, and [`crate::connect_ws`] — the
+/// dialer of `zeron mcp`, `zeron sync` and the desktop viewport — presents
+/// it. Unset (the desktop default) keeps the socket open to local callers.
+pub fn ipc_token() -> Option<String> {
+    std::env::var("ZERON_IPC_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+/// Accept WebSocket connections forever, serving each with `service`, gated on
+/// [`ipc_token`] when one is configured.
 pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>) {
+    serve_ws_listener_with_token(listener, service, ipc_token()).await
+}
+
+/// [`serve_ws_listener`] with an explicit gate: `Some(token)` rejects any
+/// handshake without `Authorization: Bearer {token}` or `?token={token}`.
+pub async fn serve_ws_listener_with_token(
+    listener: TcpListener,
+    service: Arc<dyn RpcService>,
+    token: Option<String>,
+) {
+    let token: Option<Arc<str>> = token.map(Arc::from);
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone()));
+                tokio::spawn(serve_ws_socket(stream, service.clone(), token.clone()));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");
@@ -151,7 +177,57 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
     }
 }
 
-async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
+/// The token a handshake presents: `Authorization: Bearer` first, then
+/// `?token=` (for dialers that cannot set headers).
+fn presented_token(req: &HandshakeRequest) -> Option<String> {
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let (scheme, token) = value.split_at_checked(7)?;
+            scheme
+                .eq_ignore_ascii_case("bearer ")
+                .then(|| token.trim().to_string())
+        });
+    header.or_else(|| {
+        req.uri().query()?.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == "token").then(|| percent_decode(value))
+        })
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let decoded = (bytes[i] == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Length-revealing but otherwise constant-time comparison: a mismatch at
+/// the first byte costs the same as one at the last.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, token: Option<Arc<str>>) {
     // Native viewports dial this socket with a bare `connect_async` and send
     // no `Origin` header. A browser always attaches `Origin` to a WebSocket
     // handshake and cannot forge or suppress it from script, and WebSockets
@@ -171,6 +247,15 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             let mut err = ErrorResponse::new(Some("origin not allowed on local IPC".to_string()));
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
+        }
+        if let Some(expected) = &token {
+            let presented = presented_token(req);
+            if !presented.is_some_and(|t| constant_time_eq(t.as_bytes(), expected.as_bytes())) {
+                tracing::warn!("rpc: rejecting handshake without the IPC token");
+                let mut err = ErrorResponse::new(Some("IPC token required".to_string()));
+                *err.status_mut() = StatusCode::UNAUTHORIZED;
+                return Err(err);
+            }
         }
         Ok(resp)
     };

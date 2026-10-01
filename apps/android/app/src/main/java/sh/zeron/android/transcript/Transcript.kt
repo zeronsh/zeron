@@ -1,5 +1,9 @@
 package sh.zeron.android.transcript
 
+import sh.zeron.android.feedback.Feedback
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.CubicBezierEasing
@@ -46,12 +50,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
@@ -74,6 +76,10 @@ class TranscriptActions(
     val openUrl: (String) -> Unit,
     val loadImage: suspend (String) -> androidx.compose.ui.graphics.ImageBitmap?,
     val showText: (title: String, text: String, mono: Boolean) -> Unit,
+    /** A file an agent touched (tool badge): open it in the viewer. */
+    val openFile: (path: String) -> Unit = {},
+    /** Quick actions for a file badge (open in browser, save to Downloads…). */
+    val fileActions: (path: String) -> List<sh.zeron.android.ui.MenuAction> = { emptyList() },
 )
 
 private const val OVERSCAN = 700f
@@ -234,7 +240,7 @@ private fun RowHost(
     LaunchedEffect(p.key) { if (appear.value < 1f) appear.animateTo(1f, tween(280)) }
 
     var menuAt by remember { mutableStateOf<Offset?>(null) }
-    val haptics = LocalHapticFeedback.current
+    val fb = LocalFeedback.current
 
     Box(
         Modifier
@@ -244,8 +250,8 @@ private fun RowHost(
                 clock.longValue // redraw on every veil frame
                 drawIntoCanvas { c -> veil.draw(c.nativeCanvas, model, d, fonts, palette, System.nanoTime()) }
             }
-            .pointerTaps(model, d, actions, onLongPress = {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            .pointerTaps(model, d, actions, fb, onLongPress = {
+                fb.haptic(Haptic.LongPress)
                 menuAt = it
             }),
     ) {
@@ -272,7 +278,7 @@ private fun RowHost(
 }
 
 /** Link taps (row coordinates) and the long-press menu. */
-private fun Modifier.pointerTaps(model: RowModel, d: Float, actions: TranscriptActions, onLongPress: (Offset) -> Unit) =
+private fun Modifier.pointerTaps(model: RowModel, d: Float, actions: TranscriptActions, fb: Feedback, onLongPress: (Offset) -> Unit) =
     pointerInput(model) {
         detectTapGestures(
             onTap = { pos ->
@@ -280,7 +286,10 @@ private fun Modifier.pointerTaps(model: RowModel, d: Float, actions: TranscriptA
                 val y = pos.y / d
                 model.display.links.firstOrNull { l ->
                     l.scroller == null && x >= l.x - 4 && x <= l.x + l.w + 4 && y >= l.y - 2 && y <= l.y + l.h + 2
-                }?.let { actions.openUrl(it.url) }
+                }?.let {
+                    fb.both(Haptic.Select, Cue.Tap) // a link in the text
+                    actions.openUrl(it.url)
+                }
             },
             onLongPress = onLongPress,
         )
@@ -306,8 +315,8 @@ private fun RowMenu(
             true,
             dismiss,
             listOfNotNull(
-                if (block.isNotEmpty()) sh.zeron.android.ui.MenuAction("Copy", ZIcons.Copy) { clipboard.setText(AnnotatedString(block)) } else null,
-                if (!message.isNullOrEmpty() && message != block) sh.zeron.android.ui.MenuAction("Copy message", ZIcons.Chat) { clipboard.setText(AnnotatedString(message)) } else null,
+                if (block.isNotEmpty()) sh.zeron.android.ui.MenuAction("Copy", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(block)) } else null,
+                if (!message.isNullOrEmpty() && message != block) sh.zeron.android.ui.MenuAction("Copy message", ZIcons.Chat, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(message)) } else null,
                 if (selectable.isNotEmpty()) sh.zeron.android.ui.MenuAction("Select text", ZIcons.Text) { actions.showText("Select text", selectable, false) } else null,
             ),
         )

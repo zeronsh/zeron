@@ -244,14 +244,34 @@ impl Zeron {
     }
 
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
-        let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
+        self.harnesses_on(None).await
+    }
+
+    /// The harness catalog of `device` (relayed by the engine when it is
+    /// another device — a chat runs with the host's harnesses, not ours).
+    pub async fn harnesses_on(&self, device: Option<&str>) -> anyhow::Result<Vec<HarnessInfo>> {
+        let mut params = json!({});
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        let value = self.call(methods::LIST_HARNESSES, params).await?;
         serde_json::from_value(value).context("ListHarnesses: unexpected shape")
     }
 
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
-        let value = self
-            .call(methods::LIST_MODELS, json!({ "harness": harness }))
-            .await?;
+        self.models_on(harness, None).await
+    }
+
+    pub async fn models_on(
+        &self,
+        harness: HarnessId,
+        device: Option<&str>,
+    ) -> anyhow::Result<Vec<Model>> {
+        let mut params = json!({ "harness": harness });
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        let value = self.call(methods::LIST_MODELS, params).await?;
         serde_json::from_value(value).context("ListModels: unexpected shape")
     }
 

@@ -21,4 +21,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Zeron"
-include(":app")
+// app: Compose UI over the Rust core (zeron-mobile via UniFFI).
+// runtime: the on-device engine — proot guest bootstrap + RuntimeService.
+include(":app", ":runtime")

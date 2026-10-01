@@ -1,5 +1,12 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.toggleAction
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,7 +51,16 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import sh.zeron.android.core.Account
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.DeviceIdentity
+import sh.zeron.android.core.SignIn
+import sh.zeron.runtime.CustomServer
+import sh.zeron.runtime.RuntimeState
 import sh.zeron.android.design.ThemeMode
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
@@ -53,11 +69,25 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel) {
+fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val appearance by model.appearance.collectAsState()
-    val workspace by model.workspace.collectAsState()
-    val devices = workspace?.devices.orEmpty()
+    val account by model.account.collectAsState()
+    val signIn by model.signIn.collectAsState()
+    // Kept composed behind the Sessions tab: while hidden it listens to nothing (see TabPage).
+    val engine = model.phone.state.collectAsStateWhile()
+    val developer by model.developer.collectAsState()
+    val client = model.client.collectAsStateWhile()
+    val demo = client?.isDemo() == true
+    val workspace = model.workspace.collectAsStateWhile()
+    // This phone first, like the desktop's device list.
+    val devices = workspace?.devices.orEmpty().sortedByDescending { it.isSelf }
+    val context = LocalContext.current
+    val ask = rememberPermissionAsk()
+    var editingServer by remember { mutableStateOf(false) }
+    var versionTaps by remember { mutableIntStateOf(0) }
+    val orgs by model.orgChoice.collectAsState()
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
+    val fb = LocalFeedback.current
     Box(Modifier.fillMaxSize()) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -87,6 +117,79 @@ fun SettingsScreen(model: AppModel) {
                 }
             }
         }
+        if (!demo) {
+            item { AccountRows(model, account, signIn, onSignIn = {
+                ask(false) {
+                    model.signIn { url ->
+                        androidx.browser.customtabs.CustomTabsIntent.Builder().setShowTitle(true).build()
+                            .launchUrl(context, android.net.Uri.parse(url))
+                    }
+                }
+            }, onServer = { editingServer = true }) }
+            section("This phone")
+            item {
+                // This phone is one of the account's devices: its engine, its agents.
+                Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    SegmentedListItem(
+                        onClick = tapAction { onOpen(Routes.ENGINE) },
+                        shapes = segmentedShapes(0, 2),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.Phone) },
+                        supportingContent = { Text(engineStatusLine(engine), maxLines = 2) },
+                        trailingContent = {
+                            Box(
+                                Modifier.size(10.dp).clip(CircleShape).background(
+                                    when (engine) {
+                                        is RuntimeState.Running -> successColor()
+                                        is RuntimeState.Failed -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.outlineVariant
+                                    },
+                                ),
+                            )
+                        },
+                    ) { Text("Engine") }
+                    SegmentedListItem(
+                        onClick = tapAction { onOpen(Routes.AGENTS) },
+                        shapes = segmentedShapes(1, 2),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.Bot) },
+                        supportingContent = { Text("Install agents and sign in to their accounts") },
+                        trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                    ) { Text("Coding agents") }
+                }
+            }
+            section("Files")
+            item {
+                // Transfers go through this phone's engine (docs/android.md § File transfers).
+                val transfers = model.transfers.list.collectAsStateWhile()
+                val live = transfers.count { it.state.live }
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    SegmentedListItem(
+                        onClick = tapAction { onOpen(Routes.TRANSFERS) },
+                        shapes = segmentedShapes(0, 1),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.ArrowDown) },
+                        supportingContent = {
+                            Text(if (live > 0) "$live in progress" else "Send and receive files with your other devices")
+                        },
+                        trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                    ) { Text("Transfers") }
+                }
+            }
+        }
+        section("Feedback")
+        item {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                SegmentedListItem(
+                    onClick = tapAction { onOpen(Routes.SOUNDS) },
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Volume) },
+                    supportingContent = { Text("Chimes, interface sounds, volume and vibration") },
+                    trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                ) { Text("Sounds & haptics") }
+            }
+        }
         section("Appearance")
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
@@ -103,7 +206,10 @@ fun SettingsScreen(model: AppModel) {
                             modes.forEachIndexed { index, (mode, label, icon) ->
                                 ToggleButton(
                                     checked = appearance.mode == mode,
-                                    onCheckedChange = { model.setAppearance(appearance.copy(mode = mode)) },
+                                    onCheckedChange = {
+                                        if (appearance.mode != mode) fb.both(Haptic.Select, Cue.Select)
+                                        model.setAppearance(appearance.copy(mode = mode))
+                                    },
                                     modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
                                     shapes = when (index) {
                                         0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
@@ -119,13 +225,14 @@ fun SettingsScreen(model: AppModel) {
                         }
                     }
                 }
+                val dynamic = toggleAction { model.setAppearance(appearance.copy(dynamicColor = it)) }
                 SegmentedListItem(
-                    onClick = { model.setAppearance(appearance.copy(dynamicColor = !appearance.dynamicColor)) },
+                    onClick = tapAction { dynamic(!appearance.dynamicColor) },
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },
                     supportingContent = { Text("Tint Zeron with your wallpaper's palette") },
-                    trailingContent = { Switch(appearance.dynamicColor, { model.setAppearance(appearance.copy(dynamicColor = it)) }) },
+                    trailingContent = { Switch(appearance.dynamicColor, dynamic) },
                 ) { Text("Wallpaper colors") }
             }
         }
@@ -137,24 +244,20 @@ fun SettingsScreen(model: AppModel) {
                 Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     devices.forEachIndexed { i, device ->
                         SegmentedListItem(
-                            onClick = {},
+                            onClick = tapAction {},
                             shapes = segmentedShapes(i, devices.size),
                             colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
-                            leadingContent = {
-                                IconTile(
-                                    when {
-                                        !device.isExecutionHost -> ZIcons.Phone
-                                        device.platform == "linux" -> ZIcons.Server
-                                        else -> ZIcons.Laptop
-                                    },
-                                )
-                            },
+                            leadingContent = { IconTile(DeviceIdentity.icon(device.platform)) },
                             supportingContent = {
                                 Text(
                                     listOfNotNull(
                                         if (device.isSelf) "This device" else if (device.online) "Online" else "Offline",
                                         device.version?.let { "v$it" },
-                                        if (device.sessionCount > 0u) "${device.sessionCount} sessions" else null,
+                                        when (device.sessionCount) {
+                                            0u -> null
+                                            1u -> "1 session"
+                                            else -> "${device.sessionCount} sessions"
+                                        },
                                     ).joinToString(" · "),
                                 )
                             },
@@ -170,27 +273,154 @@ fun SettingsScreen(model: AppModel) {
                 }
             }
         }
+        if (developer && !demo) {
+            section("Developer")
+            item {
+                val server = model.phone.customServer
+                SegmentedListItem(
+                    onClick = tapAction { editingServer = true },
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Server) },
+                    supportingContent = { Text(server?.edgeUrl ?: "Zeron (default)") },
+                    trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                ) { Text("Custom server") }
+            }
+        }
         section("About")
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                val rows = if (demo) 2 else 1
                 SegmentedListItem(
-                    onClick = {},
-                    shapes = segmentedShapes(0, 2),
+                    // Seven taps reveal the developer options.
+                    onClick = tapAction { if (++versionTaps >= 7 && !developer) { model.setDeveloper(true); fb.both(Haptic.Confirm, Cue.Open) } },
+                    shapes = segmentedShapes(0, rows),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Info) },
                     supportingContent = { Text("Zeron for Android · core ${coreVersion()}") },
                 ) { Text("Version") }
-                SegmentedListItem(
-                    onClick = { model.signOut() },
-                    shapes = segmentedShapes(1, 2),
-                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
-                    leadingContent = { IconTile(ZIcons.Logout, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
-                ) { Text(if (model.isDemo) "Leave demo" else "Sign out", color = MaterialTheme.colorScheme.error) }
+                if (demo) {
+                    SegmentedListItem(
+                        onClick = feedbackAction(Haptic.Confirm, Cue.Close) { model.leaveDemo() },
+                        shapes = segmentedShapes(1, rows),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.Logout, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
+                    ) { Text("Leave demo", color = MaterialTheme.colorScheme.error) }
+                }
             }
         }
     }
     StatusBarScrim(scrolled = list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0)
     }
+    if (editingServer) CustomServerDialog(model.phone.customServer, onDismiss = { editingServer = false }) {
+        editingServer = false
+        model.setCustomServer(it)
+    }
+    orgs?.let { (list, choice) -> OrgDialog(list, onPick = { choice.complete(it) }) }
+}
+
+/** The account rows: sign in (local), sign out, or the custom server. */
+@Composable
+private fun AccountRows(model: AppModel, account: Account, signIn: SignIn, onSignIn: () -> Unit, onServer: () -> Unit) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        when (account) {
+            is Account.Server -> SegmentedListItem(
+                onClick = tapAction(onServer),
+                shapes = segmentedShapes(0, 1),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                leadingContent = { IconTile(ZIcons.Server) },
+                supportingContent = { Text("This phone syncs with a development server") },
+                trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+            ) { Text("Custom server") }
+            is Account.SignedIn -> SegmentedListItem(
+                onClick = feedbackAction(Haptic.Confirm, Cue.Close) { model.signOut() },
+                enabled = signIn !is SignIn.Busy,
+                shapes = segmentedShapes(0, 1),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                leadingContent = { IconTile(ZIcons.Logout, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
+                supportingContent = { Text("This phone goes back to its local workspace") },
+            ) { Text("Sign out", color = MaterialTheme.colorScheme.error) }
+            else -> SegmentedListItem(
+                onClick = tapAction(onSignIn),
+                enabled = signIn !is SignIn.Busy,
+                shapes = segmentedShapes(0, 1),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                leadingContent = { IconTile(ZIcons.Cloud) },
+                supportingContent = {
+                    Text(
+                        when (signIn) {
+                            SignIn.Preparing -> "Preparing this phone…"
+                            SignIn.Completing, SignIn.Restarting -> "Signing in…"
+                            is SignIn.Failed -> signIn.message
+                            else -> "Use this phone with your computers, and them with it"
+                        },
+                    )
+                },
+                trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+            ) { Text("Sign in") }
+        }
+    }
+}
+
+/** Developer: point this phone's engine at a `zeron local-edge` (or back at Zeron). */
+@Composable
+private fun CustomServerDialog(current: CustomServer?, onDismiss: () -> Unit, onSave: (CustomServer?) -> Unit) {
+    var url by remember { mutableStateOf(current?.edgeUrl ?: "http://10.0.2.2:27700") }
+    var token by remember { mutableStateOf(current?.token.orEmpty()) }
+    val problem = CustomServer.problem(url, token)
+    val fb = LocalFeedback.current
+    var invalid by remember { mutableStateOf(false) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { ZIcon(ZIcons.Server, null) },
+        title = { Text("Custom server") },
+        text = {
+            OpenCloseFeedback()
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "This phone's engine joins a development edge (`zeron local-edge`) instead of Zeron, as its single user. It restarts to switch.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    url, { url = it },
+                    label = { Text("Edge URL") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    token, { token = it },
+                    label = { Text("Token") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = sh.zeron.android.design.GeistMono),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (problem != null && (token.isNotEmpty() || invalid)) {
+                    Text(problem, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = {
+                if (problem != null) {
+                    // Refused: say why, and let the refusal be felt.
+                    invalid = true
+                    fb.both(Haptic.Error, Cue.Error)
+                } else {
+                    fb.both(Haptic.Confirm, Cue.Select)
+                    onSave(CustomServer.of(url, token))
+                }
+            }) { Text("Use server") }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = tapAction { if (current != null) onSave(null) else onDismiss() }) {
+                Text(if (current != null) "Use Zeron" else "Cancel")
+            }
+        },
+    )
 }
 
 private fun LazyListScope.section(title: String) {
@@ -229,7 +459,7 @@ private fun WallpaperSettings(model: AppModel) {
     val rows = if (state.set) 3 else 1
     Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
         SegmentedListItem(
-            onClick = {
+            onClick = tapAction {
                 picker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
             },
             shapes = segmentedShapes(0, rows),
@@ -240,7 +470,7 @@ private fun WallpaperSettings(model: AppModel) {
         if (state.set) {
             Box {
                 SegmentedListItem(
-                    onClick = { effects = true },
+                    onClick = tapAction { effects = true },
                     shapes = segmentedShapes(1, rows),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },
@@ -251,7 +481,7 @@ private fun WallpaperSettings(model: AppModel) {
                 })))
             }
             SegmentedListItem(
-                onClick = { store.remove() },
+                onClick = feedbackAction(Haptic.Confirm, Cue.Delete) { store.remove() },
                 shapes = segmentedShapes(2, rows),
                 colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                 leadingContent = { IconTile(ZIcons.Delete, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },

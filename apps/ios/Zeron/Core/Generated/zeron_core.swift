@@ -944,6 +944,14 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func frontPage()  -> FrontPage
     
+    /**
+     * Untyped host RPC to `device_id`'s engine: `method` with JSON
+     * `params_json` (an object; empty = `{}`), returning the reply as JSON.
+     * For engine surfaces the typed API doesn't wrap yet (harness installs,
+     * agent sign-ins). Demo mode answers from a simulated engine.
+     */
+    func hostCall(deviceId: String, method: String, paramsJson: String) async throws  -> String
+    
     func isDemo()  -> Bool
     
     /**
@@ -1097,6 +1105,35 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Current workspace revision (cheap; compare before pulling).
      */
     func workspaceRevision()  -> UInt64
+    
+    /**
+     * Open one subagent's transcript read-only (`doc_id` from a
+     * [`SubagentView`] or a spawn chip). Attach a `TranscriptView` with the
+     * same `doc_id`.
+     */
+    func openSubagent(parentChatId: String, docId: String) throws  -> SessionHandle
+    
+    /**
+     * The subagents of `chat_id`, read from its open session's transcript
+     * (empty until the session is open and hydrated).
+     */
+    func subagents(chatId: String)  -> SubagentGroups
+    
+    /**
+     * Untyped host stream (`WatchWorkspaceFiles`, `WatchWorkspaceGitStatus`,
+     * `WatchPreviews`, `SubscribeTerminal`…) from `device_id`'s engine.
+     * Returns once the host accepted it — an unknown method or rejected
+     * params fail here — then delivers items to `listener`.
+     */
+    func hostWatch(deviceId: String, method: String, paramsJson: String, listener: HostStreamListener) async throws  -> HostStream
+    
+    /**
+     * Attach a view to engine terminal `terminal_id` on `device_id` (opened
+     * with `OpenTerminal`): replays its scrollback, then follows live output,
+     * re-subscribing from the last seen `seq` if the stream drops. Releasing
+     * the screen detaches (the shell keeps running); `kill()` ends it.
+     */
+    func terminalScreen(deviceId: String, terminalId: String, cols: UInt16, rows: UInt16, palette: TerminalPalette, listener: TerminalListener)  -> TerminalScreen
     
 }
 /**
@@ -1367,6 +1404,28 @@ open func frontPage() -> FrontPage  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Untyped host RPC to `device_id`'s engine: `method` with JSON
+     * `params_json` (an object; empty = `{}`), returning the reply as JSON.
+     * For engine surfaces the typed API doesn't wrap yet (harness installs,
+     * agent sign-ins). Demo mode answers from a simulated engine.
+     */
+open func hostCall(deviceId: String, method: String, paramsJson: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_host_call(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(method),FfiConverterString.lower(paramsJson)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func isDemo() -> Bool  {
@@ -1899,6 +1958,79 @@ open func workspaceRevision() -> UInt64  {
 })
 }
     
+    /**
+     * Open one subagent's transcript read-only (`doc_id` from a
+     * [`SubagentView`] or a spawn chip). Attach a `TranscriptView` with the
+     * same `doc_id`.
+     */
+open func openSubagent(parentChatId: String, docId: String)throws  -> SessionHandle  {
+    return try  FfiConverterTypeSessionHandle_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_open_subagent(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(parentChatId),
+        FfiConverterString.lower(docId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The subagents of `chat_id`, read from its open session's transcript
+     * (empty until the session is open and hydrated).
+     */
+open func subagents(chatId: String) -> SubagentGroups  {
+    return try!  FfiConverterTypeSubagentGroups_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_subagents(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Untyped host stream (`WatchWorkspaceFiles`, `WatchWorkspaceGitStatus`,
+     * `WatchPreviews`, `SubscribeTerminal`…) from `device_id`'s engine.
+     * Returns once the host accepted it — an unknown method or rejected
+     * params fail here — then delivers items to `listener`.
+     */
+open func hostWatch(deviceId: String, method: String, paramsJson: String, listener: HostStreamListener)async throws  -> HostStream  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_host_watch(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(method),FfiConverterString.lower(paramsJson),FfiConverterTypeHostStreamListener_lower(listener)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_u64,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_u64,
+            freeFunc: ffi_zeron_mobile_rust_future_free_u64,
+            liftFunc: FfiConverterTypeHostStream_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Attach a view to engine terminal `terminal_id` on `device_id` (opened
+     * with `OpenTerminal`): replays its scrollback, then follows live output,
+     * re-subscribing from the last seen `seq` if the stream drops. Releasing
+     * the screen detaches (the shell keeps running); `kill()` ends it.
+     */
+open func terminalScreen(deviceId: String, terminalId: String, cols: UInt16, rows: UInt16, palette: TerminalPalette, listener: TerminalListener) -> TerminalScreen  {
+    return try!  FfiConverterTypeTerminalScreen_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_terminal_screen(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(deviceId),
+        FfiConverterString.lower(terminalId),
+        FfiConverterUInt16.lower(cols),
+        FfiConverterUInt16.lower(rows),
+        FfiConverterTypeTerminalPalette_lower(palette),
+        FfiConverterTypeTerminalListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
 
     
 }
@@ -1942,6 +2074,680 @@ public func FfiConverterTypeCoreClient_lift(_ handle: UInt64) throws -> CoreClie
 #endif
 public func FfiConverterTypeCoreClient_lower(_ value: CoreClient) -> UInt64 {
     return FfiConverterTypeCoreClient.lower(value)
+}
+
+
+
+
+
+
+/**
+ * The engine running on this device (Android's on-device engine), over its
+ * token-gated IPC port. The app signs the account in *through* it and builds
+ * its [`CoreClient`] from it: the engine's device id, edge and identity, and
+ * `Credentials::Engine` — see docs/android.md.
+ */
+public protocol EngineLinkProtocol: AnyObject, Sendable {
+    
+    func account() async throws  -> EngineAccount
+    
+    /**
+     * The callback's `state` and `code`: the engine exchanges and saves the
+     * session; restart it to open the synced workspace.
+     */
+    func completeSignIn(state: String, code: String) async throws 
+    
+    func edge() async throws  -> EngineEdge
+    
+    func identity() async throws  -> EngineIdentity
+    
+    func listOrgs() async throws  -> [AuthOrg]
+    
+    func selectOrg(organizationId: String) async throws 
+    
+    /**
+     * WorkOS authorize URL redirecting to `redirect_uri` (`zeron://callback`);
+     * empty when the engine has no WorkOS (a development server).
+     */
+    func signInUrl(redirectUri: String) async throws  -> String
+    
+    func signOut() async throws 
+    
+}
+/**
+ * The engine running on this device (Android's on-device engine), over its
+ * token-gated IPC port. The app signs the account in *through* it and builds
+ * its [`CoreClient`] from it: the engine's device id, edge and identity, and
+ * `Credentials::Engine` — see docs/android.md.
+ */
+open class EngineLink: EngineLinkProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_enginelink(self.handle, $0) }
+    }
+    /**
+     * `ipc_url`: `ws://127.0.0.1:{port}`; `ipc_token`: `ZERON_IPC_TOKEN`.
+     */
+public convenience init(ipcUrl: String, ipcToken: String?) {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_constructor_enginelink_new(
+        FfiConverterString.lower(ipcUrl),
+        FfiConverterOptionString.lower(ipcToken),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_enginelink(handle, $0) }
+    }
+
+    
+
+    
+open func account()async throws  -> EngineAccount  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_account(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeEngineAccount_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * The callback's `state` and `code`: the engine exchanges and saves the
+     * session; restart it to open the synced workspace.
+     */
+open func completeSignIn(state: String, code: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_complete_sign_in(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(state),FfiConverterString.lower(code)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func edge()async throws  -> EngineEdge  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_edge(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeEngineEdge_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func identity()async throws  -> EngineIdentity  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_identity(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeEngineIdentity_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func listOrgs()async throws  -> [AuthOrg]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_list_orgs(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeAuthOrg.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func selectOrg(organizationId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_select_org(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(organizationId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * WorkOS authorize URL redirecting to `redirect_uri` (`zeron://callback`);
+     * empty when the engine has no WorkOS (a development server).
+     */
+open func signInUrl(redirectUri: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_sign_in_url(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(redirectUri)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func signOut()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_enginelink_sign_out(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineLink: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = EngineLink
+
+    public static func lift(_ handle: UInt64) throws -> EngineLink {
+        return EngineLink(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: EngineLink) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineLink {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: EngineLink, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineLink_lift(_ handle: UInt64) throws -> EngineLink {
+    return try FfiConverterTypeEngineLink.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineLink_lower(_ value: EngineLink) -> UInt64 {
+    return FfiConverterTypeEngineLink.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A running host stream. `cancel()` — or releasing the object — stops it
+ * and cancels the host side.
+ */
+public protocol HostStreamProtocol: AnyObject, Sendable {
+    
+    func cancel() 
+    
+    func isActive()  -> Bool
+    
+}
+/**
+ * A running host stream. `cancel()` — or releasing the object — stops it
+ * and cancels the host side.
+ */
+open class HostStream: HostStreamProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_hoststream(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_hoststream(handle, $0) }
+    }
+
+    
+
+    
+open func cancel()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hoststream_cancel(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+open func isActive() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hoststream_is_active(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostStream: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = HostStream
+
+    public static func lift(_ handle: UInt64) throws -> HostStream {
+        return HostStream(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: HostStream) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostStream {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: HostStream, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostStream_lift(_ handle: UInt64) throws -> HostStream {
+    return try FfiConverterTypeHostStream.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostStream_lower(_ value: HostStream) -> UInt64 {
+    return FfiConverterTypeHostStream.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Receives one host stream's items (JSON) on a client thread, in order.
+ * Hop to the main thread before touching UI state.
+ */
+public protocol HostStreamListener: AnyObject, Sendable {
+    
+    func onItem(json: String) 
+    
+    /**
+     * The host ended the stream (a terminal exited), the connection dropped
+     * or the client shut down. Not called after `cancel()`. Re-subscribe to
+     * resume.
+     */
+    func onEnd() 
+    
+}
+/**
+ * Receives one host stream's items (JSON) on a client thread, in order.
+ * Hop to the main thread before touching UI state.
+ */
+open class HostStreamListenerImpl: HostStreamListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_hoststreamlistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_hoststreamlistener(handle, $0) }
+    }
+
+    
+
+    
+open func onItem(json: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hoststreamlistener_on_item(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The host ended the stream (a terminal exited), the connection dropped
+     * or the client shut down. Not called after `cancel()`. Re-subscribe to
+     * resume.
+     */
+open func onEnd()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hoststreamlistener_on_end(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceHostStreamListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceHostStreamListener = UniffiVTableCallbackInterfaceHostStreamListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeHostStreamListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface HostStreamListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeHostStreamListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface HostStreamListener: handle missing in uniffiClone")
+            }
+        },
+        onItem: { (
+            uniffiHandle: UInt64,
+            json: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeHostStreamListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onItem(
+                     json: try FfiConverterString.lift(json)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onEnd: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeHostStreamListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onEnd(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceHostStreamListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceHostStreamListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitHostStreamListener() {
+    uniffi_zeron_mobile_fn_init_callback_vtable_hoststreamlistener(UniffiCallbackInterfaceHostStreamListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostStreamListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<HostStreamListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = HostStreamListener
+
+    public static func lift(_ handle: UInt64) throws -> HostStreamListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return HostStreamListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: HostStreamListener) -> UInt64 {
+         if let rustImpl = value as? HostStreamListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostStreamListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: HostStreamListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostStreamListener_lift(_ handle: UInt64) throws -> HostStreamListener {
+    return try FfiConverterTypeHostStreamListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostStreamListener_lower(_ value: HostStreamListener) -> UInt64 {
+    return FfiConverterTypeHostStreamListener.lower(value)
 }
 
 
@@ -3194,6 +4000,597 @@ public func FfiConverterTypeSessionHandle_lower(_ value: SessionHandle) -> UInt6
 
 
 /**
+ * Notified when a terminal needs repainting. Coalesced: after `on_frame`
+ * nothing more is sent until the next `frame()` pull.
+ */
+public protocol TerminalListener: AnyObject, Sendable {
+    
+    func onFrame() 
+    
+    /**
+     * The shell exited (the frame already shows the exit line).
+     */
+    func onExit(code: Int32) 
+    
+}
+/**
+ * Notified when a terminal needs repainting. Coalesced: after `on_frame`
+ * nothing more is sent until the next `frame()` pull.
+ */
+open class TerminalListenerImpl: TerminalListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_terminallistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_terminallistener(handle, $0) }
+    }
+
+    
+
+    
+open func onFrame()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminallistener_on_frame(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The shell exited (the frame already shows the exit line).
+     */
+open func onExit(code: Int32)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminallistener_on_exit(
+            self.uniffiCloneHandle(),
+        FfiConverterInt32.lower(code),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceTerminalListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceTerminalListener = UniffiVTableCallbackInterfaceTerminalListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeTerminalListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface TerminalListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeTerminalListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface TerminalListener: handle missing in uniffiClone")
+            }
+        },
+        onFrame: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeTerminalListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onFrame(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onExit: { (
+            uniffiHandle: UInt64,
+            code: Int32,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeTerminalListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onExit(
+                     code: try FfiConverterInt32.lift(code)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceTerminalListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceTerminalListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitTerminalListener() {
+    uniffi_zeron_mobile_fn_init_callback_vtable_terminallistener(UniffiCallbackInterfaceTerminalListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<TerminalListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = TerminalListener
+
+    public static func lift(_ handle: UInt64) throws -> TerminalListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return TerminalListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: TerminalListener) -> UInt64 {
+         if let rustImpl = value as? TerminalListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: TerminalListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalListener_lift(_ handle: UInt64) throws -> TerminalListener {
+    return try FfiConverterTypeTerminalListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalListener_lower(_ value: TerminalListener) -> UInt64 {
+    return FfiConverterTypeTerminalListener.lower(value)
+}
+
+
+
+
+
+
+/**
+ * One engine terminal as a paintable grid. See [`CoreClient::terminal_screen`].
+ */
+public protocol TerminalScreenProtocol: AnyObject, Sendable {
+    
+    /**
+     * Everything on screen and in the client's scrollback, as text.
+     */
+    func allText()  -> String
+    
+    func clearSelection() 
+    
+    /**
+     * The grid to paint (clears the pending-frame flag).
+     */
+    func frame()  -> TerminalFrame
+    
+    /**
+     * End the shell (`CloseTerminal`) and stop following it. (Releasing the
+     * object only detaches; the shell keeps running.)
+     */
+    func kill() async throws 
+    
+    /**
+     * Clipboard text (bracketed when the program asked for it).
+     */
+    func paste(text: String) 
+    
+    /**
+     * Resize the grid now; the engine's PTY follows after a short debounce
+     * (rotation and the IME animate through many sizes).
+     */
+    func resize(cols: UInt16, rows: UInt16) 
+    
+    /**
+     * Scroll the view: positive = up into history.
+     */
+    func scroll(lines: Int32) 
+    
+    func scrollToBottom() 
+    
+    /**
+     * Start a selection at a viewport cell (`right_half`: the touch landed
+     * on the cell's right half).
+     */
+    func selectStart(row: UInt32, col: UInt32, rightHalf: Bool, kind: TerminalSelection) 
+    
+    func selectUpdate(row: UInt32, col: UInt32, rightHalf: Bool) 
+    
+    func selectionText()  -> String?
+    
+    func setPalette(palette: TerminalPalette) 
+    
+    func terminalId()  -> String
+    
+    func writeKey(key: TerminalKey, ctrl: Bool, alt: Bool, shift: Bool) 
+    
+    /**
+     * Typed text; `ctrl`/`alt` are the extra-keys row's sticky modifiers.
+     */
+    func writeText(text: String, ctrl: Bool, alt: Bool) 
+    
+}
+/**
+ * One engine terminal as a paintable grid. See [`CoreClient::terminal_screen`].
+ */
+open class TerminalScreen: TerminalScreenProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_terminalscreen(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_terminalscreen(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Everything on screen and in the client's scrollback, as text.
+     */
+open func allText() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_all_text(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func clearSelection()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_clear_selection(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The grid to paint (clears the pending-frame flag).
+     */
+open func frame() -> TerminalFrame  {
+    return try!  FfiConverterTypeTerminalFrame_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_frame(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * End the shell (`CloseTerminal`) and stop following it. (Releasing the
+     * object only detaches; the shell keeps running.)
+     */
+open func kill()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_terminalscreen_kill(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Clipboard text (bracketed when the program asked for it).
+     */
+open func paste(text: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_paste(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Resize the grid now; the engine's PTY follows after a short debounce
+     * (rotation and the IME animate through many sizes).
+     */
+open func resize(cols: UInt16, rows: UInt16)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_resize(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt16.lower(cols),
+        FfiConverterUInt16.lower(rows),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Scroll the view: positive = up into history.
+     */
+open func scroll(lines: Int32)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_scroll(
+            self.uniffiCloneHandle(),
+        FfiConverterInt32.lower(lines),uniffiCallStatus
+    )
+}
+}
+    
+open func scrollToBottom()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_scroll_to_bottom(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Start a selection at a viewport cell (`right_half`: the touch landed
+     * on the cell's right half).
+     */
+open func selectStart(row: UInt32, col: UInt32, rightHalf: Bool, kind: TerminalSelection)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_select_start(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(row),
+        FfiConverterUInt32.lower(col),
+        FfiConverterBool.lower(rightHalf),
+        FfiConverterTypeTerminalSelection_lower(kind),uniffiCallStatus
+    )
+}
+}
+    
+open func selectUpdate(row: UInt32, col: UInt32, rightHalf: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_select_update(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(row),
+        FfiConverterUInt32.lower(col),
+        FfiConverterBool.lower(rightHalf),uniffiCallStatus
+    )
+}
+}
+    
+open func selectionText() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_selection_text(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func setPalette(palette: TerminalPalette)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_set_palette(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTerminalPalette_lower(palette),uniffiCallStatus
+    )
+}
+}
+    
+open func terminalId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_terminal_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func writeKey(key: TerminalKey, ctrl: Bool, alt: Bool, shift: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_write_key(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTerminalKey_lower(key),
+        FfiConverterBool.lower(ctrl),
+        FfiConverterBool.lower(alt),
+        FfiConverterBool.lower(shift),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Typed text; `ctrl`/`alt` are the extra-keys row's sticky modifiers.
+     */
+open func writeText(text: String, ctrl: Bool, alt: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_terminalscreen_write_text(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(text),
+        FfiConverterBool.lower(ctrl),
+        FfiConverterBool.lower(alt),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalScreen: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = TerminalScreen
+
+    public static func lift(_ handle: UInt64) throws -> TerminalScreen {
+        return TerminalScreen(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: TerminalScreen) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalScreen {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: TerminalScreen, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalScreen_lift(_ handle: UInt64) throws -> TerminalScreen {
+    return try FfiConverterTypeTerminalScreen.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalScreen_lower(_ value: TerminalScreen) -> UInt64 {
+    return FfiConverterTypeTerminalScreen.lower(value)
+}
+
+
+
+
+
+
+/**
  * Registered faces + fallback measurer, shared by every transcript.
  */
 public protocol TextSystemProtocol: AnyObject, Sendable {
@@ -4206,6 +5603,117 @@ public func FfiConverterTypeChatConfig_lower(_ value: ChatConfig) -> RustBuffer 
 }
 
 
+public struct CodeLine: Equatable, Hashable {
+    public var spans: [CodeSpan]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spans: [CodeSpan]) {
+        self.spans = spans
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CodeLine: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCodeLine: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CodeLine {
+        return
+            try CodeLine(
+                spans: FfiConverterSequenceTypeCodeSpan.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CodeLine, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeCodeSpan.write(value.spans, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodeLine_lift(_ buf: RustBuffer) throws -> CodeLine {
+    return try FfiConverterTypeCodeLine.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodeLine_lower(_ value: CodeLine) -> RustBuffer {
+    return FfiConverterTypeCodeLine.lower(value)
+}
+
+
+/**
+ * A highlighted span within one line, in UTF-16 code units.
+ */
+public struct CodeSpan: Equatable, Hashable {
+    public var start: UInt32
+    public var end: UInt32
+    public var color: ColorRole
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(start: UInt32, end: UInt32, color: ColorRole) {
+        self.start = start
+        self.end = end
+        self.color = color
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CodeSpan: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCodeSpan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CodeSpan {
+        return
+            try CodeSpan(
+                start: FfiConverterUInt32.read(from: &buf), 
+                end: FfiConverterUInt32.read(from: &buf), 
+                color: FfiConverterTypeColorRole.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CodeSpan, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.start, into: &buf)
+        FfiConverterUInt32.write(value.end, into: &buf)
+        FfiConverterTypeColorRole.write(value.color, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodeSpan_lift(_ buf: RustBuffer) throws -> CodeSpan {
+    return try FfiConverterTypeCodeSpan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodeSpan_lower(_ value: CodeSpan) -> RustBuffer {
+    return FfiConverterTypeCodeSpan.lower(value)
+}
+
+
 /**
  * Everything the composer and its status strip render.
  */
@@ -4833,6 +6341,141 @@ public func FfiConverterTypeDeviceView_lower(_ value: DeviceView) -> RustBuffer 
 }
 
 
+/**
+ * Where and as whom the engine syncs (`EdgeBearer`, bearer withheld): the
+ * `CoreConfig.edge_url` and `Credentials::Engine` identity for its viewer.
+ */
+public struct EngineEdge: Equatable, Hashable {
+    public var edgeUrl: String
+    public var userId: String
+    public var orgId: String
+    /**
+     * The engine's session ended (the app restarts it local-only).
+     */
+    public var signedOut: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(edgeUrl: String, userId: String, orgId: String, 
+        /**
+         * The engine's session ended (the app restarts it local-only).
+         */signedOut: Bool) {
+        self.edgeUrl = edgeUrl
+        self.userId = userId
+        self.orgId = orgId
+        self.signedOut = signedOut
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EngineEdge: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineEdge: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineEdge {
+        return
+            try EngineEdge(
+                edgeUrl: FfiConverterString.read(from: &buf), 
+                userId: FfiConverterString.read(from: &buf), 
+                orgId: FfiConverterString.read(from: &buf), 
+                signedOut: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EngineEdge, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.edgeUrl, into: &buf)
+        FfiConverterString.write(value.userId, into: &buf)
+        FfiConverterString.write(value.orgId, into: &buf)
+        FfiConverterBool.write(value.signedOut, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineEdge_lift(_ buf: RustBuffer) throws -> EngineEdge {
+    return try FfiConverterTypeEngineEdge.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineEdge_lower(_ value: EngineEdge) -> RustBuffer {
+    return FfiConverterTypeEngineEdge.lower(value)
+}
+
+
+/**
+ * The engine's fixed identity (`EngineInfo`).
+ */
+public struct EngineIdentity: Equatable, Hashable {
+    public var deviceId: String
+    /**
+     * `local` / `synced` / `development` — fixed for the engine's run.
+     */
+    public var workspaceScope: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(deviceId: String, 
+        /**
+         * `local` / `synced` / `development` — fixed for the engine's run.
+         */workspaceScope: String) {
+        self.deviceId = deviceId
+        self.workspaceScope = workspaceScope
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EngineIdentity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineIdentity: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineIdentity {
+        return
+            try EngineIdentity(
+                deviceId: FfiConverterString.read(from: &buf), 
+                workspaceScope: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EngineIdentity, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.workspaceScope, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineIdentity_lift(_ buf: RustBuffer) throws -> EngineIdentity {
+    return try FfiConverterTypeEngineIdentity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineIdentity_lower(_ value: EngineIdentity) -> RustBuffer {
+    return FfiConverterTypeEngineIdentity.lower(value)
+}
+
+
 public struct FaceData: Equatable, Hashable {
     public var role: FaceRole
     public var bytes: Data
@@ -5311,6 +6954,66 @@ public func FfiConverterTypeHarnessInfo_lift(_ buf: RustBuffer) throws -> Harnes
 #endif
 public func FfiConverterTypeHarnessInfo_lower(_ value: HarnessInfo) -> RustBuffer {
     return FfiConverterTypeHarnessInfo.lower(value)
+}
+
+
+public struct HighlightedSource: Equatable, Hashable {
+    public var language: String
+    /**
+     * One entry per `\n`-separated line of the source.
+     */
+    public var lines: [CodeLine]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(language: String, 
+        /**
+         * One entry per `\n`-separated line of the source.
+         */lines: [CodeLine]) {
+        self.language = language
+        self.lines = lines
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HighlightedSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHighlightedSource: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HighlightedSource {
+        return
+            try HighlightedSource(
+                language: FfiConverterString.read(from: &buf), 
+                lines: FfiConverterSequenceTypeCodeLine.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HighlightedSource, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.language, into: &buf)
+        FfiConverterSequenceTypeCodeLine.write(value.lines, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHighlightedSource_lift(_ buf: RustBuffer) throws -> HighlightedSource {
+    return try FfiConverterTypeHighlightedSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHighlightedSource_lower(_ value: HighlightedSource) -> RustBuffer {
+    return FfiConverterTypeHighlightedSource.lower(value)
 }
 
 
@@ -7360,6 +9063,12 @@ public struct SessionRow: Equatable, Hashable {
      * 2 = chat2; 1 = legacy (not dialable).
      */
     public var roomGen: UInt32
+    /**
+     * Subagents running right now, also after the chat's own turn settled
+     * (staleness-gated). Draw as "● N" (`running_count_label`).
+     */
+    public var runningSubagents: UInt32
+    public var pendingCallbacks: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7396,7 +9105,11 @@ public struct SessionRow: Equatable, Hashable {
          */sendState: SendState?, parentChatId: String?, 
         /**
          * 2 = chat2; 1 = legacy (not dialable).
-         */roomGen: UInt32) {
+         */roomGen: UInt32, 
+        /**
+         * Subagents running right now, also after the chat's own turn settled
+         * (staleness-gated). Draw as "● N" (`running_count_label`).
+         */runningSubagents: UInt32, pendingCallbacks: UInt32) {
         self.id = id
         self.revision = revision
         self.title = title
@@ -7427,6 +9140,8 @@ public struct SessionRow: Equatable, Hashable {
         self.sendState = sendState
         self.parentChatId = parentChatId
         self.roomGen = roomGen
+        self.runningSubagents = runningSubagents
+        self.pendingCallbacks = pendingCallbacks
     }
 
     
@@ -7474,7 +9189,9 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
-                roomGen: FfiConverterUInt32.read(from: &buf)
+                roomGen: FfiConverterUInt32.read(from: &buf), 
+                runningSubagents: FfiConverterUInt32.read(from: &buf), 
+                pendingCallbacks: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -7509,6 +9226,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
+        FfiConverterUInt32.write(value.runningSubagents, into: &buf)
+        FfiConverterUInt32.write(value.pendingCallbacks, into: &buf)
     }
 }
 
@@ -7590,6 +9309,585 @@ public func FfiConverterTypeStyleDesc_lift(_ buf: RustBuffer) throws -> StyleDes
 #endif
 public func FfiConverterTypeStyleDesc_lower(_ value: StyleDesc) -> RustBuffer {
     return FfiConverterTypeStyleDesc.lower(value)
+}
+
+
+/**
+ * The lists the Subagents panel draws, in order.
+ */
+public struct SubagentGroups: Equatable, Hashable {
+    /**
+     * Running (longest-running first), then not yet stamped.
+     */
+    public var active: [SubagentView]
+    /**
+     * Newest first.
+     */
+    public var completed: [SubagentView]
+    /**
+     * Newest first.
+     */
+    public var failed: [SubagentView]
+    /**
+     * Subagents streaming right now.
+     */
+    public var running: UInt32
+    /**
+     * The chat's harness: subagents run inside it.
+     */
+    public var harness: String?
+    public var harnessLabel: String?
+    /**
+     * The chat's model (a spawn without its own inherits it).
+     */
+    public var modelLabel: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Running (longest-running first), then not yet stamped.
+         */active: [SubagentView], 
+        /**
+         * Newest first.
+         */completed: [SubagentView], 
+        /**
+         * Newest first.
+         */failed: [SubagentView], 
+        /**
+         * Subagents streaming right now.
+         */running: UInt32, 
+        /**
+         * The chat's harness: subagents run inside it.
+         */harness: String?, harnessLabel: String?, 
+        /**
+         * The chat's model (a spawn without its own inherits it).
+         */modelLabel: String?) {
+        self.active = active
+        self.completed = completed
+        self.failed = failed
+        self.running = running
+        self.harness = harness
+        self.harnessLabel = harnessLabel
+        self.modelLabel = modelLabel
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SubagentGroups: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubagentGroups: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubagentGroups {
+        return
+            try SubagentGroups(
+                active: FfiConverterSequenceTypeSubagentView.read(from: &buf), 
+                completed: FfiConverterSequenceTypeSubagentView.read(from: &buf), 
+                failed: FfiConverterSequenceTypeSubagentView.read(from: &buf), 
+                running: FfiConverterUInt32.read(from: &buf), 
+                harness: FfiConverterOptionString.read(from: &buf), 
+                harnessLabel: FfiConverterOptionString.read(from: &buf), 
+                modelLabel: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SubagentGroups, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeSubagentView.write(value.active, into: &buf)
+        FfiConverterSequenceTypeSubagentView.write(value.completed, into: &buf)
+        FfiConverterSequenceTypeSubagentView.write(value.failed, into: &buf)
+        FfiConverterUInt32.write(value.running, into: &buf)
+        FfiConverterOptionString.write(value.harness, into: &buf)
+        FfiConverterOptionString.write(value.harnessLabel, into: &buf)
+        FfiConverterOptionString.write(value.modelLabel, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentGroups_lift(_ buf: RustBuffer) throws -> SubagentGroups {
+    return try FfiConverterTypeSubagentGroups.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentGroups_lower(_ value: SubagentGroups) -> RustBuffer {
+    return FfiConverterTypeSubagentGroups.lower(value)
+}
+
+
+/**
+ * One subagent of a chat.
+ */
+public struct SubagentView: Equatable, Hashable {
+    /**
+     * Its transcript: `CoreClient.open_subagent(chat, doc_id)`.
+     */
+    public var docId: String
+    public var spawnId: String
+    /**
+     * The bare task ("verify the marker pipeline").
+     */
+    public var title: String
+    /**
+     * The spawn chip's detail line.
+     */
+    public var description: String
+    /**
+     * `subagent_type` ("Explore", "general-purpose"…), when the spawn said.
+     */
+    public var agentType: String?
+    /**
+     * The model the spawn named; `None` = the chat's model.
+     */
+    public var model: String?
+    public var state: SubagentState
+    public var startedAtMs: Int64
+    /**
+     * Latest turn that spawned or steered it (the desktop's "updated").
+     */
+    public var updatedAtMs: Int64
+    /**
+     * What it reported back to the parent, else its last line.
+     */
+    public var summary: String?
+    public var spawnFailed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Its transcript: `CoreClient.open_subagent(chat, doc_id)`.
+         */docId: String, spawnId: String, 
+        /**
+         * The bare task ("verify the marker pipeline").
+         */title: String, 
+        /**
+         * The spawn chip's detail line.
+         */description: String, 
+        /**
+         * `subagent_type` ("Explore", "general-purpose"…), when the spawn said.
+         */agentType: String?, 
+        /**
+         * The model the spawn named; `None` = the chat's model.
+         */model: String?, state: SubagentState, startedAtMs: Int64, 
+        /**
+         * Latest turn that spawned or steered it (the desktop's "updated").
+         */updatedAtMs: Int64, 
+        /**
+         * What it reported back to the parent, else its last line.
+         */summary: String?, spawnFailed: Bool) {
+        self.docId = docId
+        self.spawnId = spawnId
+        self.title = title
+        self.description = description
+        self.agentType = agentType
+        self.model = model
+        self.state = state
+        self.startedAtMs = startedAtMs
+        self.updatedAtMs = updatedAtMs
+        self.summary = summary
+        self.spawnFailed = spawnFailed
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SubagentView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubagentView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubagentView {
+        return
+            try SubagentView(
+                docId: FfiConverterString.read(from: &buf), 
+                spawnId: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf), 
+                agentType: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                state: FfiConverterTypeSubagentState.read(from: &buf), 
+                startedAtMs: FfiConverterInt64.read(from: &buf), 
+                updatedAtMs: FfiConverterInt64.read(from: &buf), 
+                summary: FfiConverterOptionString.read(from: &buf), 
+                spawnFailed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SubagentView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.docId, into: &buf)
+        FfiConverterString.write(value.spawnId, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.agentType, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterTypeSubagentState.write(value.state, into: &buf)
+        FfiConverterInt64.write(value.startedAtMs, into: &buf)
+        FfiConverterInt64.write(value.updatedAtMs, into: &buf)
+        FfiConverterOptionString.write(value.summary, into: &buf)
+        FfiConverterBool.write(value.spawnFailed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentView_lift(_ buf: RustBuffer) throws -> SubagentView {
+    return try FfiConverterTypeSubagentView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentView_lower(_ value: SubagentView) -> RustBuffer {
+    return FfiConverterTypeSubagentView.lower(value)
+}
+
+
+public struct TerminalFrame: Equatable, Hashable {
+    public var cols: UInt16
+    public var rows: UInt16
+    public var lines: [TerminalLine]
+    /**
+     * `-1` when hidden or scrolled out of view.
+     */
+    public var cursorRow: Int32
+    public var cursorCol: Int32
+    /**
+     * Lines scrolled back (0 = following live output).
+     */
+    public var displayOffset: UInt32
+    public var history: UInt32
+    public var title: String?
+    public var exitCode: Int32?
+    public var hasSelection: Bool
+    /**
+     * Output hasn't arrived yet (the first replay is in flight).
+     */
+    public var connecting: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(cols: UInt16, rows: UInt16, lines: [TerminalLine], 
+        /**
+         * `-1` when hidden or scrolled out of view.
+         */cursorRow: Int32, cursorCol: Int32, 
+        /**
+         * Lines scrolled back (0 = following live output).
+         */displayOffset: UInt32, history: UInt32, title: String?, exitCode: Int32?, hasSelection: Bool, 
+        /**
+         * Output hasn't arrived yet (the first replay is in flight).
+         */connecting: Bool) {
+        self.cols = cols
+        self.rows = rows
+        self.lines = lines
+        self.cursorRow = cursorRow
+        self.cursorCol = cursorCol
+        self.displayOffset = displayOffset
+        self.history = history
+        self.title = title
+        self.exitCode = exitCode
+        self.hasSelection = hasSelection
+        self.connecting = connecting
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TerminalFrame: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalFrame: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalFrame {
+        return
+            try TerminalFrame(
+                cols: FfiConverterUInt16.read(from: &buf), 
+                rows: FfiConverterUInt16.read(from: &buf), 
+                lines: FfiConverterSequenceTypeTerminalLine.read(from: &buf), 
+                cursorRow: FfiConverterInt32.read(from: &buf), 
+                cursorCol: FfiConverterInt32.read(from: &buf), 
+                displayOffset: FfiConverterUInt32.read(from: &buf), 
+                history: FfiConverterUInt32.read(from: &buf), 
+                title: FfiConverterOptionString.read(from: &buf), 
+                exitCode: FfiConverterOptionInt32.read(from: &buf), 
+                hasSelection: FfiConverterBool.read(from: &buf), 
+                connecting: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TerminalFrame, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.cols, into: &buf)
+        FfiConverterUInt16.write(value.rows, into: &buf)
+        FfiConverterSequenceTypeTerminalLine.write(value.lines, into: &buf)
+        FfiConverterInt32.write(value.cursorRow, into: &buf)
+        FfiConverterInt32.write(value.cursorCol, into: &buf)
+        FfiConverterUInt32.write(value.displayOffset, into: &buf)
+        FfiConverterUInt32.write(value.history, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionInt32.write(value.exitCode, into: &buf)
+        FfiConverterBool.write(value.hasSelection, into: &buf)
+        FfiConverterBool.write(value.connecting, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalFrame_lift(_ buf: RustBuffer) throws -> TerminalFrame {
+    return try FfiConverterTypeTerminalFrame.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalFrame_lower(_ value: TerminalFrame) -> RustBuffer {
+    return FfiConverterTypeTerminalFrame.lower(value)
+}
+
+
+public struct TerminalLine: Equatable, Hashable {
+    public var runs: [TerminalRun]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(runs: [TerminalRun]) {
+        self.runs = runs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TerminalLine: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalLine: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalLine {
+        return
+            try TerminalLine(
+                runs: FfiConverterSequenceTypeTerminalRun.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TerminalLine, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeTerminalRun.write(value.runs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalLine_lift(_ buf: RustBuffer) throws -> TerminalLine {
+    return try FfiConverterTypeTerminalLine.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalLine_lower(_ value: TerminalLine) -> RustBuffer {
+    return FfiConverterTypeTerminalLine.lower(value)
+}
+
+
+/**
+ * Theme colors the emulator resolves cells against (ARGB).
+ */
+public struct TerminalPalette: Equatable, Hashable {
+    public var foreground: UInt32
+    public var background: UInt32
+    /**
+     * ANSI 0–15.
+     */
+    public var ansi: [UInt32]
+    public var cursor: UInt32
+    public var selection: UInt32
+    /**
+     * Light appearance mirrors the 232–255 grayscale ramp (as the desktop).
+     */
+    public var light: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(foreground: UInt32, background: UInt32, 
+        /**
+         * ANSI 0–15.
+         */ansi: [UInt32], cursor: UInt32, selection: UInt32, 
+        /**
+         * Light appearance mirrors the 232–255 grayscale ramp (as the desktop).
+         */light: Bool) {
+        self.foreground = foreground
+        self.background = background
+        self.ansi = ansi
+        self.cursor = cursor
+        self.selection = selection
+        self.light = light
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TerminalPalette: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalPalette: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalPalette {
+        return
+            try TerminalPalette(
+                foreground: FfiConverterUInt32.read(from: &buf), 
+                background: FfiConverterUInt32.read(from: &buf), 
+                ansi: FfiConverterSequenceUInt32.read(from: &buf), 
+                cursor: FfiConverterUInt32.read(from: &buf), 
+                selection: FfiConverterUInt32.read(from: &buf), 
+                light: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TerminalPalette, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.foreground, into: &buf)
+        FfiConverterUInt32.write(value.background, into: &buf)
+        FfiConverterSequenceUInt32.write(value.ansi, into: &buf)
+        FfiConverterUInt32.write(value.cursor, into: &buf)
+        FfiConverterUInt32.write(value.selection, into: &buf)
+        FfiConverterBool.write(value.light, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalPalette_lift(_ buf: RustBuffer) throws -> TerminalPalette {
+    return try FfiConverterTypeTerminalPalette.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalPalette_lower(_ value: TerminalPalette) -> RustBuffer {
+    return FfiConverterTypeTerminalPalette.lower(value)
+}
+
+
+/**
+ * A run of cells sharing a style, starting at `col` and spanning `width`
+ * cells. Wide characters get their own run (width 2).
+ */
+public struct TerminalRun: Equatable, Hashable {
+    public var col: UInt16
+    public var width: UInt16
+    public var text: String
+    public var fg: UInt32
+    /**
+     * `0` = the terminal background (nothing to paint).
+     */
+    public var bg: UInt32
+    public var bold: Bool
+    public var italic: Bool
+    public var underline: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(col: UInt16, width: UInt16, text: String, fg: UInt32, 
+        /**
+         * `0` = the terminal background (nothing to paint).
+         */bg: UInt32, bold: Bool, italic: Bool, underline: Bool) {
+        self.col = col
+        self.width = width
+        self.text = text
+        self.fg = fg
+        self.bg = bg
+        self.bold = bold
+        self.italic = italic
+        self.underline = underline
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TerminalRun: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalRun: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalRun {
+        return
+            try TerminalRun(
+                col: FfiConverterUInt16.read(from: &buf), 
+                width: FfiConverterUInt16.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                fg: FfiConverterUInt32.read(from: &buf), 
+                bg: FfiConverterUInt32.read(from: &buf), 
+                bold: FfiConverterBool.read(from: &buf), 
+                italic: FfiConverterBool.read(from: &buf), 
+                underline: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TerminalRun, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.col, into: &buf)
+        FfiConverterUInt16.write(value.width, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterUInt32.write(value.fg, into: &buf)
+        FfiConverterUInt32.write(value.bg, into: &buf)
+        FfiConverterBool.write(value.bold, into: &buf)
+        FfiConverterBool.write(value.italic, into: &buf)
+        FfiConverterBool.write(value.underline, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalRun_lift(_ buf: RustBuffer) throws -> TerminalRun {
+    return try FfiConverterTypeTerminalRun.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalRun_lower(_ value: TerminalRun) -> RustBuffer {
+    return FfiConverterTypeTerminalRun.lower(value)
 }
 
 
@@ -9377,6 +11675,19 @@ public enum Credentials: Equatable, Hashable {
     case dev(userId: String, orgId: String
     )
     /**
+     * The local edge of this device's own engine (Android on-device mode):
+     * the bearer is its shared secret verbatim.
+     */
+    case local(token: String
+    )
+    /**
+     * The engine on this device owns the account: its bearer (fetched over
+     * its IPC port, refreshed by it alone) and the identity it reported
+     * (`EngineLink::edge`). The client must use the engine's device id.
+     */
+    case engine(ipcUrl: String, ipcToken: String?, userId: String, orgId: String
+    )
+    /**
      * Fully offline dataset with a simulated host.
      */
     case demo(options: DemoOptions
@@ -9408,7 +11719,13 @@ public struct FfiConverterTypeCredentials: FfiConverterRustBuffer {
         case 2: return .dev(userId: try FfiConverterString.read(from: &buf), orgId: try FfiConverterString.read(from: &buf)
         )
         
-        case 3: return .demo(options: try FfiConverterTypeDemoOptions.read(from: &buf)
+        case 3: return .local(token: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 4: return .engine(ipcUrl: try FfiConverterString.read(from: &buf), ipcToken: try FfiConverterOptionString.read(from: &buf), userId: try FfiConverterString.read(from: &buf), orgId: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 5: return .demo(options: try FfiConverterTypeDemoOptions.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -9432,8 +11749,21 @@ public struct FfiConverterTypeCredentials: FfiConverterRustBuffer {
             FfiConverterString.write(orgId, into: &buf)
             
         
-        case let .demo(options):
+        case let .local(token):
             writeInt(&buf, Int32(3))
+            FfiConverterString.write(token, into: &buf)
+            
+        
+        case let .engine(ipcUrl,ipcToken,userId,orgId):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(ipcUrl, into: &buf)
+            FfiConverterOptionString.write(ipcToken, into: &buf)
+            FfiConverterString.write(userId, into: &buf)
+            FfiConverterString.write(orgId, into: &buf)
+            
+        
+        case let .demo(options):
+            writeInt(&buf, Int32(5))
             FfiConverterTypeDemoOptions.write(options, into: &buf)
             
         }
@@ -9611,6 +11941,94 @@ public func FfiConverterTypeDemoFixture_lift(_ buf: RustBuffer) throws -> DemoFi
 #endif
 public func FfiConverterTypeDemoFixture_lower(_ value: DemoFixture) -> RustBuffer {
     return FfiConverterTypeDemoFixture.lower(value)
+}
+
+
+
+/**
+ * The engine's account (`AuthStatus`).
+ */
+
+public enum EngineAccount: Equatable, Hashable {
+    
+    case signedOut
+    /**
+     * Signed in, but no organization picked yet.
+     */
+    case needsOrganization(email: String, name: String?
+    )
+    case signedIn(email: String, name: String?, orgId: String?
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EngineAccount: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineAccount: FfiConverterRustBuffer {
+    typealias SwiftType = EngineAccount
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineAccount {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .signedOut
+        
+        case 2: return .needsOrganization(email: try FfiConverterString.read(from: &buf), name: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 3: return .signedIn(email: try FfiConverterString.read(from: &buf), name: try FfiConverterOptionString.read(from: &buf), orgId: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EngineAccount, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .signedOut:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .needsOrganization(email,name):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(email, into: &buf)
+            FfiConverterOptionString.write(name, into: &buf)
+            
+        
+        case let .signedIn(email,name,orgId):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(email, into: &buf)
+            FfiConverterOptionString.write(name, into: &buf)
+            FfiConverterOptionString.write(orgId, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineAccount_lift(_ buf: RustBuffer) throws -> EngineAccount {
+    return try FfiConverterTypeEngineAccount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineAccount_lower(_ value: EngineAccount) -> RustBuffer {
+    return FfiConverterTypeEngineAccount.lower(value)
 }
 
 
@@ -10900,6 +13318,402 @@ public func FfiConverterTypeStreamSpeed_lower(_ value: StreamSpeed) -> RustBuffe
 
 
 
+/**
+ * Where a subagent's lifecycle stands.
+ */
+
+public enum SubagentState: Equatable, Hashable {
+    
+    case running
+    /**
+     * Spawned, no status stamped yet.
+     */
+    case pending
+    case completed
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SubagentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubagentState: FfiConverterRustBuffer {
+    typealias SwiftType = SubagentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubagentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .running
+        
+        case 2: return .pending
+        
+        case 3: return .completed
+        
+        case 4: return .failed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SubagentState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .running:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentState_lift(_ buf: RustBuffer) throws -> SubagentState {
+    return try FfiConverterTypeSubagentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentState_lower(_ value: SubagentState) -> RustBuffer {
+    return FfiConverterTypeSubagentState.lower(value)
+}
+
+
+
+
+public enum TerminalKey: Equatable, Hashable {
+    
+    case enter
+    case backspace
+    case tab
+    case escape
+    case up
+    case down
+    case right
+    case left
+    case home
+    case end
+    case insert
+    case delete
+    case pageUp
+    case pageDown
+    case f1
+    case f2
+    case f3
+    case f4
+    case f5
+    case f6
+    case f7
+    case f8
+    case f9
+    case f10
+    case f11
+    case f12
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TerminalKey: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalKey: FfiConverterRustBuffer {
+    typealias SwiftType = TerminalKey
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalKey {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .enter
+        
+        case 2: return .backspace
+        
+        case 3: return .tab
+        
+        case 4: return .escape
+        
+        case 5: return .up
+        
+        case 6: return .down
+        
+        case 7: return .right
+        
+        case 8: return .left
+        
+        case 9: return .home
+        
+        case 10: return .end
+        
+        case 11: return .insert
+        
+        case 12: return .delete
+        
+        case 13: return .pageUp
+        
+        case 14: return .pageDown
+        
+        case 15: return .f1
+        
+        case 16: return .f2
+        
+        case 17: return .f3
+        
+        case 18: return .f4
+        
+        case 19: return .f5
+        
+        case 20: return .f6
+        
+        case 21: return .f7
+        
+        case 22: return .f8
+        
+        case 23: return .f9
+        
+        case 24: return .f10
+        
+        case 25: return .f11
+        
+        case 26: return .f12
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TerminalKey, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .enter:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .backspace:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .tab:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .escape:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .up:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .down:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .right:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .left:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .home:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .end:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .insert:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .delete:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .pageUp:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .pageDown:
+            writeInt(&buf, Int32(14))
+        
+        
+        case .f1:
+            writeInt(&buf, Int32(15))
+        
+        
+        case .f2:
+            writeInt(&buf, Int32(16))
+        
+        
+        case .f3:
+            writeInt(&buf, Int32(17))
+        
+        
+        case .f4:
+            writeInt(&buf, Int32(18))
+        
+        
+        case .f5:
+            writeInt(&buf, Int32(19))
+        
+        
+        case .f6:
+            writeInt(&buf, Int32(20))
+        
+        
+        case .f7:
+            writeInt(&buf, Int32(21))
+        
+        
+        case .f8:
+            writeInt(&buf, Int32(22))
+        
+        
+        case .f9:
+            writeInt(&buf, Int32(23))
+        
+        
+        case .f10:
+            writeInt(&buf, Int32(24))
+        
+        
+        case .f11:
+            writeInt(&buf, Int32(25))
+        
+        
+        case .f12:
+            writeInt(&buf, Int32(26))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalKey_lift(_ buf: RustBuffer) throws -> TerminalKey {
+    return try FfiConverterTypeTerminalKey.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalKey_lower(_ value: TerminalKey) -> RustBuffer {
+    return FfiConverterTypeTerminalKey.lower(value)
+}
+
+
+
+/**
+ * Selection granularity for [`TerminalScreen::select_start`].
+ */
+
+public enum TerminalSelection: Equatable, Hashable {
+    
+    case simple
+    case word
+    case line
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TerminalSelection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTerminalSelection: FfiConverterRustBuffer {
+    typealias SwiftType = TerminalSelection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TerminalSelection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .simple
+        
+        case 2: return .word
+        
+        case 3: return .line
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TerminalSelection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .simple:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .word:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .line:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalSelection_lift(_ buf: RustBuffer) throws -> TerminalSelection {
+    return try FfiConverterTypeTerminalSelection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTerminalSelection_lower(_ value: TerminalSelection) -> RustBuffer {
+    return FfiConverterTypeTerminalSelection.lower(value)
+}
+
+
+
 
 public enum TranscriptScale: Equatable, Hashable {
     
@@ -11125,6 +13939,12 @@ public enum WidgetKind: Equatable, Hashable {
     case icon(name: String, color: ColorRole
     )
     /**
+     * A file badge on a tool line (Read/Write/Edit): tapping opens `path`
+     * (as the agent called it — absolute or relative to the chat's folder).
+     */
+    case openFile(path: String
+    )
+    /**
      * A tool group's disclosure chevron (rotates between states).
      */
     case chevron(expanded: Bool
@@ -11192,16 +14012,19 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case 8: return .icon(name: try FfiConverterString.read(from: &buf), color: try FfiConverterTypeColorRole.read(from: &buf)
         )
         
-        case 9: return .chevron(expanded: try FfiConverterBool.read(from: &buf)
+        case 9: return .openFile(path: try FfiConverterString.read(from: &buf)
         )
         
-        case 10: return .toolRail(trunkX: try FfiConverterFloat.read(from: &buf), bend: try FfiConverterFloat.read(from: &buf), branchEnd: try FfiConverterFloat.read(from: &buf), rowMid: try FfiConverterFloat.read(from: &buf), tops: try FfiConverterSequenceFloat.read(from: &buf), heights: try FfiConverterSequenceFloat.read(from: &buf)
+        case 10: return .chevron(expanded: try FfiConverterBool.read(from: &buf)
         )
         
-        case 11: return .toolToggle(detail: try FfiConverterUInt64.read(from: &buf), open: try FfiConverterBool.read(from: &buf)
+        case 11: return .toolRail(trunkX: try FfiConverterFloat.read(from: &buf), bend: try FfiConverterFloat.read(from: &buf), branchEnd: try FfiConverterFloat.read(from: &buf), rowMid: try FfiConverterFloat.read(from: &buf), tops: try FfiConverterSequenceFloat.read(from: &buf), heights: try FfiConverterSequenceFloat.read(from: &buf)
         )
         
-        case 12: return .shimmer
+        case 12: return .toolToggle(detail: try FfiConverterUInt64.read(from: &buf), open: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 13: return .shimmer
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11252,13 +14075,18 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             FfiConverterTypeColorRole.write(color, into: &buf)
             
         
-        case let .chevron(expanded):
+        case let .openFile(path):
             writeInt(&buf, Int32(9))
+            FfiConverterString.write(path, into: &buf)
+            
+        
+        case let .chevron(expanded):
+            writeInt(&buf, Int32(10))
             FfiConverterBool.write(expanded, into: &buf)
             
         
         case let .toolRail(trunkX,bend,branchEnd,rowMid,tops,heights):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterFloat.write(trunkX, into: &buf)
             FfiConverterFloat.write(bend, into: &buf)
             FfiConverterFloat.write(branchEnd, into: &buf)
@@ -11268,13 +14096,13 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             
         
         case let .toolToggle(detail,`open`):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterUInt64.write(detail, into: &buf)
             FfiConverterBool.write(`open`, into: &buf)
             
         
         case .shimmer:
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(13))
         
         }
     }
@@ -11315,6 +14143,30 @@ fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionInt32: FfiConverterRustBuffer {
+    typealias SwiftType = Int32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt32.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -11579,6 +14431,30 @@ fileprivate struct FfiConverterOptionTypeContextUsage: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeContextUsage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeHighlightedSource: FfiConverterRustBuffer {
+    typealias SwiftType = HighlightedSource?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeHighlightedSource.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeHighlightedSource.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -11968,6 +14844,56 @@ fileprivate struct FfiConverterSequenceTypeBoxPrim: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeBoxPrim.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCodeLine: FfiConverterRustBuffer {
+    typealias SwiftType = [CodeLine]
+
+    public static func write(_ value: [CodeLine], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCodeLine.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CodeLine] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CodeLine]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCodeLine.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCodeSpan: FfiConverterRustBuffer {
+    typealias SwiftType = [CodeSpan]
+
+    public static func write(_ value: [CodeSpan], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCodeSpan.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CodeSpan] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CodeSpan]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCodeSpan.read(from: &buf))
         }
         return seq
     }
@@ -12526,6 +15452,81 @@ fileprivate struct FfiConverterSequenceTypeStyleDesc: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSubagentView: FfiConverterRustBuffer {
+    typealias SwiftType = [SubagentView]
+
+    public static func write(_ value: [SubagentView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSubagentView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SubagentView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SubagentView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSubagentView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTerminalLine: FfiConverterRustBuffer {
+    typealias SwiftType = [TerminalLine]
+
+    public static func write(_ value: [TerminalLine], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTerminalLine.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TerminalLine] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TerminalLine]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTerminalLine.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTerminalRun: FfiConverterRustBuffer {
+    typealias SwiftType = [TerminalRun]
+
+    public static func write(_ value: [TerminalRun], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTerminalRun.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TerminalRun] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TerminalRun]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTerminalRun.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTextRun: FfiConverterRustBuffer {
     typealias SwiftType = [TextRun]
 
@@ -12936,6 +15937,89 @@ public func workosAuthorizeUrl(state: String) -> String  {
 })
 }
 /**
+ * A running count as pills and badges draw it: exact to 99, then "99+".
+ */
+public func runningCountLabel(count: UInt32) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_running_count_label(
+        FfiConverterUInt32.lower(count),uniffiCallStatus
+    )
+})
+}
+/**
+ * The subagent doc a transcript link opens, if it is a spawn card's link.
+ */
+public func subagentLinkDoc(url: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_subagent_link_doc(
+        FfiConverterString.lower(url),uniffiCallStatus
+    )
+})
+}
+/**
+ * Rows a finished list shows before "Show more", and how many each press
+ * adds.
+ */
+public func subagentPageRows() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_subagent_page_rows(uniffiCallStatus
+    )
+})
+}
+/**
+ * Bundled icon asset for a file path (`fileicon-files-rust`), resolved like
+ * the desktop's file tree.
+ */
+public func fileIconName(path: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_file_icon_name(
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+/**
+ * Bundled icon asset for a folder name (`fileicon-folders-folder-src`).
+ */
+public func folderIconName(name: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_folder_icon_name(
+        FfiConverterString.lower(name),uniffiCallStatus
+    )
+})
+}
+/**
+ * Tree-sitter highlighting (the desktop editor's grammars) for a file's
+ * text, language picked from `path` (and a shebang). `None` for unknown
+ * languages and oversized sources.
+ */
+public func highlightSource(path: String, text: String) -> HighlightedSource?  {
+    return try!  FfiConverterOptionTypeHighlightedSource.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_highlight_source(
+        FfiConverterString.lower(path),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+/**
+ * GitHub-flavoured Markdown as an HTML fragment for the file viewer's
+ * preview (tables, task lists, strikethrough, footnotes). Raw HTML passes
+ * through; the viewer renders it with scripts off.
+ */
+public func markdownHtml(text: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_markdown_html(
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+/**
  * The canonical mention link the host understands (`[name](zeron-file:path)`).
  */
 public func fileMentionLink(path: String, isDir: Bool) -> String  {
@@ -13085,6 +16169,27 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_running_count_label() != 57267) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_subagent_link_doc() != 60992) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_subagent_page_rows() != 1563) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_file_icon_name() != 43989) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_folder_icon_name() != 51723) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_highlight_source() != 32976) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_markdown_html() != 12107) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13152,6 +16257,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_front_page() != 3792) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_host_call() != 46044) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_is_demo() != 28119) {
@@ -13277,6 +16385,42 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_open_subagent() != 51206) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_subagents() != 56738) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_host_watch() != 24134) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_terminal_screen() != 8743) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_account() != 39630) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_complete_sign_in() != 33985) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_edge() != 42333) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_identity() != 35313) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_list_orgs() != 64179) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_select_org() != 62534) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_sign_in_url() != 52706) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_enginelink_sign_out() != 43503) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13338,6 +16482,69 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_transcript_status() != 12910) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hoststream_cancel() != 9109) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hoststream_is_active() != 62197) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hoststreamlistener_on_item() != 25926) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hoststreamlistener_on_end() != 47316) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminallistener_on_frame() != 31322) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminallistener_on_exit() != 5886) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_all_text() != 46982) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_clear_selection() != 24207) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_frame() != 33808) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_kill() != 63142) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_paste() != 15470) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_resize() != 56837) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_scroll() != 33970) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_scroll_to_bottom() != 8850) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_select_start() != 53438) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_select_update() != 9605) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_selection_text() != 39959) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_set_palette() != 7536) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_terminal_id() != 39897) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_write_key() != 62687) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_terminalscreen_write_text() != 15585) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_layoutframe_build_micros() != 17231) {
@@ -13418,6 +16625,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_constructor_coreclient_new() != 27504) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_constructor_enginelink_new() != 49229) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_constructor_textsystem_new() != 55727) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13426,8 +16636,10 @@ private let initializationResult: InitializationResult = {
     }
 
     uniffiCallbackInitClientListener()
+    uniffiCallbackInitHostStreamListener()
     uniffiCallbackInitLayoutListener()
     uniffiCallbackInitPlatformMeasurer()
+    uniffiCallbackInitTerminalListener()
     uniffiCallbackInitUploadProgress()
     return InitializationResult.ok
 }()

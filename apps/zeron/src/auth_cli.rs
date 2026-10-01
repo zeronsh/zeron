@@ -164,7 +164,11 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
     let scope = live_engine_scope(config.ipc_port)
         .await
         .unwrap_or(next_scope);
-    let account = account_status(scope, &auth.state());
+    let mut account = account_status(scope, &auth.state());
+    if scope == WorkspaceScope::Development && config.dev_user_id.is_some() {
+        // `EngineConfig::with_local_edge`: the bearer is the edge's secret.
+        account.auth = "local edge (shared-secret bearer)".into();
+    }
     println!("Data dir: {}", config.data_dir.display());
     println!("Edge:     {}", config.edge_url);
     println!("Mode:     {}", account.mode);
@@ -233,6 +237,7 @@ mod tests {
             default_harness: HarnessId::Mock,
             org_id: None,
             workos_client_id: Some("client_test".into()),
+            dev_user_id: None,
         }
     }
 

@@ -1104,6 +1104,55 @@ impl Inner {
         self.set_status_with_completion(chat_id, status, fresh_start, None);
     }
 
+    /// Publish how many subagents of `chat_id` are streaming. A change is
+    /// mirrored like any status transition (it doubles as a heartbeat); an
+    /// unchanged count is a no-op, and a chat without a status row has
+    /// nothing to badge yet.
+    fn set_running_subagents(&self, chat_id: &str, running: usize) {
+        let running = u32::try_from(running).unwrap_or(u32::MAX);
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.running_subagents == running {
+                return;
+            }
+            entry.running_subagents = running;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
+    fn set_pending_callbacks(&self, chat_id: &str, count: u32) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.pending_callbacks == count {
+                return;
+            }
+            entry.pending_callbacks = count;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
         lock(&self.runs)
             .get(chat_id)
@@ -1132,6 +1181,8 @@ impl Inner {
                     status,
                     started_at: None,
                     updated_at: now,
+                    running_subagents: 0,
+                    pending_callbacks: 0,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -1187,17 +1238,24 @@ impl Inner {
             return None;
         }
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let mut env: std::collections::BTreeMap<String, String> = [
+            ("ZERON_IPC_PORT".to_owned(), port.to_string()),
+            ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+            ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
+        ]
+        .into_iter()
+        .collect();
+        // Explicit, not inherited: harnesses launch MCP servers with a
+        // filtered environment, and a token-gated IPC port refuses the
+        // server without it.
+        if let Some(token) = zeron_rpc::ipc_token() {
+            env.insert("ZERON_IPC_TOKEN".to_owned(), token);
+        }
         Some(zeron_proto::McpServer {
             name: "zeron".into(),
             command,
             args: vec!["mcp".into()],
-            env: [
-                ("ZERON_IPC_PORT".to_owned(), port.to_string()),
-                ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
-                ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
-            ]
-            .into_iter()
-            .collect(),
+            env,
         })
     }
 
@@ -1934,6 +1992,11 @@ async fn drive_run(
     // a session nobody comes back to (zeron SESSION_IDLE_MS).
     const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     let mut idle_since: Option<tokio::time::Instant> = None;
+    // Completion grants a fresh reaping grace period and is explicit proof
+    // that subsequent main output can be a callback, even inside RESUME_GATE.
+    // Keep the original park timestamp so late-output filtering is unchanged.
+    let mut background_settled_at: Option<tokio::time::Instant> = None;
+    let mut pending_callbacks = 0;
     let steerable = harness.supports_steering();
     // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
     // that loses a turn's Done — the adapter never settles `session/prompt`
@@ -2030,7 +2093,7 @@ async fn drive_run(
                 // already durable, so retire the parked process cleanly and let
                 // the queued exclusive lease proceed.
                 _ = tokio::time::sleep_until(tokio::time::Instant::now()),
-                    if idle_since.is_some() && inner.registry.update_pending(harness_id) =>
+                    if idle_since.is_some() && subagents.is_empty() && pending_callbacks == 0 && inner.registry.update_pending(harness_id) =>
                 {
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -2045,8 +2108,9 @@ async fn drive_run(
                 // nobody returned to in 30 minutes releases its child. The turn
                 // was finalized at Done, so this end is clean — no aborted stamp.
                 _ = tokio::time::sleep_until(
-                    idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
-                ), if idle_since.is_some() => {
+                    idle_since.map(|at| at.max(background_settled_at.unwrap_or(at)) + SESSION_IDLE)
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if idle_since.is_some() && subagents.is_empty() && pending_callbacks == 0 => {
                     tracing::info!(chat = %chat_id, "reaping idle persistent session");
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -2186,6 +2250,17 @@ async fn drive_run(
             event
         };
 
+        // Background bookkeeping is not main-thread activity: handle it
+        // before the parked gate so a completion never fabricates a wake turn.
+        if let AgentEvent::PendingCallbacks { count } = &event {
+            if *count < pending_callbacks && idle_since.is_some() {
+                background_settled_at = Some(tokio::time::Instant::now());
+            }
+            pending_callbacks = *count;
+            inner.set_pending_callbacks(&chat_id, *count);
+            continue;
+        }
+
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
         // into the subagent's own doc, and the parent keeps only the spawn
@@ -2201,6 +2276,12 @@ async fn drive_run(
         } = &event
         {
             inner.publish(&chat_id, &event);
+            // Background subagents can outlive the turn and be the only
+            // traffic for minutes: keep the row (and its count) inside the
+            // UI's staleness window while any is live.
+            if !subagents.is_empty() {
+                inner.touch_session(&chat_id);
+            }
             let is_steer = matches!(
                 sub_event.as_ref(),
                 AgentEvent::UserMessage { .. } | AgentEvent::Steered { .. }
@@ -2275,6 +2356,7 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
+                    inner.set_running_subagents(&chat_id, subagents.len());
                     if !chip_streaming {
                         let _ = doc_ref.update_subagent_chip(
                             parent_tool_use_id,
@@ -2288,6 +2370,17 @@ async fn drive_run(
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if done {
                 settled_subagents.insert(parent_tool_use_id.clone());
+                if !chip_streaming {
+                    // A resumed run can finish an older chip without ever
+                    // opening a sink. The chip's lifecycle is independent of
+                    // whether this run received transcript content.
+                    let _ = doc_ref.update_subagent_chip(
+                        parent_tool_use_id,
+                        None,
+                        subagent_chip_update(sub_event),
+                        None,
+                    );
+                }
             }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
@@ -2298,16 +2391,6 @@ async fn drive_run(
                 }
                 zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
-                if !chip_streaming && done {
-                    // In-place chip refresh on lifecycle transitions only —
-                    // content never rewrites the parent doc.
-                    let _ = doc_ref.update_subagent_chip(
-                        parent_tool_use_id,
-                        None,
-                        subagent_chip_update(sub_event),
-                        None,
-                    );
-                }
                 if done {
                     let status = match sub_event.as_ref() {
                         AgentEvent::Done {
@@ -2321,6 +2404,10 @@ async fn drive_run(
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
+                    if idle_since.is_some() {
+                        background_settled_at = Some(tokio::time::Instant::now());
+                    }
+                    inner.set_running_subagents(&chat_id, subagents.len());
                     let doc_id = sink.doc_id.clone();
                     // FREEZE: the finished transcript uploads as a static R2
                     // blob (`blob/{chatId}/{subDocId}`) so viewers of
@@ -2406,16 +2493,17 @@ async fn drive_run(
         let turn_was_active = idle_since.is_none();
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         if idle_since.is_some() {
-            let self_continued = idle_since
-                .is_some_and(|parked_at| parked_at.elapsed() >= RESUME_GATE)
-                && (matches!(
-                    &event,
-                    AgentEvent::TextDelta { text } if !text.is_empty()
-                ) || matches!(
-                    &event,
-                    AgentEvent::ToolCall { id, .. }
-                        if id == zeron_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
-                ));
+            let self_continued = idle_since.is_some_and(|parked_at| {
+                parked_at.elapsed() >= RESUME_GATE
+                    || background_settled_at.is_some_and(|finished| finished >= parked_at)
+            }) && (matches!(
+                &event,
+                AgentEvent::TextDelta { text } if !text.is_empty()
+            ) || matches!(
+                &event,
+                AgentEvent::ToolCall { id, .. }
+                    if id == zeron_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
+            ));
             if self_continued {
                 tracing::info!(
                     chat = %chat_id,
@@ -2774,6 +2862,8 @@ async fn drive_run(
             );
         }
     }
+    inner.set_running_subagents(&chat_id, 0);
+    inner.set_pending_callbacks(&chat_id, 0);
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own

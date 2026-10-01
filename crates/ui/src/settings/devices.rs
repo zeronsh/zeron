@@ -70,7 +70,28 @@ pub struct DevicesPage {
     error: Option<SharedString>,
     task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
+    /// This device's receive preferences (docs/file-transfer.md); `None`
+    /// until `GetFileTransferSettings` answers.
+    transfer_settings: Option<zeron_proto::FileTransferSettings>,
+    transfer_task: Option<Task<()>>,
     _observe: Subscription,
+}
+
+/// The folder received files land in (`None` inbox = the engine's default,
+/// `{home}/Zeron Transfers`).
+pub fn inbox_label(settings: &zeron_proto::FileTransferSettings) -> String {
+    settings
+        .inbox_dir
+        .clone()
+        .unwrap_or_else(|| format!("~{}Zeron Transfers", std::path::MAIN_SEPARATOR))
+}
+
+fn inbox_path(settings: &zeron_proto::FileTransferSettings) -> Option<std::path::PathBuf> {
+    settings
+        .inbox_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join("Zeron Transfers")))
 }
 
 impl DevicesPage {
@@ -84,8 +105,184 @@ impl DevicesPage {
             error: None,
             task: None,
             copy_task: None,
+            transfer_settings: None,
+            transfer_task: None,
             _observe: observe,
         }
+    }
+
+    /// Whether this desktop's engine can receive device file transfers.
+    fn transfers_available(&self, cx: &gpui::App) -> bool {
+        let state = self.state.read(cx);
+        state.workspace_scope != Some(WorkspaceScope::Local)
+            && state.local_device_id.as_deref().is_some_and(|id| {
+                state.device_supports(id, zeron_proto::capabilities::FILE_TRANSFER_V1)
+            })
+    }
+
+    #[doc(hidden)]
+    pub fn set_transfer_settings(
+        &mut self,
+        settings: zeron_proto::FileTransferSettings,
+        cx: &mut Context<Self>,
+    ) {
+        self.transfer_settings = Some(settings);
+        cx.notify();
+    }
+
+    fn load_transfer_settings(&mut self, cx: &mut Context<Self>) {
+        if self.transfer_task.is_some() || self.transfer_settings.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.transfer_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<zeron_proto::FileTransferSettings>(
+                    methods::GET_FILE_TRANSFER_SETTINGS,
+                    serde_json::json!({}),
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(settings) => page.transfer_settings = Some(settings),
+                    Err(err) => {
+                        page.error = Some(format!("Couldn't load transfer settings: {err}").into())
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn toggle_require_confirmation(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.transfer_settings.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let next = zeron_proto::FileTransferSettings {
+            require_confirmation: !previous.require_confirmation,
+            ..previous.clone()
+        };
+        self.transfer_settings = Some(next.clone());
+        let params = serde_json::to_value(&next).unwrap_or_default();
+        self.transfer_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<zeron_proto::FileTransferSettings>(
+                    methods::SET_FILE_TRANSFER_SETTINGS,
+                    params,
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(saved) => page.transfer_settings = Some(saved),
+                    Err(err) => {
+                        page.transfer_settings = Some(previous);
+                        page.error = Some(format!("Couldn't save: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_transfer_section(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        if !self.transfers_available(cx) {
+            return None;
+        }
+        self.load_transfer_settings(cx);
+        let settings = self.transfer_settings.clone();
+        let ask = settings.as_ref().is_some_and(|s| s.require_confirmation);
+        let inbox = settings.as_ref().map(inbox_label);
+        let inbox_dir = settings
+            .as_ref()
+            .and_then(inbox_path)
+            .filter(|path| path.is_dir());
+        let ask_row = widgets::card_row(theme, true)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(160.0))
+                    .child(widgets::row_title(
+                        theme,
+                        "Ask before accepting files from my other devices",
+                    ))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![div()
+                            .child(SharedString::from(
+                                "When off, files sent from your devices go straight to the inbox.",
+                            ))
+                            .into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(theme, ask, "devices-transfer-confirm")
+                    .id("devices-transfer-confirm-toggle")
+                    .cursor_pointer()
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Ask before accepting files from my other devices")
+                    .aria_toggled(if ask {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .when(settings.is_none(), |el| el.opacity(0.5))
+                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_require_confirmation(cx))),
+            );
+        let inbox_row = widgets::card_row(theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(160.0))
+                    .child(widgets::row_title(theme, "Received files"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(SharedString::from(
+                                    inbox.unwrap_or_else(|| "Loading…".into()),
+                                ))
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .when_some(inbox_dir, |row, dir| {
+                row.child(
+                    widgets::text_action(theme, widgets::ActionTone::Quiet, "Open folder")
+                        .id("devices-transfer-inbox-open")
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(move |_, _, cx| cx.open_with_system(&dir)),
+                )
+            });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(widgets::section_label(theme, "Receiving files").mt(px(28.0)))
+                .child(
+                    widgets::section_card(theme)
+                        .mt(px(8.0))
+                        .child(ask_row)
+                        .child(inbox_row),
+                ),
+        )
     }
 
     pub(crate) fn open_rename(
@@ -383,6 +580,7 @@ impl Render for DevicesPage {
             }
             block
         };
+        let transfer_section = self.render_transfer_section(&theme, cx);
         let card = div()
             .flex()
             .flex_col()
@@ -390,6 +588,7 @@ impl Render for DevicesPage {
                 el.child(widgets::section_label(&theme, "This device").mt(px(28.0)))
                     .child(block)
             })
+            .children(transfer_section)
             // A local-only workspace never has other devices to list.
             .when(workspace_scope != Some(WorkspaceScope::Local), |el| {
                 el.child(widgets::section_label(&theme, "Other devices").mt(px(28.0)))

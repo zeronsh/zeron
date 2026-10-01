@@ -1,6 +1,12 @@
 package sh.zeron.android.ui
 
-import androidx.compose.foundation.background
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.pullFeedback
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,15 +58,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
-import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.core.SessionActivity
 import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ProjectColors
 import sh.zeron.android.design.ZIcon
@@ -74,8 +80,8 @@ import uniffi.zeron_core.WorkspaceSnapshot
 private enum class Filter(val label: String) { All("All"), NeedsYou("Needs you"), Working("Working"), Pinned("Pinned") }
 
 /** "1 needs you" / "2 working" — the live summary beside New session. */
-fun liveSummary(ws: WorkspaceSnapshot): String? {
-    val (working, awaiting) = liveCounts(ws)
+fun liveSummary(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): String? {
+    val (working, awaiting) = liveCounts(ws, live)
     return when {
         awaiting > 0 -> "$awaiting needs you"
         working > 0 -> "$working working"
@@ -83,28 +89,37 @@ fun liveSummary(ws: WorkspaceSnapshot): String? {
     }
 }
 
-private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
+private fun frontRows(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): List<SessionRow> {
     val seen = HashSet<String>()
-    return (ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }
+    return SessionActivity.merged((ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }, live)
 }
 
-private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
-    val rows = frontRows(ws)
-    return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
+/** Working = the main turn, running subagents (published or seen by an open chat) or confirmed callbacks. */
+internal fun workingRows(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): List<SessionRow> =
+    frontRows(ws, live).filter(SessionActivity::isWorking)
+
+internal fun liveCounts(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): Pair<Int, Int> {
+    val rows = frontRows(ws, live)
+    return rows.count(SessionActivity::isWorking) to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
-    val workspace by model.workspace.collectAsState()
-    val connectivity by model.connectivity.collectAsState()
+    // Kept composed behind the Settings tab: while hidden it listens to nothing (see TabPage).
+    val workspace = model.workspace.collectAsStateWhile()
+    val connectivity = model.connectivity.collectAsStateWhile()
+    val engine = model.phone.state.collectAsStateWhile()
+    val client = model.client.collectAsStateWhile()
+    // Counts the open chat shows beat a lower (or missing) published count: see SessionActivity.mergedSubagents.
+    val live = model.liveSubagents.collectAsStateWhile()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     val pull = rememberPullToRefreshState()
     val ws = workspace
-    val counts = remember(ws) { ws?.let { liveCounts(it) } ?: (0 to 0) }
+    val counts = remember(ws, live) { ws?.let { liveCounts(it, live) } ?: (0 to 0) }
 
     val subtitle = when {
         connectivity?.state == ConnectivityState.OFFLINE -> "Offline"
@@ -113,10 +128,13 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
         else -> model.accountDetail.takeIf { it.isNotEmpty() }
     }
 
+    val fb = LocalFeedback.current
     val archive: (SessionRow) -> Unit = { row ->
+        fb.both(Haptic.Confirm, Cue.Archive)
         model.archive(row.id)
         scope.launch {
             if (snackbar.showSnackbar("Archived", actionLabel = "Undo", withDismissAction = true) == SnackbarResult.ActionPerformed) {
+                fb.both(Haptic.Select, Cue.Undo)
                 model.unarchive(row.id)
             }
         }
@@ -134,7 +152,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
         )
         PullToRefreshBox(
             isRefreshing = refreshing,
-            onRefresh = {
+            onRefresh = pullFeedback(pull) {
                 refreshing = true
                 scope.launch {
                     model.refresh()
@@ -144,7 +162,11 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
             state = pull,
             modifier = Modifier.fillMaxSize(),
             indicator = {
-                PullToRefreshDefaults.LoadingIndicator(
+                // Its shape-morph tables are the heaviest thing on first composition and nothing shows until a pull:
+                // compose it a frame after the page, not with it.
+                var warm by remember { mutableStateOf(false) }
+                LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; warm = true }
+                if (warm || refreshing) PullToRefreshDefaults.LoadingIndicator(
                     state = pull,
                     isRefreshing = refreshing,
                     modifier = Modifier.align(Alignment.TopCenter).padding(WindowInsets.statusBars.asPaddingValues()),
@@ -160,7 +182,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                     ScreenHeader("Sessions", subtitle) {
                         if (connectivity?.state == ConnectivityState.OFFLINE) {
                             TonalCircleButton(
-                                ZIcons.Offline, "Offline", onClick = { scope.launch { model.refresh() } },
+                                ZIcons.Offline, "Offline", onClick = feedbackAction(Haptic.Select, Cue.Refresh) { scope.launch { model.refresh() } },
                                 container = MaterialTheme.colorScheme.errorContainer, content = MaterialTheme.colorScheme.onErrorContainer,
                             )
                         }
@@ -185,21 +207,29 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                         }
                     }
                 }
-                if (ws == null) return@LazyColumn
+                // This phone's engine, while it isn't ready (first launch sets it up).
+                if (client?.isDemo() != true && engine !is sh.zeron.runtime.RuntimeState.Running) {
+                    item("engine") { EngineStatusStrip(model, engine, Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
+                }
+                if (ws == null) {
+                    // Before the first snapshot: a wireframe of the list, not a blank page.
+                    item("skeleton", contentType = "skeleton") { SessionRowsSkeleton() }
+                    return@LazyColumn
+                }
                 val front = ws.front
                 when (filter) {
                     Filter.All -> {
-                        if (front.pinned.isNotEmpty()) group("pinned", "Pinned", front.pinned, model, onOpen, archive)
+                        if (front.pinned.isNotEmpty()) group("pinned", "Pinned", SessionActivity.merged(front.pinned, live), model, onOpen, archive)
                         for (section in front.sections) {
-                            group(section.id, section.name, section.sessions, model, onOpen, archive, collapsed = section.collapsed) {
+                            group(section.id, section.name, SessionActivity.merged(section.sessions, live), model, onOpen, archive, collapsed = section.collapsed) {
                                 model.setSectionCollapsed(section.id, !section.collapsed)
                             }
                         }
-                        if (front.recent.isNotEmpty()) group("recent", "Recent", front.recent, model, onOpen, archive)
+                        if (front.recent.isNotEmpty()) group("recent", "Recent", SessionActivity.merged(front.recent, live), model, onOpen, archive)
                     }
-                    Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, model, onOpen, archive)
-                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }, model, onOpen, archive)
-                    Filter.Pinned -> group("f", null, front.pinned, model, onOpen, archive)
+                    Filter.NeedsYou -> group("f", null, frontRows(ws, live).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, model, onOpen, archive)
+                    Filter.Working -> group("f", null, workingRows(ws, live), model, onOpen, archive)
+                    Filter.Pinned -> group("f", null, SessionActivity.merged(front.pinned, live), model, onOpen, archive)
                 }
                 val empty = when (filter) {
                     Filter.All -> front.pinned.isEmpty() && front.sections.isEmpty() && front.recent.isEmpty()
@@ -236,7 +266,7 @@ private fun LazyListScope.group(
                 Text("${rows.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.weight(1f))
                 if (onToggle != null) {
-                    IconButton(onClick = onToggle, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = feedbackAction(Haptic.Select, if (collapsed) Cue.Open else Cue.Close, onToggle), modifier = Modifier.size(32.dp)) {
                         ZIcon(if (collapsed) ZIcons.ChevronDown else ZIcons.ChevronUp, if (collapsed) "Expand" else "Collapse", Modifier.size(18.dp))
                     }
                 }
@@ -265,6 +295,11 @@ private fun SwipeableSessionRow(
 ) {
     val state = rememberSwipeToDismissBoxState()
     val shape = segmentedShapes(index, count).shape
+    // A tick as the swipe crosses the point where letting go archives.
+    val fb = LocalFeedback.current
+    LaunchedEffect(state, fb) {
+        snapshotFlow { state.targetValue }.distinctUntilChanged().collect { if (it == SwipeToDismissBoxValue.EndToStart) fb.haptic(Haptic.Threshold) }
+    }
     SwipeToDismissBox(
         state = state,
         enableDismissFromStartToEnd = false,
@@ -297,12 +332,12 @@ fun SessionItem(
 ) {
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
-    val haptics = LocalHapticFeedback.current
+    val fb = LocalFeedback.current
     Box {
         SegmentedListItem(
-            onClick = { onOpen(row.id) },
+            onClick = tapAction { onOpen(row.id) },
             onLongClick = {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                fb.haptic(Haptic.LongPress)
                 menu = true
             },
             shapes = segmentedShapes(index, count),
@@ -322,9 +357,9 @@ fun SessionItem(
             menu,
             { menu = false },
             listOf(
-                MenuAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(row.id, !row.pinned) },
+                MenuAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin, haptic = Haptic.Pop, cue = if (row.pinned) Cue.Unstar else Cue.Pin) { model.setPinned(row.id, !row.pinned) },
                 MenuAction("Rename", ZIcons.Rename) { renaming = true },
-                MenuAction("Archive", ZIcons.Archive) { archive(row) },
+                MenuAction("Archive", ZIcons.Archive) { archive(row) }, // archive() answers itself
             ),
         )
     }
@@ -335,10 +370,7 @@ fun SessionItem(
 @Composable
 private fun HarnessTile(row: SessionRow) {
     val tone = ProjectColors.color(row.colorIndex(), LocalDarkTheme.current)
-    Box(
-        Modifier.size(48.dp).clip(RoundedCornerShape(16.dp)).background(tone.copy(alpha = if (LocalDarkTheme.current) 0.18f else 0.12f)),
-        contentAlignment = Alignment.Center,
-    ) { HarnessMark(row.harness, 24.dp, tint = MaterialTheme.colorScheme.onSurface) }
+    HarnessActivityTile(row.harness, tone, row.runningSubagents)
 }
 
 /** Project monogram + name, then the branch — the desktop sidebar subline. */
@@ -391,11 +423,14 @@ fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> U
         onDismissRequest = onDismiss,
         icon = { ZIcon(ZIcons.Rename, null) },
         title = { Text("Rename session") },
-        text = { OutlinedTextField(text, { text = it }, singleLine = true, shape = RoundedCornerShape(16.dp)) },
-        confirmButton = {
-            TextButton(onClick = { onRename(text.trim()); onDismiss() }, enabled = text.isNotBlank()) { Text("Rename") }
+        text = {
+            OpenCloseFeedback()
+            OutlinedTextField(text, { text = it }, singleLine = true, shape = RoundedCornerShape(16.dp))
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = {
+            TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select) { onRename(text.trim()); onDismiss() }, enabled = text.isNotBlank()) { Text("Rename") }
+        },
+        dismissButton = { TextButton(onClick = tapAction(action = onDismiss)) { Text("Cancel") } },
     )
 }
 

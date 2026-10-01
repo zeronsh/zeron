@@ -484,6 +484,8 @@ impl WorkspaceDoc {
         )?;
         set_opt_ms(&row, "startedAt", session.started_at)?;
         row.insert("updatedAt", session.updated_at.timestamp_millis())?;
+        row.insert("runningSubagents", i64::from(session.running_subagents))?;
+        row.insert("pendingCallbacks", i64::from(session.pending_callbacks))?;
         self.doc.commit();
         Ok(())
     }
@@ -773,6 +775,10 @@ pub(crate) struct RawSession {
     started_at: Option<i64>,
     #[serde(default)]
     updated_at: i64,
+    #[serde(default)]
+    running_subagents: u32,
+    #[serde(default)]
+    pending_callbacks: u32,
 }
 
 impl From<RawSession> for Session {
@@ -784,6 +790,8 @@ impl From<RawSession> for Session {
             status: raw.status,
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
+            running_subagents: raw.running_subagents,
+            pending_callbacks: raw.pending_callbacks,
         }
     }
 }
@@ -890,6 +898,8 @@ mod tests {
             status,
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
+            running_subagents: 0,
+            pending_callbacks: 0,
         }
     }
 
@@ -983,6 +993,15 @@ mod tests {
             state.sessions,
             vec![session("chat-1", "dev-a", SessionStatus::Working)]
         );
+
+        // The running-subagent count rides the row and survives the round trip.
+        let mut busy = session("chat-1", "dev-a", SessionStatus::Working);
+        busy.running_subagents = 4;
+        busy.pending_callbacks = 2;
+        ws.upsert_session(&busy).unwrap();
+        assert_eq!(ws.read_sessions().unwrap(), vec![busy]);
+        ws.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
+            .unwrap();
 
         // Upsert refreshes in place — no duplicate rows, cleared options removed.
         let mut updated = chat("chat-1", "dev-a");

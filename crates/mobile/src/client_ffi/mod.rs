@@ -11,7 +11,10 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod demo_host;
 mod session;
+mod subagents;
+mod tools;
 mod types;
 
 use std::sync::Arc;
@@ -19,6 +22,8 @@ use std::sync::Arc;
 use zeron_client as zc;
 
 pub use session::*;
+pub use subagents::*;
+pub use tools::*;
 pub use types::*;
 
 /// Receives coalesced change events (at most one burst per display frame).
@@ -55,6 +60,8 @@ where
 #[derive(uniffi::Object)]
 pub struct CoreClient {
     pub(crate) client: zc::Client,
+    /// Answers `host_call` in Demo mode (there is no engine to relay to).
+    demo_host: demo_host::DemoHost,
 }
 
 #[allow(dead_code)] // consumed in Rust by the layout engine
@@ -67,8 +74,11 @@ impl CoreClient {
     /// The Rust session handle for `chat_id` — opening it if needed — for the
     /// layout engine: `handle.snapshot()` (an `Arc<SessionSnapshot>`) and
     /// `handle.subscribe()` (a `watch::Receiver`). `None` for an unknown chat.
+    /// A subagent transcript is found once `open_subagent` has opened it.
     pub fn session_handle(&self, chat_id: &str) -> Option<zc::SessionHandle> {
-        self.client.open_session(chat_id).ok()
+        self.client
+            .session(chat_id)
+            .or_else(|| self.client.open_session(chat_id).ok())
     }
 }
 
@@ -87,7 +97,10 @@ impl CoreClient {
             credentials.into(),
             Arc::new(ListenerBridge(listener)),
         )?;
-        Ok(Arc::new(Self { client }))
+        Ok(Arc::new(Self {
+            client,
+            demo_host: demo_host::DemoHost::default(),
+        }))
     }
 
     pub fn is_demo(&self) -> bool {
@@ -370,7 +383,11 @@ impl CoreClient {
                 .register_push_target(
                     &token,
                     &environment,
-                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                    zc::PushPrefs {
+                        done: prefs.done,
+                        input: prefs.input,
+                        failed: prefs.failed,
+                    },
                 )
                 .await
         })
@@ -404,7 +421,12 @@ impl CoreClient {
         query: String,
     ) -> CoreResult<Vec<FileMatch>> {
         let client = self.client.clone();
-        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        let files = on_runtime(async move {
+            client
+                .search_files(&device_id, chat_id, space_id, &query)
+                .await
+        })
+        .await?;
         Ok(files
             .into_iter()
             .map(|f| FileMatch {
@@ -483,6 +505,32 @@ impl CoreClient {
         Ok(bytes.as_ref().clone())
     }
 
+    /// Untyped host RPC to `device_id`'s engine: `method` with JSON
+    /// `params_json` (an object; empty = `{}`), returning the reply as JSON.
+    /// For engine surfaces the typed API doesn't wrap yet (harness installs,
+    /// agent sign-ins). Demo mode answers from a simulated engine.
+    pub async fn host_call(
+        &self,
+        device_id: String,
+        method: String,
+        params_json: String,
+    ) -> CoreResult<String> {
+        let params: serde_json::Value = if params_json.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&params_json).map_err(|e| CoreError::InvalidArgument {
+                message: format!("params: {e}"),
+            })?
+        };
+        let reply = if self.client.is_demo() {
+            self.demo_host.call(&method, params).await?
+        } else {
+            let client = self.client.clone();
+            on_runtime(async move { client.host_call(&device_id, &method, params).await }).await?
+        };
+        Ok(reply.to_string())
+    }
+
     // ── lifecycle ──────────────────────────────────────────────────────────
 
     /// OS network path: `false` only for a definitive "unsatisfied".
@@ -498,6 +546,84 @@ impl CoreClient {
     /// App is backgrounding: persist now; pause time-driven work.
     pub fn on_background(&self) {
         self.client.on_background();
+    }
+}
+
+// ── the engine on this device ───────────────────────────────────────────────
+
+/// The engine running on this device (Android's on-device engine), over its
+/// token-gated IPC port. The app signs the account in *through* it and builds
+/// its [`CoreClient`] from it: the engine's device id, edge and identity, and
+/// `Credentials::Engine` — see docs/android.md.
+#[derive(uniffi::Object)]
+pub struct EngineLink {
+    link: Arc<zc::engine::EngineLink>,
+}
+
+#[uniffi::export]
+impl EngineLink {
+    /// `ipc_url`: `ws://127.0.0.1:{port}`; `ipc_token`: `ZERON_IPC_TOKEN`.
+    #[uniffi::constructor]
+    pub fn new(ipc_url: String, ipc_token: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            link: zc::engine::EngineLink::new(ipc_url, ipc_token),
+        })
+    }
+
+    pub async fn identity(&self) -> CoreResult<EngineIdentity> {
+        let info = self.link.info().await?;
+        let scope = serde_json::to_value(info.workspace_scope)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        Ok(EngineIdentity {
+            device_id: info.device_id,
+            workspace_scope: scope,
+        })
+    }
+
+    pub async fn edge(&self) -> CoreResult<EngineEdge> {
+        let edge = self.link.edge_bearer().await?;
+        Ok(EngineEdge {
+            signed_out: edge.signed_out || edge.bearer.is_none(),
+            edge_url: edge.edge_url,
+            user_id: edge.user_id,
+            org_id: edge.org_id,
+        })
+    }
+
+    pub async fn account(&self) -> CoreResult<EngineAccount> {
+        Ok(self.link.auth_state().await?.into())
+    }
+
+    /// WorkOS authorize URL redirecting to `redirect_uri` (`zeron://callback`);
+    /// empty when the engine has no WorkOS (a development server).
+    pub async fn sign_in_url(&self, redirect_uri: String) -> CoreResult<String> {
+        Ok(self.link.sign_in_url(&redirect_uri).await?)
+    }
+
+    /// The callback's `state` and `code`: the engine exchanges and saves the
+    /// session; restart it to open the synced workspace.
+    pub async fn complete_sign_in(&self, state: String, code: String) -> CoreResult<()> {
+        Ok(self.link.complete_sign_in(&state, &code).await?)
+    }
+
+    pub async fn list_orgs(&self) -> CoreResult<Vec<AuthOrg>> {
+        Ok(self
+            .link
+            .list_orgs()
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub async fn select_org(&self, organization_id: String) -> CoreResult<()> {
+        Ok(self.link.select_org(&organization_id).await?)
+    }
+
+    pub async fn sign_out(&self) -> CoreResult<()> {
+        Ok(self.link.sign_out().await?)
     }
 }
 

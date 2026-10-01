@@ -135,6 +135,7 @@ impl WorkspaceStore {
         &self,
         self_device_id: &str,
         send_states: &HashMap<String, crate::SendState>,
+        chip_subagents: &HashMap<String, u32>,
         synced: bool,
     ) -> Option<u64> {
         let _serial = lock(&self.recompute);
@@ -151,6 +152,7 @@ impl WorkspaceStore {
                 presence: &presence,
                 change_requests: &change_requests,
                 send_states,
+                chip_subagents,
                 synced,
                 previous: Some(&previous),
             },

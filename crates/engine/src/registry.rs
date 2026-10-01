@@ -267,6 +267,19 @@ impl HarnessRegistry {
             .insert(id);
     }
 
+    /// [`Self::begin_update`] only if no update is pending; the marker clears
+    /// when the returned guard drops.
+    pub fn claim_update(&self, id: HarnessId) -> Option<UpdateMarker<'_>> {
+        let claimed = self
+            .pending_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id);
+        // Build the guard only once claimed and unlocked: dropping one ends
+        // the update (and takes this lock).
+        claimed.then(|| UpdateMarker { registry: self, id })
+    }
+
     pub fn end_update(&self, id: HarnessId) {
         self.pending_updates
             .lock()
@@ -518,6 +531,18 @@ impl HarnessRegistry {
                 Some(descriptor)
             })
             .collect()
+    }
+}
+
+/// A claimed pending-update marker (see [`HarnessRegistry::claim_update`]).
+pub struct UpdateMarker<'a> {
+    registry: &'a HarnessRegistry,
+    id: HarnessId,
+}
+
+impl Drop for UpdateMarker<'_> {
+    fn drop(&mut self) {
+        self.registry.end_update(self.id);
     }
 }
 

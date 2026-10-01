@@ -616,6 +616,14 @@ async fn captured_live_background_subagent_frames_replay_correctly() {
         .collect();
     assert_eq!(opening.len(), 1, "one seeded opening prompt: {events:?}");
     assert!(opening[0] < dones[0], "opening rides with the spawn");
+    let started = events.iter().position(|e| matches!(e,
+        AgentEvent::Subagent { parent_tool_use_id, event }
+            if *parent_tool_use_id == spawn_id && matches!(event.as_ref(), AgentEvent::Steered { .. })
+    )).expect("confirmed start is countable before any child content");
+    assert!(
+        started < dones[0],
+        "silent child is already running when the parent parks"
+    );
     let tagged: Vec<usize> = events
         .iter()
         .enumerate()
@@ -624,7 +632,7 @@ async fn captured_live_background_subagent_frames_replay_correctly() {
                 e,
                 AgentEvent::Subagent { parent_tool_use_id, event }
                     if *parent_tool_use_id == spawn_id
-                        && !matches!(event.as_ref(), AgentEvent::UserMessage { .. })
+                        && !matches!(event.as_ref(), AgentEvent::UserMessage { .. } | AgentEvent::Steered { .. })
             )
             .then_some(i)
         })

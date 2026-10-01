@@ -189,6 +189,52 @@ mod tests {
     }
 
     #[test]
+    fn silent_child_start_is_countable_before_output_and_finishes_once() {
+        let mut children = Subagents::new("root".into());
+        let start = serde_json::json!({"threadId":"child", "turn":{"id":"turn-1"}});
+        // Start may precede the parent's spawn result; it must survive buffering.
+        assert!(
+            children
+                .notification("child", "turn/started", &start)
+                .is_empty()
+        );
+        assert_eq!(
+            children.bind("child", "spawn"),
+            vec![tag(
+                "spawn",
+                AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: None,
+                }
+            )]
+        );
+        let end =
+            serde_json::json!({"threadId":"child", "turn":{"id":"turn-1", "status":"completed"}});
+        let events = children.notification("child", "turn/completed", &end);
+        assert!(
+            matches!(&events[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
+            if parent_tool_use_id == "spawn" && matches!(event.as_ref(), AgentEvent::Done { .. }))
+        );
+        assert!(
+            children
+                .notification("child", "turn/completed", &end)
+                .is_empty()
+        );
+        assert!(
+            children
+                .notification("child", "turn/started", &start)
+                .is_empty(),
+            "late old start cannot revive a finished child"
+        );
+        let next = serde_json::json!({"threadId":"child", "turn":{"id":"turn-2"}});
+        assert!(
+            matches!(&children.notification("child", "turn/started", &next)[..],
+            [AgentEvent::Subagent { parent_tool_use_id, event }]
+                if parent_tool_use_id == "spawn" && matches!(event.as_ref(), AgentEvent::Steered { .. }))
+        );
+    }
+
+    #[test]
     fn binding_is_stable_and_children_are_independent() {
         let mut children = Subagents::new("root".into());
         children.bind("alpha", "spawn-alpha");

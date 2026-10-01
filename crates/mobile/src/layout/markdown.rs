@@ -107,8 +107,13 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
                 if img.alt.is_empty() { "image".to_owned() } else { img.alt.clone() },
                 Some(img.link.clone().unwrap_or_else(|| img.source.clone())),
             ),
-            None => (run.text.clone(), s.link.clone()),
+            None => (
+                run.text.clone(),
+                s.link.clone().or_else(|| (s.code && code_path(&run.text)).then(|| run.text.clone())),
+            ),
         };
+        // An inline-code path (`out/report.pdf`) is tappable but keeps its chip look.
+        let code_link = s.code && s.link.is_none() && link.is_some();
         if content.is_empty() {
             continue;
         }
@@ -134,7 +139,7 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
             pad_end: if s.code { pad } else { 0.0 },
             atomic: false,
         });
-        let color = if link.is_some() {
+        let color = if link.is_some() && !code_link {
             ColorRole::Link
         } else if s.code {
             ColorRole::InlineCodeText
@@ -145,7 +150,13 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
         };
         paints.push(SpanPaint {
             color,
-            decoration: if s.strikethrough { Decoration::Strikethrough } else { Decoration::None },
+            decoration: if s.strikethrough {
+                Decoration::Strikethrough
+            } else if code_link {
+                Decoration::Underline
+            } else {
+                Decoration::None
+            },
             link,
             chip: s.code,
         });
@@ -283,7 +294,30 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
     }
 }
 
-fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
+/// Whether inline code names a file the app can open: a path with an
+/// extension (`src/app.py`, `/home/zeron/projects/x/report.pdf`, `./a.md`) or
+/// a bare artifact name (`report.pdf`, `index.html`). URLs count too.
+pub(crate) fn code_path(text: &str) -> bool {
+    const ARTIFACTS: &[&str] = &[
+        "pdf", "html", "htm", "md", "png", "jpg", "jpeg", "gif", "webp", "svg", "apk", "zip", "csv", "json", "txt",
+    ];
+    let t = text.trim();
+    if t.is_empty() || t.len() > 400 || t.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if t.starts_with("http://") || t.starts_with("https://") {
+        return true;
+    }
+    let name = t.rsplit('/').next().unwrap_or(t);
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    let ext_ok = (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) && !stem.is_empty();
+    let pathish = t.contains('/') && !t.contains("://") && !t.starts_with("//");
+    ext_ok && (pathish || ARTIFACTS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+pub(crate) fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
     use zeron_syntax::HighlightKind as K;
     match kind {
         K::Comment => ColorRole::SyntaxComment,

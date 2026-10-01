@@ -9,10 +9,18 @@ publish.workspace = true
 name = "zeron"
 path = "src/main.rs"
 
+[features]
+default = ["ui"]
+# The gpui app. `--no-default-features` builds an engine-only binary (headless,
+# CLI, MCP) for hosts without a display stack — e.g. the Linux guest the
+# Android app runs on the phone (docs/android.md).
+ui = ["dep:zeron-ui"]
+
 [dependencies]
 zeron-engine.workspace = true
+zeron-localedge.workspace = true
 zeron-rpc.workspace = true
-zeron-ui.workspace = true
+zeron-ui = { workspace = true, optional = true }
 zeron-update.workspace = true
 zeron-mcp.workspace = true
 tokio.workspace = true

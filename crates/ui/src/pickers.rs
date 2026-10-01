@@ -2237,11 +2237,19 @@ impl Pickers {
         }
     }
 
-    /// Devices in picker order: this device first, then by name.
+    /// Devices that can host the session, in picker order: this device
+    /// first, then by name. Hosting is what a device's engine advertises
+    /// (`Device::is_execution_host`), never its platform — a phone running
+    /// its own engine is a target like any desktop.
     fn device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
-        let mut devices: Vec<zeron_proto::Device> = state.devices.clone();
+        let mut devices: Vec<zeron_proto::Device> = state
+            .devices
+            .iter()
+            .filter(|d| d.is_execution_host() || local.as_deref() == Some(d.id.as_str()))
+            .cloned()
+            .collect();
         devices.sort_by_key(|d| {
             (
                 local.as_deref() != Some(d.id.as_str()),

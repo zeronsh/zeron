@@ -179,8 +179,16 @@ pub fn same_process(pid: u32, started_at: u64) -> bool {
 pub fn listeners() -> Vec<Listener> {
     use std::{fs, os::unix::fs::MetadataExt};
     let mut sockets = HashMap::new();
+    // Android's app sandbox (the phone's engine runs in a proot guest as the
+    // app) denies /proc/net: fall back to the ports a server's command line
+    // names, confirmed by a loopback connect (`android_ports`).
+    let mut restricted = true;
     for (file, ipv6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
-        if let Ok(text) = fs::read_to_string(file) {
+        let read = fs::read_to_string(file);
+        if !matches!(&read, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied) {
+            restricted = false;
+        }
+        if let Ok(text) = read {
             for line in text.lines().skip(1) {
                 let parts: Vec<_> = line.split_whitespace().collect();
                 if parts.len() <= 9 || parts[3] != "0A" {
@@ -193,6 +201,7 @@ pub fn listeners() -> Vec<Listener> {
         }
     }
     let (boot, ticks) = linux_clock();
+    let mut probed: HashMap<u16, bool> = HashMap::new();
     let uid = unsafe { libc::geteuid() };
     let mut result = Vec::new();
     let mut parents = HashMap::new();
@@ -231,6 +240,32 @@ pub fn listeners() -> Vec<Listener> {
         let Ok(fds) = fs::read_dir(path.join("fd")) else {
             continue;
         };
+        if restricted {
+            let has_socket = fds.flatten().any(|fd| {
+                fs::read_link(fd.path()).is_ok_and(|l| l.to_string_lossy().starts_with("socket:"))
+            });
+            if has_socket {
+                for port in inferred_ports(&args) {
+                    let address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+                    if probed.entry(port).or_insert_with(|| {
+                        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(80))
+                            .is_ok()
+                    }) == &true
+                    {
+                        result.push(Listener {
+                            pid,
+                            parent,
+                            cwd: cwd.clone(),
+                            args: args.clone(),
+                            started_at,
+                            address,
+                            zeron_owned: false,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
         for fd in fds.flatten() {
             let Ok(link) = fs::read_link(fd.path()) else {
                 continue;
@@ -259,6 +294,50 @@ pub fn listeners() -> Vec<Listener> {
     result.sort_by_key(|l| (l.address, l.pid));
     result.dedup_by_key(|l| (l.address, l.pid));
     result
+}
+
+/// Ports a dev server's command line names (`--port 3000`, `-p=8080`,
+/// `0.0.0.0:5173`, `http.server 8000`), else its framework's default. Only
+/// used where the socket tables are unreadable (Android); callers confirm
+/// each with a connect.
+pub fn inferred_ports(args: &[String]) -> Vec<u16> {
+    let port = |s: &str| s.parse::<u16>().ok().filter(|p| *p >= 1024);
+    let mut ports = Vec::new();
+    let mut take_next = false;
+    for arg in args.iter().skip(1) {
+        if take_next {
+            ports.extend(port(arg));
+            take_next = false;
+            continue;
+        }
+        if let Some((flag, value)) = arg.split_once('=') {
+            if matches!(flag, "--port" | "-p" | "--listen" | "PORT") {
+                ports.extend(port(value.rsplit(':').next().unwrap_or(value)));
+            }
+            continue;
+        }
+        if matches!(arg.as_str(), "--port" | "-p" | "--listen" | "-l") {
+            take_next = true;
+        } else if let Some((_, tail)) = arg.rsplit_once(':') {
+            ports.extend(port(tail).filter(|_| !arg.contains('/')));
+        } else if args.iter().any(|a| a == "http.server") {
+            ports.extend(port(arg));
+        }
+    }
+    if ports.is_empty() {
+        let (name, _) = framework(args);
+        let default = match name {
+            "Vite" => Some(5173),
+            "Next.js" => Some(3000),
+            "Astro" => Some(4321),
+            _ if args.iter().any(|a| a == "http.server") => Some(8000),
+            _ => None,
+        };
+        ports.extend(default);
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 #[cfg(target_os = "linux")]
@@ -443,6 +522,28 @@ mod tests {
             command_identity(&["node".into(), "docs.js".into()])
         );
     }
+    #[test]
+    fn command_lines_name_their_ports() {
+        let v = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(inferred_ports(&v("python3 -m http.server 8000")), [8000]);
+        assert_eq!(inferred_ports(&v("python3 -m http.server")), [8000]);
+        assert_eq!(inferred_ports(&v("node server.js --port 3001")), [3001]);
+        assert_eq!(
+            inferred_ports(&v("node /x/node_modules/.bin/vite --port=4000")),
+            [4000]
+        );
+        assert_eq!(
+            inferred_ports(&v("node /x/node_modules/vite/bin/vite.js")),
+            [5173]
+        );
+        assert_eq!(
+            inferred_ports(&v("uvicorn app:app --host 0.0.0.0 --port 9000")),
+            [9000]
+        );
+        assert_eq!(inferred_ports(&v("php -S 127.0.0.1:8080")), [8080]);
+        assert!(inferred_ports(&v("node build.js 42")).is_empty());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn accepts_only_loopback_reachable_listeners() {

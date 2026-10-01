@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use zeron_client::events::NullListener;
 use zeron_client::{
     ChatIndicator, Client, ClientConfig, Credentials, DemoFixture, DemoOptions, MessageRole,
-    MessageStatus, SendOutcome, SendRequest, StreamSpeed, TranscriptScale,
+    MessageStatus, SendOutcome, SendRequest, StreamSpeed, SubagentGroups, SubagentState,
+    TranscriptScale,
 };
 
 fn demo(options: DemoOptions) -> (Client, tempfile::TempDir) {
@@ -61,7 +62,14 @@ fn front_page_mirrors_the_desktop_sidebar() {
     // Recency order; archived + child chats never appear.
     assert_eq!(
         ids(&ws.front.recent),
-        ["chat-cjk", "chat-home", "chat-deploy", "chat-blog"]
+        [
+            "chat-fanout",
+            "chat-cjk",
+            "chat-background",
+            "chat-home",
+            "chat-deploy",
+            "chat-blog"
+        ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
     assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
@@ -249,8 +257,7 @@ fn questions_answer_through_respond_input() {
     });
     // The host publishes the question, then flips the chat's status.
     wait_for("awaiting input", Duration::from_secs(5), || {
-        client.workspace().session("chat-deploy").unwrap().indicator
-            == ChatIndicator::AwaitingInput
+        client.workspace().session("chat-deploy").unwrap().indicator == ChatIndicator::AwaitingInput
     });
     let input = session.composer().open_input.clone().unwrap();
     session
@@ -363,9 +370,12 @@ fn warm_sessions_are_capped_and_preload_follows_the_front_page() {
     let (client, _dir) = demo(fast());
     client.preload_sessions();
     let open = client.open_session_ids();
-    assert_eq!(open.len(), zeron_client::PRELOAD_CAP);
-    for id in ["chat-veil", "chat-picker", "chat-tabs", "chat-errored"] {
-        assert!(open.iter().any(|o| o == id), "{id} preloaded");
+    assert_eq!(open.len(), zeron_client::PRELOAD_CAP, "{open:?}");
+    // The front page's order, except that chats live right now come first:
+    // the fan-out chat (subagents running) is warmed ahead of the settled
+    // errored one.
+    for id in ["chat-veil", "chat-picker", "chat-tabs", "chat-fanout"] {
+        assert!(open.iter().any(|o| o == id), "{id} preloaded: {open:?}");
     }
     let attached = client.open_session("chat-home").unwrap();
     attached.set_view_attached(true);
@@ -539,4 +549,92 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     let row = client.workspace().session("chat-blog").unwrap().clone();
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
+}
+
+#[test]
+fn rows_count_running_subagents_even_when_the_parent_is_done() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let fanout = ws.session("chat-fanout").unwrap();
+    assert_eq!(fanout.indicator, ChatIndicator::Working);
+    assert_eq!(fanout.running_subagents, 3);
+    // The parent's turn settled; two of its subagents still run.
+    let background = ws.session("chat-background").unwrap();
+    assert_eq!(background.indicator, ChatIndicator::Completed);
+    assert_eq!(background.running_subagents, 2);
+    assert_eq!(ws.session("chat-cjk").unwrap().running_subagents, 0);
+}
+
+#[test]
+fn idle_rows_report_confirmed_background_callbacks() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let row = ws.session("chat-deploy").unwrap();
+    assert_ne!(row.indicator, ChatIndicator::Working);
+    assert_eq!(row.running_subagents, 0);
+    assert_eq!(row.pending_callbacks, 1);
+    assert_eq!(ws.session("chat-background").unwrap().pending_callbacks, 0);
+}
+
+#[test]
+fn subagents_group_like_the_desktop_and_open_read_only() {
+    let (client, _dir) = demo(fast());
+    let parent = client.open_session("chat-fanout").unwrap();
+    let groups = SubagentGroups::from_entries(&parent.snapshot().transcript_messages());
+    assert_eq!(
+        (
+            groups.running(),
+            groups.completed.len(),
+            groups.failed.len()
+        ),
+        (3, 13, 2)
+    );
+    // Longest-running first; the newest settled first.
+    let active: Vec<&str> = groups.active.iter().map(|r| r.doc_id.as_str()).collect();
+    assert_eq!(
+        active,
+        [
+            "chat-fanout--sub--fo-soak",
+            "chat-fanout--sub--fo-fuzz",
+            "chat-fanout--sub--fo-docs"
+        ]
+    );
+    assert_eq!(groups.failed[0].doc_id, "chat-fanout--sub--fo-ios");
+    assert_eq!(groups.active[0].title, "Soak-test reconnect storms");
+    assert_eq!(
+        groups.active[0].agent_type.as_deref(),
+        Some("general-purpose")
+    );
+
+    // A running subagent streams; a finished one is settled.
+    let live = client
+        .open_subagent("chat-fanout", "chat-fanout--sub--fo-fuzz")
+        .unwrap();
+    let snapshot = live.snapshot();
+    assert!(snapshot.hydrated && snapshot.streaming);
+    assert_eq!(snapshot.transcript()[0].message.role, MessageRole::User);
+    let done = client
+        .open_subagent("chat-fanout", &groups.completed[0].doc_id)
+        .unwrap();
+    assert!(!done.snapshot().streaming);
+    assert_eq!(groups.completed[0].state, SubagentState::Completed);
+    // Reopening returns the same session; chats and unknown docs refuse.
+    assert_eq!(
+        client
+            .open_subagent("chat-fanout", "chat-fanout--sub--fo-fuzz")
+            .unwrap()
+            .chat_id(),
+        "chat-fanout--sub--fo-fuzz"
+    );
+    assert!(client.open_subagent("chat-fanout", "chat-fanout").is_err());
+    assert!(
+        client
+            .open_subagent("chat-fanout", "chat-fanout--sub--nope")
+            .is_err()
+    );
+    assert!(
+        client
+            .open_subagent("chat-missing", "chat-fanout--sub--fo-docs")
+            .is_err()
+    );
 }

@@ -98,7 +98,34 @@ struct Inner {
     callback_routes: CallbackRoutes,
     /// Sign-in callbacks this device forwards to the device running them.
     callback_tunnels: CallbackTunnels,
+    /// Engine services peers may open by id prefix (file transfer).
+    peer_services: PeerServices,
     peers: std::sync::OnceLock<Peers>,
+}
+
+/// Serves one stream a peer device opened: `(peer, service id)` → the local
+/// end of that stream.
+pub type PeerServiceHandler = Arc<
+    dyn Fn(String, String) -> futures::future::BoxFuture<'static, anyhow::Result<BoxIo>>
+        + Send
+        + Sync,
+>;
+
+/// Non-preview services reachable over the same authenticated P2P mux,
+/// keyed by service-id prefix. Only remote peers reach them: the connector
+/// hands the coordinator-stamped device id to the handler.
+#[derive(Clone, Default)]
+struct PeerServices(Arc<Mutex<Vec<(String, PeerServiceHandler)>>>);
+
+impl PeerServices {
+    fn handler(&self, service: &str) -> Option<PeerServiceHandler> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(prefix, _)| service.starts_with(prefix.as_str()))
+            .map(|(_, handler)| handler.clone())
+    }
 }
 pub type Projects = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
 impl PreviewService {
@@ -110,6 +137,7 @@ impl PreviewService {
             tasks: Mutex::new(Vec::new()),
             callback_routes: CallbackRoutes::default(),
             callback_tunnels: CallbackTunnels::default(),
+            peer_services: PeerServices::default(),
             peers: std::sync::OnceLock::new(),
         })))
     }
@@ -153,6 +181,54 @@ impl PreviewService {
     pub fn close_login_tunnel(&self, login_id: &str) {
         self.0.callback_tunnels.close(login_id);
     }
+    /// Serve streams whose service id starts with `prefix` to peer devices.
+    /// Register before [`Self::start`]'s first peer can connect.
+    pub fn register_peer_service(&self, prefix: &str, handler: PeerServiceHandler) {
+        self.0
+            .peer_services
+            .0
+            .lock()
+            .unwrap()
+            .push((prefix.to_owned(), handler));
+    }
+    /// Whether direct connections can be attempted at all (signaling runs).
+    pub fn peers_available(&self) -> bool {
+        self.0.peers.get().is_some() && !self.0.stop.is_cancelled()
+    }
+    /// Open `service` on `device` over the P2P mux, pairing first when no
+    /// connection exists. Fails after `timeout` so callers can fall back.
+    pub async fn open_peer_stream(
+        &self,
+        device: &str,
+        service: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<mux::Stream> {
+        let peers = self.0.peers.get().cloned().ok_or_else(|| {
+            anyhow::anyhow!("direct connections to other devices aren't available")
+        })?;
+        tokio::time::timeout(timeout, peers.open(device, service, false))
+            .await
+            .map_err(|_| anyhow::anyhow!("no direct connection to {device} within {timeout:?}"))?
+    }
+    pub async fn is_paired(&self, device: &str) -> bool {
+        match self.0.peers.get() {
+            Some(peers) => peers.is_paired(device).await,
+            None => false,
+        }
+    }
+    /// Close the connection to `device` now, streams and all (a network
+    /// change; tests use it to cut a tunnel mid-transfer).
+    pub async fn drop_peer(&self, device: &str) {
+        if let Some(peers) = self.0.peers.get() {
+            peers.remove(device).await;
+        }
+    }
+    /// Tear down the connection to `device` when nothing uses it any more.
+    pub async fn release_peer_if_idle(&self, device: &str) {
+        if let Some(peers) = self.0.peers.get() {
+            peers.release_if_idle(device).await;
+        }
+    }
     pub async fn start(&self, projects: Projects, signaling: Option<signaling::Config>) {
         if self.0.started.swap(true, Ordering::SeqCst) {
             return;
@@ -160,6 +236,7 @@ impl PreviewService {
         let connector = Arc::new(LocalConnector(
             self.0.catalog.clone(),
             self.0.callback_routes.clone(),
+            self.0.peer_services.clone(),
         ));
         let local = mux::local(connector.clone(), self.0.stop.child_token());
         let (peers, output) = Peers::new(
@@ -286,7 +363,7 @@ impl PreviewService {
         }
     }
 }
-struct LocalConnector(Catalog, CallbackRoutes);
+struct LocalConnector(Catalog, CallbackRoutes, PeerServices);
 #[async_trait::async_trait]
 impl Connector for LocalConnector {
     async fn connect(&self, id: &str) -> anyhow::Result<BoxIo> {
@@ -297,6 +374,11 @@ impl Connector for LocalConnector {
         // that started the login, only while it runs.
         if let Some(port) = self.1.target(peer, id) {
             return CallbackRoutes::connect(port?).await;
+        }
+        // Engine peer services: remote devices only, never a local open.
+        if let Some(handler) = self.2.handler(id) {
+            let peer = peer.ok_or_else(|| anyhow::anyhow!("peer service needs a remote device"))?;
+            return handler(peer.to_owned(), id.to_owned()).await;
         }
         let route = self
             .0

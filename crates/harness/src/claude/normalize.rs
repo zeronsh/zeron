@@ -191,6 +191,8 @@ pub(crate) struct Normalizer {
     /// re-keys them onto the spawn chip's feed (the wire never echoes the
     /// steer on the child feed — live-verified 2.1.228).
     agent_tasks: std::collections::HashMap<String, String>,
+    /// Later tool calls that wake the same task → its original spawn.
+    agent_tool_spawns: std::collections::HashMap<String, String>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -199,11 +201,23 @@ pub(crate) struct Normalizer {
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
     agent_spawn_tools: std::collections::HashSet<String>,
+    /// Only the main feed's Bash calls may register a callback. Nested shell
+    /// tasks belong to their subagent and must not turn the parent blue.
+    main_shell_tools: std::collections::HashSet<String>,
+    background_tasks: std::collections::HashSet<String>,
+    wakeup_tools: std::collections::HashMap<String, WakeupRequest>,
+    scheduled_wakeup: Option<std::time::Instant>,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
     /// Last session id seen (init or result) — used for synthetic Dones.
     pub session_id: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum WakeupRequest {
+    Stop,
+    After(std::time::Duration),
 }
 
 impl Normalizer {
@@ -212,10 +226,93 @@ impl Normalizer {
             saw_init: false,
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
+            agent_tool_spawns: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
+            main_shell_tools: std::collections::HashSet::new(),
+            background_tasks: std::collections::HashSet::new(),
+            wakeup_tools: std::collections::HashMap::new(),
+            scheduled_wakeup: None,
             assistant_message_id: new_message_id(),
             session_id: None,
         }
+    }
+
+    /// Restore only spawn identity from Claude's native history. The CLI
+    /// does not replay task_started when --resume starts a new process.
+    /// Session ids are global; search project directories rather than
+    /// duplicating the CLI's cwd encoding (including long-path hashing).
+    pub async fn for_resume(config_root: &std::path::Path, session_id: &str) -> Self {
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        let mut norm = Self::new();
+        if session_id.is_empty()
+            || !session_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return norm;
+        }
+        let Ok(mut projects) = tokio::fs::read_dir(config_root.join("projects")).await else {
+            return norm;
+        };
+        while let Ok(Some(project)) = projects.next_entry().await {
+            let path = project.path().join(format!("{session_id}.jsonl"));
+            let Ok(file) = tokio::fs::File::open(path).await else {
+                continue;
+            };
+            let mut lines = BufReader::new(file).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Torn lines and older/newer unknown shapes are harmless.
+                let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if !record.get("parent_tool_use_id").is_none_or(Value::is_null) {
+                    continue;
+                }
+                let Some(blocks) = record.pointer("/message/content").and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                match record.get("type").and_then(Value::as_str) {
+                    Some("assistant") => {
+                        for block in blocks {
+                            if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                                && matches!(
+                                    block.get("name").and_then(Value::as_str),
+                                    Some("Agent" | "Task")
+                                )
+                                && let Some(id) = block
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .filter(|id| !id.is_empty())
+                            {
+                                norm.agent_spawn_tools.insert(id.to_owned());
+                            }
+                        }
+                    }
+                    Some("user") => {
+                        if let Some(agent) = record
+                            .pointer("/toolUseResult/agentId")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            && let Some(spawn) = blocks
+                                .iter()
+                                .filter(|b| {
+                                    b.get("type").and_then(Value::as_str) == Some("tool_result")
+                                })
+                                .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+                                .find(|id| norm.agent_spawn_tools.contains(*id))
+                        {
+                            norm.agent_tasks
+                                .entry(agent.to_owned())
+                                .or_insert_with(|| spawn.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            break;
+        }
+        norm
     }
 
     /// Rotate the assistant message id for a steer boundary; returns
@@ -228,8 +325,138 @@ impl Normalizer {
     /// Normalize one stdout frame into 0+ unified events. `interrupted` folds
     /// a post-interrupt `result` into `Done { status: Interrupted }`.
     pub fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
+        let before = self.pending_callbacks();
+        if self
+            .scheduled_wakeup
+            .is_some_and(|at| at <= std::time::Instant::now())
+        {
+            self.scheduled_wakeup = None;
+        }
+        let response = match &frame {
+            Frame::User(f) => f.tool_use_result.clone(),
+            _ => None,
+        };
+        let mut events = self.normalize_frame(frame, interrupted);
+        for event in &events {
+            match event {
+                AgentEvent::ToolCall {
+                    id,
+                    call:
+                        ToolCall::Unknown {
+                            name,
+                            input: Some(input),
+                        },
+                } if name == "ScheduleWakeup" => {
+                    let request = if input.get("stop").and_then(Value::as_bool) == Some(true) {
+                        Some(WakeupRequest::Stop)
+                    } else {
+                        input
+                            .get("delaySeconds")
+                            .and_then(Value::as_f64)
+                            .filter(|n| n.is_finite())
+                            .map(|seconds| {
+                                WakeupRequest::After(std::time::Duration::from_secs_f64(
+                                    seconds.clamp(60.0, 3600.0),
+                                ))
+                            })
+                    };
+                    if let Some(request) = request {
+                        self.wakeup_tools.insert(id.clone(), request);
+                    }
+                }
+                AgentEvent::ToolResult { id, is_error, .. } => {
+                    if let Some(request) = self.wakeup_tools.remove(id)
+                        && !is_error
+                    {
+                        self.scheduled_wakeup = match request {
+                            WakeupRequest::Stop => None,
+                            WakeupRequest::After(fallback) => {
+                                let reported = response
+                                    .as_ref()
+                                    .and_then(|r| r.get("scheduledFor"))
+                                    .and_then(Value::as_u64)
+                                    .map(|at| {
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            as u64;
+                                        std::time::Duration::from_millis(
+                                            at.saturating_sub(now).min(3_600_000),
+                                        )
+                                    });
+                                let delay = reported.unwrap_or(fallback);
+                                (!delay.is_zero()).then(|| std::time::Instant::now() + delay)
+                            }
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        let count = self.pending_callbacks();
+        if count != before {
+            events.push(AgentEvent::PendingCallbacks { count });
+        }
+        events
+    }
+
+    fn pending_callbacks(&self) -> u32 {
+        (self.background_tasks.len() as u32)
+            .saturating_add(u32::from(self.scheduled_wakeup.is_some()))
+    }
+
+    fn normalize_frame(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
         match frame {
             Frame::System(f) => {
+                if f.subtype == "background_tasks_changed"
+                    && let Some(tasks) = &f.tasks
+                {
+                    self.background_tasks.retain(|id| {
+                        tasks
+                            .iter()
+                            .any(|task| task.task_id == *id && !task.ambient)
+                    });
+                    return Vec::new();
+                }
+                if f.subtype == "task_started"
+                    && matches!(
+                        f.task_type.as_str(),
+                        "local_bash" | "monitor_mcp" | "monitor_ws"
+                    )
+                    && f.owned_by_subagent != Some(true)
+                    && (f.owned_by_subagent == Some(false)
+                        || f.tool_use_id
+                            .as_ref()
+                            .is_some_and(|id| self.main_shell_tools.contains(id)))
+                    && let Some(task) = f.task_id.as_ref().filter(|id| !id.is_empty())
+                    && self.background_tasks.insert(task.clone())
+                {
+                    return Vec::new();
+                }
+                if f.subtype == "task_notification"
+                    && matches!(
+                        f.status.as_deref(),
+                        Some(
+                            "completed"
+                                | "complete"
+                                | "succeeded"
+                                | "success"
+                                | "failed"
+                                | "errored"
+                                | "error"
+                                | "killed"
+                                | "cancelled"
+                                | "canceled"
+                                | "stopped"
+                                | "interrupted"
+                        )
+                    )
+                    && let Some(task) = f.task_id.as_ref()
+                    && self.background_tasks.remove(task)
+                {
+                    return Vec::new();
+                }
                 // A background subagent's completion arrives as an UNTAGGED
                 // `task_notification` carrying the spawning tool's id — the
                 // wire's only terminal signal for it (live-verified 2.1.228:
@@ -237,16 +464,22 @@ impl Normalizer {
                 // Surface it as the subagent's tagged Done so the chip flips
                 // done/failed and the transcript freezes.
                 if f.subtype == "task_notification" {
-                    let Some(parent) = f.tool_use_id.as_deref().filter(|t| !t.is_empty()) else {
+                    // A resumed task's notification may carry SendMessage's
+                    // id, or omit the tool id entirely. Its task id is stable.
+                    let parent = f
+                        .task_id
+                        .as_deref()
+                        .and_then(|task| self.agent_tasks.get(task).map(String::as_str))
+                        .or_else(|| f.tool_use_id.as_deref().filter(|t| !t.is_empty()));
+                    let Some(parent) = parent else {
                         return Vec::new();
                     };
                     // Only a KNOWN spawn settles as a subagent. Background
                     // SHELL tasks (`Bash` with `run_in_background`) settle
                     // through this same subtype carrying the Bash call's id —
                     // tagging that Done would bind a subagent ref onto an
-                    // ordinary Run chip. A real spawn's tool_use frame always
-                    // precedes its notification on the wire, so the set is
-                    // populated by the time a genuine one arrives.
+                    // ordinary Run chip. Spawn ids are learned from live
+                    // calls/task starts or restored from the native history.
                     if !self.agent_spawn_tools.contains(parent) {
                         return Vec::new();
                     }
@@ -279,9 +512,22 @@ impl Normalizer {
                         f.tool_use_id.as_deref().filter(|t| !t.is_empty()),
                     )
                 {
-                    self.agent_tasks.insert(task.to_owned(), tool.to_owned());
-                    self.agent_spawn_tools.insert(tool.to_owned());
-                    return Vec::new();
+                    let spawn = self
+                        .agent_tasks
+                        .entry(task.to_owned())
+                        .or_insert_with(|| tool.to_owned());
+                    self.agent_spawn_tools.insert(spawn.clone());
+                    self.agent_tool_spawns
+                        .insert(tool.to_owned(), spawn.clone());
+                    // A confirmed start counts even while the child is silent.
+                    // The same boundary also reopens a previously settled child.
+                    return vec![tag(
+                        spawn,
+                        AgentEvent::Steered {
+                            assistant_message_id: None,
+                            next_assistant_message_id: None,
+                        },
+                    )];
                 }
                 if f.subtype != "init" || self.saw_init {
                     return Vec::new();
@@ -311,6 +557,7 @@ impl Normalizer {
                     return Vec::new();
                 }
                 if let Some(parent) = &f.parent_tool_use_id {
+                    let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
                     return match f.event.delta.kind.as_str() {
                         "text_delta" => vec![tag(
                             parent,
@@ -350,6 +597,7 @@ impl Normalizer {
 
             Frame::Assistant(f) => {
                 if let Some(parent) = &f.parent_tool_use_id {
+                    let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
                     // Subagent content, attributed. The 2.1.x wire streams NO
                     // tagged partial deltas (live-verified): a subagent's text
                     // arrives only as full text blocks on its tagged
@@ -386,8 +634,11 @@ impl Normalizer {
                     return out;
                 }
                 // Record spawn tool ids up front: `task_notification` keys on
-                // them, and only foreground spawns ever get a `task_started`.
+                // them; a task may finish before a `task_started` arrives.
                 for b in f.message.blocks() {
+                    if b.kind == "tool_use" && matches!(b.name.as_str(), "Bash" | "Monitor") {
+                        self.main_shell_tools.insert(b.id.clone());
+                    }
                     if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
                         self.agent_spawn_tools.insert(b.id.clone());
                     }
@@ -485,6 +736,7 @@ impl Normalizer {
 
             Frame::User(f) => {
                 if let Some(parent) = &f.parent_tool_use_id {
+                    let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
                     let mut out: Vec<AgentEvent> = f
@@ -708,6 +960,157 @@ mod tests {
         Normalizer::new().normalize(frame, false)
     }
 
+    #[test]
+    fn main_background_tasks_report_callbacks_and_settle_without_subagent_events() {
+        let mut norm = Normalizer::new();
+        let mut feed =
+            |raw: &str| norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+        feed(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"bash-main","name":"Bash","input":{"command":"sleep 60","run_in_background":true}}]}}"#,
+        );
+        let start = r#"{"type":"system","subtype":"task_started","task_id":"bg1","tool_use_id":"bash-main","task_type":"local_bash"}"#;
+        assert_eq!(feed(start), vec![AgentEvent::PendingCallbacks { count: 1 }]);
+        assert!(
+            feed(start).is_empty(),
+            "duplicate starts do not inflate the count"
+        );
+        assert!(feed(r#"{"type":"system","subtype":"task_notification","task_id":"bg1","status":"running"}"#).is_empty());
+        assert_eq!(
+            feed(
+                r#"{"type":"system","subtype":"task_notification","task_id":"bg1","status":"completed"}"#
+            ),
+            vec![AgentEvent::PendingCallbacks { count: 0 }]
+        );
+        assert!(feed(r#"{"type":"system","subtype":"task_notification","task_id":"bg1","status":"completed"}"#).is_empty());
+    }
+
+    #[test]
+    fn nested_and_unidentified_background_shell_tasks_never_mark_the_main_as_waiting() {
+        let mut norm = Normalizer::new();
+        let mut feed =
+            |raw: &str| norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+        feed(
+            r#"{"type":"assistant","parent_tool_use_id":"spawn","message":{"content":[{"type":"tool_use","id":"bash-child","name":"Bash","input":{"run_in_background":true}}]}}"#,
+        );
+        assert!(feed(r#"{"type":"system","subtype":"task_started","task_id":"child1","owned_by_subagent":true,"tool_use_id":"bash-child","task_type":"local_bash"}"#).is_empty());
+        assert!(feed(r#"{"type":"system","subtype":"task_started","task_id":"child2","tool_use_id":"bash-child","task_type":"local_bash"}"#).is_empty());
+        assert!(feed(r#"{"type":"system","subtype":"task_started","task_id":"unknown","task_type":"local_bash"}"#).is_empty());
+        assert!(feed(r#"{"type":"system","subtype":"task_notification","task_id":"child1","status":"completed"}"#).is_empty());
+    }
+
+    #[test]
+    fn multiple_explicit_main_tasks_count_down_on_failure_and_cancellation() {
+        let mut norm = Normalizer::new();
+        let mut feed =
+            |raw: &str| norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+        assert_eq!(
+            feed(
+                r#"{"type":"system","subtype":"task_started","task_id":"a","owned_by_subagent":false,"task_type":"local_bash"}"#
+            ),
+            vec![AgentEvent::PendingCallbacks { count: 1 }]
+        );
+        assert_eq!(
+            feed(
+                r#"{"type":"system","subtype":"task_started","task_id":"b","owned_by_subagent":false,"task_type":"local_bash"}"#
+            ),
+            vec![AgentEvent::PendingCallbacks { count: 2 }]
+        );
+        assert_eq!(
+            feed(
+                r#"{"type":"system","subtype":"task_notification","task_id":"a","status":"failed"}"#
+            ),
+            vec![AgentEvent::PendingCallbacks { count: 1 }]
+        );
+        assert_eq!(
+            feed(
+                r#"{"type":"system","subtype":"task_notification","task_id":"b","status":"killed"}"#
+            ),
+            vec![AgentEvent::PendingCallbacks { count: 0 }]
+        );
+    }
+
+    #[test]
+    fn wakeup_only_counts_after_success_and_stops_on_successful_cancellation() {
+        let mut norm = Normalizer::new();
+        fn feed(norm: &mut Normalizer, raw: &str) -> Vec<AgentEvent> {
+            norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false)
+        }
+        let schedule = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"wake","name":"ScheduleWakeup","input":{"delaySeconds":60}}]}}"#;
+        feed(&mut norm, schedule);
+        assert_eq!(
+            norm.pending_callbacks(),
+            0,
+            "a request is not a confirmed timer"
+        );
+        feed(
+            &mut norm,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"wake","is_error":true}]}}"#,
+        );
+        assert_eq!(norm.pending_callbacks(), 0);
+        feed(&mut norm, schedule);
+        let events = feed(
+            &mut norm,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"wake","is_error":false}]}}"#,
+        );
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::PendingCallbacks { count: 1 })
+        );
+        feed(
+            &mut norm,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"stop","name":"ScheduleWakeup","input":{"stop":true}}]}}"#,
+        );
+        let events = feed(
+            &mut norm,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"stop","is_error":false}]}}"#,
+        );
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::PendingCallbacks { count: 0 })
+        );
+    }
+
+    #[test]
+    fn expired_wakeup_and_authoritative_empty_task_set_clear_waiting() {
+        let mut norm = Normalizer::new();
+        norm.scheduled_wakeup = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        norm.background_tasks.insert("main-bg".into());
+        let events = norm.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        assert_eq!(events, vec![AgentEvent::PendingCallbacks { count: 0 }]);
+    }
+
+    #[test]
+    fn nested_wakeup_and_ambient_or_missing_level_payload_do_not_mark_main_waiting() {
+        let mut norm = Normalizer::new();
+        norm.normalize(crate::claude::wire::parse_frame(r#"{"type":"assistant","parent_tool_use_id":"child","message":{"content":[{"type":"tool_use","id":"wake","name":"ScheduleWakeup","input":{"delaySeconds":60}}]}}"#).unwrap(), false);
+        norm.normalize(crate::claude::wire::parse_frame(r#"{"type":"user","parent_tool_use_id":"child","message":{"content":[{"type":"tool_result","tool_use_id":"wake","is_error":false}]}}"#).unwrap(), false);
+        assert_eq!(norm.pending_callbacks(), 0);
+        norm.background_tasks.insert("main-bg".into());
+        assert!(
+            norm.normalize(
+                crate::claude::wire::parse_frame(
+                    r#"{"type":"system","subtype":"background_tasks_changed"}"#
+                )
+                .unwrap(),
+                false
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            norm.pending_callbacks(),
+            1,
+            "a missing set is not an empty set"
+        );
+        let events = norm.normalize(crate::claude::wire::parse_frame(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"main-bg","ambient":true}]}"#).unwrap(), false);
+        assert_eq!(events, vec![AgentEvent::PendingCallbacks { count: 0 }]);
+    }
+
     fn result_done(raw: &str) -> AgentEvent {
         let events = normalize_one(raw);
         assert_eq!(events.len(), 2, "usage + done");
@@ -892,7 +1295,16 @@ mod tests {
             r#"{"type":"system","subtype":"task_started","task_id":"a20b2336","tool_use_id":"toolu_spawn","subagent_type":"general-purpose","prompt":"p","description":"d"}"#,
         )
         .expect("parses");
-        assert!(norm.normalize(started, false).is_empty());
+        assert_eq!(
+            norm.normalize(started, false),
+            vec![tag(
+                "toolu_spawn",
+                AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: None,
+                }
+            )]
+        );
         let send = crate::claude::wire::parse_frame(
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a20b2336","message":"Also read the rebuild.","summary":"s"}}]}}"#,
         )
@@ -1022,6 +1434,123 @@ mod tests {
                 r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn resumed_task_notifications_settle_the_original_spawn() {
+        for notification in [
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","status":"stopped"}"#,
+        ] {
+            let mut norm = Normalizer::new();
+            for raw in [
+                r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"Keep going."}}]}}"#,
+                r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+            ] {
+                norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+            }
+            let events = norm.normalize(
+                crate::claude::wire::parse_frame(notification).unwrap(),
+                false,
+            );
+            let expected = if notification.contains("completed") {
+                DoneStatus::Completed
+            } else {
+                DoneStatus::Interrupted
+            };
+            assert_eq!(
+                events,
+                vec![tag(
+                    "toolu_spawn",
+                    AgentEvent::Done {
+                        status: expected,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }
+                )]
+            );
+            // The next steer must still use the original transcript too.
+            let events = norm.normalize(crate::claude::wire::parse_frame(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send2","name":"SendMessage","input":{"to":"a1","message":"One more check."}}]}}"#,
+            ).unwrap(), false);
+            assert!(
+                events.iter().any(|e| matches!(e,
+                    AgentEvent::Subagent { parent_tool_use_id, event }
+                        if parent_tool_use_id == "toolu_spawn"
+                            && matches!(event.as_ref(), AgentEvent::UserMessage { .. })
+                )),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resumed_child_frames_use_the_original_transcript() {
+        let mut norm = Normalizer::new();
+        for raw in [
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+        ] {
+            norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+        }
+        for raw in [
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_send","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"working"}}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_send","message":{"content":[{"type":"text","text":"finished"}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_send","message":{"content":[{"type":"tool_result","tool_use_id":"child-tool"}]}}"#,
+        ] {
+            let events = norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+            assert!(!events.is_empty());
+            assert!(events.iter().all(|e| matches!(e,
+                AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == "toolu_spawn"
+            )), "{events:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resumed_session_restores_task_ids_from_the_native_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/encoded-project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("session-1.jsonl"), concat!(
+            "not json\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_spawn","name":"Agent","input":{"description":"scout"}}]}}"#,
+            "\n",
+            r#"{"type":"user","toolUseResult":{"agentId":"a1","status":"async_launched"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_spawn"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"continue"}}]}}"#,
+            "\n",
+            r#"{"type":"user","toolUseResult":{"agentId":"a1"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_send"}]}}"#,
+            "\n{torn tail"
+        )).unwrap();
+        let mut norm = Normalizer::for_resume(root.path(), "session-1").await;
+        // The revived process has no original spawn frame on its wire.
+        norm.normalize(crate::claude::wire::parse_frame(
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+        ).unwrap(), false);
+        let events = norm.normalize(crate::claude::wire::parse_frame(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
+        ).unwrap(), false);
+        assert_eq!(
+            events,
+            vec![tag(
+                "toolu_spawn",
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }
+            )]
+        );
+        assert!(!norm.saw_init, "history must not consume the live init");
+        assert!(
+            Normalizer::for_resume(root.path(), "missing")
+                .await
+                .agent_tasks
+                .is_empty()
         );
     }
 

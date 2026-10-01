@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Previews handed to other apps ("Open with…"): copies in cache/shared. -->
+<paths>
+    <cache-path name="shared" path="shared/" />
+</paths>

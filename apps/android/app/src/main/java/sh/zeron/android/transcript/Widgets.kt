@@ -1,5 +1,8 @@
 package sh.zeron.android.transcript
 
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.graphics.BitmapFactory
 import android.util.LruCache
 import androidx.compose.animation.core.LinearEasing
@@ -11,6 +14,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,12 +66,10 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -104,11 +106,11 @@ fun RowWidgets(state: TranscriptState, model: RowModel, scroller: UInt?, palette
 @Composable
 private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: TranscriptPalette, actions: TranscriptActions, live: Boolean) {
     val key = model.display.key
-    val haptics = LocalHapticFeedback.current
+    val fb = LocalFeedback.current
     when (val kind = w.kind) {
         WidgetKind.CopyCode -> CopyButton(w.payload ?: "", palette)
         is WidgetKind.Disclosure -> Tap(if (kind.expanded) "Collapse" else "Expand") {
-            haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+            fb.both(Haptic.Tick, Cue.Tap)
             state.toggle(key)
         }
         is WidgetKind.ToolStatus -> when {
@@ -133,10 +135,38 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
         )
         is WidgetKind.ToolRail -> ToolRail(kind, Color(palette[ColorRole.TOOL_RAIL]))
         is WidgetKind.ToolToggle -> Tap(if (kind.open) "Hide details" else "Show details") {
-            haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+            fb.both(Haptic.Tick, Cue.Tap)
             state.toggleDetail(key, kind.detail, kind.open)
         }
         WidgetKind.Shimmer -> Shimmer(state, model, w, palette)
+        is WidgetKind.OpenFile -> FileBadgeTap(kind.path, actions)
+    }
+}
+
+/** A tool line's file badge: tap opens the file, long-press offers its quick actions. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun FileBadgeTap(path: String, actions: TranscriptActions) {
+    var menu by remember { mutableStateOf(false) }
+    val fb = LocalFeedback.current
+    Box(
+        Modifier
+            .fillMaxSize()
+            .semantics { contentDescription = "Open $path" }
+            .combinedClickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {
+                    fb.both(Haptic.Select, Cue.Tap)
+                    actions.openFile(path)
+                },
+                onLongClick = {
+                    fb.haptic(Haptic.LongPress)
+                    menu = true
+                },
+            ),
+    ) {
+        sh.zeron.android.ui.ActionMenu(menu, { menu = false }, actions.fileActions(path))
     }
 }
 
@@ -153,7 +183,7 @@ private fun Tap(label: String, onClick: () -> Unit) {
 @Composable
 private fun CopyButton(payload: String, palette: TranscriptPalette) {
     val clipboard = LocalClipboardManager.current
-    val haptics = LocalHapticFeedback.current
+    val fb = LocalFeedback.current
     var copied by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
@@ -168,7 +198,7 @@ private fun CopyButton(payload: String, palette: TranscriptPalette) {
             .semantics { contentDescription = "Copy code" }
             .clickable {
                 clipboard.setText(AnnotatedString(payload))
-                haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                fb.both(Haptic.Confirm, Cue.Copy)
                 copied = true
             },
         contentAlignment = Alignment.Center,

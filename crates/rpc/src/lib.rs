@@ -22,13 +22,13 @@ mod client;
 pub mod device_room;
 mod server;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{RpcClient, RpcSubscription, connect_ws, connect_ws_with_token};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use server::{ipc_token, serve_connection, serve_ws_listener, serve_ws_listener_with_token};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -37,6 +37,11 @@ pub mod methods {
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
+    /// Remove what Zeron's installers put on disk for a harness (vendor
+    /// layout, global npm package, managed archive/adapters); refuses a CLI
+    /// installed elsewhere. `{harness, dryRun?}` → `UninstallHarnessResult`.
+    /// `CancelInstall` cancels one still running its npm step.
+    pub const UNINSTALL_HARNESS: &str = "UninstallHarness";
     /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
@@ -133,6 +138,12 @@ pub mod methods {
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";
+    /// The bearer this engine presents to its edge, for a viewer on the same
+    /// device that shares the engine's account (the Android app): `{edgeUrl,
+    /// bearer, expiresAtMs?, userId, orgId}`. The engine stays the only
+    /// refresher — WorkOS refresh tokens rotate, so a second one would race it.
+    /// Served only on a token-gated `zeron headless` IPC port; never relayed.
+    pub const EDGE_BEARER: &str = "EdgeBearer";
     /// One-time local→synced profile import: what's importable (unary).
     pub const LOCAL_IMPORT_STATUS: &str = "LocalImportStatus";
     /// One-time local→synced profile import: run it (stream of progress items).
@@ -163,6 +174,7 @@ pub mod methods {
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
+    pub const READ_WORKSPACE_BYTES: &str = "ReadWorkspaceBytes";
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
@@ -215,9 +227,44 @@ pub mod methods {
     pub const WATCH_HARNESS_UPDATES: &str = "WatchHarnessUpdates";
     pub const CHECK_HARNESS_UPDATES: &str = "CheckHarnessUpdates";
     pub const APPLY_HARNESS_UPDATE: &str = "ApplyHarnessUpdate";
+    /// Check every monitored harness, then apply each available update in
+    /// turn; per-harness progress rides `WatchHarnessUpdates` (or polled
+    /// `ListHarnessUpdates`). Replies `HarnessUpdateAllResult`.
+    pub const APPLY_ALL_HARNESS_UPDATES: &str = "ApplyAllHarnessUpdates";
+    /// The current ordered status list, without probing anything — the unary
+    /// twin of `WatchHarnessUpdates` for clients that cannot stream.
+    pub const LIST_HARNESS_UPDATES: &str = "ListHarnessUpdates";
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    // Device-to-device file transfer (docs/file-transfer.md; relay-forwardable,
+    // so `targetDeviceId` picks the engine that SENDS or holds the transfer —
+    // the receiver of `SendFiles` is `toDeviceId`). Not `WatchTransfers`,
+    // which is the chat-attachment feed.
+    /// `{toDeviceId?, chatId?, paths[], destination?}` → `SendFilesReply`.
+    /// Without `toDeviceId`, `chatId` names a chat whose latest user message
+    /// came from the device to send to.
+    pub const SEND_FILES: &str = "SendFiles";
+    /// Stream of `FileTransfer[]`: the current list first, then every change
+    /// (progress throttled to a few frames per second).
+    pub const WATCH_FILE_TRANSFERS: &str = "WatchFileTransfers";
+    /// Unary snapshot of the same list (pollers such as the Android app).
+    pub const LIST_FILE_TRANSFERS: &str = "ListFileTransfers";
+    /// `{transferId}` — either side; the other side is told.
+    pub const CANCEL_FILE_TRANSFER: &str = "CancelFileTransfer";
+    /// `{transferId}` — an incoming transfer awaiting this device's consent.
+    pub const ACCEPT_FILE_TRANSFER: &str = "AcceptFileTransfer";
+    pub const DECLINE_FILE_TRANSFER: &str = "DeclineFileTransfer";
+    /// Drop finished rows from the history (`{transferId?}`; none = all).
+    pub const CLEAR_FILE_TRANSFERS: &str = "ClearFileTransfers";
+    pub const GET_FILE_TRANSFER_SETTINGS: &str = "GetFileTransferSettings";
+    pub const SET_FILE_TRANSFER_SETTINGS: &str = "SetFileTransferSettings";
+    /// Engine ⇄ engine only: the relay fallback's byte pipe. A stream opened
+    /// by the sender (`{pipeId, transferId, fromDeviceId}`) carries the
+    /// receiver's bytes back; `FileTransferPipeWrite {pipeId, seq, data?,
+    /// eof?}` carries the sender's, reordered by `seq`.
+    pub const FILE_TRANSFER_PIPE: &str = "FileTransferPipe";
+    pub const FILE_TRANSFER_PIPE_WRITE: &str = "FileTransferPipeWrite";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -561,6 +608,41 @@ mod tests {
         let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
         let echoed = client.call("Echo", serde_json::json!("ok")).await.unwrap();
         assert_eq!(echoed, serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn ipc_token_gates_the_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_ws_listener_with_token(
+            listener,
+            Arc::new(TestService),
+            Some("s3cret-token".into()),
+        ));
+        let url = format!("ws://127.0.0.1:{port}");
+
+        // No token, a wrong token, and a same-length wrong token all fail
+        // the handshake itself — no RPC is ever served.
+        for token in [None, Some("nope"), Some("s3cret-tokex")] {
+            assert!(
+                connect_ws_with_token(&url, token).await.is_err(),
+                "{token:?} must be rejected"
+            );
+        }
+
+        // The bearer header (what `connect_ws` sends) is accepted …
+        let client = connect_ws_with_token(&url, Some("s3cret-token"))
+            .await
+            .unwrap();
+        let echoed = client.call("Echo", serde_json::json!("in")).await.unwrap();
+        assert_eq!(echoed, serde_json::json!("in"));
+
+        // … and so is `?token=` for dialers that cannot set headers.
+        let client = connect_ws_with_token(&format!("{url}/?token=s3cret-token"), None)
+            .await
+            .unwrap();
+        let echoed = client.call("Echo", serde_json::json!("q")).await.unwrap();
+        assert_eq!(echoed, serde_json::json!("q"));
     }
 
     #[tokio::test]

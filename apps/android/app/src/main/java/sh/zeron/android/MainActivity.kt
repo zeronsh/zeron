@@ -2,20 +2,21 @@ package sh.zeron.android
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import sh.zeron.android.core.LaunchOptions
 import sh.zeron.android.ui.ZeronRoot
 
 /**
  * Launch extras mirror the iOS launch arguments, e.g.
  * `adb shell am start -n sh.zeron.android/.MainActivity --ez demo true --es route chat:chat-veil`
- * (`--es wallpaper <path>` sets the wallpaper from a file the app can read).
+ * (`--es wallpaper <path>` sets the wallpaper from a file the app can read;
+ * `--ez local true` continues without an account; `--es server <url> --es
+ * server-token <t>` joins a development edge). Session notifications reopen
+ * it with `route chat:<id>`.
  */
 class MainActivity : ComponentActivity() {
     private val model get() = (application as ZeronApplication).model
@@ -34,22 +35,32 @@ class MainActivity : ComponentActivity() {
                 huge = extras?.getBoolean("huge") == true,
                 noProjects = extras?.getBoolean("noprojects") == true,
                 signedOut = extras?.getBoolean("signedout") == true,
+                local = extras?.getBoolean("local") == true,
+                server = extras?.getString("server"),
+                serverToken = extras?.getString("server-token"),
                 route = extras?.getString("route"),
                 wallpaper = extras?.getString("wallpaper"),
                 wallpaperEffect = extras?.getString("wallpaper-effect"),
             ),
         )
+        // boot() runs once per process: a process kept alive by the engine
+        // (or the share sheet) still has to honour a notification's route.
+        if (savedInstanceState == null) extras?.getString("route")?.let { model.pendingRoute.value = it }
         handleCallback(intent)
-        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) = model.onForeground()
-            override fun onStop(owner: LifecycleOwner) = model.onBackground()
-        })
+        if (model.isDebuggable) sh.zeron.android.core.Perf.attach(window)
         setContent { ZeronRoot(model) }
+    }
+
+    /** A finger down anywhere wakes the sound output ahead of the click that will use it (see `WarmPolicy`). */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) model.feedback.onTouchDown()
+        return super.dispatchTouchEvent(ev)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleCallback(intent)
+        intent.getStringExtra("route")?.let { model.pendingRoute.value = it }
     }
 
     private fun handleCallback(intent: Intent?) {

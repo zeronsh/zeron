@@ -30,6 +30,7 @@ mod composer_markdown;
 mod context_usage;
 pub mod edge_fade;
 pub mod file_icons;
+pub mod file_transfers;
 pub mod files;
 pub mod frost;
 pub mod history;

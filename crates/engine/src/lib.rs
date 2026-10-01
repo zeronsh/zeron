@@ -22,6 +22,7 @@ pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+mod file_transfers;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
@@ -121,6 +122,33 @@ pub struct EngineConfig {
     pub org_id: Option<String>,
     /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
     pub workos_client_id: Option<String>,
+    /// Development identity when `edge_token` is an opaque shared secret rather
+    /// than `user[@org]` (the embedded local edge, see [`Self::with_local_edge`]).
+    /// `None` = the bearer names the user, as a dev edge parses it.
+    pub dev_user_id: Option<String>,
+}
+
+/// The fixed user and org of a runtime served by an embedded local edge —
+/// the same identity `zeron-client`'s `Credentials::Local` assumes.
+pub const LOCAL_EDGE_IDENTITY: &str = "local";
+
+impl EngineConfig {
+    /// Run against an embedded local edge (docs/android.md): its loopback URL
+    /// and shared-secret bearer, in `Development` scope (no WorkOS) under the
+    /// fixed [`LOCAL_EDGE_IDENTITY`]. The identity is not derived from the
+    /// token, so rotating the secret never moves the profile's store.
+    pub fn with_local_edge(
+        mut self,
+        edge_url: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        self.edge_url = edge_url.into();
+        self.edge_token = Some(token.into());
+        self.dev_user_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.org_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.workos_client_id = None;
+        self
+    }
 }
 
 /// The assembled engine core — also constructible without the IPC server for tests
@@ -135,6 +163,8 @@ pub struct EngineCore {
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
     pub previews: zeron_preview::PreviewService,
+    /// Device-to-device file transfer (docs/file-transfer.md).
+    pub transfers: zeron_transfer::Transfers,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -147,8 +177,13 @@ pub struct EngineCore {
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
+    /// The account's auth when it is not the edge's (see [`Engine::with_account`]):
+    /// the IPC's AuthStatus / SignIn / … answer from it. `None` = [`Self::auth`].
+    account: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
     links: std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>,
+    /// The same links, as the file-transfer relay fallback sees them.
+    transfer_links: Arc<std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
     updater: std::sync::Mutex<Option<zeron_update::Updater>>,
@@ -237,7 +272,7 @@ impl EngineCore {
             WorkspaceHostConfig {
                 device_id: device_id.clone(),
                 device_name: local_device_name(&device_id),
-                platform: std::env::consts::OS.to_string(),
+                platform: local_device_platform(),
                 org_id: profile.org_id().to_string(),
                 user_id: profile.user_id().to_string(),
                 edge: edge.clone(),
@@ -266,6 +301,23 @@ impl EngineCore {
             local_device_name(&device_id),
         )
         .map_err(|e| EngineError::Other(e.to_string()))?;
+        let transfer_links = Arc::new(std::sync::Mutex::new(None));
+        let transfers = zeron_transfer::Transfers::new(
+            zeron_transfer::TransfersConfig {
+                device_id: device_id.clone(),
+                device_name: local_device_name(&device_id),
+                state_dir: profile.store_root().join("file-transfers"),
+                settings_file: data_dir.join("file-transfers.json"),
+                home_dir: repos::session_home_dir().ok(),
+            },
+            Arc::new(file_transfers::EngineNetwork::new(
+                device_id.clone(),
+                previews.clone(),
+                workspace.clone(),
+                transfer_links.clone(),
+            )),
+        );
+        file_transfers::register_peer_service(&previews, &transfers);
         let uploads = Uploads::from_root_with_fallback(
             profile.uploads_root(),
             legacy_uploads_root.as_deref(),
@@ -328,6 +380,7 @@ impl EngineCore {
             terminals,
             project_actions,
             previews,
+            transfers,
             change_requests,
             diff_sync,
             spaces_sync,
@@ -338,7 +391,9 @@ impl EngineCore {
             local_import,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
+            account: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
+            transfer_links,
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             _instance_lock: lock,
@@ -376,10 +431,34 @@ impl EngineCore {
         .clone()
     }
 
+    /// Attach the account's auth for a runtime whose edge credentials are not
+    /// the account's (see [`Engine::with_account`]); RPC services built after
+    /// this answer the auth methods from it.
+    pub fn set_account_auth(&self, auth: Auth) {
+        *self
+            .account
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(auth);
+    }
+
+    /// The auth the account methods (AuthStatus, SignIn, …) speak for.
+    pub fn account_auth(&self) -> Auth {
+        let account = self
+            .account
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        account.unwrap_or_else(|| self.auth())
+    }
+
     /// Attach the peer link cache — enables `targetDeviceId` routing,
     /// [`Self::dial_device`], and the doc host's queued-attachment transfers.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
         self.doc_host.set_links(links.clone());
+        *self
+            .transfer_links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(links.clone());
         *self
             .links
             .lock()
@@ -466,8 +545,9 @@ impl EngineCore {
             self.agent_accounts.clone(),
             self.workspace_scope,
         )
-        .with_auth(self.auth())
+        .with_auth(self.account_auth())
         .with_previews(self.previews.clone())
+        .with_transfers(self.transfers.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -486,6 +566,7 @@ impl EngineCore {
     /// clearing credentials alone is not a security boundary.
     pub fn disconnect_edge(&self) {
         self.previews.stop();
+        self.transfers.shutdown();
         if let Some(links) = self.links() {
             links.disconnect_all();
         }
@@ -497,6 +578,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.transfers.shutdown();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
@@ -541,6 +623,8 @@ impl EngineCore {
 
 pub struct Engine {
     pub config: EngineConfig,
+    /// See [`Self::with_account`].
+    account: Option<Auth>,
 }
 
 /// A fully assembled identity-scoped engine plus the relay handle whose lifetime
@@ -549,6 +633,87 @@ pub struct Engine {
 pub struct EngineRuntime {
     core: EngineCore,
     host_relay: std::sync::Mutex<Option<zeron_rpc::HostRelay>>,
+    /// What [`methods::EDGE_BEARER`] answers; `None` = no edge (local scope).
+    edge_bearer: Option<EdgeBearerSource>,
+}
+
+/// The edge a runtime syncs through, the identity it syncs as, and the
+/// credentials its transports present there — [`methods::EDGE_BEARER`]'s
+/// answer to a viewer on the same device that shares this engine's account.
+#[derive(Clone)]
+pub struct EdgeBearerSource {
+    edge_url: String,
+    user_id: String,
+    org_id: String,
+    auth: Auth,
+}
+
+impl EdgeBearerSource {
+    pub fn new(
+        edge_url: impl Into<String>,
+        user_id: impl Into<String>,
+        org_id: impl Into<String>,
+        auth: Auth,
+    ) -> Self {
+        Self {
+            edge_url: edge_url.into(),
+            user_id: user_id.into(),
+            org_id: org_id.into(),
+            auth,
+        }
+    }
+
+    /// `{edgeUrl, userId, orgId, bearer, expiresAtMs?}`, or `{…, signedOut:
+    /// true}` once the session is gone (terminal, unlike a failed refresh,
+    /// which is an error the viewer retries).
+    pub async fn reply(&self) -> Result<serde_json::Value, RpcError> {
+        let mut reply = serde_json::json!({
+            "edgeUrl": self.edge_url,
+            "userId": self.user_id,
+            "orgId": self.org_id,
+        });
+        match self.auth.access_token_with_expiry().await {
+            Ok((bearer, remaining)) => {
+                reply["bearer"] = bearer.into();
+                if let Some(remaining) = remaining {
+                    let at = now_ms().saturating_add(remaining.as_millis() as i64);
+                    reply["expiresAtMs"] = at.into();
+                }
+            }
+            Err(zeron_rpc::TokenError::SignedOut) => reply["signedOut"] = true.into(),
+            Err(err) => return Err(RpcError::Failed(err.to_string())),
+        }
+        Ok(reply)
+    }
+}
+
+/// [`methods::EDGE_BEARER`] in front of an IPC service. Only a token-gated
+/// IPC port may serve it (the account's bearer must not reach every local
+/// process), and never the relay: it answers for *this* engine's session.
+pub struct EdgeBearerRpc {
+    inner: Arc<dyn RpcService>,
+    source: Option<EdgeBearerSource>,
+}
+
+impl EdgeBearerRpc {
+    pub fn new(inner: Arc<dyn RpcService>, source: Option<EdgeBearerSource>) -> Self {
+        Self { inner, source }
+    }
+}
+
+#[async_trait]
+impl RpcService for EdgeBearerRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method != methods::EDGE_BEARER {
+            return self.inner.handle(method, params).await;
+        }
+        let Some(source) = &self.source else {
+            return Err(RpcError::Failed(
+                "this engine runs local-only: it has no edge".into(),
+            ));
+        };
+        RpcReply::value(&source.reply().await?)
+    }
 }
 
 /// IPC-only lifecycle control owned by `zeron headless`. The regular
@@ -586,6 +751,12 @@ impl EngineRuntime {
         self.core.workspace_scope()
     }
 
+    /// Edge, identity and credentials for [`EdgeBearerRpc`]; `None` when the
+    /// runtime has no edge.
+    pub fn edge_bearer_source(&self) -> Option<EdgeBearerSource> {
+        self.edge_bearer.clone()
+    }
+
     pub fn disconnect_edge(&self) {
         // Revoke remote reachability before graceful draining. Sessions may
         // need time to settle; no authenticated relay RPC may enter during
@@ -614,7 +785,21 @@ impl Drop for EngineRuntime {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            account: None,
+        }
+    }
+
+    /// Serve the account methods (AuthStatus, SignIn, SelectOrg, …) from
+    /// `account` instead of the edge's auth. For a runtime whose edge is not
+    /// the account's — `zeron headless` over its embedded local edge while
+    /// signed out (docs/android.md): the viewer signs in through this engine,
+    /// `session.json` is written, and the next start opens the synced profile
+    /// (the running scope never changes, ARCHITECTURE §1).
+    pub fn with_account(mut self, account: Auth) -> Self {
+        self.account = Some(account);
+        self
     }
 
     /// Resolve the shared dev/WorkOS auth configuration for headed and headless
@@ -635,7 +820,13 @@ impl Engine {
                 .unwrap_or(27641),
         );
         if let Some(token) = &config.edge_token {
-            auth_config.dev_user_id = token.clone();
+            match &config.dev_user_id {
+                Some(user) => {
+                    auth_config.dev_user_id = user.clone();
+                    auth_config.dev_bearer = Some(token.clone());
+                }
+                None => auth_config.dev_user_id = token.clone(),
+            }
         }
         Auth::new(auth_config)
     }
@@ -779,6 +970,14 @@ impl Engine {
         });
 
         let preview_org = profile.org_id().to_string();
+        let edge_bearer = edge_enabled.then(|| {
+            EdgeBearerSource::new(
+                config.edge_url.clone(),
+                profile.user_id(),
+                profile.org_id(),
+                auth.clone(),
+            )
+        });
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
@@ -863,6 +1062,7 @@ impl Engine {
         Ok(EngineRuntime {
             core,
             host_relay: std::sync::Mutex::new(host_relay),
+            edge_bearer,
         })
     }
 
@@ -891,6 +1091,9 @@ impl Engine {
             .ok_or_else(|| EngineError::Other("synced workspace profile is not ready".into()))?;
 
         let runtime = Self::assemble_runtime(&config, auth, profile).await?;
+        if let Some(account) = self.account {
+            runtime.core().set_account_auth(account);
+        }
         // The desktop app or `zeron update` may install a newer binary under
         // a running service; restart into it once no run or terminal is live.
         if let Some(updater) = runtime.core().updater() {
@@ -901,10 +1104,11 @@ impl Engine {
         // unlike the headed app, which can still work over its in-process
         // transport (see `serve_ipc`).
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
-        let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
-            inner: runtime.core().rpc_service(),
-            stop_tx,
-        });
+        let mut inner: Arc<dyn RpcService> = runtime.core().rpc_service();
+        if zeron_rpc::ipc_token().is_some() {
+            inner = Arc::new(EdgeBearerRpc::new(inner, runtime.edge_bearer_source()));
+        }
+        let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc { inner, stop_tx });
         let server = serve_ipc(config.ipc_port, service).await?;
         // Only a port this process actually serves goes to agents: the
         // injected MCP server must dial back into THIS engine.
@@ -1144,6 +1348,17 @@ async fn run_org_onboarding(auth: Auth) {
 }
 
 /// Best-effort human name for this device's registry row.
+/// The platform on this engine's device row: `ZERON_DEVICE_PLATFORM` when set
+/// (an engine inside the Android app's Linux guest reports `android`, not the
+/// guest's `linux`), else the OS this binary was built for.
+fn local_device_platform() -> String {
+    std::env::var("ZERON_DEVICE_PLATFORM")
+        .ok()
+        .map(|platform| platform.trim().to_string())
+        .filter(|platform| !platform.is_empty())
+        .unwrap_or_else(|| std::env::consts::OS.to_string())
+}
+
 fn local_device_name(device_id: &str) -> String {
     select_local_device_name(
         [

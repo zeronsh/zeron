@@ -500,17 +500,13 @@ impl ChildStream {
             if !id.is_empty() && self.completed_turns.contains(&id) {
                 return Vec::new();
             }
-            if self.settled {
-                self.settled = false;
-                // v2 followup_task starts a new child turn without echoing a
-                // userMessage. Reopen the existing document without inventing
-                // a user prompt or attributing an activity id as a new spawn.
-                return vec![AgentEvent::Steered {
-                    assistant_message_id: None,
-                    next_assistant_message_id: None,
-                }];
-            }
-            return Vec::new();
+            self.settled = false;
+            // Count a confirmed turn immediately, including its silent startup.
+            // Follow-up turns reopen the same child without inventing a prompt.
+            return vec![AgentEvent::Steered {
+                assistant_message_id: None,
+                next_assistant_message_id: None,
+            }];
         }
         if matches!(method, "item/started" | "item/completed") {
             let item = params.get("item").unwrap_or(&Value::Null);

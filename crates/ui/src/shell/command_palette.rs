@@ -42,6 +42,9 @@ enum Entry {
     NewProject,
     Settings,
     Theme(AppearanceMode),
+    /// Device file transfers (docs/file-transfer.md).
+    SendFileToDevice,
+    ShowFileTransfers,
     Chat(String),
 }
 
@@ -59,6 +62,8 @@ impl Entry {
                 },
                 mode.icon(),
             )),
+            Self::SendFileToDevice => Some(("Send current file to device…", icons::SMARTPHONE)),
+            Self::ShowFileTransfers => Some(("Show file transfers", icons::SORT_VERTICAL)),
             Self::Chat(_) => None,
         }
     }
@@ -139,6 +144,25 @@ impl Shell {
         };
         let query = palette.search.read(cx).text().trim().to_lowercase();
         let mut entries = actions_for(&query, Theme::of(cx).appearance.is_dark());
+        // Transfer commands appear only where they can act.
+        let transfers = self.state.read(cx).engine().is_some_and(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::FILE_TRANSFER_V1)
+        });
+        if transfers {
+            entries.extend(
+                [
+                    self.current_file_path(cx)
+                        .is_some()
+                        .then_some(Entry::SendFileToDevice),
+                    Some(Entry::ShowFileTransfers),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|entry| matches_query(&query, entry.action().unwrap().0)),
+            );
+        }
         let state = self.state.read(cx);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
@@ -207,6 +231,8 @@ impl Shell {
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => self.open_last_settings(cx),
             Entry::Theme(_) => unreachable!(),
+            Entry::SendFileToDevice => self.open_send_menu_for_current_file(cx),
+            Entry::ShowFileTransfers => self.open_file_transfers_panel(cx),
             Entry::Chat(id) => self.open_chat(id, cx),
         }
     }

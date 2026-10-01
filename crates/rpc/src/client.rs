@@ -363,12 +363,40 @@ fn wire_error(error: String) -> RpcError {
 /// stranger on port 27654 would hang the app at boot rather than degrade it.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).
+/// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`), presenting
+/// [`crate::ipc_token`] when this process has one.
 pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
-    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
+    connect_ws_with_token(url, crate::ipc_token().as_deref()).await
+}
+
+/// [`connect_ws`] with an explicit IPC token (`None` sends none).
+pub async fn connect_ws_with_token(url: &str, token: Option<&str>) -> Result<RpcClient, RpcError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| RpcError::Transport(e.to_string()))?;
+    if let Some(token) = token {
+        let value = format!("Bearer {token}")
+            .parse()
+            .map_err(|_| RpcError::Transport("IPC token is not a valid header value".into()))?;
+        request.headers_mut().insert("authorization", value);
+    }
+    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
         .await
         .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
-        .map_err(|e| RpcError::Transport(e.to_string()))?;
+        .map_err(|e| match e {
+            tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status()
+                    == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED =>
+            {
+                RpcError::Transport(match token {
+                    Some(_) => "the engine rejected this IPC token (ZERON_IPC_TOKEN)".into(),
+                    None => "the engine requires an IPC token (set ZERON_IPC_TOKEN)".into(),
+                })
+            }
+            e => RpcError::Transport(e.to_string()),
+        })?;
     let (mut sink, mut stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);

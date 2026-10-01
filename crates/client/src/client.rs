@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
-use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
+use zeron_proto::{Chat, ChatConfig, ChatIndicator, SidebarPinChange, SidebarSectionChange};
 
 use crate::attachments::{self, AttachmentCache};
 use crate::auth::TokenProvider;
@@ -34,8 +34,35 @@ const TICK: Duration = Duration::from_secs(1);
 /// is evicted. On-screen sessions, streaming ones and ones with unadopted
 /// sends are never evicted.
 pub const WARM_SESSION_CAP: usize = 6;
-/// Sessions `preload_sessions` warms (front page order).
+/// Sessions `preload_sessions` warms.
 pub const PRELOAD_CAP: usize = 4;
+/// A chat active this recently is warmed ahead of the front page's order.
+const HOT_CHAT_MS: i64 = 30 * 60_000;
+
+/// The chats `preload_sessions` opens, best first.
+fn preload_ids(front: &crate::workspace::FrontPage, now_ms: i64) -> Vec<String> {
+    let ordered = front
+        .pinned
+        .iter()
+        .chain(front.sections.iter().flat_map(|s| s.sessions.iter()))
+        .chain(front.recent.iter())
+        .filter(|row| row.room_gen >= 2);
+    let hot = |row: &crate::workspace::SessionRow| {
+        matches!(
+            row.host_indicator,
+            ChatIndicator::Working | ChatIndicator::AwaitingInput
+        ) || now_ms - row.last_activity_ms < HOT_CHAT_MS
+    };
+    let (hot_rows, rest): (Vec<_>, Vec<_>) = ordered.partition(|row| hot(row));
+    let mut seen = std::collections::HashSet::new();
+    hot_rows
+        .into_iter()
+        .chain(rest)
+        .filter(|row| seen.insert(row.id.as_str()))
+        .take(PRELOAD_CAP)
+        .map(|row| row.id.clone())
+        .collect()
+}
 
 /// Where a new session runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,11 +158,19 @@ impl ClientInner {
             .iter()
             .filter_map(|core| core.send_state().map(|s| (core.chat_id.clone(), s)))
             .collect();
+        let chip_subagents: HashMap<String, u32> = self
+            .cores()
+            .iter()
+            .map(|core| (core.chat_id.clone(), core.chip_subagents()))
+            .filter(|(_, running)| *running > 0)
+            .collect();
         let synced = self.synced.load(Ordering::Acquire);
-        if let Some(revision) =
-            self.workspace
-                .recompute(&self.config.device_id, &send_states, synced)
-        {
+        if let Some(revision) = self.workspace.recompute(
+            &self.config.device_id,
+            &send_states,
+            &chip_subagents,
+            synced,
+        ) {
             self.events.workspace(revision);
             // Host presence / live status feed every open session's snapshot
             // (working flag) and composer; `refresh` is O(1) when no doc
@@ -182,6 +217,15 @@ impl ClientInner {
         // New rows may flip a chat's roomGen / host: attach rooms.
         for core in self.cores() {
             core.ensure_room(self);
+        }
+        // The rows are now the server's, not last session's cache, and a chat
+        // may have gone live since: keep the live chats warm (see
+        // `preload_sessions` -- it only opens what is not already open).
+        if posture.synced && self.foreground.load(Ordering::Acquire) {
+            Client {
+                inner: Arc::clone(self),
+            }
+            .preload_sessions();
         }
     }
 
@@ -570,12 +614,13 @@ impl Client {
         let tokens = TokenProvider::new(&credentials, config.edge_base(), events.clone());
         // Live: restore the registry replica + open the docs store first, so
         // the very first snapshot renders the cached workspace (instant).
-        let (registry, store) = if credentials.is_demo() {
+        let (mut registry, store) = if credentials.is_demo() {
             (RegistryDoc::new(config.device_id.clone()), None)
         } else {
             let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
             (registry, Some(store))
         };
+        registry.set_clock_writer(credentials.writer_id(&config.device_id));
         let inner = Arc::new(ClientInner {
             workspace: WorkspaceStore::new(registry),
             events: events.clone(),
@@ -731,7 +776,7 @@ impl Client {
                     .iter()
                     .find(|d| &d.id == device_id)
                     .ok_or_else(|| ClientError::NotFound(device_id.clone()))?;
-                if matches!(host.platform.as_str(), "ios" | "android" | "ipados") {
+                if !host.is_execution_host() {
                     return Err(ClientError::InvalidArgument(
                         "that device can't host sessions".into(),
                     ));
@@ -1066,6 +1111,49 @@ impl Client {
         Ok(SessionHandle { core })
     }
 
+    /// Open a SUBAGENT's transcript (`{chatId}--sub--{suffix}`, the doc ref
+    /// on a spawn chip of `parent_chat_id`) read-only. It syncs like a chat —
+    /// the engine publishes every subagent doc to its own chat2 room, which
+    /// keeps the log after the subagent settles — but it has no registry row,
+    /// so there is nothing to send, queue or interrupt through it. Instant:
+    /// the local copy renders first.
+    pub fn open_subagent(&self, parent_chat_id: &str, doc_id: &str) -> Result<SessionHandle> {
+        if !crate::subagents::is_subagent_doc(doc_id) {
+            return Err(ClientError::InvalidArgument(format!(
+                "{doc_id} is not a subagent transcript"
+            )));
+        }
+        if let Some(core) = self.inner.session_core(doc_id) {
+            return Ok(SessionHandle { core });
+        }
+        if self.inner.workspace.chat(parent_chat_id).is_none() {
+            return Err(ClientError::NotFound(parent_chat_id.to_owned()));
+        }
+        let (doc, cursor, hydrated) = match self.inner.backend() {
+            Backend::Demo(demo) => (demo.subagent_doc(parent_chat_id, doc_id)?, 0, true),
+            Backend::Live(live) => {
+                let local = crate::live::room::load_local(&live.store, doc_id);
+                (local.doc, local.cursor, local.had_content)
+            }
+        };
+        let core = SessionCore::new(doc_id, &self.inner, doc, cursor);
+        let core = {
+            let mut sessions = lock(&self.inner.sessions);
+            sessions
+                .entry(doc_id.to_owned())
+                .or_insert_with(|| core.clone())
+                .clone()
+        };
+        if hydrated {
+            core.set_hydrated();
+        }
+        core.ensure_room(&self.inner);
+        core.touch();
+        core.refresh();
+        self.inner.evict_sessions();
+        Ok(SessionHandle { core })
+    }
+
     /// An already-open session, if any.
     pub fn session(&self, chat_id: &str) -> Option<SessionHandle> {
         self.inner
@@ -1178,7 +1266,9 @@ impl Client {
         environment: &str,
         prefs: PushPrefs,
     ) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1198,14 +1288,19 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push registration http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push registration http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
 
     /// Stop notifications to this device (sign-out, turned off).
     pub async fn unregister_push_target(&self) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1219,7 +1314,10 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push removal http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push removal http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
@@ -1306,6 +1404,47 @@ impl Client {
                     .call(device_id, zeron_rpc::methods::LIST_FOLDERS, params)
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// Untyped relay call to `device_id`'s engine, for host RPCs the typed
+    /// surface doesn't wrap (Android settings: harness installs, agent
+    /// logins). Demo mode has no generic host: `Unsupported`.
+    pub async fn host_call(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
+            Backend::Live(live) => live.relay.call(device_id, method, params).await,
+        }
+    }
+
+    /// Untyped host stream from `device_id`'s engine (`SubscribeTerminal`,
+    /// `WatchWorkspaceFiles`, `WatchPreviews`…): returns once the host has
+    /// accepted it (an unknown method or bad params fail here), then pumps
+    /// items into `sink` until the host ends it or the handle is dropped. The
+    /// engine this viewer shares is reached over its IPC port, others over
+    /// the device relay. Demo mode has no generic host: `Unsupported`.
+    pub async fn host_watch(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        sink: Arc<dyn crate::rpc::HostWatchSink>,
+    ) -> Result<crate::rpc::HostWatch> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
+            Backend::Live(live) => {
+                let stream = live.relay.subscribe(device_id, method, params).await?;
+                Ok(crate::rpc::HostWatch::spawn(
+                    stream,
+                    sink,
+                    &self.inner.cancel,
+                ))
             }
         }
     }
@@ -1435,6 +1574,7 @@ impl Client {
             self.inner.reconcile_change_request_watches();
         }
         self.inner.tick();
+        self.preload_sessions();
     }
 
     /// App is backgrounding: persist registry + docs now; pause time-driven
@@ -1458,21 +1598,20 @@ impl Client {
         }
     }
 
-    /// Warm the most relevant sessions (front page order: pinned, sections,
-    /// recent), up to [`PRELOAD_CAP`]. Opening is instant (local snapshot);
-    /// live rooms dial behind the client's dial cap.
+    /// Warm the most relevant sessions, up to [`PRELOAD_CAP`]: chats that are
+    /// live right now first (a running turn, or active within
+    /// [`HOT_CHAT_MS`] -- where background subagents are most likely still
+    /// going, and a warm chat is what lets the Sessions list badge them for
+    /// hosts that publish no count), then the front page's order (pinned,
+    /// sections, recent). Opening is instant (local snapshot); live rooms dial
+    /// behind the client's dial cap. Idempotent and cheap: the app calls it at
+    /// start, and the client again whenever the synced registry changes and on
+    /// every return to the foreground.
     pub fn preload_sessions(&self) {
         let workspace = self.workspace();
-        let front = &workspace.front;
-        let candidates = front
-            .pinned
-            .iter()
-            .chain(front.sections.iter().flat_map(|s| s.sessions.iter()))
-            .chain(front.recent.iter())
-            .filter(|row| row.room_gen >= 2);
-        for row in candidates.take(PRELOAD_CAP) {
-            if self.inner.session_core(&row.id).is_none() {
-                let _ = self.open_session(&row.id);
+        for id in preload_ids(&workspace.front, now_ms()) {
+            if self.inner.session_core(&id).is_none() {
+                let _ = self.open_session(&id);
             }
         }
     }
@@ -1501,4 +1640,90 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+#[cfg(test)]
+mod preload_tests {
+    use super::*;
+    use crate::workspace::{FrontPage, SectionView, SessionRow};
+
+    const NOW: i64 = 100 * 3_600_000;
+
+    fn row(id: &str, indicator: ChatIndicator, idle_ms: i64) -> Arc<SessionRow> {
+        Arc::new(SessionRow {
+            id: id.into(),
+            revision: 0,
+            title: id.into(),
+            has_title: true,
+            preview: None,
+            project: None,
+            device_id: "host".into(),
+            device_name: None,
+            device_online: true,
+            harness: None,
+            harness_label: None,
+            model: None,
+            model_label: None,
+            reasoning: None,
+            branch: None,
+            cwd: None,
+            indicator,
+            host_indicator: indicator,
+            working_since_ms: None,
+            last_activity_ms: NOW - idle_ms,
+            time_label: String::new(),
+            created_at_ms: 0,
+            unseen: false,
+            archived: false,
+            pinned: false,
+            section_id: None,
+            pull_request: None,
+            send_state: None,
+            parent_chat_id: None,
+            room_gen: 2,
+            running_subagents: 0,
+            pending_callbacks: 0,
+        })
+    }
+
+    #[test]
+    fn live_chats_are_warmed_before_the_front_pages_order() {
+        let day = 24 * 3_600_000;
+        let front = FrontPage {
+            pinned: vec![
+                row("pin-old-1", ChatIndicator::Idle, day),
+                row("pin-old-2", ChatIndicator::Idle, 2 * day),
+            ],
+            sections: vec![SectionView {
+                id: "s".into(),
+                name: "S".into(),
+                collapsed: false,
+                sessions: vec![row("sect-old", ChatIndicator::Idle, 3 * day)],
+            }],
+            recent: vec![
+                row("just-finished", ChatIndicator::Completed, 5 * 60_000),
+                row("old", ChatIndicator::Idle, 4 * day),
+                row("running", ChatIndicator::Working, 2 * day),
+            ],
+        };
+        assert_eq!(
+            preload_ids(&front, NOW),
+            ["just-finished", "running", "pin-old-1", "pin-old-2"]
+        );
+    }
+
+    #[test]
+    fn nothing_hot_keeps_the_front_pages_order_and_legacy_rooms_are_skipped() {
+        let day = 24 * 3_600_000;
+        let mut legacy = (*row("legacy", ChatIndicator::Working, 0)).clone();
+        legacy.room_gen = 1;
+        let front = FrontPage {
+            pinned: vec![Arc::new(legacy), row("p", ChatIndicator::Idle, day)],
+            sections: Vec::new(),
+            recent: (0..6)
+                .map(|i| row(&format!("r{i}"), ChatIndicator::Idle, (i + 2) * day))
+                .collect(),
+        };
+        assert_eq!(preload_ids(&front, NOW), ["p", "r0", "r1", "r2"]);
+    }
 }

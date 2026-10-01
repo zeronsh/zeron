@@ -119,7 +119,9 @@ final class AppModel {
     private static func claimCoreDir(for credentials: Credentials) {
         let owner: String
         switch credentials {
-        case let .workOs(userId, orgId, _), let .dev(userId, orgId): owner = "\(userId)/\(orgId)"
+        case let .workOs(userId, orgId, _), let .dev(userId, orgId), let .engine(_, _, userId, orgId):
+            owner = "\(userId)/\(orgId)"
+        case .local: owner = "local"
         case .demo: return
         }
         let marker = coreDir.appendingPathComponent(".owner")
@@ -603,7 +605,8 @@ extension Credentials {
             dict = ["kind": "workos", "userId": userId, "orgId": orgId, "access": tokens.accessToken, "refresh": tokens.refreshToken]
         case let .dev(userId, orgId):
             dict = ["kind": "dev", "userId": userId, "orgId": orgId]
-        case .demo:
+        // Local engine credentials are process-scoped and must never be restored.
+        case .demo, .local, .engine:
             return
         }
         if let data = try? JSONSerialization.data(withJSONObject: dict) {

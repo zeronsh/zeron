@@ -144,6 +144,35 @@ impl HarnessUpdateStatus {
     }
 }
 
+/// One harness's result inside [`HarnessUpdateAllResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUpdateOutcome {
+    pub harness: HarnessId,
+    /// The verified version after a successful update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `ApplyAllHarnessUpdates`: every available update the device could apply,
+/// in catalog order, plus the statuses once the pass finished.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUpdateAllResult {
+    #[serde(default)]
+    pub updated: Vec<HarnessUpdateOutcome>,
+    #[serde(default)]
+    pub failed: Vec<HarnessUpdateOutcome>,
+    /// A newer release exists but only its own package manager may apply it
+    /// (`manualCommand` on the status says how).
+    #[serde(default)]
+    pub manual: Vec<HarnessId>,
+    #[serde(default)]
+    pub statuses: Vec<HarnessUpdateStatus>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
@@ -544,6 +573,12 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     AvailableCommands {
         commands: Vec<SlashCommand>,
+    },
+    /// Explicitly reported background work whose completion can wake the main
+    /// agent. Engine metadata only: never a transcript part or a subagent.
+    #[serde(rename_all = "camelCase")]
+    PendingCallbacks {
+        count: u32,
     },
     Error {
         message: String,

@@ -191,6 +191,18 @@ pub enum Credentials {
     },
     /// `AUTH_MODE=dev` edge: the bearer is `userId@orgId`.
     Dev { user_id: String, org_id: String },
+    /// The local edge of this device's own engine (Android on-device mode):
+    /// the bearer is its shared secret verbatim.
+    Local { token: String },
+    /// The engine on this device owns the account: its bearer (fetched over
+    /// its IPC port, refreshed by it alone) and the identity it reported
+    /// (`EngineLink::edge`). The client must use the engine's device id.
+    Engine {
+        ipc_url: String,
+        ipc_token: Option<String>,
+        user_id: String,
+        org_id: String,
+    },
     /// Fully offline dataset with a simulated host.
     Demo { options: DemoOptions },
 }
@@ -208,6 +220,18 @@ impl From<Credentials> for zc::Credentials {
                 tokens: tokens.into(),
             },
             Credentials::Dev { user_id, org_id } => zc::Credentials::Dev { user_id, org_id },
+            Credentials::Local { token } => zc::Credentials::Local { token },
+            Credentials::Engine {
+                ipc_url,
+                ipc_token,
+                user_id,
+                org_id,
+            } => zc::Credentials::Engine {
+                ipc_url,
+                ipc_token,
+                user_id,
+                org_id,
+            },
             Credentials::Demo { options } => zc::Credentials::Demo(options.into()),
         }
     }
@@ -277,6 +301,62 @@ impl From<zc::auth::AuthCallback> for AuthCallback {
             zc::auth::AuthCallback::Error { error, description } => {
                 AuthCallback::Error { error, description }
             }
+        }
+    }
+}
+
+// ── the engine on this device ─────────────────────────────────────────────
+
+/// The engine's fixed identity (`EngineInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EngineIdentity {
+    pub device_id: String,
+    /// `local` / `synced` / `development` — fixed for the engine's run.
+    pub workspace_scope: String,
+}
+
+/// Where and as whom the engine syncs (`EdgeBearer`, bearer withheld): the
+/// `CoreConfig.edge_url` and `Credentials::Engine` identity for its viewer.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EngineEdge {
+    pub edge_url: String,
+    pub user_id: String,
+    pub org_id: String,
+    /// The engine's session ended (the app restarts it local-only).
+    pub signed_out: bool,
+}
+
+/// The engine's account (`AuthStatus`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum EngineAccount {
+    SignedOut,
+    /// Signed in, but no organization picked yet.
+    NeedsOrganization {
+        email: String,
+        name: Option<String>,
+    },
+    SignedIn {
+        email: String,
+        name: Option<String>,
+        org_id: Option<String>,
+    },
+}
+
+impl From<zeron_proto::AuthState> for EngineAccount {
+    fn from(state: zeron_proto::AuthState) -> Self {
+        match state {
+            zeron_proto::AuthState::SignedOut => EngineAccount::SignedOut,
+            zeron_proto::AuthState::NeedsOrganization { user } => {
+                EngineAccount::NeedsOrganization {
+                    email: user.email,
+                    name: user.name,
+                }
+            }
+            zeron_proto::AuthState::SignedIn { user, org_id } => EngineAccount::SignedIn {
+                email: user.email,
+                name: user.name,
+                org_id,
+            },
         }
     }
 }
@@ -507,6 +587,10 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
+    /// Subagents running right now, also after the chat's own turn settled
+    /// (staleness-gated). Draw as "● N" (`running_count_label`).
+    pub running_subagents: u32,
+    pub pending_callbacks: u32,
 }
 
 impl From<&zc::SessionRow> for SessionRow {
@@ -546,6 +630,8 @@ impl From<&zc::SessionRow> for SessionRow {
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
             room_gen: r.room_gen,
+            running_subagents: r.running_subagents,
+            pending_callbacks: r.pending_callbacks,
         }
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "zeron-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Device-to-device file transfer (docs/file-transfer.md): manifests, the
+# block protocol, resumable receive state, and the DeviceRoom relay pipe.
+# Transport-agnostic — the engine supplies P2P mux streams or relay pipes.
+
+[dependencies]
+zeron-proto.workspace = true
+zeron-rpc.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+futures.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+libc.workspace = true
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
