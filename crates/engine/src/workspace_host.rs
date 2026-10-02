@@ -152,6 +152,17 @@ fn new_projectless_cwd(
     }
 }
 
+/// This device's advertised capabilities: the binary's, plus
+/// `cloud-session` on a Cloud session machine (device lists hide those and
+/// show the account's one Cloud device instead).
+fn device_capabilities() -> Vec<String> {
+    let mut capabilities = zeron_proto::capabilities::current();
+    if crate::runner::session().is_some() {
+        capabilities.push(zeron_proto::CLOUD_SESSION_CAPABILITY.to_string());
+    }
+    capabilities
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkspaceHostConfig {
     pub device_id: String,
@@ -301,7 +312,7 @@ impl WorkspaceHost {
             // on the Devices page; workspace version — same for every crate).
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
-            capabilities: zeron_proto::capabilities::current(),
+            capabilities: device_capabilities(),
         })?;
 
         let state = doc.read_all()?;
@@ -653,6 +664,17 @@ impl WorkspaceHost {
         self.inner.config.edge.is_some()
     }
 
+    /// The edge this workspace syncs through (`None` = local/offline profile)
+    /// — also where account-scoped HTTP calls (Cloud, vault) go.
+    pub fn edge(&self) -> Option<&EdgeConfig> {
+        self.inner.config.edge.as_ref()
+    }
+
+    /// The workspace org (`ws3/{orgId}/…` rooms, `/cloud/{orgId}` routes).
+    pub fn org_id(&self) -> &str {
+        &self.inner.config.org_id
+    }
+
     // ── registry access helpers ─────────────────────────────────────────────
 
     /// Run a mutation under the registry lock, then wake the publish/persist
@@ -852,6 +874,7 @@ impl WorkspaceHost {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         };
         self.mutate(|doc| doc.upsert_space(&space))?;
@@ -952,6 +975,32 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
+        self.create_chat_hosted(
+            chat_id,
+            space_id,
+            device_id,
+            None,
+            config,
+            cwd,
+            parent_chat_id,
+        )
+    }
+
+    /// [`create_chat_with_parent`](Self::create_chat_with_parent) with an
+    /// explicit host for a chat IN a project: a chat run on Cloud is hosted
+    /// by its own session device, not the device owning the project's
+    /// folder. `host: None` keeps the project's owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_chat_hosted(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        host: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        parent_chat_id: Option<String>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
@@ -962,10 +1011,11 @@ impl WorkspaceHost {
             },
             None => None,
         };
-        let host_device = match (&space, device_id) {
-            (Some(space), _) => space.device_id.clone(),
-            (None, Some(device_id)) => device_id.to_string(),
-            (None, None) => {
+        let host_device = match (&space, device_id, host) {
+            (Some(_), _, Some(host)) => host.to_string(),
+            (Some(space), _, None) => space.device_id.clone(),
+            (None, Some(device_id), _) => device_id.to_string(),
+            (None, None, _) => {
                 return Err(EngineError::Other(
                     "createChat needs a spaceId or a deviceId".into(),
                 ));
@@ -1057,6 +1107,7 @@ impl WorkspaceHost {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                github_repo: None,
                 created_at: Utc::now(),
             })
         })?;
@@ -1090,11 +1141,19 @@ impl WorkspaceHost {
         detected: bool,
         checkout_id: Option<&str>,
         repository_id: Option<&str>,
+        github_repo: Option<&str>,
     ) -> Result<bool, EngineError> {
         match self.read(|doc| doc.space(space_id))? {
             Some(space) if space.device_id == self.inner.config.device_id => {
                 Ok(self.mutate(|doc| {
-                    doc.set_space_git(space_id, detected, checkout_id, repository_id, Utc::now())
+                    doc.set_space_git(
+                        space_id,
+                        detected,
+                        checkout_id,
+                        repository_id,
+                        github_repo,
+                        Utc::now(),
+                    )
                 })?)
             }
             Some(space) => {
@@ -1249,9 +1308,13 @@ impl WorkspaceHostInner {
         let registry_synced = lock(&self.room)
             .as_ref()
             .is_some_and(|room| room.stats().synced);
+        // Sidebar pins are viewport state. A Cloud device has no viewport, and
+        // the edge refuses its writes to rows it doesn't own: reconciling here
+        // would rewrite the missing preferences row after every refused push.
+        let owns_sidebar = self.config.platform != zeron_proto::CLOUD_PLATFORM;
         let snapshot = {
             let mut doc = lock(&self.reg);
-            match doc.reconcile_sidebar_pins(registry_synced) {
+            match doc.reconcile_sidebar_pins(registry_synced && owns_sidebar) {
                 Ok(true) => {
                     // Persist and transmit cleanup just like a user mutation.
                     self.bump_changed();

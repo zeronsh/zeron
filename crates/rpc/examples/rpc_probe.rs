@@ -3,8 +3,18 @@
 //! Usage:
 //!   cargo run -p zeron-rpc --example rpc_probe -- ws://127.0.0.1:27801 LocalDevice '{}'
 //!   cargo run -p zeron-rpc --example rpc_probe -- ws://127.0.0.1:27801 WatchSessions '{}' --stream 3
+//!
+//! The engine's IPC bearer comes from `$ZERON_IPC_TOKEN`, `$ZERON_IPC_TOKEN_FILE`,
+//! or `$ZERON_DATA_DIR/ipc-token` (default `~/.zeron/ipc-token`) — point
+//! `ZERON_DATA_DIR` at the probed engine's data dir.
 
-use zeron_rpc::connect_ws;
+use zeron_rpc::{connect_ws, ipc_auth};
+
+fn data_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("ZERON_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".zeron")))
+}
 
 #[tokio::main]
 async fn main() {
@@ -14,7 +24,10 @@ async fn main() {
         std::process::exit(2);
     };
     let params: serde_json::Value = serde_json::from_str(params).expect("params json");
-    let client = connect_ws(url).await.expect("connect");
+    let token = ipc_auth::client_tokens(data_dir().as_deref())
+        .into_iter()
+        .next();
+    let client = connect_ws(url, token.as_deref()).await.expect("connect");
     if rest.first().map(String::as_str) == Some("--stream") {
         let count: usize = rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(1);
         let mut rx = client.subscribe(method, params).await.expect("subscribe");

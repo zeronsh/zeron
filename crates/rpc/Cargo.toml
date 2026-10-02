@@ -18,9 +18,12 @@ thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+# OS CSPRNG for the localhost IPC bearer (already in the tree via uuid).
+getrandom = "0.4"
 
 [dev-dependencies]
 zeron-doc.workspace = true
+tempfile.workspace = true
 
 # Deterministic stalled-transport deadlines.
 tokio = { workspace = true, features = ["test-util"] }

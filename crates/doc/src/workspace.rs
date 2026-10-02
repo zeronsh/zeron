@@ -171,6 +171,7 @@ impl WorkspaceDoc {
         set_opt_ms(&row, "gitCheckedAt", space.git_checked_at)?;
         set_opt_str(&row, "checkoutId", space.checkout_id.as_deref())?;
         set_opt_str(&row, "repositoryId", space.repository_id.as_deref())?;
+        set_opt_str(&row, "githubRepo", space.github_repo.as_deref())?;
         row.insert("createdAt", space.created_at.timestamp_millis())?;
         self.doc.commit();
         Ok(())
@@ -210,6 +211,7 @@ impl WorkspaceDoc {
         detected: bool,
         checkout_id: Option<&str>,
         repository_id: Option<&str>,
+        github_repo: Option<&str>,
         checked_at: DateTime<Utc>,
     ) -> Result<bool, DocError> {
         let Some(row) = self.existing_row("spaces", space_id) else {
@@ -218,6 +220,7 @@ impl WorkspaceDoc {
         row.insert("gitDetected", detected)?;
         set_opt_str(&row, "checkoutId", checkout_id)?;
         set_opt_str(&row, "repositoryId", repository_id)?;
+        set_opt_str(&row, "githubRepo", github_repo)?;
         row.insert("gitCheckedAt", checked_at.timestamp_millis())?;
         self.doc.commit();
         Ok(true)
@@ -660,6 +663,7 @@ pub(crate) struct RawSpace {
     checkout_id: Option<String>,
     #[serde(default)]
     repository_id: Option<String>,
+    github_repo: Option<String>,
     #[serde(default)]
     created_at: i64,
 }
@@ -675,6 +679,7 @@ impl From<RawSpace> for Space {
             git_checked_at: raw.git_checked_at.map(dt),
             checkout_id: raw.checkout_id,
             repository_id: raw.repository_id,
+            github_repo: raw.github_repo,
             created_at: dt(raw.created_at),
         }
     }
@@ -889,6 +894,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: ts(1_500),
         }
     }
@@ -1121,6 +1127,7 @@ mod tests {
                 true,
                 Some("checkout-abc"),
                 Some("github.com/owner/project"),
+                Some("acme/app"),
                 ts(4_000),
             )
             .unwrap()
@@ -1132,11 +1139,12 @@ mod tests {
             row.repository_id.as_deref(),
             Some("github.com/owner/project")
         );
+        assert_eq!(row.github_repo.as_deref(), Some("acme/app"));
         assert_eq!(row.git_checked_at, Some(ts(4_000)));
 
         // Unknown rows report false, never invent rows.
         assert!(!ws.rename_space("nope", Some("x")).unwrap());
-        assert!(!ws.set_space_git("nope", true, None, None, ts(1)).unwrap());
+        assert!(!ws.set_space_git("nope", true, None, None, None, ts(1)).unwrap());
     }
 
     #[test]

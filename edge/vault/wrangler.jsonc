@@ -1,0 +1,38 @@
+{
+  // zeron-vault: the credential vault (docs/design/cloud-device.md, "Credential
+  // vault"). It has NO HTTP surface: no routes, no workers.dev, no preview
+  // URLs. The only way in is the main edge Worker's `VAULT` service binding
+  // (`entrypoint: "VaultApi"`), which passes an identity it already verified.
+  // Deployed by its own job, separately from edge/.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zeron-vault",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "account_id": "b57dde68ee5964dccc025437b5478a5b",
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [
+      // dev1/{userId}: enrolled device keys, replay fences, audit log, the
+      // per-user kill switch.
+      { "name": "VAULT_DEVICES", "class_name": "VaultDevices" },
+      // acct1/{userId}/{provider}: one encrypted credential + its refresh
+      // bookkeeping. Single-threaded per id = one refresh in flight.
+      { "name": "VAULT_ACCOUNTS", "class_name": "VaultAccount" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDevices", "VaultAccount"] }],
+  // Daily canary: force-refresh CANARY_USER_ID's codex + github credentials so
+  // a provider changing its refresh contract alerts before users' grants fail.
+  "triggers": { "crons": ["0 6 * * *"] },
+  // No vars. Secrets (`wrangler secret put NAME`), see README.md:
+  //   VAULT_KEK                 required; base64 of 32 random bytes (the KEK)
+  //   VAULT_KEK_PREVIOUS        optional; the KEK before the last rotation
+  //   GITHUB_APP_CLIENT_ID      GitHub App (user-to-server tokens, device flow)
+  //   GITHUB_APP_CLIENT_SECRET
+  //   VAULT_DISABLED            optional; "1" = global kill switch (every call 503)
+  //   CANARY_USER_ID            optional; user whose credentials the cron refreshes
+  "observability": {
+    "enabled": true
+  }
+}

@@ -4992,12 +4992,15 @@ impl Shell {
             .device_name(&chat.device_id)
             .unwrap_or("Unknown device")
             .to_string();
-        // Unknown device → no fragment, same as the archived list.
-        let folder = match (project, state.device_name(&chat.device_id)) {
-            (Some(project), Some(_)) => format!("{project} @ {device}"),
-            (Some(project), None) => project,
-            (None, Some(_)) => device.clone(),
-            (None, None) => String::new(),
+        // Unknown device → no fragment, same as the archived list; a Cloud
+        // chat's own machine isn't a device worth naming either.
+        let named = state.device_name(&chat.device_id).is_some()
+            && !zeron_proto::is_cloud_device(&chat.device_id, "");
+        let folder = match (project, named) {
+            (Some(project), true) => format!("{project} @ {device}"),
+            (Some(project), false) => project,
+            (None, true) => device.clone(),
+            (None, false) => String::new(),
         };
         // The branch shows whenever the engine has stamped one —
         // main-checkout sessions included, not just worktrees.
@@ -6598,6 +6601,7 @@ impl Shell {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         };
         self.state.update(cx, |s, cx| {

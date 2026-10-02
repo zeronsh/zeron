@@ -208,6 +208,9 @@ struct Inner {
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
+    /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
+    /// handed to the injected `zeron mcp` as a PATH, never the token itself.
+    ipc_token_file: Mutex<Option<std::path::PathBuf>>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -266,6 +269,7 @@ impl SessionsEngine {
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_token_file: Mutex::new(None),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -294,6 +298,13 @@ impl SessionsEngine {
         self.inner
             .ipc_port
             .store(port, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
+    /// The injected MCP server gets `ZERON_IPC_TOKEN_FILE` and reads the file
+    /// at dial time, so it follows token rotation across engine restarts.
+    pub fn set_ipc_token_file(&self, path: std::path::PathBuf) {
+        *lock(&self.inner.ipc_token_file) = Some(path);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -390,6 +401,15 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.turn.background_live())
+    }
+
+    /// How many chats have a turn in flight (the Cloud runner heartbeat's
+    /// `activeRuns`).
+    pub fn active_count(&self) -> usize {
+        lock(&self.inner.statuses)
+            .values()
+            .filter(|session| is_active(session))
+            .count()
     }
 
     /// Any run currently working or blocked on input — the auto-updater's
@@ -1252,6 +1272,7 @@ impl SessionsEngine {
                             attachments: Vec::new(),
                             resume: None,
                             worktree: None,
+                            env: Default::default(),
                         })
                     });
                 let Some(mut request) = request else {
@@ -1558,23 +1579,38 @@ impl Inner {
     /// mcp` subcommand, dialing the engine's IPC port and stamped with the
     /// originating chat + device so the agent's side chats link back here.
     /// None when the engine serves no port or its executable is unknown.
+    ///
+    /// The IPC bearer travels as a file PATH (`ZERON_IPC_TOKEN_FILE`), not as
+    /// `ZERON_IPC_TOKEN`: some harnesses hand this env to their CLI on the
+    /// command line (Claude's inline `--mcp-config`), where any local user can
+    /// read it with `ps`. The file is owner-only and always current.
     fn zeron_mcp(&self, chat_id: &str) -> Option<zeron_proto::McpServer> {
         let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
         if port == 0 {
             return None;
         }
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let mut env: std::collections::BTreeMap<String, String> = [
+            ("ZERON_IPC_PORT".to_owned(), port.to_string()),
+            ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+            ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
+        ]
+        .into_iter()
+        .collect();
+        if let Some(path) = lock(&self.ipc_token_file)
+            .as_ref()
+            .and_then(|path| path.to_str())
+        {
+            env.insert(
+                zeron_rpc::ipc_auth::TOKEN_FILE_ENV.to_owned(),
+                path.to_owned(),
+            );
+        }
         Some(zeron_proto::McpServer {
             name: "zeron".into(),
             command,
             args: vec!["mcp".into()],
-            env: [
-                ("ZERON_IPC_PORT".to_owned(), port.to_string()),
-                ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
-                ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
-            ]
-            .into_iter()
-            .collect(),
+            env,
         })
     }
 
@@ -2273,10 +2309,16 @@ async fn drive_run(
                     wire_request.prompt =
                         zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
                 }
-                if resume_state.idle {
-                    harness.start_idle(wire_request, controls).await
-                } else {
-                    harness.run(wire_request, controls).await
+                // Host-resolved spawn env (a Cloud device's credential broker);
+                // `RunRequest::env` is serde-skipped, never persisted.
+                match inner
+                    .registry
+                    .prepare_run(harness_id, &mut wire_request)
+                    .await
+                {
+                    Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
+                    Ok(()) => harness.run(wire_request, controls).await,
+                    Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
                 }
             } else {
                 Ok(futures::stream::once(async {
@@ -2365,6 +2407,32 @@ async fn drive_run(
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
+    // A Cloud session machine's own setup (started or woke, cloned, checked
+    // out) opens the first answer after it boots, as tool chips right under
+    // the message that brought it up — with how long that message waited.
+    if crate::runner::has_setup_steps() {
+        let waited = doc_ref.read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.id == resume_state.user_message_id)
+                .map(|entry| {
+                    std::time::Duration::from_millis(
+                        now_ms().saturating_sub(entry.created_at).max(0) as u64,
+                    )
+                })
+        });
+        folded.extend(crate::runner::take_setup_parts(waited));
+        if let Err(err) = sync_segment(
+            doc_ref,
+            &mut writer,
+            &entry_id,
+            &device_id,
+            segment_started,
+            &folded,
+        ) {
+            tracing::warn!(chat = %chat_id, error = %err, "cloud setup steps write failed");
+        }
+    }
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
     // Set when the engine interrupts the run: the harness gets this long to end its own
@@ -3747,6 +3815,7 @@ mod tests {
             resume: None,
             attachments: Vec::new(),
             worktree: None,
+            env: Default::default(),
         }
     }
 

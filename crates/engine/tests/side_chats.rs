@@ -154,6 +154,8 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
     assert_eq!(target.doc().read_entries().unwrap().len(), 3);
     core.sessions.set_ipc_port(27699);
     core.sessions
+        .set_ipc_token_file(std::path::PathBuf::from("/data/ipc-token"));
+    core.sessions
         .dispatch(
             "side",
             HarnessId::Mock,
@@ -170,6 +172,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 resume: None,
                 attachments: vec![],
                 worktree: None,
+                env: Default::default(),
             },
             Some("side-user".into()),
         )
@@ -195,6 +198,10 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
     assert_eq!(mcp.env["ZERON_IPC_PORT"], "27699");
     assert_eq!(mcp.env["ZERON_CHAT_ID"], "side");
     assert_eq!(mcp.env["ZERON_DEVICE_ID"], core.device_id);
+    // The IPC bearer rides as a path to the owner-only file, never inline:
+    // harness CLIs may receive this env on their (world-readable) argv.
+    assert_eq!(mcp.env["ZERON_IPC_TOKEN_FILE"], "/data/ipc-token");
+    assert!(!mcp.env.contains_key("ZERON_IPC_TOKEN"));
     assert!(request.prompt.contains("PINEAPPLE"));
     assert!(!request.prompt.contains("unfinished turn"));
     assert_eq!(source.doc().read_entries().unwrap().len(), 4);
@@ -419,6 +426,7 @@ async fn side_turn(
                 resume,
                 attachments: vec![],
                 worktree: None,
+                env: Default::default(),
             },
             Some(message_id.into()),
         )
@@ -627,6 +635,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         resume: None,
         attachments: vec![],
         worktree: None,
+        env: Default::default(),
     };
     let settle = |count: usize| {
         let seen = seen.clone();
@@ -812,6 +821,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         resume: None,
         attachments: vec![],
         worktree: None,
+        env: Default::default(),
     };
     core.sessions
         .dispatch(

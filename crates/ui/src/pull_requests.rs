@@ -3681,6 +3681,7 @@ mod tests {
 
     fn space(id: &str, device: &str, git: bool, created_minutes_ago: i64) -> zeron_proto::Space {
         zeron_proto::Space {
+            github_repo: None,
             id: id.into(),
             device_id: device.into(),
             path: format!("/{id}"),
@@ -4342,6 +4343,7 @@ mod tests {
         state.update(cx, |state, cx| {
             state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
             state.spaces = vec![zeron_proto::Space {
+                github_repo: None,
                 id: "project".into(),
                 device_id: "local".into(),
                 path: "/checkout".into(),
@@ -4525,6 +4527,7 @@ mod tests {
         state.update(cx, |state, cx| {
             state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
             state.spaces = vec![zeron_proto::Space {
+                github_repo: None,
                 id: "project".into(),
                 device_id: "local".into(),
                 path: "/checkout".into(),
@@ -4587,6 +4590,7 @@ mod tests {
         state.update(cx, |state, cx| {
             state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
             state.spaces = vec![zeron_proto::Space {
+                github_repo: None,
                 id: "project".into(),
                 device_id: "local".into(),
                 path: "/checkout".into(),

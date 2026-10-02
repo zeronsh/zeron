@@ -34,7 +34,7 @@ use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
     EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client, methods};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
@@ -246,13 +246,17 @@ async fn wait_for_deferred_engine(
 struct RemoteEngine {
     client: Arc<RpcClient>,
     url: String,
+    /// The daemon's IPC port and data dir: a second connection presents the
+    /// same bearer the first did.
+    ipc_port: u16,
+    data_dir: std::path::PathBuf,
     lifecycle_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[async_trait]
 impl EngineBackend for RemoteEngine {
     async fn media_client(&self) -> Result<RpcClient, RpcError> {
-        connect_ws(&self.url).await
+        zeron_rpc::connect_ipc(self.ipc_port, Some(&self.data_dir)).await
     }
     fn client(&self) -> &RpcClient {
         &self.client
@@ -294,7 +298,7 @@ impl EngineHandle {
         static BOOTSTRAP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _gate = BOOTSTRAP_GATE.lock().await;
 
-        if let Some(handle) = Self::attach_to_daemon(config.ipc_port).await {
+        if let Some(handle) = Self::attach_to_daemon(config.ipc_port, &config.data_dir).await {
             return Ok(handle);
         }
 
@@ -324,7 +328,10 @@ impl EngineHandle {
                         return Err(err.into());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(handle) = Self::attach_to_daemon(engine_config.ipc_port).await {
+                    if let Some(handle) =
+                        Self::attach_to_daemon(engine_config.ipc_port, &engine_config.data_dir)
+                            .await
+                    {
                         return Ok(handle);
                     }
                 }
@@ -355,8 +362,13 @@ impl EngineHandle {
         //
         // Best-effort — losing the bind race with another engine costs other
         // viewports, not this one.
-        let ipc_task = match zeron_engine::serve_ipc(engine_config.ipc_port, service.clone()).await
-        {
+        let served = zeron_engine::serve_ipc(
+            engine_config.ipc_port,
+            &engine_config.data_dir,
+            service.clone(),
+        )
+        .await;
+        let ipc_task = match served {
             Ok(task) => Some(task),
             Err(err) => {
                 tracing::warn!(
@@ -373,6 +385,7 @@ impl EngineHandle {
         // Agents only learn a port THIS window serves: a lost bind race must
         // not point their injected MCP server at some other engine.
         let served_ipc_port = ipc_task.as_ref().map(|_| engine_config.ipc_port);
+        let ipc_token_file = zeron_rpc::ipc_auth::token_path(&engine_config.data_dir);
         // The instance lock rides into the boot task and is consumed by
         // assembly — held through sign-in onboarding too, because this process
         // owns the data dir from the moment it decided to embed.
@@ -410,6 +423,10 @@ impl EngineHandle {
                     let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
                     if let Some(port) = served_ipc_port {
                         engine_runtime.core().sessions.set_ipc_port(port);
+                        engine_runtime
+                            .core()
+                            .sessions
+                            .set_ipc_token_file(ipc_token_file);
                     }
                     *runtime_for_boot.lock().await = Some(engine_runtime);
                     if service_for_boot.set(service).is_err() {
@@ -451,8 +468,9 @@ impl EngineHandle {
 
     /// Probe the IPC port and, if a live engine answers, attach as a remote
     /// viewport. `None` means embed: nothing listening, a non-engine listener,
-    /// or a listener without an identity.
-    async fn attach_to_daemon(ipc_port: u16) -> Option<EngineHandle> {
+    /// a listener without an identity, or an engine whose IPC bearer
+    /// (`{data_dir}/ipc-token`, read at dial time) this viewport doesn't hold.
+    async fn attach_to_daemon(ipc_port: u16, data_dir: &std::path::Path) -> Option<EngineHandle> {
         let url = format!("ws://127.0.0.1:{ipc_port}");
         let probe = tokio::time::timeout(
             std::time::Duration::from_millis(750),
@@ -463,7 +481,7 @@ impl EngineHandle {
             return None;
         }
         tracing::info!(%url, "engine daemon detected; connecting");
-        match connect_ws(&url).await {
+        match zeron_rpc::connect_ipc(ipc_port, Some(data_dir)).await {
             Ok(client) => match query_engine_info(&client).await {
                 Ok(engine_info) => {
                     let client = Arc::new(client);
@@ -491,6 +509,8 @@ impl EngineHandle {
                         inner: Arc::new(RemoteEngine {
                             client,
                             url,
+                            ipc_port,
+                            data_dir: data_dir.to_path_buf(),
                             lifecycle_task: tokio::sync::Mutex::new(Some(lifecycle_task)),
                         }),
                         engine_info,
@@ -522,6 +542,8 @@ impl EngineHandle {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
                 url: "memory://test".into(),
+                ipc_port: 0,
+                data_dir: std::path::PathBuf::new(),
                 lifecycle_task: tokio::sync::Mutex::new(None),
             }),
             engine_info: EngineInfo {
@@ -855,6 +877,20 @@ pub struct AppState {
     /// Device-local agent CLI update lifecycle. Unlike `ListHarnesses`, this
     /// standing stream may be backed by subprocess and network probes.
     pub harness_updates: Vec<zeron_proto::HarnessUpdateStatus>,
+    /// Last `CloudStatus` any surface fetched (Settings → Cloud, Devices,
+    /// New project). Fetched on open and after actions — never polled — so
+    /// device lists can say "Asleep" instead of "Offline" for Cloud.
+    pub cloud_status: Option<zeron_proto::CloudStatus>,
+    /// Every Cloud session and its machine's state, read on focus, chat
+    /// selection and page open — and every few seconds only while one is
+    /// being set up, woken or deleted ([`Self::refresh_cloud_sessions`]).
+    pub cloud_sessions: Option<zeron_proto::CloudSessions>,
+    cloud_sessions_task: Option<Task<()>>,
+    /// The GitHub repositories Cloud reaches (the Zeron GitHub App's
+    /// installations): a project whose repository is here can run a session
+    /// on Cloud. `None` = Cloud off, GitHub not connected, or not read yet.
+    pub cloud_repos: Option<Vec<zeron_proto::GithubRepo>>,
+    cloud_repos_task: Option<Task<()>>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -963,6 +999,11 @@ impl AppState {
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             harness_updates: Vec::new(),
+            cloud_status: None,
+            cloud_sessions: None,
+            cloud_sessions_task: None,
+            cloud_repos: None,
+            cloud_repos_task: None,
             data_dir: None,
             clock: ClockTransitions::default(),
             engine: None,
@@ -1381,8 +1422,7 @@ impl AppState {
         if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
             return false;
         }
-        if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
+        if self.connectivity.state == S::Offline || !self.device_online(&chat.device_id, Utc::now())
         {
             return true;
         }
@@ -1826,6 +1866,7 @@ impl AppState {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                 || self.chat_delivery_degraded(chat_id)
+                || self.cloud_machine_booting(chat_id).is_some()
         })
     }
 
@@ -1835,7 +1876,7 @@ impl AppState {
     pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
-        })
+        }) && self.cloud_machine_booting(chat_id).is_none()
     }
 
     /// Retry pressed: restart the grace clock so the overlay returns to its
@@ -1857,6 +1898,7 @@ impl AppState {
             .filter(|p| {
                 now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                     || self.chat_delivery_degraded(chat_id)
+                    || self.cloud_machine_booting(chat_id).is_some()
             })
             .map(|p| p.started)
     }
@@ -2067,10 +2109,62 @@ impl AppState {
     }
 
     pub fn device_name(&self, device_id: &str) -> Option<&str> {
+        let device = self.devices.iter().find(|d| d.id == device_id);
+        // A session's machine is shown as the Cloud it belongs to.
+        if self.is_cloud_session_device(device_id) {
+            return Some(
+                self.cloud_account_device()
+                    .map_or(crate::cloud::CLOUD_LABEL, |d| d.name.as_str()),
+            );
+        }
+        device.map(|d| d.name.as_str())
+    }
+
+    /// Devices for lists and pickers: Cloud's per-session machines are
+    /// hidden; the logical Cloud device stands for them.
+    pub fn listed_devices(&self) -> impl Iterator<Item = &Device> {
+        self.devices.iter().filter(|d| crate::cloud::is_listed(d))
+    }
+
+    /// Devices whose providers the Providers page manages: Cloud's are
+    /// managed on the Cloud page.
+    pub fn provider_devices(&self) -> impl Iterator<Item = &Device> {
+        self.listed_devices().filter(|d| !crate::cloud::is_cloud(d))
+    }
+
+    /// The device a list shows for `device_id`: a session machine is shown
+    /// as the logical Cloud device it belongs to.
+    pub fn listed_device_id(&self, device_id: &str) -> String {
+        if self.is_cloud_session_device(device_id) {
+            let account = self
+                .cloud_account_device()
+                .map(|d| d.id.clone())
+                .or_else(|| self.cloud_status.as_ref().and_then(|s| s.device_id.clone()));
+            if let Some(account) = account {
+                return account;
+            }
+        }
+        device_id.to_string()
+    }
+
+    /// The logical Cloud device's registry row, when Cloud is on.
+    pub fn cloud_account_device(&self) -> Option<&Device> {
+        self.devices
+            .iter()
+            .find(|d| crate::cloud::is_cloud_account(d))
+    }
+
+    /// A session machine: by its registry capability, or (before its engine
+    /// has registered) by a session naming it.
+    pub fn is_cloud_session_device(&self, device_id: &str) -> bool {
         self.devices
             .iter()
             .find(|d| d.id == device_id)
-            .map(|d| d.name.as_str())
+            .is_some_and(crate::cloud::is_cloud_session_device)
+            || self
+                .cloud_sessions
+                .as_ref()
+                .is_some_and(|s| s.sessions.iter().any(|x| x.device_id == device_id))
     }
 
     /// Host-presence check: is this device's 15s presence heartbeat fresh?
@@ -2087,12 +2181,198 @@ impl AppState {
         }
     }
 
+    /// [`Self::device_online`] refined for Cloud. The logical Cloud device
+    /// reads from the account (on while Cloud is enabled); a session machine
+    /// from its session (a stopped one is "Asleep" — it wakes when its chat
+    /// is sent to — not "Offline").
+    pub fn device_presence(&self, device_id: &str, now: DateTime<Utc>) -> crate::cloud::Presence {
+        use crate::cloud::Presence;
+        let device = self.devices.iter().find(|d| d.id == device_id);
+        let is_account = device.is_some_and(crate::cloud::is_cloud_account)
+            || self
+                .cloud_status
+                .as_ref()
+                .and_then(|s| s.device_id.as_deref())
+                == Some(device_id);
+        if is_account {
+            return crate::cloud::account_presence(self.cloud_status.as_ref());
+        }
+        let online = self.device_online(device_id, now);
+        if self.is_cloud_session_device(device_id) || device.is_some_and(crate::cloud::is_cloud) {
+            let session = self
+                .cloud_sessions
+                .as_ref()
+                .and_then(|s| s.sessions.iter().find(|x| x.device_id == device_id));
+            return crate::cloud::session_presence(device.is_some() && online, session);
+        }
+        if online {
+            Presence::Online
+        } else {
+            Presence::Offline
+        }
+    }
+
+    /// Publish a fresh `CloudStatus`; observers repaint only on change.
+    pub fn set_cloud_status(&mut self, status: zeron_proto::CloudStatus, cx: &mut Context<Self>) {
+        if self.cloud_status.as_ref() != Some(&status) {
+            self.cloud_status = Some(status);
+            cx.notify();
+        }
+    }
+
+    /// Whether Cloud is on for this account (its logical device exists).
+    pub fn cloud_enabled(&self) -> bool {
+        self.cloud_status
+            .as_ref()
+            .is_some_and(crate::cloud::account_enabled)
+            || self.cloud_account_device().is_some()
+    }
+
+    /// The Cloud session `chat_id` runs in — its own, or for a side chat its
+    /// parent's (same machine) — when the chat is hosted on Cloud.
+    pub fn chat_cloud_session(&self, chat_id: &str) -> Option<&zeron_proto::CloudSession> {
+        let sessions = self.cloud_sessions.as_ref()?;
+        let device_id = self
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .map_or("", |c| c.device_id.as_str());
+        crate::cloud::session_for(sessions, chat_id, device_id)
+    }
+
+    /// A send to `chat_id` is waiting for its Cloud machine to be set up or
+    /// woken: delivered (queued for the machine), not failed — the machine
+    /// picks it up as soon as it is up. `None` once the machine runs, or when
+    /// it failed (that is a real delivery problem).
+    pub fn cloud_machine_booting(&self, chat_id: &str) -> Option<zeron_proto::CloudState> {
+        use zeron_proto::CloudState;
+        self.chat_machine_down(chat_id)
+            .map(|(_, state)| state)
+            .filter(|state| {
+                matches!(
+                    state,
+                    CloudState::Provisioning
+                        | CloudState::Starting
+                        | CloudState::Sleeping
+                        | CloudState::Stopping
+                )
+            })
+    }
+
+    /// Whether a send is waiting on a Cloud machine (keeps the session poll
+    /// running until the machine is up).
+    fn send_waits_on_cloud(&self) -> bool {
+        self.pending_sends
+            .keys()
+            .any(|chat_id| self.cloud_machine_booting(chat_id).is_some())
+    }
+
+    /// When `chat_id`'s Cloud machine isn't running: the session to wake
+    /// (its chat id) and its state. Files, terminals and changes show a Wake
+    /// button then instead of dialing a machine that won't answer.
+    pub fn chat_machine_down(&self, chat_id: &str) -> Option<(String, zeron_proto::CloudState)> {
+        use zeron_proto::CloudState;
+        let chat = self.chats.iter().find(|c| c.id == chat_id)?;
+        if !self.is_cloud_session_device(&chat.device_id) {
+            return None;
+        }
+        match self.chat_cloud_session(chat_id) {
+            Some(session) if session.state == CloudState::Ready => None,
+            Some(session) => Some((session.chat_id.clone(), session.state)),
+            // No session read yet: trust a fresh heartbeat, else asleep.
+            None if self.devices.iter().any(|d| d.id == chat.device_id)
+                && self.device_online(&chat.device_id, Utc::now()) =>
+            {
+                None
+            }
+            None => Some((
+                chat.parent_chat_id
+                    .clone()
+                    .unwrap_or_else(|| chat.id.clone()),
+                CloudState::Sleeping,
+            )),
+        }
+    }
+
+    /// Publish fresh sessions; observers repaint only on change.
+    pub fn set_cloud_sessions(
+        &mut self,
+        sessions: zeron_proto::CloudSessions,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cloud_sessions.as_ref() != Some(&sessions) {
+            self.cloud_sessions = Some(sessions);
+            cx.notify();
+        }
+    }
+
+    /// Fold one session (a wake/sleep/delete reply) in, and follow it while
+    /// it settles.
+    pub fn apply_cloud_session(
+        &mut self,
+        session: zeron_proto::CloudSession,
+        cx: &mut Context<Self>,
+    ) {
+        let sessions = self
+            .cloud_sessions
+            .get_or_insert_with(|| zeron_proto::CloudSessions {
+                sessions: Vec::new(),
+                available: true,
+            });
+        match sessions
+            .sessions
+            .iter_mut()
+            .find(|s| s.chat_id == session.chat_id)
+        {
+            Some(existing) => *existing = session,
+            None => sessions.sessions.push(session),
+        }
+        cx.notify();
+        self.refresh_cloud_sessions(cx);
+    }
+
+    /// Read every Cloud session once — then again every
+    /// [`crate::cloud::SESSION_POLL`] only while one is being set up, woken
+    /// or deleted. Never runs for an account without Cloud.
+    pub fn refresh_cloud_sessions(&mut self, cx: &mut Context<Self>) {
+        if !self.cloud_enabled() {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        self.cloud_sessions_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let result = crate::cloud::fetch_sessions(engine.clone()).await;
+                let settling = this
+                    .update(cx, |state, cx| {
+                        if let Ok(sessions) = result {
+                            state.set_cloud_sessions(sessions, cx);
+                        }
+                        state
+                            .cloud_sessions
+                            .as_ref()
+                            .is_some_and(crate::cloud::any_session_settling)
+                            || state.send_waits_on_cloud()
+                    })
+                    .unwrap_or(false);
+                if !settling {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(crate::cloud::SESSION_POLL)
+                    .await;
+            }
+        }));
+    }
+
     /// The "@ device" tag for a space — shared by the space pickers' rows,
     /// the sidebar filter trigger, and the composer's space chip. Returns
     /// `(tag, offline)`; staleness renders as a disconnected GLYPH at the
-    /// call sites (user request), never words in the tag.
+    /// call sites (user request), never words in the tag. A sleeping Cloud
+    /// device is not stale — it wakes when a chat opens there.
     pub fn space_device_tag(&self, space: &Space, now: DateTime<Utc>) -> (String, bool) {
-        let offline = !self.device_online(&space.device_id, now);
+        let offline = self.device_presence(&space.device_id, now).warns();
         let device = self
             .device_name(&space.device_id)
             .unwrap_or("Unknown device");
@@ -2655,7 +2935,73 @@ impl AppState {
                 self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
             }
         }
+        // Whether this account can run sessions on Cloud, and on which
+        // repositories (the checkout picker's Cloud option).
+        self.refresh_cloud(cx);
         cx.notify();
+    }
+
+    /// Read Cloud's status, then — when it is on — the repositories it
+    /// reaches. Best effort: an account without Cloud just has no option.
+    pub fn refresh_cloud(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        self.cloud_repos_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(status) = crate::cloud::fetch_status(engine.clone()).await else {
+                return;
+            };
+            let enabled = crate::cloud::account_enabled(&status);
+            this.update(cx, |state, cx| {
+                state.set_cloud_status(status, cx);
+                if enabled {
+                    state.refresh_cloud_repos(cx);
+                } else if state.cloud_repos.take().is_some() {
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Re-read the repositories Cloud reaches (Cloud turned on, GitHub
+    /// connected, the GitHub App installed somewhere new).
+    pub fn refresh_cloud_repos(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        if !self.cloud_enabled() {
+            return;
+        }
+        self.cloud_repos_task = Some(cx.spawn(async move |this, cx| {
+            #[derive(serde::Deserialize)]
+            struct Listing {
+                #[serde(default)]
+                repos: Vec<zeron_proto::GithubRepo>,
+            }
+            let repos = engine
+                .client()
+                .call_as::<Listing>(methods::LIST_GITHUB_REPOS, serde_json::json!({}))
+                .await;
+            this.update(cx, |state, cx| {
+                // A failed read keeps what was known.
+                if let Ok(listing) = repos {
+                    state.cloud_repos = Some(listing.repos);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The Cloud repository a project's GitHub origin names, when Cloud
+    /// reaches it — the checkout picker then offers Cloud.
+    pub fn cloud_repo_for(&self, space: &zeron_proto::Space) -> Option<&zeron_proto::GithubRepo> {
+        let name = space.github_repo.as_deref()?;
+        self.cloud_repos
+            .as_ref()?
+            .iter()
+            .find(|repo| repo.full_name.eq_ignore_ascii_case(name))
     }
 
     fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {
@@ -2975,7 +3321,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -3593,11 +3942,14 @@ mod tests {
     async fn remote_viewport_treats_legacy_daemon_as_ready() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        // The viewport reads the daemon's IPC bearer from its data dir.
+        let token = zeron_rpc::ipc_auth::issue_token(dir.path()).unwrap();
         let server = tokio::spawn(zeron_rpc::serve_ws_listener(
             listener,
             Arc::new(LegacyIdentityRpc),
+            token,
         ));
-        let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
@@ -3709,6 +4061,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
+        let dir = tempfile::tempdir().unwrap();
+        let token = zeron_rpc::ipc_auth::issue_token(dir.path()).unwrap();
         let server = tokio::spawn(zeron_rpc::serve_ws_listener(
             listener,
             Arc::new(DeferredIdentityRpc {
@@ -3720,9 +4074,9 @@ mod tests {
                 },
                 state: state_rx,
             }),
+            token,
         ));
 
-        let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
@@ -3775,7 +4129,14 @@ mod tests {
         assert_eq!(handle.mode(), EngineMode::InProcess);
 
         // Attach the way an external viewport would, and speak the same protocol.
-        let attached = connect_ws(&format!("ws://127.0.0.1:{port}"))
+        // Without the engine's bearer the port refuses to serve.
+        assert!(
+            zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{port}"), None)
+                .await
+                .is_err(),
+            "the IPC port must not serve a dial without the engine's token"
+        );
+        let attached = zeron_rpc::connect_ipc(port, Some(dir.path()))
             .await
             .expect("a second viewport must be able to attach");
         let harnesses = attached
@@ -3996,9 +4357,16 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(zeron_rpc::serve_ws_listener(listener, core.rpc_service()));
-
         let ui_dir = tempfile::tempdir().unwrap();
+        // The daemon publishes its bearer; this viewport shares the data dir
+        // it reads the token from.
+        let token = zeron_rpc::ipc_auth::issue_token(ui_dir.path()).unwrap();
+        tokio::spawn(zeron_rpc::serve_ws_listener(
+            listener,
+            core.rpc_service(),
+            token,
+        ));
+
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: ui_dir.path().to_path_buf(),
             ipc_port: port,
@@ -4074,6 +4442,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: base + TimeDelta::minutes(created_min),
         }
     }
@@ -4525,6 +4894,50 @@ mod tests {
             ChatIndicator::Completed
         );
         assert_eq!(s.indicator_for("c", later), Indicator::None);
+        assert!(s.send_undelivered("c", later));
+    }
+
+    #[test]
+    fn a_send_waiting_on_a_booting_cloud_machine_is_pending_not_undelivered() {
+        use zeron_proto::{CloudSession, CloudSessions, CloudState};
+        let now = Utc::now();
+        let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        let mut s = AppState::new();
+        let mut c = chat("c", 0, Some(10));
+        c.device_id = "cloud-s1".into();
+        s.chats = vec![c];
+        let session = |state| CloudSession {
+            chat_id: "c".into(),
+            device_id: "cloud-s1".into(),
+            space_id: "sp".into(),
+            repo: Some("acme/app".into()),
+            path: Some("/home/user/app".into()),
+            state,
+            error: None,
+            failed_action: None,
+            last_active_at: None,
+            created_at: 0,
+        };
+        s.begin_pending_send("c", "m1", now);
+        for state in [
+            CloudState::Provisioning,
+            CloudState::Starting,
+            CloudState::Sleeping,
+        ] {
+            s.cloud_sessions = Some(CloudSessions {
+                sessions: vec![session(state)],
+                available: true,
+            });
+            assert_eq!(s.cloud_machine_booting("c"), Some(state));
+            assert!(s.send_pending("c", later), "{state:?}");
+            assert!(!s.send_undelivered("c", later), "{state:?}");
+        }
+        // A machine that failed is a real delivery problem.
+        s.cloud_sessions = Some(CloudSessions {
+            sessions: vec![session(CloudState::Error)],
+            available: true,
+        });
+        assert_eq!(s.cloud_machine_booting("c"), None);
         assert!(s.send_undelivered("c", later));
     }
 

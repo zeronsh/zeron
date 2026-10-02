@@ -28,6 +28,8 @@ chrono.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
+# Cloud runner identity: Ed25519 device key (already in the tree via rustls).
+ring = "0.17"
 toml = "0.8"
 libc.workspace = true
 gethostname.workspace = true

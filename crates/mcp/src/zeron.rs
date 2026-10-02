@@ -19,7 +19,7 @@ use zeron_doc::{
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -105,7 +105,10 @@ pub enum TurnOutcome {
 }
 
 pub struct Zeron {
-    url: String,
+    /// Engine IPC port; `None` = wrapped client only (no redial).
+    port: Option<u16>,
+    /// Data dir whose `ipc-token` authenticates each (re)dial.
+    data_dir: Option<std::path::PathBuf>,
     origin: Origin,
     rpc: Mutex<Option<Arc<RpcClient>>>,
 }
@@ -113,9 +116,11 @@ pub struct Zeron {
 impl Zeron {
     /// Lazy dialer: nothing connects until the first tool call, so `zeron
     /// mcp` starts (and answers `initialize`) even before the engine is up.
-    pub fn new(url: String, origin: Origin) -> Self {
+    /// Every (re)dial re-reads the engine's IPC token ([`connect_ipc`]).
+    pub fn new(port: u16, data_dir: Option<std::path::PathBuf>, origin: Origin) -> Self {
         Self {
-            url,
+            port: Some(port),
+            data_dir,
             origin,
             rpc: Mutex::new(None),
         }
@@ -124,7 +129,8 @@ impl Zeron {
     /// Wrap an already-connected client (tests, in-process embedding).
     pub fn with_client(client: RpcClient, origin: Origin) -> Self {
         Self {
-            url: String::new(),
+            port: None,
+            data_dir: None,
             origin,
             rpc: Mutex::new(Some(Arc::new(client))),
         }
@@ -139,15 +145,16 @@ impl Zeron {
         if let Some(client) = slot.as_ref() {
             return Ok(client.clone());
         }
-        if self.url.is_empty() {
+        let Some(port) = self.port else {
             bail!("engine connection closed");
-        }
-        let client = connect_ws(&self.url).await.map_err(|e| {
-            anyhow!(
-                "no Zeron engine listening at {} ({e}) — is Zeron running?",
-                self.url
-            )
-        })?;
+        };
+        let client = connect_ipc(port, self.data_dir.as_deref())
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "no Zeron engine reachable at ws://127.0.0.1:{port} ({e}) — is Zeron running?"
+                )
+            })?;
         let client = Arc::new(client);
         *slot = Some(client.clone());
         Ok(client)
@@ -773,6 +780,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         }
     }

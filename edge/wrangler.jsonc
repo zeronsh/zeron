@@ -1,6 +1,8 @@
 {
   // Zeron edge: per-session + per-workspace Loro sync DOs, per-device
-  // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
+  // relay DOs, R2 blobs, the absorbed WorkOS auth routes, and the Cloud
+  // control plane (CloudAccount/CloudIndex DOs, per-session lifecycle Workflows,
+  // usage metering; docs/design/cloud-device.md) in front of the vault.
   // Design: loro-sessions §2 (topology), §3 (persistence), §6.1 (diff
   // sidecar), §8 (device-room streams), §1.2 (R2 attachments), §3.3 (R2
   // backups); ARCHITECTURE.md §6.
@@ -41,7 +43,13 @@
       { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
       { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
-      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      // Cloud control plane (docs/design/cloud-device.md):
+      // cloud1/{orgId}/{userId} — the account, its projects, and every
+      // session's machine (own sandbox, runner key, lifecycle), usage meter.
+      { "name": "CLOUD_ACCOUNTS", "class_name": "CloudAccount" },
+      // index1 — every user who ever had Cloud (billing walk list).
+      { "name": "CLOUD_INDEX", "class_name": "CloudIndex" }
     ]
   },
   "migrations": [
@@ -61,8 +69,25 @@
       "tag": "v3",
       "new_sqlite_classes": ["ChatRoom"]
     },
-    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] }
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["CloudAccount", "CloudIndex"] }
   ],
+  // Cloud device lifecycle (src/cloud/workflows.ts). Workflow names are
+  // account-wide: the dev/test wrangler configs must never reuse them.
+  "workflows": [
+    { "name": "zeron-cloud-provision", "binding": "CLOUD_PROVISION", "class_name": "ProvisionWorkflow" },
+    { "name": "zeron-cloud-wake", "binding": "CLOUD_WAKE", "class_name": "WakeWorkflow" },
+    { "name": "zeron-cloud-sleep", "binding": "CLOUD_SLEEP", "class_name": "SleepWorkflow" },
+    // Explicit delete: stop → final usage read → DELETE (billing-exact).
+    { "name": "zeron-cloud-delete", "binding": "CLOUD_DELETE", "class_name": "DeleteWorkflow" }
+  ],
+  // The credential vault (edge/vault, deployed by its own job BEFORE this
+  // worker: a service binding to a missing worker fails the deploy). It has
+  // no routes; this binding is the only way in.
+  "services": [{ "binding": "VAULT", "service": "zeron-vault", "entrypoint": "VaultApi" }],
+  // Hourly: Cloud usage reconcile backstop + daily orphan scan (00:17 UTC) +
+  // closed-month exports to R2 usage/{YYYY-MM}.json (src/cloud/billing.ts).
+  "triggers": { "crons": ["17 * * * *"] },
   "r2_buckets": [
     {
       "binding": "BLOBS",
@@ -83,8 +108,42 @@
     // `wrangler secret put APNS_KEY_P8` (the AuthKey_XXXX.p8 file's contents)
     // and `wrangler secret put APNS_KEY_ID`. Unset ⇒ decided and logged on
     // /registry/:org/stats, not sent.
+    //
+    // Cloud device secrets (unset ⇒ /cloud answers `available: false`):
+    //   BOAT_API_KEY            Boat provider API key. A scoped key needs:
+    //                           sandbox.create, sandbox.read, sandbox.update,
+    //                           sandbox.stop, sandbox.resume, sandbox.delete,
+    //                           exec, and usage read (GET /sandboxes/{id}/usage,
+    //                           also list for the orphan scan); account.read is
+    //                           not needed. A missing action surfaces as
+    //                           "Cloud isn't configured to … sandboxes".
+    //   RUNNER_JWT_PRIVATE_KEY  ES256 private JWK (JSON) that signs runner JWTs
+    //   RUNNER_JWT_PUBLIC_KEY   the matching public JWK (JSON); add a "kid" to
+    //                           rotate later
+    //   ADMIN_TOKEN             operator bearer for GET /admin/cloud/usage
+    //                           (unset ⇒ that route 404s)
+    // Optional var CLOUD_EDGE_URL overrides the origin session engines are
+    // pointed at (default: the origin of the request that created the session).
+    // Optional CLOUD_TEMPLATE names a provider snapshot (engine pre-installed,
+    // no identity) that session sandboxes start from; needs the key's
+    // snapshot.read. Unset ⇒ every session installs the engine (~30–60 s).
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
-    "AUTH_MODE": "workos"
+    "AUTH_MODE": "workos",
+    // Sandbox provider for NEW Cloud devices (src/cloud/providers): "boat".
+    // Existing sandboxes keep the provider they were created on.
+    "SANDBOX_PROVIDER": "boat",
+    // Sandbox auto-stop, seconds. Required while the Boat account is on trial
+    // (max 7200; auto-stop cannot be disabled there, so the DO re-extends it
+    // while the device is busy). Remove on a paid plan: idle sleep
+    // (CLOUD_IDLE_MINUTES) is ours.
+    "CLOUD_TTL_SECONDS": "7200",
+    "CLOUD_IDLE_MINUTES": "20",
+    // Most sessions per user whose machines may run at once; waking another
+    // first sleeps the least recently active idle one.
+    "CLOUD_MAX_AWAKE": "5",
+    // Session machine size: small · default · large.
+    "CLOUD_MACHINE": "default",
+    "BOAT_API_BASE": "https://boat.dev/api/v1"
   },
   "observability": {
     "enabled": true

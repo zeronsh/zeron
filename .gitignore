@@ -14,3 +14,5 @@ edge/dist/
 .claude
 CLAUDE.md
 /scripts/**/__pycache__/
+.dev.vars
+.dev.vars.*

@@ -136,12 +136,20 @@ async fn handle_request(
 }
 
 /// Accept WebSocket connections forever, serving each with `service`.
-pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>) {
+///
+/// Every handshake must present `Authorization: Bearer {token}` — the
+/// per-start secret the engine published at `{data_dir}/ipc-token`
+/// ([`crate::ipc_auth`]). Loopback alone is not an identity: any local
+/// process (another OS user, a sandboxed app, a container sharing the host
+/// network) can open this port, and the engine behind it can start agents and
+/// broker vault grants.
+pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>, token: String) {
+    let token: Arc<str> = token.into();
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone()));
+                tokio::spawn(serve_ws_socket(stream, service.clone(), token.clone()));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");
@@ -151,18 +159,23 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
     }
 }
 
-async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
-    // Native viewports dial this socket with a bare `connect_async` and send
-    // no `Origin` header. A browser always attaches `Origin` to a WebSocket
-    // handshake and cannot forge or suppress it from script, and WebSockets
-    // are exempt from the Same-Origin Policy — so only rejecting any handshake
-    // that carries `Origin` keeps a page the user happens to visit from
-    // reaching this local socket. Keep this check.
+async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, token: Arc<str>) {
+    // Two independent gates, both required:
+    //
+    // 1. Origin. Native viewports dial this socket without an `Origin`
+    //    header. A browser always attaches `Origin` to a WebSocket handshake
+    //    and cannot forge or suppress it from script, and WebSockets are
+    //    exempt from the Same-Origin Policy — so only rejecting any handshake
+    //    that carries `Origin` keeps a page the user happens to visit from
+    //    reaching this local socket. Keep this check.
+    // 2. Bearer. Any local process can still dial without `Origin`; only one
+    //    that can read the owner-only `{data_dir}/ipc-token` knows the token.
+    //    Compared in constant time; the presented value is never logged.
     //
     // The large `Err` (ErrorResponse) is the shape tungstenite's Callback
     // trait requires; it can't be boxed away here.
     #[allow(clippy::result_large_err)]
-    let reject_cross_origin = |req: &HandshakeRequest, resp: HandshakeResponse| {
+    let authorize = |req: &HandshakeRequest, resp: HandshakeResponse| {
         if let Some(origin) = req.headers().get("origin") {
             tracing::warn!(
                 origin = %String::from_utf8_lossy(origin.as_bytes()),
@@ -172,9 +185,24 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
         }
+        let presented = req
+            .headers()
+            .get(tokio_tungstenite::tungstenite::http::header::AUTHORIZATION)
+            .map(|value| value.as_bytes());
+        if !crate::ipc_auth::bearer_matches(&token, presented) {
+            tracing::warn!(
+                presented = presented.is_some(),
+                "rpc: rejecting IPC handshake without the engine's bearer token"
+            );
+            let mut err = ErrorResponse::new(Some(
+                "missing or wrong IPC token (see {data_dir}/ipc-token)".to_string(),
+            ));
+            *err.status_mut() = StatusCode::UNAUTHORIZED;
+            return Err(err);
+        }
         Ok(resp)
     };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin).await {
+    let ws = match tokio_tungstenite::accept_hdr_async(stream, authorize).await {
         Ok(ws) => ws,
         Err(err) => {
             tracing::warn!(error = %err, "rpc: websocket handshake failed");

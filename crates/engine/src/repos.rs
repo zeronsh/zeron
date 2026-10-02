@@ -357,6 +357,16 @@ impl Repos {
     }
 
     /// Is `path` inside a git work tree? (Also the SpacesSync git-presence probe.)
+    /// The GitHub repository (`owner/name`) of `path`'s `origin` remote.
+    pub async fn github_repo(&self, path: &Path) -> Option<String> {
+        let remote = self
+            .git(&["remote", "get-url", "origin"], Some(path))
+            .await
+            .ok()?;
+        let (owner, name) = parse_github_remote(&remote)?;
+        Some(format!("{owner}/{name}"))
+    }
+
     pub async fn is_repo(&self, path: &Path) -> bool {
         matches!(
             self.git(&["rev-parse", "--is-inside-work-tree"], Some(path)).await,
@@ -613,6 +623,12 @@ impl Repos {
 
     /// `git clone <url>` under `{data_dir}/repos`. (Named `clone_repo` to keep
     /// `Clone::clone` unambiguous on the service handle.)
+    ///
+    /// Idempotent: when the destination already holds a clone whose `origin`
+    /// is the same repository (scheme, `.git`, trailing slash, embedded
+    /// credentials and owner/name case ignored), that checkout is the answer —
+    /// same reply as a fresh clone. A destination holding anything else stays
+    /// an "Already exists" error.
     pub async fn clone_repo(&self, url: &str) -> Result<Repo, EngineError> {
         let trimmed = url.trim().trim_end_matches('/');
         let name = trimmed
@@ -625,6 +641,19 @@ impl Repos {
         let repos_dir = self.inner.data_dir.join("repos");
         let target = repos_dir.join(&name);
         if target.exists() {
+            // `.git` must be the destination's own: `git remote` inside a
+            // plain folder would answer for an enclosing repository.
+            let origin = if target.join(".git").exists() {
+                self.git(&["remote", "get-url", "origin"], Some(&target))
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            if origin.is_some_and(|origin| same_remote(&origin, trimmed)) {
+                self.register(&target.to_string_lossy())?;
+                return self.to_repo(&target).await;
+            }
             return Err(EngineError::Other(format!(
                 "Already exists: {}",
                 target.display()
@@ -2093,6 +2122,38 @@ fn compact_history_commits(
         .collect()
 }
 
+/// Whether two remote URLs name the same repository: `https://`, `ssh://` and
+/// scp-style spellings, a `.git` suffix, a trailing slash, embedded
+/// credentials, and host/owner/name case are all ignored.
+pub(crate) fn same_remote(a: &str, b: &str) -> bool {
+    fn key(url: &str) -> String {
+        if let Some(remote) = crate::source_control::parse_git_remote(url) {
+            return format!(
+                "{}/{}/{}",
+                remote.host,
+                remote.owner.to_ascii_lowercase(),
+                remote.repository.to_ascii_lowercase()
+            );
+        }
+        // Not owner/name shaped (nested groups, local paths): compare the
+        // URL minus scheme, credentials, trailing slash and `.git`.
+        let url = url.trim().trim_end_matches('/');
+        let url = url.strip_suffix(".git").unwrap_or(url);
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let rest = match rest.split_once('/') {
+            Some((authority, path)) => format!(
+                "{}/{path}",
+                authority
+                    .rsplit_once('@')
+                    .map_or(authority, |(_, host)| host)
+            ),
+            None => rest.to_string(),
+        };
+        rest.to_ascii_lowercase()
+    }
+    key(a) == key(b)
+}
+
 fn search_files_blocking(
     search: &WorkspaceSearch,
     root: &Path,
@@ -2740,6 +2801,119 @@ mod tests {
                 .is_some_and(|listed| same_file::is_same_file(listed, &path).unwrap_or(false))
         }));
         assert_eq!(repos.current_branch(&repo).await.unwrap(), "main");
+    }
+
+    #[test]
+    fn same_remote_ignores_scheme_suffix_slash_credentials_and_case() {
+        let canonical = "https://github.com/Acme/App";
+        for same in [
+            "https://github.com/acme/app.git",
+            "https://github.com/Acme/App/",
+            "https://x-access-token:ghu_secret@github.com/acme/app.git",
+            "git@github.com:acme/app.git",
+            "ssh://git@github.com/acme/app",
+            "http://GitHub.com/acme/app",
+        ] {
+            assert!(same_remote(canonical, same), "{same}");
+        }
+        for other in [
+            "https://github.com/acme/app2",
+            "https://github.com/other/app",
+            "https://gitlab.com/acme/app",
+        ] {
+            assert!(!same_remote(canonical, other), "{other}");
+        }
+        assert!(same_remote("/srv/git/src.git", "file:///srv/git/src.git/"));
+        assert!(!same_remote("/srv/git/src.git", "/srv/other/src.git"));
+    }
+
+    #[tokio::test]
+    async fn github_repo_names_the_origins_owner_and_name() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let repos = Repos::new(&root.path().join("data"), "device-1");
+        git(&["init", "-q"]);
+        assert_eq!(repos.github_repo(root.path()).await, None, "no origin");
+        git(&["remote", "add", "origin", "git@github.com:Acme/app.git"]);
+        assert_eq!(
+            repos.github_repo(root.path()).await.as_deref(),
+            Some("Acme/app")
+        );
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "https://gitlab.com/acme/app.git",
+        ]);
+        assert_eq!(repos.github_repo(root.path()).await, None, "not GitHub");
+    }
+
+    #[tokio::test]
+    async fn clone_repo_is_idempotent_for_the_same_origin_only() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "git {args:?}: {status:?}");
+        };
+        // Two different upstreams that would both clone into `repos/src`.
+        let mut upstreams = Vec::new();
+        for dir in ["a", "b"] {
+            let work = root.path().join(dir).join("work");
+            std::fs::create_dir_all(&work).unwrap();
+            git(&["init", "-q", "-b", "main"], &work);
+            std::fs::write(work.join("README.md"), dir).unwrap();
+            git(&["add", "."], &work);
+            git(&["commit", "-q", "-m", "init"], &work);
+            let bare = root.path().join(dir).join("src.git");
+            git(
+                &[
+                    "clone",
+                    "-q",
+                    "--bare",
+                    work.to_str().unwrap(),
+                    bare.to_str().unwrap(),
+                ],
+                root.path(),
+            );
+            upstreams.push(bare);
+        }
+        let data = root.path().join("data");
+        let repos = Repos::new(&data, "device-1");
+        let first = repos
+            .clone_repo(upstreams[0].to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.path, data.join("repos/src").to_string_lossy());
+        // Same repository again (different spelling): the same success reply.
+        let again = repos
+            .clone_repo(&format!("file://{}/", upstreams[0].display()))
+            .await
+            .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(repos.list().await.len(), 1, "registered once");
+        // A different repository with the same folder name stays an error.
+        let err = repos
+            .clone_repo(upstreams[1].to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Already exists"), "{err}");
     }
 
     #[test]

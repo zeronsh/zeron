@@ -1075,7 +1075,11 @@ impl Shell {
                     (None, None) => None,
                     _ => Some("?"),
                 };
-                let folder = match (project, state.device_name(&chat.device_id)) {
+                // A Cloud chat's own machine isn't a device worth naming.
+                let device = (!zeron_proto::is_cloud_device(&chat.device_id, ""))
+                    .then(|| state.device_name(&chat.device_id))
+                    .flatten();
+                let folder = match (project, device) {
                     (Some(project), Some(device)) => format!("{project} @ {device}"),
                     (Some(project), None) => project.to_string(),
                     (None, device) => device.unwrap_or_default().to_string(),

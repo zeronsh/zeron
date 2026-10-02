@@ -30,6 +30,14 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
   no current client dials it) + DeviceRoom DO (per device) + R2 attachments + WorkOS JWKS auth.
   Absorbs the old `apps/server` responsibilities (WorkOS code exchange/refresh, orgs) so
   **Postgres, the Hono server, and the WebRTC/signaling stack are all gone**.
+- **Cloud** (`docs/design/cloud-device.md`): a checkout option — a session in any project
+  whose GitHub repository the Zeron GitHub App reaches can run on its own hosted sandbox,
+  with Cloud's own providers — an ordinary headless engine
+  provisioned per session by the edge's CloudAccount DO + Workflows behind a provider-neutral
+  sandbox interface, sleeping when idle, authenticated with its own device key (runner tokens
+  scoped to that one session's device), and fed provider credentials by the separate
+  service-binding-only `zeron-vault` Worker (one Durable Object per account serializes
+  refreshes, so parallel sessions never race a refresh token).
 
 ### Headed / headless
 Single binary `zeron`:

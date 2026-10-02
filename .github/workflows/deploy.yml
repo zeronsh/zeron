@@ -1,12 +1,16 @@
 name: deploy
 
 # Autodeploy the edge Worker + Durable Objects (session/device rooms, R2,
-# WorkOS auth routes) on every push to main that touches edge/. Skips
-# gracefully until the CLOUDFLARE_API_TOKEN secret is configured (until then:
-# `npm -C edge run deploy` from a wrangler-authenticated machine).
+# WorkOS auth routes, Cloud control plane) on every push to main that touches
+# edge/, and the credential vault (edge/vault) — behind its own approval —
+# when edge/vault/ changes. Skips gracefully until the CLOUDFLARE_API_TOKEN
+# secret is configured (until then: `npm -C edge run deploy` from a
+# wrangler-authenticated machine).
 #
 # The token needs: Workers Scripts (edit), Workers Routes (edit) on zeron.sh,
-# Workers R2 Storage (edit). Account id is pinned in edge/wrangler.jsonc.
+# Workers R2 Storage (edit), Workflows (edit). Account id is pinned in
+# edge/wrangler.jsonc. One-time setup: create the `vault-production`
+# environment (Settings → Environments) with required reviewers.
 
 on:
   push:
@@ -18,7 +22,74 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ── credential vault (edge/vault) ───────────────────────────────────────
+  # Its own deploy with its own approval: the `vault-production` GitHub
+  # environment carries required reviewers (and may hold its own
+  # CLOUDFLARE_API_TOKEN). Change detection lives in a separate, ungated job
+  # because an environment gate applies before a job's first step — folding
+  # detection into the gated job would ask for approval on every push.
+  vault-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: detect vault changes
+        id: changed
+        shell: bash
+        run: |
+          before="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^edge/vault/"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  vault:
+    needs: vault-changes
+    if: needs.vault-changes.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    environment: vault-production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    defaults:
+      run:
+        working-directory: edge/vault
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: edge/vault/package-lock.json
+      - name: install
+        run: npm ci
+      - name: typecheck
+        run: npm run typecheck
+      - name: test
+        run: npm test
+      - name: deploy
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: npx wrangler deploy
+
   edge:
+    # The edge's VAULT service binding needs the vault worker to exist, so a
+    # vault change deploys (and is approved) first. A skipped vault job (no
+    # vault change) must not block the edge: `!cancelled()` replaces the
+    # implicit success() gate, then we allow exactly success or skipped — a
+    # failed or rejected vault deploy, or failed change detection, stops the
+    # edge too.
+    needs: [vault-changes, vault]
+    if: >-
+      !cancelled()
+      && needs.vault-changes.result == 'success'
+      && (needs.vault.result == 'success' || needs.vault.result == 'skipped')
     runs-on: ubuntu-latest
     env:
       # `secrets` is not a valid context in step `if:` expressions — surface

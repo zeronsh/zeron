@@ -729,7 +729,11 @@ impl HarnessesPage {
         use crate::icons::{self, icon};
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
-            (s.devices.clone(), s.local_device_id.clone())
+            // Cloud's providers live on the Cloud page.
+            (
+                s.provider_devices().cloned().collect::<Vec<_>>(),
+                s.local_device_id.clone(),
+            )
         };
         devices.sort_by(|a, b| {
             a.created_at
@@ -737,17 +741,13 @@ impl HarnessesPage {
                 .then_with(|| a.id.cmp(&b.id))
         });
         let effective = self.target_device.clone().or_else(|| local_id.clone());
-        let platform_glyph = |platform: &str| match platform {
-            "macos" | "darwin" => icons::LAPTOP,
-            "ios" | "android" => icons::SMARTPHONE,
-            _ => icons::MONITOR,
-        };
+        let now = chrono::Utc::now();
         // Local device = no passthrough (calls stay direct).
         let mut targets: Vec<Option<String>> = Vec::new();
         let mut options = Vec::new();
         for device in &devices {
             let is_local = local_id.as_deref() == Some(device.id.as_str());
-            let glyph = platform_glyph(&device.platform);
+            let glyph = crate::cloud::device_glyph(&device.id, &device.platform);
             let muted = theme.text_muted;
             let option = widgets::SelectOption::new(device.name.clone()).leading(move || {
                 icon(glyph)
@@ -756,8 +756,15 @@ impl HarnessesPage {
                     .text_color(muted)
                     .into_any_element()
             });
+            // A sleeping Cloud device says so; it wakes when asked.
+            let presence = self.state.read(cx).device_presence(&device.id, now);
             options.push(if is_local {
                 option.detail("You")
+            } else if matches!(
+                presence,
+                crate::cloud::Presence::Asleep | crate::cloud::Presence::Waking
+            ) {
+                option.detail(presence.label())
             } else {
                 option
             });

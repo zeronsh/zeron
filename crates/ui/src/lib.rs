@@ -23,6 +23,7 @@ pub mod badges;
 pub mod browser;
 pub mod change_requests;
 pub mod changes;
+pub mod cloud;
 mod comment_ui;
 pub mod comments;
 pub mod composer;

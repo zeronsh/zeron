@@ -271,6 +271,10 @@ impl ClaudeHarness {
     fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
+        // Host-resolved environment (a Cloud device's `ANTHROPIC_API_KEY`
+        // from the user's own key, `GH_TOKEN`, …). Never a Claude.ai
+        // subscription token: those stay inside the CLI's own login.
+        crate::apply_run_env(&mut cmd, &request.env);
         cmd.args(Self::launch_args(request));
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));

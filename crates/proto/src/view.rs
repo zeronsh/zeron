@@ -223,6 +223,7 @@ mod project_tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: repository.map(str::to_string),
+            github_repo: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH + chrono::TimeDelta::minutes(minutes),
         }
     }
@@ -525,6 +526,10 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         // (every native driver's convention): label them "Agent" with the
         // description as the detail — "Tool · Agent: scan repo" read as two
         // labels fighting.
+        // A Cloud machine's own setup ("Cloned acme/app").
+        call @ ToolCall::Unknown { name, .. } if crate::cloud_setup_step(call).is_some() => {
+            ("Cloud", name.clone())
+        }
         ToolCall::Unknown { name, .. } => match name.strip_prefix("Agent: ") {
             Some(description) => ("Agent", description.to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
@@ -539,6 +544,25 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
 /// the summary itself is one implementation for both.
 pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     use crate::ToolCall;
+    // A Cloud machine's setup steps read as what happened to the machine.
+    if !tools.is_empty() {
+        let steps: Option<Vec<&str>> = tools
+            .iter()
+            .map(|(call, _)| crate::cloud_setup_step(call))
+            .collect();
+        if let Some(steps) = steps {
+            let mut summary = if steps.contains(&"wake") {
+                "Woke the Cloud machine".to_string()
+            } else {
+                "Set up the Cloud machine".to_string()
+            };
+            let failed = tools.iter().filter(|(_, is_error)| *is_error).count();
+            if failed > 0 {
+                summary.push_str(&format!(" · {failed} failed"));
+            }
+            return summary;
+        }
+    }
     let mut commands = 0usize;
     let mut edited: Vec<&str> = Vec::new();
     let mut reads = 0usize;
@@ -766,5 +790,56 @@ mod checkout_tests {
             checkout_label(CheckoutKind::NewWorktree, Some(&plain("main"))),
             "New worktree"
         );
+    }
+}
+
+#[cfg(test)]
+mod cloud_setup_tests {
+    use super::*;
+    use crate::ToolCall;
+
+    fn step(step: &str, name: &str) -> ToolCall {
+        ToolCall::Unknown {
+            name: name.into(),
+            input: Some(
+                serde_json::json!({ crate::CLOUD_SETUP_KEY: step, "command": "git clone x" }),
+            ),
+        }
+    }
+
+    #[test]
+    fn cloud_setup_steps_read_as_what_happened_to_the_machine() {
+        let start = step("start", "Started a machine");
+        let clone = step("clone", "Cloned acme/app");
+        assert_eq!(crate::cloud_setup_step(&clone), Some("clone"));
+        assert_eq!(
+            tool_chip_content(&clone),
+            ("Cloud", "Cloned acme/app".to_string())
+        );
+        assert_eq!(
+            tool_group_summary(&[(start.clone(), false), (clone.clone(), false)]),
+            "Set up the Cloud machine"
+        );
+        assert_eq!(
+            tool_group_summary(&[(step("wake", "Woke the machine"), false)]),
+            "Woke the Cloud machine"
+        );
+        assert_eq!(
+            tool_group_summary(&[(start, false), (clone.clone(), true)]),
+            "Set up the Cloud machine · 1 failed"
+        );
+        // Mixed with ordinary tools: the ordinary summary.
+        let exec = ToolCall::Exec {
+            command: "ls".into(),
+        };
+        assert_eq!(
+            tool_group_summary(&[(clone, false), (exec, false)]),
+            "Ran 1 command · called 1 tool"
+        );
+        let other = ToolCall::Unknown {
+            name: "x".into(),
+            input: Some(serde_json::json!({"a": 1})),
+        };
+        assert_eq!(crate::cloud_setup_step(&other), None);
     }
 }

@@ -86,6 +86,9 @@ export const handleAuthRoute = async (
     const token = bearerFromRequest(request);
     const caller = token ? await verifyToken(env, token) : undefined;
     if (!caller) return json({ error: "invalid or missing bearer token" }, 401);
+    // A Cloud device's runner token acts for its user inside the sandbox, but
+    // never manages memberships (runner-policy.ts covers the post-bearer routes).
+    if (caller.kind === "runner") return json({ error: "forbidden" }, 403);
     if (request.method === "GET") {
       try {
         return json({ orgs: await listOrgs(apiKey, caller.userId) });

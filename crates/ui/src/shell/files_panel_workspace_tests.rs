@@ -144,8 +144,13 @@ fn files_panel_workspace_navigation_and_external_updates() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
+    // The viewport below attaches with the bearer published in its data dir.
     let _ipc = runtime
-        .block_on(zeron_engine::serve_ipc(port, core.rpc_service()))
+        .block_on(zeron_engine::serve_ipc(
+            port,
+            &directory.path().join("ui"),
+            core.rpc_service(),
+        ))
         .unwrap();
     let output = std::env::var_os("ZERON_FILES_CAPTURES").map(PathBuf::from);
     let application = if output.is_some() {

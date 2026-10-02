@@ -987,6 +987,9 @@ fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
         .collect()
 }
 
+/// What a masked input shows in place of each character.
+const MASK_GLYPH: char = '•';
+
 #[derive(Debug, Clone, Default)]
 struct TextProjection {
     display: String,
@@ -1218,6 +1221,21 @@ impl TextProjection {
     /// a dangling reference and shows as its plain label.
     fn rich(raw: &str, active: Option<Range<usize>>, live: Option<&HashSet<u32>>) -> Self {
         Self::project(raw, active, true, live)
+    }
+
+    /// Secret fields: every character shown as one bullet. A mapping per
+    /// character keeps the caret, selection and hit-testing exact.
+    fn masked(raw: &str) -> Self {
+        let mut projection = Self::default();
+        for (start, ch) in raw.char_indices() {
+            let display_start = projection.display.len();
+            projection.display.push(MASK_GLYPH);
+            projection.mappings.push((
+                start..start + ch.len_utf8(),
+                display_start..projection.display.len(),
+            ));
+        }
+        projection
     }
 
     fn project(
@@ -2002,6 +2020,8 @@ pub struct ComposerInput {
     /// File mentions are a composer feature, not a behavior of generic inputs
     /// (picker searches and rename fields also use this type).
     mentions_enabled: bool,
+    /// Secret entry (API keys): shown as bullets and never copied or cut.
+    masked: bool,
     /// Bumped once per `layout_text` pass — the flip logic uses it to apply at
     /// most one compact↔expanded flip per layout (a flip is only re-evaluated
     /// after the input has been measured in the new mode).
@@ -2112,6 +2132,7 @@ impl ComposerInput {
             syntax_task: None,
             ghost: None,
             mentions_enabled: false,
+            masked: false,
             layout_epoch: 0,
             display_is_placeholder: true,
             blink_anchor: Instant::now(),
@@ -2164,6 +2185,15 @@ impl ComposerInput {
     /// Join the window's Tab order, for a field the keyboard must reach.
     pub(crate) fn with_tab_stop(mut self) -> Self {
         self.focus_handle = self.focus_handle.tab_stop(true);
+        self
+    }
+
+    /// Secret entry: characters render as bullets, copy and cut do nothing,
+    /// and assistive tech is told it is a password field.
+    pub fn with_masked(mut self) -> Self {
+        self.masked = true;
+        self.accessibility_role = Role::PasswordInput;
+        self.refresh_projection();
         self
     }
 
@@ -2244,7 +2274,9 @@ impl ComposerInput {
     }
 
     fn refresh_projection(&mut self) {
-        self.projection = if self.mentions_enabled {
+        self.projection = if self.masked {
+            TextProjection::masked(&self.content)
+        } else if self.mentions_enabled {
             let live: Option<HashSet<u32>> = self
                 .attachment_chips
                 .as_ref()
@@ -3118,6 +3150,10 @@ impl ComposerInput {
     }
 
     fn previous_word_boundary(&self, offset: usize) -> usize {
+        // Word stops would reveal where a secret's punctuation sits.
+        if self.masked {
+            return 0;
+        }
         if let Some(boundary) = self.projection.previous_boundary(offset) {
             return boundary;
         }
@@ -3129,6 +3165,9 @@ impl ComposerInput {
     }
 
     fn next_word_boundary(&self, offset: usize) -> usize {
+        if self.masked {
+            return self.content.len();
+        }
         if let Some(boundary) = self.projection.next_boundary(offset) {
             return boundary;
         }
@@ -3394,7 +3433,8 @@ impl ComposerInput {
     }
 
     fn clipboard_selection(&self) -> Option<(String, String)> {
-        if self.selected_range.is_empty() {
+        // A masked field's text never leaves it through the clipboard.
+        if self.selected_range.is_empty() || self.masked {
             return None;
         }
         let selected = self.projection.normalize_range(self.selected_range.clone());
@@ -8803,7 +8843,7 @@ impl Composer {
         // Where the new session runs (Current checkout / reuse an existing
         // worktree / fresh worktree off the picked base) — resolved NOW so
         // the async block needs no picker access.
-        let plan = self.pickers.read(cx).checkout_plan();
+        let plan = self.pickers.read(cx).session_checkout_plan(cx);
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
@@ -9052,6 +9092,11 @@ impl Composer {
                 // without it a remote send flashed Completed (and could ring
                 // the done-chime) in the queue→drain→sync gap.
                 s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
+                // A Cloud chat's machine may be starting or asleep: read
+                // where it stands (and follow it until it is up).
+                if s.cloud_enabled() {
+                    s.refresh_cloud_sessions(cx);
+                }
             }
             cx.notify();
         });
@@ -9247,10 +9292,17 @@ impl Composer {
                 // it from the first frame (it read "Select ref" until the
                 // host's diff reconciler got around to stamping the branch).
                 let mut chat_branch: Option<String> = None;
+                // Cloud: the chat gets its own Cloud machine; its host and
+                // cwd come back from createChat.
+                let mut on_cloud = false;
                 if is_new && space_path.is_some() {
                     match &plan {
                         crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
                             chat_branch = branch.clone();
+                        }
+                        crate::pickers::CheckoutPlan::Cloud { branch } => {
+                            chat_branch = branch.clone();
+                            on_cloud = true;
                         }
                         crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
                             cwd = path.clone();
@@ -9331,8 +9383,11 @@ impl Composer {
                         {
                             object.insert("config".into(), config);
                         }
+                        if on_cloud {
+                            object.insert("cloud".into(), serde_json::Value::Bool(true));
+                        }
                     }
-                    if let Err(err) = attachments::call_with_timeout(
+                    match attachments::call_with_timeout(
                         &engine,
                         cx.background_executor(),
                         methods::MUTATE,
@@ -9341,7 +9396,20 @@ impl Composer {
                     )
                     .await
                     {
-                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+                        // A Cloud chat runs in its machine's checkout.
+                        Ok(reply) if on_cloud => {
+                            if let Some(machine_cwd) = reply.get("cwd").and_then(|v| v.as_str()) {
+                                cwd = machine_cwd.to_string();
+                            }
+                        }
+                        Ok(_) => {}
+                        // No machine, no session: say why (Cloud can't
+                        // reach the repository, Cloud is off, …) instead of
+                        // queueing a run nobody will pick up.
+                        Err(err) if on_cloud => return Err(err),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+                        }
                     }
                 }
                 // A hand-started side chat is minted by its first send. Unlike
@@ -9420,6 +9488,7 @@ impl Composer {
                         resume: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,
+                        env: Default::default(),
                     },
                     message_id: message_id.clone(),
                 };
@@ -10833,6 +10902,8 @@ impl Render for Composer {
         // reconnect) instead of letting the button imply instant delivery.
         let queue_notice: Option<(SharedString, bool)> = {
             use zeron_proto::ConnectivityState as S;
+            // A new session on Cloud never waits on the project's device.
+            let runs_on_cloud = self.pickers.read(cx).runs_on_cloud(cx);
             let state = self.state.read(cx);
             let degraded = match state.selected_chat.as_deref() {
                 Some(id) => state.chat_delivery_degraded(id),
@@ -10842,6 +10913,7 @@ impl Render for Composer {
                         .effective_device_id()
                         .is_some_and(|id| state.local_device_id.as_deref() != Some(id.as_str()));
                     remote_target
+                        && !runs_on_cloud
                         && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
                             || state
                                 .effective_device_id()
@@ -10849,9 +10921,25 @@ impl Render for Composer {
                 }
             };
             let offline = state.connectivity.state == S::Offline;
+            // A sleeping Cloud device is woken by the send itself.
+            let cloud_asleep = !offline
+                && state
+                    .selected_chat
+                    .as_deref()
+                    .and_then(|id| state.chats.iter().find(|c| c.id == id))
+                    .map(|chat| chat.device_id.clone())
+                    .or_else(|| state.effective_device_id())
+                    .is_some_and(|id| {
+                        matches!(
+                            state.device_presence(&id, chrono::Utc::now()),
+                            crate::cloud::Presence::Asleep | crate::cloud::Presence::Waking
+                        )
+                    });
             degraded.then(|| {
                 let text: SharedString = if offline {
                     "Offline — messages will send when you're back online.".into()
+                } else if cloud_asleep {
+                    "Cloud is asleep — it wakes up when you send.".into()
                 } else {
                     "Messages will send once the connection recovers.".into()
                 };
@@ -14333,6 +14421,33 @@ mod tests {
                     );
                 }
             }
+        });
+    }
+
+    #[gpui::test]
+    fn masked_input_shows_bullets_and_keeps_its_text_off_the_clipboard(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let input = cx.new(|cx| ComposerInput::new("API key", cx).with_masked());
+        input.update(cx, |input, cx| {
+            input.set_text("sk-é9", cx);
+            input.refresh_projection();
+            assert_eq!(input.projection.display, MASK_GLYPH.to_string().repeat(5));
+            // Every raw character boundary maps onto a bullet boundary and back.
+            for (bullet, (raw, _)) in input.content.char_indices().enumerate() {
+                let display = input.projection.raw_to_display(raw);
+                assert_eq!(display, bullet * MASK_GLYPH.len_utf8());
+                assert_eq!(input.projection.display_to_raw(display), raw);
+            }
+            assert_eq!(
+                input.projection.raw_to_display(input.content.len()),
+                input.projection.display.len()
+            );
+            input.selected_range = 0..input.content.len();
+            assert_eq!(input.clipboard_selection(), None);
+            assert_eq!(input.previous_word_boundary(4), 0);
+            assert_eq!(input.next_word_boundary(1), input.content.len());
+            assert_eq!(input.text(), "sk-é9");
         });
     }
 

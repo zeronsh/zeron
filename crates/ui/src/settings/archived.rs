@@ -135,9 +135,12 @@ impl Render for ArchivedPage {
                     .unwrap_or_else(|| "Untitled session".into())
                     .into();
                 // Unknown device → no fragment at all (zeron renders the
-                // device span only when the name resolves).
+                // device span only when the name resolves); a Cloud chat's
+                // own machine isn't a device worth naming either.
                 let device: Option<SharedString> =
-                    device_names.get(&chat.device_id).cloned().map(Into::into);
+                    (!zeron_proto::is_cloud_device(&chat.device_id, ""))
+                        .then(|| device_names.get(&chat.device_id).cloned().map(Into::into))
+                        .flatten();
                 let time_ago: SharedString = crate::state::format_time_ago(
                     chat.last_message_at.unwrap_or(chat.created_at),
                     now,

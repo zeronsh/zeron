@@ -209,16 +209,19 @@ impl AgentAccountsConfig {
             Some(dir) => dir.join(".claude.json"),
             None => home_dir().join(".claude.json"),
         };
+        // A Cloud device's logins are files the credential broker writes;
+        // it never has (or prompts for) a keychain.
+        let keychain = cfg!(target_os = "macos") && !crate::runner::is_cloud_platform();
         Self {
             data_dir: data_dir.to_path_buf(),
-            claude_keychain_service: cfg!(target_os = "macos")
+            claude_keychain_service: keychain
                 .then(|| claude_keychain_service(claude_dir.as_deref())),
             claude_config_dir: claude_dir.unwrap_or_else(|| home_dir().join(".claude")),
             claude_config_file,
             codex_home: env_dir("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex")),
             cursor_sdk_auth_file: home_dir().join(".cursor").join("sdk").join("auth.json"),
             antigravity_home: zeron_harness::acp::antigravity_home().ok(),
-            antigravity_keychain: cfg!(target_os = "macos")
+            antigravity_keychain: keychain
                 && std::env::var_os("AGY_ACP_FORCE_FILE_STORAGE")
                     .is_none_or(|v| !matches!(v.to_str(), Some("1" | "true"))),
             grok_home: stores::default_grok_home(),
@@ -393,6 +396,17 @@ impl Detected {
 
 // ── login flows ─────────────────────────────────────────────────────────────
 
+/// Where a CAPTURED sign-in goes instead of this device: the Cloud credential
+/// vault's upload ([`AgentAccounts::start_capture_login`]). Called with the
+/// provider's credential blob — Codex's `auth.json`, Claude's `claudeAiOauth`
+/// — and answers the user-facing reason on failure. `Fn`, not `FnOnce`: a
+/// mistyped paste-code may retry the same flow.
+pub type CaptureSink = Arc<
+    dyn Fn(serde_json::Value) -> futures::future::BoxFuture<'static, Result<(), String>>
+        + Send
+        + Sync,
+>;
+
 enum LoginFlow {
     Claude {
         verifier: String,
@@ -400,6 +414,9 @@ enum LoginFlow {
         /// verifier in the authorize url would defeat PKCE).
         state: String,
         started_at: Instant,
+        /// Capture-only: the redeemed tokens go here, never into a slot or
+        /// this device's live Claude store.
+        capture: Option<CaptureSink>,
     },
     /// A spawned login child polled to completion: `codex login` against a
     /// throwaway `CODEX_HOME`, the cursor shim's login mode minting into a
@@ -1472,17 +1489,23 @@ impl AgentAccounts {
     /// `localhost:<port>/callback` we serve, finishing when the browser lands
     /// there. Pasting the code is the fallback when no port can be bound.
     async fn start_claude_login(&self) -> AgentLoginStart {
+        self.start_claude_login_with(None).await
+    }
+
+    /// [`Self::start_claude_login`]; with `capture`, the redeemed tokens go
+    /// there instead of a slot / the live login.
+    async fn start_claude_login_with(&self, capture: Option<CaptureSink>) -> AgentLoginStart {
         match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
             Ok(listener) => match listener.local_addr() {
-                Ok(address) => self.start_claude_loopback_login(listener, address.port()),
+                Ok(address) => self.start_claude_loopback_login(listener, address.port(), capture),
                 Err(error) => {
                     tracing::warn!(%error, "Claude login callback has no port; pasting the code instead");
-                    self.start_claude_paste_login()
+                    self.start_claude_paste_login_with(capture)
                 }
             },
             Err(error) => {
                 tracing::warn!(%error, "no loopback port for the Claude login; pasting the code instead");
-                self.start_claude_paste_login()
+                self.start_claude_paste_login_with(capture)
             }
         }
     }
@@ -1491,6 +1514,7 @@ impl AgentAccounts {
         &self,
         listener: tokio::net::TcpListener,
         port: u16,
+        capture: Option<CaptureSink>,
     ) -> AgentLoginStart {
         let login_id = new_id();
         let (verifier, challenge) = pkce_pair();
@@ -1513,7 +1537,13 @@ impl AgentAccounts {
         let outcome_state = task_state.clone();
         let handle = tokio::spawn(async move {
             let outcome = this
-                .finish_claude_loopback_login(listener, &state, &verifier, &redirect)
+                .finish_claude_loopback_login(
+                    listener,
+                    &state,
+                    &verifier,
+                    &redirect,
+                    capture.as_ref(),
+                )
                 .await;
             lock(&outcome_state).outcome = Some(outcome.map_err(|e| e.to_string()));
         });
@@ -1544,6 +1574,7 @@ impl AgentAccounts {
         state: &str,
         verifier: &str,
         redirect: &str,
+        capture: Option<&CaptureSink>,
     ) -> Result<(), EngineError> {
         use tokio::io::AsyncWriteExt as _;
         let (callback, mut browser) = await_claude_callback(&listener, state).await;
@@ -1557,6 +1588,7 @@ impl AgentAccounts {
                     verifier,
                     redirect,
                     CLAUDE_LOOPBACK_SCOPES,
+                    capture,
                 )
                 .await
             }
@@ -1585,7 +1617,12 @@ impl AgentAccounts {
 
     /// The paste-code fallback: Anthropic's manual redirect shows the code
     /// for the user to paste back ([`Self::complete_login`]).
+    #[cfg(test)]
     fn start_claude_paste_login(&self) -> AgentLoginStart {
+        self.start_claude_paste_login_with(None)
+    }
+
+    fn start_claude_paste_login_with(&self, capture: Option<CaptureSink>) -> AgentLoginStart {
         let login_id = new_id();
         let (verifier, challenge) = pkce_pair();
         let state = random_url_token();
@@ -1602,6 +1639,7 @@ impl AgentAccounts {
                 verifier,
                 state,
                 started_at: Instant::now(),
+                capture,
             },
         );
         AgentLoginStart {
@@ -1768,6 +1806,154 @@ impl AgentAccounts {
         .await
     }
 
+    /// Sign in to `harness` for a credential that LEAVES this device — the
+    /// Cloud credential vault (docs/design/cloud-device.md, "Sign-in stays on
+    /// the device"). The provider's own flow runs exactly as for "Add
+    /// account", but the result goes to `capture` and nowhere else: no slot,
+    /// no live credential store or Keychain, no adoption. This device's own
+    /// login is untouched and the capturer is the grant's only refresher.
+    ///
+    /// Same lifecycle as [`Self::start_login`]: the reply is an
+    /// [`AgentLoginStart`]; a `browser` flow is polled with
+    /// [`Self::poll_login`] (`done` once `capture` succeeded, its message on
+    /// failure), a `paste-code` flow is finished with [`Self::complete_login`],
+    /// and [`Self::cancel_login`] stops either. Abandoned flows are reaped
+    /// after [`FLOW_TTL`].
+    pub async fn start_capture_login(
+        &self,
+        harness: HarnessId,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.sweep_flows();
+        let mut start = match harness {
+            HarnessId::ClaudeCode => {
+                self.reap_spawned_flows(HarnessId::ClaudeCode);
+                self.start_claude_login_with(Some(capture)).await
+            }
+            HarnessId::Codex => self.start_codex_capture(capture).await?,
+            other => {
+                return Err(EngineError::Other(format!(
+                    "{other:?} sign-ins can't be connected to Cloud"
+                )));
+            }
+        };
+        if start.callback_port.is_none() {
+            start.callback_port = loopback_port(&start.url);
+        }
+        Ok(start)
+    }
+
+    /// Codex half of [`Self::start_capture_login`]: `codex login` into a
+    /// throwaway `CODEX_HOME`; once its `auth.json` holds a ChatGPT token set
+    /// it goes to `capture` and the home is shredded. Holds ChatGPT's fixed
+    /// callback port like every Codex sign-in, so a newer one supersedes it.
+    async fn start_codex_capture(
+        &self,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Codex);
+        self.reap_port_flows(oauth::OPENAI_LOOPBACK_PORT);
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        // From here on every exit path — error, success, cancel (abort),
+        // engine shutdown — shreds the throwaway home.
+        let shred = ShredOnDrop(home.clone());
+        let cli = lock(&self.inner.cli_overrides)
+            .get(&HarnessId::Codex)
+            .cloned();
+        let mut command = match cli {
+            Some(cli) => {
+                let mut command = zeron_harness::process::Command::new(cli);
+                command.arg("login").env("CODEX_HOME", &home);
+                command
+            }
+            None => zeron_harness::codex::login_command(&home).map_err(|err| {
+                EngineError::Other(match err {
+                    zeron_harness::HarnessError::NotInstalled(hint) => format!(
+                        "The `codex` CLI was not found on this device — install it first. ({hint})"
+                    ),
+                    other => format!("Could not resolve the codex CLI for login: {other}"),
+                })
+            })?,
+        };
+        command
+            .stdin(zeron_harness::process::Stdio::null())
+            .stdout(zeron_harness::process::Stdio::piped())
+            .stderr(zeron_harness::process::Stdio::piped());
+        // The app opens the one authorization tab (see `start_codex_login`).
+        #[cfg(unix)]
+        if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
+            command.env("BROWSER", noop_browser);
+        }
+        let child = command.spawn().map_err(|err| {
+            EngineError::Other(if err.kind() == std::io::ErrorKind::NotFound {
+                "The `codex` CLI was not found on this device — install it first.".into()
+            } else {
+                format!("Could not start the codex sign-in: {err}")
+            })
+        })?;
+        let (child, output, exit) = wire_login_child(child);
+        let kill = KillOnDrop(child);
+        let url = await_login_url(&output, &exit, scan_openai_url).await;
+        if url.is_empty()
+            && let Some(code) = *lock(&exit)
+        {
+            return Err(EngineError::Other(login_child_failure(code, &output)));
+        }
+        let state = Arc::new(Mutex::new(TaskLoginState {
+            url: (!url.is_empty()).then(|| url.clone()),
+            ..Default::default()
+        }));
+        let task_state = state.clone();
+        let auth_file = home.join("auth.json");
+        let handle = tokio::spawn(async move {
+            let waited = tokio::time::timeout(
+                FLOW_TTL,
+                await_codex_capture(&auth_file, &output, &exit, &task_state),
+            )
+            .await
+            .unwrap_or_else(|_| Err("The sign-in timed out — start again.".into()));
+            // The CLI answers the browser right after writing auth.json; give
+            // it a moment to exit on its own, then stop it either way.
+            if waited.is_ok() {
+                for _ in 0..30 {
+                    if lock(&exit).is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+            drop(kill);
+            // Off the disk before the upload: the token set lives on only in
+            // this task's memory until the capturer has it.
+            drop(shred);
+            let outcome = match waited {
+                Ok(auth) => capture(auth).await,
+                Err(message) => Err(message),
+            };
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Codex,
+                started_at: Instant::now(),
+                state,
+                handle,
+                // The task's own guard shreds the home; a plain remove here
+                // could beat it to the files.
+                home: None,
+                port: Some(oauth::OPENAI_LOOPBACK_PORT),
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
     /// Antigravity: its ACP server's own Google sign-in. The start replies at
     /// once — a first sign-in may download a large server — and polls carry
     /// the browser url once the server prints it. A server that already holds
@@ -1868,10 +2054,13 @@ impl AgentAccounts {
         login_id: &str,
         code: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
-        let (verifier, expected_state) = match lock(&self.inner.flows).get(login_id) {
+        let (verifier, expected_state, capture) = match lock(&self.inner.flows).get(login_id) {
             Some(LoginFlow::Claude {
-                verifier, state, ..
-            }) => (verifier.clone(), state.clone()),
+                verifier,
+                state,
+                capture,
+                ..
+            }) => (verifier.clone(), state.clone(), capture.clone()),
             _ => {
                 return Err(EngineError::Other(
                     "This sign-in attempt expired — start again.".into(),
@@ -1899,6 +2088,7 @@ impl AgentAccounts {
             &verifier,
             CLAUDE_REDIRECT,
             CLAUDE_SCOPES,
+            capture.as_ref(),
         )
         .await?;
         self.remove_flow(login_id);
@@ -1907,7 +2097,10 @@ impl AgentAccounts {
 
     /// Redeem a Claude authorization code at `token_url` and save the account
     /// as a slot (see [`Self::adopt_if_live`] for when it also becomes live).
-    /// `redirect` must be the one the authorize url named.
+    /// `redirect` must be the one the authorize url named. With `capture`
+    /// the `claudeAiOauth` blob goes there INSTEAD: no slot, no live store,
+    /// no Keychain — the capturer becomes the grant's only holder.
+    #[allow(clippy::too_many_arguments)]
     async fn redeem_claude_code(
         &self,
         token_url: &str,
@@ -1916,6 +2109,7 @@ impl AgentAccounts {
         verifier: &str,
         redirect: &str,
         default_scopes: &str,
+        capture: Option<&CaptureSink>,
     ) -> Result<(), EngineError> {
         let token = self
             .inner
@@ -2017,6 +2211,9 @@ impl AgentAccounts {
         });
         if let (Some(sub), Some(map)) = (subscription_type, oauth.as_object_mut()) {
             map.insert("subscriptionType".into(), serde_json::json!(sub));
+        }
+        if let Some(capture) = capture {
+            return capture(oauth).await.map_err(EngineError::Other);
         }
         let mut oauth_account = serde_json::json!({
             "accountUuid": account_uuid,
@@ -2903,6 +3100,15 @@ mod keychain {
     const EXEC_TIMEOUT: Duration = Duration::from_secs(15);
 
     async fn exec(args: &[&str]) -> (bool, String, String) {
+        // A Cloud device never uses a keychain (see `detect`); this also
+        // covers lookups that don't go through the config.
+        if crate::runner::is_cloud_platform() {
+            return (
+                false,
+                String::new(),
+                "a Cloud device has no keychain".into(),
+            );
+        }
         // Absolute path: a PATH-planted `security` must never see secrets.
         let run = tokio::process::Command::new("/usr/bin/security")
             .args(args)
@@ -3894,6 +4100,134 @@ fn wire_login_child(mut child: zeron_harness::process::Child) -> LoginChildHandl
         });
     }
     (child, output, exit)
+}
+
+/// The user-facing reason a login child exited without credentials: its last
+/// output line, redacted (a CLI's last words can carry a url or a code).
+fn login_child_failure(code: Option<i32>, output: &Mutex<String>) -> String {
+    if code == Some(0) {
+        return "The sign-in finished without credentials.".into();
+    }
+    let output = lock(output);
+    let last = strip_ansi(&output)
+        .trim()
+        .lines()
+        .last()
+        .unwrap_or("sign-in failed")
+        .to_string();
+    zeron_harness::redact::redact_output(&last)
+}
+
+/// Wait for a captured `codex login` to write a ChatGPT token set into its
+/// throwaway home. An API-key login can't be refreshed by the vault, so it
+/// is refused rather than uploaded.
+async fn await_codex_capture(
+    auth_file: &Path,
+    output: &Mutex<String>,
+    exit: &Mutex<Option<Option<i32>>>,
+    state: &Mutex<TaskLoginState>,
+) -> Result<serde_json::Value, String> {
+    let complete = |auth: &serde_json::Value| {
+        let tokens = auth.get("tokens")?;
+        ["id_token", "access_token", "refresh_token"]
+            .iter()
+            .all(|k| {
+                tokens
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.is_empty())
+            })
+            .then_some(())
+    };
+    loop {
+        // Read before checking exit: the CLI may write and exit in one tick.
+        let exited = *lock(exit);
+        if let Some(auth) = read_json(auth_file) {
+            if complete(&auth).is_some() {
+                return Ok(auth);
+            }
+            if auth.get("OPENAI_API_KEY").is_some() && auth.get("tokens").is_none() {
+                return Err(
+                    "Codex signed in with an API key, which Cloud can't refresh — sign \
+                            in with ChatGPT, or save the key as an OpenAI API key instead."
+                        .into(),
+                );
+            }
+        }
+        if let Some(code) = exited {
+            return Err(login_child_failure(code, output));
+        }
+        {
+            let mut state = lock(state);
+            if state.url.is_none() {
+                state.url = scan_openai_url(&lock(output));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Kills a captured sign-in's CLI when its task ends or is aborted (cancel,
+/// a superseding sign-in, engine shutdown).
+struct KillOnDrop(Arc<Mutex<Option<zeron_harness::process::Child>>>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(child) = lock(&self.0).as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// Securely deletes a captured sign-in's throwaway home when dropped: every
+/// regular file is overwritten with zeros and synced before the tree is
+/// removed. Best effort by nature — copy-on-write filesystems and SSD wear
+/// levelling may keep old blocks — but nothing readable stays behind under
+/// the path, and a crash leaves only `.login-*` dirs the startup sweep
+/// reclaims.
+struct ShredOnDrop(PathBuf);
+
+impl Drop for ShredOnDrop {
+    fn drop(&mut self) {
+        shred_dir(&self.0);
+    }
+}
+
+fn shred_dir(dir: &Path) {
+    fn overwrite(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                overwrite(&entry.path());
+            } else if kind.is_file()
+                && let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(entry.path())
+                && let Ok(meta) = file.metadata()
+            {
+                use std::io::Write;
+                let zeros = [0u8; 4096];
+                let mut left = meta.len();
+                while left > 0 {
+                    let n = left.min(zeros.len() as u64) as usize;
+                    if file.write_all(&zeros[..n]).is_err() {
+                        break;
+                    }
+                    left -= n as u64;
+                }
+                let _ = file.sync_all();
+            }
+        }
+    }
+    overwrite(dir);
+    if let Err(error) = std::fs::remove_dir_all(dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(dir = %dir.display(), %error, "could not remove a sign-in home");
+    }
 }
 
 /// Wait briefly for the login child to print its authorize URL (empty when it
@@ -5134,5 +5468,232 @@ mod login_tests {
         assert!(routes.is_registered(&remote.login_id));
         accounts.cancel_login(&remote.login_id);
         assert!(!routes.is_registered(&remote.login_id));
+    }
+
+    /// A capture sink that records what it is handed (the vault upload in
+    /// production), failing with `fail` when given.
+    fn recording_sink(
+        fail: Option<&'static str>,
+    ) -> (CaptureSink, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let log = got.clone();
+        let sink: CaptureSink = Arc::new(move |value| {
+            let log = log.clone();
+            Box::pin(async move {
+                lock(&log).push(value);
+                fail.map_or(Ok(()), |message| Err(message.to_string()))
+            })
+        });
+        (sink, got)
+    }
+
+    /// [`poll_until_settled`] with room for a spawned CLI's own timing.
+    async fn poll_until_settled_slowly(accounts: &AgentAccounts, login_id: &str) -> AgentLoginPoll {
+        for _ in 0..200 {
+            let poll = accounts.poll_login(login_id).await.unwrap();
+            if poll.status != AgentLoginStatus::Pending {
+                return poll;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("login never settled");
+    }
+
+    fn no_sign_in_homes_left(root: &Path) -> bool {
+        std::fs::read_dir(config(root).root_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .all(|e| !e.file_name().to_string_lossy().starts_with(".login-"))
+            })
+            .unwrap_or(true)
+    }
+
+    #[tokio::test]
+    async fn claude_capture_hands_off_tokens_without_touching_this_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let accounts = loopback_accounts(tmp.path(), token_url);
+        // No live login: a regular sign-in would go live here at once.
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::ClaudeCode, sink)
+            .await
+            .unwrap();
+        assert_eq!(start.mode, AgentLoginMode::Browser);
+        let port = start.callback_port.unwrap();
+        let state = reqwest::Url::parse(&start.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let response = browser_get(port, &format!("/callback?code=good-code&state={state}")).await;
+        assert!(response.starts_with("HTTP/1.1 302"), "{response}");
+        let poll = poll_until_settled(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+
+        // The capturer got the claudeAiOauth blob…
+        let captured = lock(&captured).clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["accessToken"], "access");
+        assert_eq!(captured[0]["refreshToken"], "refresh");
+        assert!(captured[0]["expiresAt"].as_i64().unwrap() > now_ms());
+        assert!(
+            captured[0]["scopes"]
+                .as_array()
+                .is_some_and(|s| !s.is_empty())
+        );
+        // …and nothing landed on this device: no live credentials, no
+        // identity rewrite, no slot, no account row.
+        let config = config(tmp.path());
+        assert!(!config.claude_creds_file().exists());
+        assert!(!config.claude_config_file.exists());
+        assert!(accounts.read_slots(HarnessId::ClaudeCode).is_empty());
+        let snapshot = accounts.list(false).await.unwrap();
+        assert!(
+            !snapshot
+                .accounts
+                .iter()
+                .any(|a| a.harness == HarnessId::ClaudeCode)
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_capture_keeps_the_live_login_and_reports_upload_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let accounts = loopback_accounts(tmp.path(), token_url);
+        write_live_claude(tmp.path(), "acct-bob", "bob@example.com", "bob-token");
+        accounts.list(false).await.unwrap();
+        let live_before = std::fs::read_to_string(config(tmp.path()).claude_creds_file()).unwrap();
+        let slots_before = accounts.read_slots(HarnessId::ClaudeCode).len();
+
+        let (sink, captured) = recording_sink(Some("The vault refused that sign-in."));
+        let start = accounts
+            .start_capture_login(HarnessId::ClaudeCode, sink)
+            .await
+            .unwrap();
+        let state = reqwest::Url::parse(&start.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let page = browser_get(
+            start.callback_port.unwrap(),
+            &format!("/callback?code=good-code&state={state}"),
+        )
+        .await;
+        assert!(page.starts_with("HTTP/1.1 400"), "{page}");
+        assert!(page.contains("The vault refused that sign-in."), "{page}");
+        let poll = poll_until_settled(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Error);
+        assert_eq!(
+            poll.message.as_deref(),
+            Some("The vault refused that sign-in.")
+        );
+        assert_eq!(lock(&captured).len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(config(tmp.path()).claude_creds_file()).unwrap(),
+            live_before,
+            "the live login is never rewritten"
+        );
+        assert_eq!(
+            accounts.read_slots(HarnessId::ClaudeCode).len(),
+            slots_before
+        );
+    }
+
+    /// A stand-in `codex` CLI: prints the authorize url, then writes
+    /// `auth_json` into `$CODEX_HOME/auth.json` and exits.
+    #[cfg(unix)]
+    fn fake_codex(root: &Path, auth_json: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("fake-codex");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 echo 'Starting local login server on http://localhost:1455.' >&2\n\
+                 echo 'https://auth.openai.com/oauth/authorize?response_type=code&state=s' >&2\n\
+                 sleep 0.3\n\
+                 printf '%s' '{auth_json}' > \"$CODEX_HOME/auth.json\"\n\
+                 sleep 0.2\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_capture_uploads_auth_json_and_shreds_the_throwaway_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        accounts.override_cli(
+            HarnessId::Codex,
+            fake_codex(
+                tmp.path(),
+                r#"{"tokens":{"id_token":"id","access_token":"at","refresh_token":"rt","account_id":"acct"},"last_refresh":"2026-10-01T00:00:00Z"}"#,
+            ),
+        );
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::Codex, sink)
+            .await
+            .unwrap();
+        assert!(
+            start.url.starts_with("https://auth.openai.com/"),
+            "{}",
+            start.url
+        );
+        let poll = poll_until_settled_slowly(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+
+        let captured = lock(&captured).clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["tokens"]["refresh_token"], "rt");
+        // The throwaway home is gone and nothing touched this device's Codex.
+        assert!(no_sign_in_homes_left(tmp.path()));
+        assert!(!config(tmp.path()).codex_auth_file().exists());
+        assert!(accounts.read_slots(HarnessId::Codex).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_capture_refuses_an_api_key_login() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        accounts.override_cli(
+            HarnessId::Codex,
+            fake_codex(tmp.path(), r#"{"OPENAI_API_KEY":"sk-test"}"#),
+        );
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::Codex, sink)
+            .await
+            .unwrap();
+        let poll = poll_until_settled_slowly(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Error);
+        assert!(poll.message.unwrap().contains("API key"));
+        assert!(lock(&captured).is_empty(), "nothing is uploaded");
+        assert!(no_sign_in_homes_left(tmp.path()));
+    }
+
+    #[tokio::test]
+    async fn capture_is_offered_for_claude_and_codex_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        let (sink, _) = recording_sink(None);
+        assert!(
+            accounts
+                .start_capture_login(HarnessId::Grok, sink)
+                .await
+                .is_err()
+        );
     }
 }

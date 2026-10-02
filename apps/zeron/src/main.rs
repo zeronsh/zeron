@@ -253,7 +253,8 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
+            let config = engine_config_from_env();
+            runtime.block_on(sync_cli(config.ipc_port, &config.data_dir))
         }
         Some(Command::Mcp) => {
             // One bridge per agent session, and it only relays: stdio
@@ -265,7 +266,11 @@ fn main() -> anyhow::Result<()> {
                 .worker_threads(2)
                 .enable_all()
                 .build()?;
-            runtime.block_on(zeron_mcp::run(zeron_mcp::McpConfig::from_env()))
+            let mut config = zeron_mcp::McpConfig::from_env();
+            // The engine's IPC bearer lives in its data dir (the injected
+            // ZERON_IPC_TOKEN_FILE wins when present).
+            config.data_dir.get_or_insert_with(paths::data_dir);
+            runtime.block_on(zeron_mcp::run(config))
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
@@ -374,8 +379,8 @@ fn harness_from_env() -> zeron_engine::HarnessId {
 /// `zeron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
-async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
-    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
+async fn sync_cli(ipc_port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let client = zeron_rpc::connect_ipc(ipc_port, Some(data_dir))
         .await
         .map_err(|e| {
             anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is zeron running?")

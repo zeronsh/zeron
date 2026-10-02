@@ -16,11 +16,33 @@ the stdio tool-server subset is tiny, so no SDK dependency was taken.
 The engine can inject this server into a harness's MCP config with the
 originating chat in the environment:
 
-| Variable          | Meaning                                                       |
-| ----------------- | ------------------------------------------------------------- |
-| `ZERON_IPC_PORT`  | Engine to proxy (default 27654).                              |
-| `ZERON_CHAT_ID`   | The chat whose agent spawned this server.                     |
-| `ZERON_DEVICE_ID` | That chat's host device.                                      |
+| Variable               | Meaning                                                  |
+| ---------------------- | -------------------------------------------------------- |
+| `ZERON_IPC_PORT`       | Engine to proxy (default 27654).                         |
+| `ZERON_IPC_TOKEN_FILE` | The engine's IPC bearer file (see below).                |
+| `ZERON_CHAT_ID`        | The chat whose agent spawned this server.                |
+| `ZERON_DEVICE_ID`      | That chat's host device.                                 |
+
+### IPC authentication
+
+The IPC port is loopback-only, but loopback is not an identity: any local
+process could otherwise drive the engine (start agents, broker Cloud vault
+grants). Every engine start that binds the port mints a fresh 32-byte token
+and writes it to `{data_dir}/ipc-token` (owner-only `0600`, atomic replace;
+on Windows the file inherits `%LOCALAPPDATA%\Zeron`'s per-user ACL). The
+WebSocket handshake must carry `Authorization: Bearer <token>` (compared in
+constant time) and is refused with `401` otherwise; the browser `Origin`
+rejection (`403`) still applies on top. In-process (in-memory) transports are
+unaffected.
+
+Clients resolve the token at every dial — `$ZERON_IPC_TOKEN`, then the file
+named by `$ZERON_IPC_TOKEN_FILE`, then `{ZERON_DATA_DIR or ~/.zeron}/ipc-token`
+(`zeron_rpc::connect_ipc`) — so they follow the rotation across engine
+restarts. The engine hands injected servers the file PATH
+(`ZERON_IPC_TOKEN_FILE`), never the token itself: Claude receives this env on
+its command line (`--mcp-config <inline json>`), which other local users can
+read with `ps`. A client run against a different data dir (e.g. a viewport on
+a daemon's port) sets `ZERON_IPC_TOKEN_FILE` to the daemon's file.
 
 When `ZERON_CHAT_ID` is set, every `send_message` is prefixed with a
 `[Message from Zeron chat <title> (<id8>) …]` line so the receiving agent and the
@@ -64,7 +86,7 @@ finds them.
 
 The host engine stamps this server onto every run it drives
 (`RunRequest.mcp`, additive): the same `zeron` binary with `args: ["mcp"]`
-and the three variables above, pointed at the port the engine itself serves
+and the variables above, pointed at the port the engine itself serves
 (never a port it lost the bind race for). Each driver spells it in its own
 dialect and leaves the user's configured servers alone:
 
@@ -266,7 +288,7 @@ both the MCP transport and engine support concurrent chat runs.
 BIN=target/debug/zeron
 { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_chats","arguments":{"limit":5}}}'
-  sleep 5; } | ZERON_IPC_PORT=27655 $BIN mcp
+  sleep 5; } | ZERON_IPC_PORT=27655 ZERON_DATA_DIR=/path/to/that/engine/data $BIN mcp
 ```
 
 `create_chat` with `"prompt": "Reply with exactly the word pong", "wait": true`

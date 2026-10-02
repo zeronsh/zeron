@@ -7015,7 +7015,7 @@ impl Transcript {
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
-        let (sending, queued, elapsed_secs, seed, turn) = if let Some(doc_id) = &self.doc_override {
+        let (sending, queued, elapsed_secs, seed, turn, booting) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
             // the PARENT chat's live state into this tab. Liveness rides the
             // doc itself instead: the sink's assistant entry streams until
@@ -7033,7 +7033,7 @@ impl Transcript {
                 return None;
             }
             let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
-            (false, false, elapsed, flavour_seed(doc_id), last.created_at)
+            (false, false, elapsed, flavour_seed(doc_id), last.created_at, None)
         } else {
             let chat_id = self.chat_id.clone()?;
             // Failed-send state first: past the grace window the trailer IS
@@ -7056,7 +7056,7 @@ impl Transcript {
                         .into_any_element(),
                 );
             }
-            let (sending, queued, elapsed, turn) = {
+            let (sending, queued, elapsed, turn, booting) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                     return None;
@@ -7083,9 +7083,15 @@ impl Transcript {
                 // rolls out of that turn's word or an earlier send's.
                 let turn = if sending { send_started } else { turn_started }
                     .map_or(0, |t| t.timestamp_millis());
-                (sending, queued, elapsed, turn)
+                // The send waits for the chat's own Cloud machine to come up.
+                let booting = if sending {
+                    state.cloud_machine_booting(&chat_id)
+                } else {
+                    None
+                };
+                (sending, queued, elapsed, turn, booting)
             };
-            (sending, queued, elapsed, flavour_seed(&chat_id), turn)
+            (sending, queued, elapsed, flavour_seed(&chat_id), turn, booting)
         };
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
@@ -7109,6 +7115,13 @@ impl Transcript {
         }
         let word = if queued {
             "Queued — will send automatically"
+        } else if let Some(state) = booting {
+            // The send waits for the chat's own Cloud machine.
+            if state == zeron_proto::CloudState::Provisioning {
+                "Starting a Cloud machine"
+            } else {
+                "Waking the Cloud machine"
+            }
         } else if sending {
             "Sending"
         } else {
@@ -9059,6 +9072,12 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
+    // A Cloud machine's own setup: the machine, then its git steps.
+    match zeron_proto::cloud_setup_step(call) {
+        Some("clone" | "branch") => return crate::icons::GIT_BRANCH,
+        Some(_) => return crate::icons::CLOUD,
+        None => {}
+    }
     match call {
         ToolCall::Exec { .. } => crate::icons::TERMINAL,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,

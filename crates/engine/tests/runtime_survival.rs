@@ -233,6 +233,7 @@ fn rig_full(adopts_config: bool, turn_boundary: bool) -> Rig {
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
         mcp: None,
+        env: Default::default(),
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
         model: Some("process-1".into()),

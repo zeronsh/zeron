@@ -782,6 +782,9 @@ impl CodexHarness {
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
+        // Host-resolved credentials (a Cloud device's managed CODEX_HOME,
+        // GH_TOKEN, …). Absent on laptops: the CLI's own login is used.
+        crate::apply_run_env(&mut cmd, &request.env);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }

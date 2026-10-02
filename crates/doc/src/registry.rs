@@ -1115,6 +1115,7 @@ impl RegistryDoc {
             ("gitCheckedAt", opt_ms(space.git_checked_at)),
             ("checkoutId", opt_str(space.checkout_id.as_deref())),
             ("repositoryId", opt_str(space.repository_id.as_deref())),
+            ("githubRepo", opt_str(space.github_repo.as_deref())),
             ("createdAt", json!(space.created_at.timestamp_millis())),
         ]);
         self.write(KIND_SPACES, &space.id.clone(), OpKind::Upsert, set);
@@ -1161,6 +1162,7 @@ impl RegistryDoc {
         detected: bool,
         checkout_id: Option<&str>,
         repository_id: Option<&str>,
+        github_repo: Option<&str>,
         checked_at: DateTime<Utc>,
     ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_SPACES, space_id) {
@@ -1174,6 +1176,7 @@ impl RegistryDoc {
                 ("gitDetected", json!(detected)),
                 ("checkoutId", opt_str(checkout_id)),
                 ("repositoryId", opt_str(repository_id)),
+                ("githubRepo", opt_str(github_repo)),
                 ("gitCheckedAt", json!(checked_at.timestamp_millis())),
             ]),
         );
@@ -1625,6 +1628,7 @@ impl RegistryDoc {
                     ("gitCheckedAt", opt_ms(space.git_checked_at)),
                     ("checkoutId", opt_str(space.checkout_id.as_deref())),
                     ("repositoryId", opt_str(space.repository_id.as_deref())),
+                    ("githubRepo", opt_str(space.github_repo.as_deref())),
                     ("createdAt", json!(space.created_at.timestamp_millis())),
                 ]),
             );

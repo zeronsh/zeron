@@ -82,6 +82,13 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign in")?;
     let auth = Engine::build_auth(&config).await;
+    if let Some(runner) = auth.runner_identity() {
+        println!(
+            "This is a Cloud device ({}) — it authenticates with its enrolled key; there is nothing to sign in to.",
+            runner.device_id()
+        );
+        return Ok(());
+    }
     if !auth.workos_enabled() {
         println!("Auth is in dev mode (no WorkOS client id) — there is nothing to sign in to.");
         return Ok(());
@@ -126,6 +133,13 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign out")?;
     let auth = Engine::build_auth(&config).await;
+    if let Some(runner) = auth.runner_identity() {
+        println!(
+            "This is a Cloud device ({}) — it has no session to sign out of. Delete it from Settings → Cloud on another device instead.",
+            runner.device_id()
+        );
+        return Ok(());
+    }
     if !auth.workos_enabled() {
         // Dev mode has no live session, but clear any stale session.json from a
         // previous WorkOS-mode run so the next real run starts signed out.
@@ -161,12 +175,20 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
 pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
     let auth = Engine::build_auth(&config).await;
     let next_scope = Engine::initial_workspace_scope(&auth);
-    let scope = live_engine_scope(config.ipc_port)
+    let scope = live_engine_scope(config.ipc_port, &config.data_dir)
         .await
         .unwrap_or(next_scope);
     let account = account_status(scope, &auth.state());
     println!("Data dir: {}", config.data_dir.display());
     println!("Edge:     {}", config.edge_url);
+    if let Some(runner) = auth.runner_identity() {
+        println!(
+            "Runner:   Cloud device {} (org {}, user {})",
+            runner.device_id(),
+            runner.org_id(),
+            runner.user_id()
+        );
+    }
     println!("Mode:     {}", account.mode);
     println!("Auth:     {}", account.auth);
     match InstanceLock::holder(&config.data_dir) {
@@ -193,8 +215,8 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
 /// Prefer the immutable scope of a live runtime. Falling back to the next-boot
 /// derivation is correct when no engine is listening and tolerant of old
 /// daemons that predate EngineInfo.
-async fn live_engine_scope(ipc_port: u16) -> Option<WorkspaceScope> {
-    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
+async fn live_engine_scope(ipc_port: u16, data_dir: &std::path::Path) -> Option<WorkspaceScope> {
+    let client = zeron_rpc::connect_ipc(ipc_port, Some(data_dir))
         .await
         .ok()?;
     let value = client

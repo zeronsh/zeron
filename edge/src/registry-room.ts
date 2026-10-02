@@ -16,11 +16,16 @@
  * - `meta` — seq counter, gcFloor, per-device push attribution, backup marks.
  * - presence — memory-only by construction (15s client beats, rebroadcast).
  *
+ * Cloud runners (the Worker stamps RUNNER_DEVICE_HEADER for runner bearers)
+ * act as their device, not the user: every row delivery to them is filtered
+ * and every op they push must be on a row they host (registry-runner.ts).
+ *
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
-import { AUTH_USER_HEADER, apnsConfig, type Env } from "./env";
+import { chatHost, runnerCanSee, runnerOpRefusal } from "./registry-runner";
+import { AUTH_USER_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER, apnsConfig, type Env } from "./env";
 import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
 import {
   apnsPayload,
@@ -46,6 +51,18 @@ interface SocketState {
   device: string;
   /** Set once a valid hello established the session. */
   ready?: boolean;
+  /** Cloud runner socket: its verified device id. Rows are filtered and
+   * pushes ownership-checked for it. */
+  runner?: string;
+  /** The runner's account (logical Cloud device; JWT `cld`). */
+  runnerAccount?: string;
+}
+
+/** An op a runner pushed that it does not own — skipped, not fatal. */
+interface RejectedOp {
+  kind: string;
+  id: string;
+  error: string;
 }
 
 interface WireOp extends Op {}
@@ -169,6 +186,30 @@ export class RegistryRoom implements DurableObject {
     );
   }
 
+  /** What one reader may receive: everything for user callers, owned rows
+   * (plus all devices, and the projects of the chats it hosts) for a runner. */
+  private visible(rows: Row[], runner: string | undefined, _account: string | undefined): Row[] {
+    if (runner === undefined) return rows;
+    const spaces = this.hostedChatSpaces(runner);
+    return rows.filter((row) => runnerCanSee(runner, row, spaces));
+  }
+
+  /** The projects (`spaceId`s) of the live chats `device` hosts. */
+  private hostedChatSpaces(device: string): Set<string> {
+    const spaces = new Set<string>();
+    for (const raw of this.ctx.storage.sql.exec<{ fields: string }>(
+      "SELECT fields FROM rows WHERE kind = 'chats' AND deleted = 0"
+    )) {
+      try {
+        const fields = JSON.parse(raw.fields) as Record<string, unknown>;
+        if (fields.deviceId === device && typeof fields.spaceId === "string") spaces.add(fields.spaceId);
+      } catch {
+        /* a malformed row names no project */
+      }
+    }
+    return spaces;
+  }
+
   private rowsSince(cursor: number): Row[] {
     const out: Row[] = [];
     for (const raw of this.ctx.storage.sql.exec(
@@ -195,12 +236,26 @@ export class RegistryRoom implements DurableObject {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
+    const runner = request.headers.get(RUNNER_DEVICE_HEADER) || undefined;
+    const runnerAccount = runner === undefined ? undefined : request.headers.get(RUNNER_ACCOUNT_HEADER) || undefined;
+    // Defense in depth (the Worker refuses these too): a runner syncs rows
+    // and nothing else — no stats (push targets, push log), no APNs target
+    // registration (notification titles of every chat), no operator wipe.
+    if (runner !== undefined && !["/ws", "/rows", "/push"].includes(url.pathname)) {
+      return json({ error: "forbidden" }, 403);
+    }
 
     if (url.pathname === "/ws") {
-      const device = url.searchParams.get("device") ?? "";
+      // A runner's device identity is the verified one, never self-declared.
+      const device = runner ?? url.searchParams.get("device") ?? "";
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
-      const state: SocketState = { userId, device };
+      const state: SocketState = {
+        userId,
+        device,
+        ...(runner ? { runner } : {}),
+        ...(runnerAccount ? { runnerAccount } : {})
+      };
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
@@ -269,7 +324,7 @@ export class RegistryRoom implements DurableObject {
       const sinceRaw = url.searchParams.get("since");
       const sinceNum = sinceRaw === null ? NaN : Number(sinceRaw);
       const cursor = Number.isInteger(sinceNum) && sinceNum >= 0 ? sinceNum : null;
-      const device = url.searchParams.get("device") ?? "";
+      const device = runner ?? url.searchParams.get("device") ?? "";
       if (device !== "" && url.searchParams.get("beat") === "1") {
         const at = Date.now();
         this.presence.set(device, at);
@@ -286,9 +341,16 @@ export class RegistryRoom implements DurableObject {
         seq,
         full,
         gcFloor,
-        rows: full ? this.rowsSince(0) : this.rowsSince(cursor),
+        rows: this.visible(full ? this.rowsSince(0) : this.rowsSince(cursor), runner, runnerAccount),
         presence: Object.fromEntries(this.presence)
       });
+    }
+
+    // The Worker's chat2/blob gate for runners: who hosts this chat? Only
+    // reachable through the Worker, which asks the caller's own room.
+    if (url.pathname === "/chat-host" && request.method === "GET") {
+      const chat = url.searchParams.get("chat") ?? "";
+      return json({ deviceId: chatHost(this.loadRow("chats", chat)) ?? null });
     }
 
     if (url.pathname === "/push" && request.method === "POST") {
@@ -297,7 +359,7 @@ export class RegistryRoom implements DurableObject {
       // apply, same rows broadcast to live sockets; the ack is the response
       // body. LWW clocks make replayed batches apply zero ops, so
       // at-least-once delivery (including 0-RTT/early-data replays) is safe.
-      const device = url.searchParams.get("device") ?? "";
+      const device = runner ?? url.searchParams.get("device") ?? "";
       // Pre-read cap (the WS path gets this for free from MAX_FRAME_BYTES):
       // a legitimate batch is bounded well under this by MAX_BATCH_OPS ×
       // MAX_OP_BYTES; anything larger only burns this room's own CPU.
@@ -309,9 +371,14 @@ export class RegistryRoom implements DurableObject {
       } catch {
         return json({ error: "bad_push", message: "malformed body" }, 400);
       }
-      const outcome = this.applyPushBatch(device, frame);
+      const outcome = this.applyPushBatch(device, frame, runner);
       if (!outcome.ok) return json({ error: outcome.code, message: outcome.message }, 400);
-      return json({ batch: outcome.batch, seq: outcome.seq, applied: outcome.applied });
+      return json({
+        batch: outcome.batch,
+        seq: outcome.seq,
+        applied: outcome.applied,
+        ...(outcome.rejected.length > 0 ? { rejected: outcome.rejected } : {})
+      });
     }
 
     if (url.pathname === "/reset" && request.method === "POST") {
@@ -381,7 +448,7 @@ export class RegistryRoom implements DurableObject {
 
   private handleHello(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {
     const cursor = typeof frame.cursor === "number" && frame.cursor >= 0 ? frame.cursor : null;
-    if (typeof frame.device === "string" && frame.device.length > 0) {
+    if (state.runner === undefined && typeof frame.device === "string" && frame.device.length > 0) {
       state.device = frame.device;
     }
     state.ready = true;
@@ -393,7 +460,7 @@ export class RegistryRoom implements DurableObject {
     // reset/wipe) — both force `full`, and the client reacts by replacing
     // (former) or re-seeding the server (latter; see registry.rs).
     const full = cursor === null || cursor < gcFloor || cursor > seq;
-    const rows = full ? this.rowsSince(0) : this.rowsSince(cursor);
+    const rows = this.visible(full ? this.rowsSince(0) : this.rowsSince(cursor), state.runner, state.runnerAccount);
     send(ws, {
       t: "state",
       seq,
@@ -410,23 +477,37 @@ export class RegistryRoom implements DurableObject {
       send(ws, { t: "error", code: "bad_push", message: "hello first / malformed push" });
       return;
     }
-    const outcome = this.applyPushBatch(state.device, frame);
+    const outcome = this.applyPushBatch(state.device, frame, state.runner);
     if (!outcome.ok) {
       send(ws, { t: "error", code: outcome.code, message: outcome.message });
       return;
     }
-    send(ws, { t: "ack", batch: outcome.batch, seq: outcome.seq, applied: outcome.applied });
+    // Skipped runner ops are reported like invalid ones (error frames the
+    // client logs and counts); the ack still retires the batch.
+    for (const rejected of outcome.rejected.slice(0, 20)) {
+      send(ws, { t: "error", code: "not_owner", message: `${rejected.kind}/${rejected.id}: ${rejected.error}` });
+    }
+    send(ws, {
+      t: "ack",
+      batch: outcome.batch,
+      seq: outcome.seq,
+      applied: outcome.applied,
+      ...(outcome.rejected.length > 0 ? { rejected: outcome.rejected } : {})
+    });
   }
 
   /** Validate + atomically apply one op batch and broadcast merged rows to
    * every ready socket -- shared by the WS push and the HTTP `POST /push`
-   * fallback. The caller delivers the ack/error on its own transport. */
+   * fallback. The caller delivers the ack/error on its own transport.
+   * `runner` (a Cloud device) may only touch rows it hosts: its other ops
+   * are skipped and reported in `rejected`, the rest of the batch applies. */
   private applyPushBatch(
     device: string,
-    frame: Record<string, unknown>
+    frame: Record<string, unknown>,
+    runner?: string
   ):
     | { ok: false; code: string; message: string }
-    | { ok: true; batch: string; seq: number; applied: number } {
+    | { ok: true; batch: string; seq: number; applied: number; rejected: RejectedOp[] } {
     const batch = typeof frame.batch === "string" ? frame.batch : "";
     if (batch === "" || !Array.isArray(frame.ops)) {
       this.recordPush(device, false);
@@ -455,9 +536,17 @@ export class RegistryRoom implements DurableObject {
     /** Each touched session row as it was before this batch. */
     const sessionsBefore = new Map<string, Row | undefined>();
     let applied = 0;
+    const rejected: RejectedOp[] = [];
     for (const op of ops) {
       const key = `${op.kind} ${op.id}`;
       const before = touched.get(key) ?? this.loadRow(op.kind, op.id);
+      if (runner !== undefined) {
+        const refusal = runnerOpRefusal(runner, before, op);
+        if (refusal !== null) {
+          rejected.push({ kind: op.kind, id: op.id, error: refusal });
+          continue;
+        }
+      }
       if (op.kind === "sessions" && !sessionsBefore.has(op.id)) sessionsBefore.set(op.id, before);
       const { row, changed } = applyOp(before, op);
       if (!changed || row === undefined) continue;
@@ -471,6 +560,7 @@ export class RegistryRoom implements DurableObject {
       this.markBackupDirty();
     }
     this.recordPush(device, true);
+    if (rejected.length > 0) this.recordPush(device, false);
     const seq = applied > 0 ? nextSeq : this.seq();
     if (applied > 0) {
       // Merged full rows to EVERY ready socket (sender included -- its op may
@@ -482,11 +572,13 @@ export class RegistryRoom implements DurableObject {
       for (const socket of this.ctx.getWebSockets()) {
         const socketState = socket.deserializeAttachment() as SocketState | null;
         if (!socketState?.ready) continue;
-        send(socket, { t: "rows", seq, rows });
+        // A runner still gets the frame (possibly empty) so its cursor
+        // advances with the room's seq.
+        send(socket, { t: "rows", seq, rows: this.visible(rows, socketState.runner, socketState.runnerAccount) });
       }
       this.notifySessions(sessionsBefore, touched);
     }
-    return { ok: true, batch, seq, applied };
+    return { ok: true, batch, seq, applied, rejected };
   }
 
   // ── push notifications ───────────────────────────────────────────────────

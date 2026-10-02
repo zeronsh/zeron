@@ -609,6 +609,7 @@ mod tests {
         });
         let engine = crate::state::EngineHandle::from_test_client(rpc.client());
         let space = |id: &str, device: &str| zeron_proto::Space {
+            github_repo: None,
             id: id.into(),
             device_id: device.into(),
             path: format!("/{id}"),
