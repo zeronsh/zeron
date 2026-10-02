@@ -2157,6 +2157,7 @@ pub(super) struct AddSpaceFlow {
     drives: Loadable<Vec<DriveEntry>>,
     /// Requested browser path (`None` = the device's default, i.e. home).
     browser_path: Option<String>,
+    show_hidden: bool,
     /// The device's home (the path a `None` browse resolved to) — breadcrumbs
     /// fold everything up to here into the Home crumb.
     home: Option<String>,
@@ -2183,6 +2184,47 @@ pub(super) struct AddSpaceFlow {
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
     _search_events: Subscription,
+}
+
+fn device_supports_hidden_folders(device: &Device) -> bool {
+    matches!(device.platform.as_str(), "linux" | "macos" | "darwin")
+        && device.supports(zeron_proto::capabilities::LIST_FOLDERS_SHOW_HIDDEN_V1)
+}
+
+fn space_folder_params(
+    path: Option<&str>,
+    device_id: Option<&str>,
+    local_device_id: Option<&str>,
+    show_hidden: bool,
+) -> serde_json::Value {
+    let mut params = serde_json::Map::new();
+    if let Some(path) = path {
+        params.insert("path".into(), path.into());
+    }
+    if let Some(target) = device_id
+        && local_device_id != Some(target)
+    {
+        params.insert("targetDeviceId".into(), target.into());
+    }
+    if show_hidden {
+        params.insert("showHidden".into(), true.into());
+    }
+    serde_json::Value::Object(params)
+}
+
+/// GPUI normalizes shifted punctuation on macOS (⌘⇧. arrives as cmd->).
+fn hidden_folders_shortcut(key: &Keystroke) -> bool {
+    let modifiers = key.modifiers;
+    if modifiers.alt || modifiers.function {
+        return false;
+    }
+    if cfg!(target_os = "macos") {
+        modifiers.platform
+            && !modifiers.control
+            && ((modifiers.shift && key.key == ".") || (!modifiers.shift && key.key == ">"))
+    } else {
+        modifiers.control && !modifiers.platform && !modifiers.shift && key.key == "h"
+    }
 }
 
 /// Folder crumbs shown before the middle folds into `…`, and how many of the
@@ -5214,6 +5256,7 @@ impl Shell {
             browser: Loadable::Idle,
             drives: Loadable::Idle,
             browser_path: None,
+            show_hidden: false,
             home: None,
             browser_repo: false,
             active: 0,
@@ -5587,6 +5630,16 @@ impl Shell {
         };
         flow.focus_pending = true;
         let device_id = flow.device.as_ref().map(|d| d.id.clone());
+        let params = space_folder_params(
+            path.as_deref(),
+            device_id.as_deref(),
+            local.as_deref(),
+            flow.show_hidden
+                && flow
+                    .device
+                    .as_ref()
+                    .is_some_and(device_supports_hidden_folders),
+        );
         let went_home = path.is_none();
         flow.browser_path = path.clone();
         flow.browser = Loadable::Loading;
@@ -5598,23 +5651,7 @@ impl Shell {
             return;
         };
         flow.load_task = Some(cx.spawn(async move |this, cx| {
-            let mut params = serde_json::Map::new();
-            if let Some(p) = &path {
-                params.insert("path".into(), serde_json::Value::String(p.clone()));
-            }
-            // Only target remote devices — local calls skip the relay.
-            if let (Some(target), local) = (&device_id, &local)
-                && local.as_deref() != Some(target.as_str())
-            {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(target.clone()),
-                );
-            }
-            let result = engine
-                .client()
-                .call(methods::LIST_FOLDERS, serde_json::Value::Object(params))
-                .await;
+            let result = engine.client().call(methods::LIST_FOLDERS, params).await;
             this.update(cx, |shell, cx| {
                 if let Some(flow) = shell.add_space.as_mut() {
                     flow.browser = match result {
@@ -5637,6 +5674,29 @@ impl Shell {
             })
             .ok();
         }));
+    }
+
+    /// Reload the current folder without changing the search query.
+    fn toggle_space_hidden_folders(&mut self, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        if flow.step != ProjectStep::Folders
+            || !flow
+                .device
+                .as_ref()
+                .is_some_and(device_supports_hidden_folders)
+        {
+            return;
+        }
+        flow.show_hidden = !flow.show_hidden;
+        let path = flow
+            .browser
+            .ready()
+            .map(|listing| listing.path.clone())
+            .or_else(|| flow.browser_path.clone());
+        self.load_space_folders(path, cx);
+        cx.notify();
     }
 
     /// Create the space for the browser's current folder.
@@ -5769,6 +5829,13 @@ impl Shell {
     /// goes up, esc closes. (Typing `/` also descends — see the Edited
     /// subscription.)
     fn add_space_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        if hidden_folders_shortcut(&event.keystroke) {
+            if !event.is_held {
+                self.toggle_space_hidden_folders(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         // ←/→ act on the FOLDERS, not the text cursor — the palette is a
         // navigator first; queries are short and edited with ⌫.
         match event.keystroke.key.as_str() {
@@ -5899,6 +5966,12 @@ impl Shell {
             window.focus(&flow.search.focus_handle(cx), cx);
         }
         let step = flow.step;
+        let show_hidden = flow.show_hidden;
+        let can_show_hidden = step == ProjectStep::Folders
+            && flow
+                .device
+                .as_ref()
+                .is_some_and(device_supports_hidden_folders);
         let search = flow.search.clone();
         let focus = flow.focus.clone();
         let scroll = flow.list_scroll.clone();
@@ -6365,6 +6438,47 @@ impl Shell {
                 el.child(command_palette::command_key_hint(&theme, "←", "Back"))
             })
             .child(command_palette::command_key_hint(&theme, "Esc", "Close"))
+            .when(can_show_hidden, |el| {
+                el.child(
+                    div()
+                        .id("project-show-hidden")
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .cursor_pointer()
+                        .role(gpui::Role::CheckBox)
+                        .aria_label("Show hidden folders")
+                        .aria_toggled(if show_hidden {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_space_hidden_folders(cx);
+                        }))
+                        .child(
+                            div()
+                                .size(px(12.0))
+                                .border_1()
+                                .border_color(theme.text_muted)
+                                .rounded(px(3.0))
+                                .when(show_hidden, |el| {
+                                    el.child(
+                                        icon(icons::CHECK).size(px(10.0)).text_color(theme.text),
+                                    )
+                                }),
+                        )
+                        .child(command_palette::command_key_hint(
+                            &theme,
+                            if cfg!(target_os = "macos") {
+                                "⌘⇧."
+                            } else {
+                                "Ctrl H"
+                            },
+                            "Show hidden folders",
+                        )),
+                )
+            })
             .when(step == ProjectStep::Folders, |el| {
                 el.child(div().flex_1()).child(
                     div()
@@ -6794,6 +6908,59 @@ mod project_flow_tests {
     use super::*;
 
     #[test]
+    fn hidden_folders_shortcut_uses_the_desktop_platform() {
+        for combo in ["cmd-shift-.", "cmd->"] {
+            assert_eq!(
+                hidden_folders_shortcut(&Keystroke::parse(combo).unwrap()),
+                cfg!(target_os = "macos"),
+            );
+        }
+        assert_eq!(
+            hidden_folders_shortcut(&Keystroke::parse("ctrl-h").unwrap()),
+            !cfg!(target_os = "macos"),
+        );
+        for combo in ["h", ".", "cmd-.", "ctrl-shift-h", "ctrl-alt-h"] {
+            assert!(!hidden_folders_shortcut(&Keystroke::parse(combo).unwrap()));
+        }
+    }
+
+    #[test]
+    fn hidden_folders_require_a_supported_platform_and_capability() {
+        for platform in ["linux", "macos", "darwin", "windows"] {
+            let mut device: Device = serde_json::from_value(serde_json::json!({
+                "id": "remote", "name": "Server", "platform": platform,
+            }))
+            .unwrap();
+            assert!(!device_supports_hidden_folders(&device));
+            device
+                .capabilities
+                .push(zeron_proto::capabilities::LIST_FOLDERS_SHOW_HIDDEN_V1.into());
+            assert_eq!(
+                device_supports_hidden_folders(&device),
+                platform != "windows"
+            );
+        }
+    }
+
+    #[test]
+    fn folder_params_only_send_show_hidden_when_enabled() {
+        assert_eq!(
+            space_folder_params(None, Some("local"), Some("local"), false),
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            space_folder_params(Some("/projects"), Some("remote"), Some("local"), false),
+            serde_json::json!({"path": "/projects", "targetDeviceId": "remote"}),
+        );
+        assert_eq!(
+            space_folder_params(Some("/projects"), Some("remote"), Some("local"), true),
+            serde_json::json!({
+                "path": "/projects", "targetDeviceId": "remote", "showHidden": true,
+            }),
+        );
+    }
+
+    #[test]
     fn deep_crumb_trails_fold_all_but_the_deepest_folders() {
         let mut short = vec!["a", "b", "c"];
         assert!(fold_crumb_folders(&mut short).is_empty());
@@ -6816,7 +6983,8 @@ mod project_flow_tests {
                 let mut state = AppState::new();
                 state.devices = serde_json::from_value(serde_json::json!([
                     {"id":"local","name":"Studio","platform":"macos","lastSeenAt":null},
-                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
+                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null,
+                     "capabilities":[zeron_proto::capabilities::LIST_FOLDERS_SHOW_HIDDEN_V1]}
                 ]))
                 .unwrap();
                 state
@@ -6839,6 +7007,7 @@ mod project_flow_tests {
             shell.open_add_space(cx);
             assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Devices);
             assert!(shell.add_space.as_ref().unwrap().device.is_none());
+            assert!(!shell.add_space.as_ref().unwrap().show_hidden);
             let search = shell.add_space.as_ref().unwrap().search.clone();
             search.update(cx, |input, cx| input.set_text("server", cx));
             assert_eq!(shell.add_space_devices(cx).len(), 1);
@@ -6861,11 +7030,36 @@ mod project_flow_tests {
                 entries: Vec::new(),
                 truncated: false,
             });
+            search.update(cx, |input, cx| input.set_text("config", cx));
+            shell.add_space_key(
+                &gpui::KeyDownEvent {
+                    keystroke: Keystroke::parse(if cfg!(target_os = "macos") {
+                        "cmd->"
+                    } else {
+                        "ctrl-h"
+                    })
+                    .unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                cx,
+            );
+            let flow = shell.add_space.as_mut().unwrap();
+            assert!(flow.show_hidden);
+            assert_eq!(flow.browser_path.as_deref(), Some("/projects"));
+            assert_eq!(flow.search.read(cx).text(), "config");
+            flow.browser = Loadable::Ready(FolderListing {
+                path: "/projects".into(),
+                entries: Vec::new(),
+                truncated: false,
+            });
             shell.add_space_go_up(cx);
             assert_eq!(
                 shell.add_space.as_ref().unwrap().step,
                 ProjectStep::Locations
             );
+            shell.toggle_space_hidden_folders(cx);
+            assert!(shell.add_space.as_ref().unwrap().show_hidden);
             assert!(shell.add_space.as_ref().unwrap().browser.ready().is_none());
             shell.add_space_go_up(cx);
             let flow = shell.add_space.as_ref().unwrap();
@@ -6876,6 +7070,8 @@ mod project_flow_tests {
             // Slash navigation only applies to folders, never device search.
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
+            shell.open_add_space(cx);
+            assert!(!shell.add_space.as_ref().unwrap().show_hidden);
         });
     }
 }
