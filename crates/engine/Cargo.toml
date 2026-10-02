@@ -13,6 +13,7 @@ zeron-sync.workspace = true
 zeron-harness.workspace = true
 zeron-rpc.workspace = true
 zeron-update.workspace = true
+zeron-workflow.workspace = true
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -28,6 +29,8 @@ chrono.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
+# JSON Schema validation of child-ask results (pure Rust).
+boon = "0.6"
 toml = "0.8"
 libc.workspace = true
 gethostname.workspace = true
@@ -35,6 +38,8 @@ tokio-util = { workspace = true, features = ["rt"] }
 sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
+# `files.grep` in workflow scripts (pure Rust; already in the tree via `ignore`).
+regex = "1"
 nucleo-matcher.workspace = true
 
 tempfile.workspace = true
@@ -43,6 +48,8 @@ tempfile.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
+# Paused-clock tests of backoff and stall notices.
+tokio = { workspace = true, features = ["test-util"] }
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 zip.workspace = true
 tokio-tungstenite.workspace = true

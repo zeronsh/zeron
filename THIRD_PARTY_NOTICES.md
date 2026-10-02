@@ -23,6 +23,36 @@ Zeron also uses the following editor foundations from the pinned `zeronsh/gpui-c
 
 Zeron's own source code is licensed under the terms in `LICENSE`. Bundled third-party components retain their respective licenses and notices.
 
+## ZCode goal prompts
+
+The goal-mode verifier and continuation prompts in `crates/engine/src/goal.rs` are
+adapted from the goal-verification prompts of
+[ZCode](https://github.com/zai-org/ZCode) (Apache-2.0, zai-org), which are in part
+reproduced in substance and several phrases verbatim (the completion-audit and
+"fail if any requirement is missing…" wording). They are modified for Zeron: the
+verifier is a read-only child chat that inspects the workspace, and the objective is
+wrapped in an escaped `<untrusted_objective>` block.
+
+## Starlark
+
+Workflow scripts (`crates/workflow`) run on the
+[`starlark`](https://github.com/facebook/starlark-rust) interpreter by Meta
+(Apache-2.0), pinned to `=0.14.2` with its `starlark_derive` and `allocative`
+companions. `blake3` is built with the `pure` feature so mobile and musl builds need
+no C compiler.
+
+## ZCode dynamic workflows
+
+The workflow actor instructions and the per-ask epilogue in
+`crates/engine/src/workflow/prompts.rs`, and the authoring guide's patterns
+(`docs/workflow-guide.md`: fresh eyes, independent confirmation, deterministic gates,
+the recommended result shape), are adapted from
+[ZCode](https://github.com/zai-org/ZCode)'s dynamic-workflow subagent prompt and
+authoring skill (Apache-2.0, zai-org); a few phrases are reproduced verbatim ("Ground
+every claim in something you read or ran", "A check counts as passed only if you
+executed it here"). They are modified for Zeron: the script language is Starlark, actors
+are persistent child chats, and untrusted text is escaped where it is embedded.
+
 ## Symbols
 
 Zeron bundles the SVG icon set and filename/folder associations from

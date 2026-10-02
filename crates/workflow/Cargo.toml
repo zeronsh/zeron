@@ -1,0 +1,23 @@
+[package]
+name = "zeron-workflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Dynamic workflows: the Starlark runtime, static analysis and run-state reducer (pure; no engine coupling)"
+
+[dependencies]
+zeron-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+# Pinned: pre-1.0, and the API moves between minors (0.14 made `Module`
+# closure-scoped). Apache-2.0 (see THIRD_PARTY_NOTICES.md).
+starlark = "=0.14.2"
+starlark_derive = "=0.14.2"
+allocative = "0.3"
+# starlark pulls blake3, whose default build compiles C NEON code on aarch64;
+# `pure` keeps the Android / iOS / musl builds free of a C compiler.
+blake3 = { version = "=1.8.2", features = ["pure"] }

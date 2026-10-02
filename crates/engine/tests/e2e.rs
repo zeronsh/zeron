@@ -1220,6 +1220,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
 
         let doc = SessionDoc::init(CHAT).unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "m-user".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -1322,6 +1323,7 @@ async fn recover_stale_journal_settles_chips_in_completed_local_entries() {
     let doc = SessionDoc::init(CHAT).unwrap();
     for (id, device) in [("local", device_id), ("remote", "other-device")] {
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: id.into(),
             role: MessageRole::Assistant,
             parts: vec![
@@ -1393,6 +1395,7 @@ async fn subagent_done_without_a_live_sink_updates_a_persisted_chip() {
         .unwrap()
         .doc()
         .push_message(&SessionMessageEntry {
+            origin: None,
             id: "old-assistant".into(),
             role: MessageRole::Assistant,
             parts: vec![spawn_chip("old-spawn", SubagentStatus::Running)],
@@ -1573,6 +1576,7 @@ async fn respond_input_resolves_pending_question() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
                 let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                    meta: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -1728,6 +1732,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
                 let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                    meta: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -1921,6 +1926,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                     // (empty answers) and cancels the token — like a real CLI
                     // being torn down, the stream then ends WITHOUT a Done.
                     let _ = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                        meta: None,
                         id: "q1".into(),
                         header: "Pick".into(),
                         question: "Which one?".into(),
@@ -2070,6 +2076,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
                 let question = zeron_proto::UserInputQuestion {
+                    meta: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),

@@ -47,6 +47,7 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
     // A real transcript doc, saved the way the local runtime saves it.
     let doc = SessionDoc::init("chat-doc").expect("init doc");
     doc.push_message(&SessionMessageEntry {
+        origin: None,
         id: "m1".into(),
         role: MessageRole::User,
         parts: vec![MessagePart::Text {

@@ -17,6 +17,7 @@ members = [
     "crates/mobile",
     "crates/client",
     "crates/mcp",
+    "crates/workflow",
     "crates/text",
     "apps/zeron",
 ]
@@ -43,6 +44,7 @@ zeron-mobile = { path = "crates/mobile" }
 zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }
+zeron-workflow = { path = "crates/workflow" }
 zeron-text = { path = "crates/text" }
 
 # CRDT

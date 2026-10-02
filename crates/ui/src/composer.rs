@@ -1819,6 +1819,14 @@ enum CaretAffinity {
     Downstream,
 }
 
+/// A workflow approval question, parsed once per request.
+struct WorkflowApprovalUi {
+    request_id: String,
+    model: crate::workflow::approval::ApprovalModel,
+    highlight: Option<zeron_syntax::HighlightedDocument>,
+    script_open: bool,
+}
+
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
@@ -4993,6 +5001,10 @@ impl Render for ComposerInput {
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
     WorkspaceCommand(WorkspaceCommand),
+    /// Open another chat (the goal tray's link to a verifier chat).
+    OpenChat {
+        chat_id: String,
+    },
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -5337,6 +5349,8 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    /// `/goal` — completing it inserts the command for an objective to follow.
+    Goal,
 }
 
 impl WorkspaceCommand {
@@ -5366,6 +5380,12 @@ impl WorkspaceCommand {
                 true,
             ),
             (Self::Stop, "stop", "Zeron: stop the active run", true),
+            (
+                Self::Goal,
+                "goal",
+                "Zeron: keep working until a verifier says the objective is met",
+                true,
+            ),
         ]
     }
 }
@@ -5666,8 +5686,12 @@ pub struct Composer {
     /// connected"). Chat-scoped failures survive navigation and render only
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
-    failure_key: Option<String>,
+    pub(crate) failure_key: Option<String>,
     wizard: Option<Wizard>,
+    /// The structured block of a workflow approval question: the model
+    /// parsed from the question's `meta`, its highlighted excerpt, and
+    /// whether the script is unfolded. Keyed by request id.
+    workflow_approval: Option<WorkflowApprovalUi>,
     wizard_focus: FocusHandle,
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
@@ -5699,6 +5723,16 @@ pub struct Composer {
     /// Rows awaiting a host-authoritative removal acknowledgement. They stay
     /// visible but inert until the host wins the race against queue delivery.
     pub(crate) queue_removing: HashSet<String>,
+    /// The agent's checklist tray: latest list of the selected chat, and the
+    /// per-chat open/fold state (in memory, like the right-pane flags).
+    pub(crate) todo_cache: crate::todo_panel::TodoCache,
+    pub(crate) todo_panels: HashMap<String, crate::todo_panel::TodoPanelState>,
+    pub(crate) todo_scroll: gpui::ScrollHandle,
+    /// The goal tray's per-chat presentation state, scroll, and the one-second
+    /// repaint that keeps its elapsed time moving while a goal runs.
+    pub(crate) goal_panels: HashMap<String, crate::goal_panel::GoalPanelState>,
+    pub(crate) goal_scroll: gpui::ScrollHandle,
+    pub(crate) goal_ticker: Option<Task<()>>,
     /// Whether the modifier overlay should currently reveal the queue hint.
     /// The shell owns modifier tracking and clears this on window deactivation.
     queue_shortcut_revealed: bool,
@@ -5954,6 +5988,7 @@ impl Composer {
             launching_new_chat: false,
             failure: None,
             wizard: None,
+            workflow_approval: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             failure_key: None,
@@ -5979,6 +6014,12 @@ impl Composer {
             queue_full_preview: None,
             queue_previews: HashMap::new(),
             queue_removing: HashSet::new(),
+            todo_cache: Default::default(),
+            todo_panels: HashMap::new(),
+            todo_scroll: gpui::ScrollHandle::new(),
+            goal_panels: HashMap::new(),
+            goal_scroll: gpui::ScrollHandle::new(),
+            goal_ticker: None,
             queue_shortcut_revealed: false,
             expanded_mode: false,
             flip_epoch: 0,
@@ -7452,6 +7493,15 @@ impl Composer {
         else {
             return;
         };
+        if command.workspace_command == Some(WorkspaceCommand::Goal) {
+            // Takes an argument: leave `/goal ` in the input for the objective.
+            self.input.update(cx, |input, cx| {
+                input.replace_plain_token(token.range, "/goal ", cx)
+            });
+            self.reset_slash(None, cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = command.workspace_command {
             self.execute_workspace_command(action, token.range, cx);
             return;
@@ -7951,6 +8001,10 @@ impl Composer {
         // Leading indentation distinguishes literal Markdown from native commands
         // and skill invocations. Only the empty-content check may trim the draft.
         let text = self.input.read(cx).text().to_string();
+        // `/goal …` is a Zeron command with arguments: it never reaches the agent.
+        if self.run_goal_input(&text, cx) {
+            return;
+        }
         if let Some(action) = self
             .slash_cache
             .get(&self.slash.context)
@@ -8239,6 +8293,7 @@ impl Composer {
         // Optimistic echo (client-minted id doubles as the persisted message id,
         // so the doc frame dedups it away).
         let echo = SessionMessageEntry {
+            origin: None,
             id: message_id.clone(),
             role: zeron_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -8404,7 +8459,7 @@ impl Composer {
                     // flicker. A queued message has no transcript echo at all;
                     // its queue row is the only representation until dispatch.
                     if should_publish_optimistic_echo(queue) {
-                        let refreshed = SessionMessageEntry {
+                        let refreshed = SessionMessageEntry { origin: None,
                             id: message_id.clone(),
                             role: zeron_doc::MessageRole::User,
                             parts: vec![MessagePart::Text {
@@ -9018,7 +9073,7 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -9031,6 +9086,51 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        // A workflow approval carries its analysed graph in `meta`: draw that
+        // instead of the plain text (which stays the contract for clients
+        // that cannot). The answers are the stock options either way.
+        let approval_meta = crate::workflow::approval::parse_meta(question.meta.as_ref());
+        match (&approval_meta, &self.workflow_approval) {
+            (Some(meta), current)
+                if current
+                    .as_ref()
+                    .is_none_or(|a| a.request_id != wizard.request_id) =>
+            {
+                let model = crate::workflow::approval::ApprovalModel::from_meta(meta);
+                let highlight = crate::workflow::approval::highlight_excerpt(&model.excerpt);
+                self.workflow_approval = Some(WorkflowApprovalUi {
+                    request_id: wizard.request_id.clone(),
+                    model,
+                    highlight,
+                    // Capture knob: `ZERON_WORKFLOW_APPROVAL=script`.
+                    script_open: std::env::var("ZERON_WORKFLOW_APPROVAL").as_deref()
+                        == Ok("script"),
+                });
+            }
+            (None, Some(_)) => self.workflow_approval = None,
+            _ => {}
+        }
+        let is_approval = approval_meta.is_some();
+        let approval_block = approval_meta.is_some().then(|| {
+            let ui = self.workflow_approval.as_ref().expect("set above");
+            let this = cx.entity().downgrade();
+            crate::workflow::approval::approval_block(
+                &ui.model,
+                ui.highlight.as_ref(),
+                ui.script_open,
+                move |_, cx| {
+                    this.update(cx, |composer, cx| {
+                        if let Some(ui) = composer.workflow_approval.as_mut() {
+                            ui.script_open = !ui.script_open;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                &theme,
+                window,
+            )
+        });
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -9158,15 +9258,18 @@ impl Composer {
                                 )
                             }),
                     )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
+                    .when(approval_block.is_none(), |el| {
+                        el.child(
+                            div()
+                                .mt(px(6.0))
+                                .text_size(crate::typography::ui_rems(15.0))
+                                .line_height(px(20.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(question.question.clone())),
+                        )
+                    })
+                    .children(approval_block)
                     .when(question.multi_select, |el| {
                         el.child(
                             div()
@@ -9185,17 +9288,20 @@ impl Composer {
                             .children(options),
                     )
                     // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+                    // input entity). An approval is a yes or a no: nothing to
+                    // type, and a typed reply would not match either label.
+                    .when(!is_approval, |el| {
+                        el.child(
+                            div()
+                                .mt(px(12.0))
+                                .border_t_1()
+                                .border_color(crate::theme::hairline(0.06))
+                                .pt(px(12.0))
+                                .pb(px(4.0))
+                                .px(px(4.0))
+                                .child(self.input.clone()),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -10100,7 +10206,7 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let wizard = self.render_wizard(window, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 
@@ -10115,6 +10221,19 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_comments(cx).len(),
             );
+        // The checklist tray stacks above the queue (or directly above the
+        // composer), one step narrower than what follows it.
+        let has_queue = !self.state.read(cx).queue.is_empty();
+        let todo_panel = self.render_todo_panel(has_queue, window, cx);
+        // The goal tray tops the stack, one step narrower than each tray below.
+        let below = usize::from(has_queue) + usize::from(todo_panel.is_some());
+        let container = container
+            .when_some(self.render_goal_panel(below, window, cx), |el, panel| {
+                el.child(motion::fade_quick("composer-goal", div().child(panel)))
+            });
+        let container = container.when_some(todo_panel, |el, panel| {
+            el.child(motion::fade_quick("composer-todo", div().child(panel)))
+        });
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {
@@ -11445,7 +11564,7 @@ mod tests {
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 12);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
@@ -11454,7 +11573,7 @@ mod tests {
             workspace_command_for_text("/zeron:zeron:model", &rows),
             Some(WorkspaceCommand::Model)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 12);
         let draft_rows = with_workspace_commands(vec![], false);
         assert_eq!(draft_rows.len(), 4);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
@@ -14092,6 +14211,7 @@ mod tests {
 
     fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
         UserInputQuestion {
+            meta: None,
             id: id.into(),
             header: "Header".into(),
             question: format!("Question {id}"),
@@ -14991,6 +15111,7 @@ mod tests {
             q.prefill = Some("  initial\ntext\n".into());
             q.multiline = true;
             vec![SessionMessageEntry {
+                origin: None,
                 id: "assistant".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Input {
@@ -15062,6 +15183,7 @@ mod tests {
             resolved: false,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
+            origin: None,
             id: "m".into(),
             role: MessageRole::Assistant,
             parts,
@@ -15096,6 +15218,7 @@ mod tests {
         let t = vec![
             entry(Some(MessageStatus::Aborted), vec![input_part.clone()]),
             SessionMessageEntry {
+                origin: None,
                 id: "m2".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Text {
@@ -15129,6 +15252,7 @@ mod tests {
         // found (a last-entry-only read vanished the panel exactly when the
         // user typed, bricking the answer flow).
         let user_echo = SessionMessageEntry {
+            origin: None,
             id: "u2".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {

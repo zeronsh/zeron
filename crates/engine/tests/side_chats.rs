@@ -53,6 +53,7 @@ impl Harness for Capture {
 }
 fn message(id: &str, role: MessageRole, text: &str, status: MessageStatus) -> SessionMessageEntry {
     SessionMessageEntry {
+        origin: None,
         duration_ms: None,
         id: id.into(),
         role,

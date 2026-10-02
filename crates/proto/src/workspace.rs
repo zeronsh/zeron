@@ -15,6 +15,13 @@ pub mod capabilities {
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
+    /// The host runs goal mode: it executes `goal` doc commands and drives the
+    /// chat's rounds (`docs/goal-mode.md`).
+    pub const GOAL_MODE_V1: &str = "goal-mode-v1";
+    /// The host runs dynamic workflows: it serves the `Workflow*` RPCs, executes
+    /// `workflow` doc commands and projects runs into `meta.workflowRuns`
+    /// (`docs/workflows.md`).
+    pub const WORKFLOWS_V1: &str = "workflows-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -24,6 +31,8 @@ pub mod capabilities {
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         HARNESS_UPDATES_V1,
+        GOAL_MODE_V1,
+        WORKFLOWS_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -103,7 +112,9 @@ mod tests {
                     "message-queue-attachments-v1",
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
-                    "harness-updates-v1"
+                    "harness-updates-v1",
+                    "goal-mode-v1",
+                    "workflows-v1"
                 ],
             })
         );
