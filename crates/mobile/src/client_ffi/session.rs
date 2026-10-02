@@ -643,3 +643,6 @@ impl SessionHandle {
         Ok(self.inner.retry_delivery()?)
     }
 }
+
+#[cfg(test)]
+mod tests;

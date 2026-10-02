@@ -1084,3 +1084,6 @@ pub struct PushPrefs {
     pub input: bool,
     pub failed: bool,
 }
+
+#[cfg(test)]
+mod tests;
