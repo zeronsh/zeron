@@ -1956,6 +1956,17 @@ struct ActiveChatRow {
     branch: Option<String>,
     change_request: Option<zeron_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
+    /// Workflow run lines drawn under the row (live runs, and ended ones the
+    /// user has not opened the chat since), and how many more there are.
+    workflow_lines: Vec<crate::workflow::model::RunLine>,
+    workflow_overflow: u32,
+}
+
+impl ActiveChatRow {
+    /// Height the run lines add under the row.
+    fn workflow_strip(&self) -> f32 {
+        crate::workflow::sidebar::strip_height(self.workflow_lines.len())
+    }
 }
 
 pub(super) fn compare_sidebar_chats(
@@ -4343,6 +4354,14 @@ impl Shell {
             )),
             SidebarOrganization::InOneList => None,
         };
+        let (workflow_lines, workflow_overflow) = match state.workflow_activity.chats.get(&chat.id)
+        {
+            Some(briefs) => {
+                let seen = &self.settings.workflow_seen_runs;
+                crate::workflow::model::select_lines(briefs, &|id| seen.iter().any(|s| s == id))
+            }
+            _ => (Vec::new(), 0),
+        };
         ActiveChatRow {
             status,
             chat: chat.clone(),
@@ -4350,6 +4369,8 @@ impl Shell {
             branch,
             change_request,
             group,
+            workflow_lines,
+            workflow_overflow,
         }
     }
 
@@ -4415,7 +4436,7 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     row.branch.is_some(),
                     row.change_request.is_some(),
-                )
+                ) + row.workflow_strip()
             })
             .collect();
         let visible_pinned_ids = std::sync::Arc::new(
@@ -4597,6 +4618,8 @@ impl Shell {
                     branch,
                     change_request,
                     group: _,
+                    workflow_lines,
+                    workflow_overflow,
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
@@ -4738,7 +4761,38 @@ impl Shell {
                         },
                     ))
                     .into_any_element();
-                rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
+                // Run lines hang under the card, inside the same list slot.
+                let strip = if is_moving {
+                    0.0
+                } else {
+                    crate::workflow::sidebar::strip_height(workflow_lines.len())
+                };
+                let element = if strip > 0.0 {
+                    let shell = cx.entity().downgrade();
+                    let chat_id = chat.id.clone();
+                    let open: crate::workflow::sidebar::OpenRun =
+                        std::rc::Rc::new(move |run_id, _, cx| {
+                            shell
+                                .update(cx, |this, cx| {
+                                    this.open_chat_run(chat_id.clone(), run_id, cx)
+                                })
+                                .ok();
+                        });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(element)
+                        .child(crate::workflow::sidebar::run_lines(
+                            &workflow_lines,
+                            workflow_overflow,
+                            theme,
+                            open,
+                        ))
+                        .into_any_element()
+                } else {
+                    element
+                };
+                rendered_rows.push((format!("c:{}", chat.id), slot_height + strip, element));
             }
 
             let Some((key, label)) = group else {

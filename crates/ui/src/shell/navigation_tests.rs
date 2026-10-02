@@ -533,3 +533,108 @@ fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppC
     assert_eq!(clipboard_text(cx).as_deref(), Some("sentinel"));
     clear_transcript_selection();
 }
+
+fn workflow_run(id: &str) -> zeron_proto::WorkflowRun {
+    zeron_proto::WorkflowRun {
+        header: zeron_proto::WorkflowRunHeader {
+            run_id: id.into(),
+            name: "Review".into(),
+            chat_id: "parent".into(),
+            status: zeron_proto::WorkflowStatus::Running,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[gpui::test]
+fn a_workflow_run_opens_one_pane_tab_and_refocuses_it(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.workflows.runs.push(workflow_run("run-1"));
+            state.workflows.runs.push(workflow_run("run-2"));
+        });
+        shell.add_workflow_surface("run-1".into(), None, None, cx);
+        // opening it again (a pill group's "+n more") focuses the same tab
+        shell.add_workflow_surface("run-1".into(), Some("fix".into()), None, cx);
+        assert_eq!(shell.workflow_tabs.len(), 1);
+        // another run is another tab
+        shell.add_workflow_surface("run-2".into(), None, None, cx);
+        assert_eq!(shell.workflow_tabs.len(), 2);
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.update(|_, cx| {
+        let shell = shell.read(cx);
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Workflow(2));
+        let titles: Vec<String> = shell
+            .right_surface_rows(cx)
+            .into_iter()
+            .filter(|(s, ..)| matches!(s, RightSurface::Workflow(_)))
+            .map(|(_, title, ..)| title.to_string())
+            .collect();
+        assert_eq!(titles, ["Review", "Review"], "tabs carry the run's name");
+    });
+    shell.update(cx, |shell, cx| {
+        shell.add_workflow_surface("run-1".into(), None, None, cx);
+    });
+    cx.update(|_, cx| {
+        assert_eq!(
+            shell.read(cx).resolved_right_active(cx),
+            RightSurface::Workflow(1),
+            "the first run's tab came back to the front"
+        );
+    });
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.close_right_surface(RightSurface::Workflow(1), window, cx)
+        })
+    });
+    cx.update(|_, cx| {
+        let shell = shell.read(cx);
+        assert_eq!(shell.workflow_tabs.len(), 1, "closing drops the pane");
+        assert_ne!(shell.resolved_right_active(cx), RightSurface::Workflow(1));
+    });
+}
+
+#[gpui::test]
+fn opening_a_chat_acknowledges_its_ended_runs_but_not_live_ones(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    let brief = |id: &str, status| zeron_proto::WorkflowRunBrief {
+        header: zeron_proto::WorkflowRunHeader {
+            run_id: id.into(),
+            status,
+            ..Default::default()
+        },
+        pending_questions: 0,
+    };
+    shell.update(cx, |shell, cx| {
+        let state = shell.state.clone();
+        state.update(cx, |state, _| {
+            state.workflow_activity.chats.insert(
+                "parent".into(),
+                vec![
+                    brief("ended", zeron_proto::WorkflowStatus::Completed),
+                    brief("live", zeron_proto::WorkflowStatus::Running),
+                ],
+            );
+            // another chat's ended run is not this chat's to acknowledge
+            state.workflow_activity.chats.insert(
+                "elsewhere".into(),
+                vec![brief("other", zeron_proto::WorkflowStatus::Completed)],
+            );
+        });
+        shell.acknowledge_workflow_runs(&state, cx);
+        assert_eq!(shell.settings.workflow_seen_runs, ["ended"]);
+        // idempotent
+        shell.acknowledge_workflow_runs(&state, cx);
+        assert_eq!(shell.settings.workflow_seen_runs, ["ended"]);
+        // the live run is acknowledged only once it ends
+        state.update(cx, |state, _| {
+            state.workflow_activity.chats.get_mut("parent").unwrap()[1].header.status =
+                zeron_proto::WorkflowStatus::Stopped;
+        });
+        shell.acknowledge_workflow_runs(&state, cx);
+        assert_eq!(shell.settings.workflow_seen_runs, ["ended", "live"]);
+    });
+}

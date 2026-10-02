@@ -61,7 +61,8 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
+    RunRequest, SlashCommand, SteeringMode, TodoItem, TodoStatus, ToolCall, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -3527,6 +3528,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
                     Some(UserInputQuestion {
+                        meta: None,
                         id: format!("q{ix}"),
                         header: q
                             .get("header")
@@ -3617,13 +3619,13 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: t
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    done: t.get("status").and_then(Value::as_str) == Some("completed"),
+                .map(|t| {
+                    TodoItem::new(
+                        t.get("content").and_then(Value::as_str).unwrap_or_default(),
+                        TodoStatus::parse(
+                            t.get("status").and_then(Value::as_str).unwrap_or_default(),
+                        ),
+                    )
                 })
                 .collect(),
         },

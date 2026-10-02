@@ -1819,6 +1819,14 @@ enum CaretAffinity {
     Downstream,
 }
 
+/// A workflow approval question, parsed once per request.
+struct WorkflowApprovalUi {
+    request_id: String,
+    model: crate::workflow::approval::ApprovalModel,
+    highlight: Option<zeron_syntax::HighlightedDocument>,
+    script_open: bool,
+}
+
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
@@ -4993,6 +5001,10 @@ impl Render for ComposerInput {
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
     WorkspaceCommand(WorkspaceCommand),
+    /// Open another chat (the goal tray's link to a verifier chat).
+    OpenChat {
+        chat_id: String,
+    },
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -5020,6 +5032,17 @@ pub enum ComposerEvent {
         chat_id: String,
         message_id: String,
     },
+    /// `/workflow name key=value …` named a saved workflow in `chat_id`. With
+    /// nothing `missing` the shell starts it; otherwise it opens the launcher
+    /// with `args` filled in.
+    SavedWorkflow {
+        chat_id: String,
+        workflow: zeron_proto::SavedWorkflowSummary,
+        args: serde_json::Value,
+        missing: Vec<String>,
+    },
+    /// A bare `/workflow`: show the saved workflows (Settings → Workflows).
+    OpenSavedWorkflows,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5337,6 +5360,11 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    /// `/goal` — completing it inserts the command for an objective to follow.
+    Goal,
+    /// `/workflow` — completing it inserts the command for a saved workflow's
+    /// name and arguments to follow; run bare it opens Settings → Workflows.
+    Workflow,
 }
 
 impl WorkspaceCommand {
@@ -5366,6 +5394,18 @@ impl WorkspaceCommand {
                 true,
             ),
             (Self::Stop, "stop", "Zeron: stop the active run", true),
+            (
+                Self::Goal,
+                "goal",
+                "Zeron: keep working until a verifier says the objective is met",
+                true,
+            ),
+            (
+                Self::Workflow,
+                "workflow",
+                "Zeron: run a saved workflow: /workflow <name> key=value …",
+                true,
+            ),
         ]
     }
 }
@@ -5386,6 +5426,7 @@ fn with_workspace_commands(
             name = format!("zeron:{name}");
         }
         rows.push(InvocationCandidate {
+            saved_workflow: None,
             invocation: zeron_proto::invocation::Invocation::Command { name: name.clone() },
             name,
             description: description.into(),
@@ -5413,6 +5454,9 @@ fn workspace_command_for_text(
 #[derive(Debug, Clone)]
 struct InvocationCandidate {
     workspace_command: Option<WorkspaceCommand>,
+    /// A saved workflow listed beside the commands: its name. Accepting the
+    /// row types `/workflow <name> ` instead of a command invocation.
+    saved_workflow: Option<String>,
     name: String,
     description: String,
     input_hint: Option<String>,
@@ -5536,6 +5580,7 @@ fn invocation_candidates(
         .into_iter()
         .map(|c| InvocationCandidate {
             workspace_command: None,
+            saved_workflow: None,
             input_hint: c.input_hint,
             name: c.name.clone(),
             description: c.description,
@@ -5547,6 +5592,7 @@ fn invocation_candidates(
                 .filter(|s| s.enabled)
                 .map(|s| InvocationCandidate {
                     workspace_command: None,
+                    saved_workflow: None,
                     input_hint: None,
                     name: s.name.clone(),
                     description: if zeron_proto::invocation::native_skill_identity(&s.path) {
@@ -5561,6 +5607,29 @@ fn invocation_candidates(
                     },
                 }),
         )
+        .collect()
+}
+
+/// Saved workflows as completion rows: `workflow:<name>`, with the arguments
+/// as the hint. Only the ones that win in the chat's project are offered.
+fn saved_workflow_candidates(
+    workflows: &[zeron_proto::SavedWorkflowSummary],
+) -> Vec<InvocationCandidate> {
+    workflows
+        .iter()
+        .filter(|w| w.shadowed_by.is_none())
+        .map(|w| {
+            let name = format!("workflow:{}", w.name);
+            let args = w.args_line();
+            InvocationCandidate {
+                workspace_command: None,
+                saved_workflow: Some(w.name.clone()),
+                input_hint: (!args.is_empty()).then_some(args),
+                description: format!("{} workflow — {}", w.scope.label(), w.description),
+                invocation: zeron_proto::invocation::Invocation::Command { name: name.clone() },
+                name,
+            }
+        })
         .collect()
 }
 
@@ -5643,6 +5712,10 @@ pub struct Composer {
     mention_task: Option<Task<()>>,
     mention: FileMentionState,
     slash_task: Option<Task<()>>,
+    /// Saved workflows offered as `workflow:<name>` rows, per completion
+    /// context, fetched apart from the provider's own catalog.
+    slash_saved: HashMap<String, Vec<InvocationCandidate>>,
+    slash_saved_task: Option<Task<()>>,
     slash: SlashState,
     /// Advertised invocations for the current device/harness/workspace.
     /// Invalidated on context changes; filtering stays local while typing.
@@ -5666,8 +5739,12 @@ pub struct Composer {
     /// connected"). Chat-scoped failures survive navigation and render only
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
-    failure_key: Option<String>,
+    pub(crate) failure_key: Option<String>,
     wizard: Option<Wizard>,
+    /// The structured block of a workflow approval question: the model
+    /// parsed from the question's `meta`, its highlighted excerpt, and
+    /// whether the script is unfolded. Keyed by request id.
+    workflow_approval: Option<WorkflowApprovalUi>,
     wizard_focus: FocusHandle,
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
@@ -5699,6 +5776,16 @@ pub struct Composer {
     /// Rows awaiting a host-authoritative removal acknowledgement. They stay
     /// visible but inert until the host wins the race against queue delivery.
     pub(crate) queue_removing: HashSet<String>,
+    /// The agent's checklist tray: latest list of the selected chat, and the
+    /// per-chat open/fold state (in memory, like the right-pane flags).
+    pub(crate) todo_cache: crate::todo_panel::TodoCache,
+    pub(crate) todo_panels: HashMap<String, crate::todo_panel::TodoPanelState>,
+    pub(crate) todo_scroll: gpui::ScrollHandle,
+    /// The goal tray's per-chat presentation state, scroll, and the one-second
+    /// repaint that keeps its elapsed time moving while a goal runs.
+    pub(crate) goal_panels: HashMap<String, crate::goal_panel::GoalPanelState>,
+    pub(crate) goal_scroll: gpui::ScrollHandle,
+    pub(crate) goal_ticker: Option<Task<()>>,
     /// Whether the modifier overlay should currently reveal the queue hint.
     /// The shell owns modifier tracking and clears this on window deactivation.
     queue_shortcut_revealed: bool,
@@ -5944,6 +6031,8 @@ impl Composer {
             mention_task: None,
             mention: FileMentionState::default(),
             slash_task: None,
+            slash_saved: HashMap::new(),
+            slash_saved_task: None,
             slash: SlashState::default(),
             slash_cache: HashMap::new(),
             slash_scroll: gpui::ScrollHandle::new(),
@@ -5954,6 +6043,7 @@ impl Composer {
             launching_new_chat: false,
             failure: None,
             wizard: None,
+            workflow_approval: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             failure_key: None,
@@ -5979,6 +6069,12 @@ impl Composer {
             queue_full_preview: None,
             queue_previews: HashMap::new(),
             queue_removing: HashSet::new(),
+            todo_cache: Default::default(),
+            todo_panels: HashMap::new(),
+            todo_scroll: gpui::ScrollHandle::new(),
+            goal_panels: HashMap::new(),
+            goal_scroll: gpui::ScrollHandle::new(),
+            goal_ticker: None,
             queue_shortcut_revealed: false,
             expanded_mode: false,
             flip_epoch: 0,
@@ -6764,6 +6860,16 @@ impl Composer {
         Some(params)
     }
 
+    /// Where to ask for the chat's saved workflows (`None`: no chat, or its
+    /// host predates them).
+    fn saved_list_params(&self, cx: &App) -> Option<serde_json::Value> {
+        let state = self.state.read(cx);
+        let chat = state.selected_chat_row()?;
+        state
+            .chat_host_supports(&chat.id, capabilities::WORKFLOWS_SAVED_V1)
+            .then(|| serde_json::json!({ "chatId": chat.id, "targetDeviceId": chat.device_id }))
+    }
+
     fn catalog_params(&self, cx: &App) -> serde_json::Value {
         let mut params = self.completion_workspace_params(cx).unwrap_or_else(|| {
             let mut params = serde_json::json!({});
@@ -7269,6 +7375,7 @@ impl Composer {
             self.slash.loading = false;
             if self.slash.catalog_context != catalog_context {
                 self.slash_cache.clear();
+                self.slash_saved.clear();
             } else if self.slash.error.is_some() || !self.slash.supported {
                 self.slash_cache.remove(&self.slash.context);
             }
@@ -7313,6 +7420,41 @@ impl Composer {
         self.slash.loading = true;
         self.slash.error = None;
         self.refilter_slash(cx);
+        // Saved workflows of this chat's project (on its host) join the list.
+        // They load on their own: a slow provider catalog must not hold them.
+        if !skill
+            && commands_allowed
+            && let Some(params) = self.saved_list_params(cx)
+        {
+            let engine = engine.clone();
+            let ctx = context.clone();
+            self.slash_saved_task = Some(cx.spawn(async move |this, cx| {
+                // An older host has no such method: no saved rows, no error.
+                let rows = engine
+                    .client()
+                    .call(methods::WORKFLOW_SAVED_LIST, params)
+                    .await
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<zeron_proto::SavedWorkflowList>(v).ok())
+                    .map(|list| saved_workflow_candidates(&list.workflows))
+                    .unwrap_or_default();
+                this.update(cx, |composer, cx| {
+                    if composer.slash.context != ctx {
+                        return;
+                    }
+                    composer.slash_saved.insert(ctx.clone(), rows.clone());
+                    let in_chat = composer.state.read(cx).selected_chat.is_some();
+                    let entry = composer
+                        .slash_cache
+                        .entry(ctx)
+                        .or_insert_with(|| with_workspace_commands(vec![], in_chat));
+                    entry.retain(|row| row.saved_workflow.is_none());
+                    entry.extend(rows);
+                    composer.refilter_slash(cx);
+                })
+                .ok();
+            }));
+        }
         self.slash_task = Some(cx.spawn(async move |this, cx| {
             let result = async {
                 let commands = async {
@@ -7367,6 +7509,14 @@ impl Composer {
                         } else {
                             candidates
                         };
+                        let mut candidates = candidates;
+                        candidates.extend(
+                            composer
+                                .slash_saved
+                                .get(&context)
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
                         composer.slash_cache.insert(context, candidates);
                     }
                     Err(err) => {
@@ -7452,6 +7602,32 @@ impl Composer {
         else {
             return;
         };
+        if let Some(name) = command.saved_workflow.clone() {
+            // Leave `/workflow <name> ` for the arguments to follow.
+            self.input.update(cx, |input, cx| {
+                input.replace_plain_token(token.range, &format!("/workflow {name} "), cx)
+            });
+            self.reset_slash(None, cx);
+            cx.notify();
+            return;
+        }
+        if command.workspace_command == Some(WorkspaceCommand::Workflow) {
+            self.input.update(cx, |input, cx| {
+                input.replace_plain_token(token.range, "/workflow ", cx)
+            });
+            self.reset_slash(None, cx);
+            cx.notify();
+            return;
+        }
+        if command.workspace_command == Some(WorkspaceCommand::Goal) {
+            // Takes an argument: leave `/goal ` in the input for the objective.
+            self.input.update(cx, |input, cx| {
+                input.replace_plain_token(token.range, "/goal ", cx)
+            });
+            self.reset_slash(None, cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = command.workspace_command {
             self.execute_workspace_command(action, token.range, cx);
             return;
@@ -7929,6 +8105,90 @@ impl Composer {
         cx.notify();
     }
 
+    /// Handle a typed `/workflow …` line. Returns whether the line was
+    /// consumed: a bare `/workflow` opens Settings → Workflows; with a name
+    /// the saved workflow is looked up on the chat's host, the `key=value`
+    /// words are typed against its arguments, and the shell either starts it
+    /// or — a required argument is missing — opens the launcher.
+    pub(crate) fn run_workflow_input(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        use crate::workflow::saved::{
+            WorkflowInput, bind_assignments, parse_workflow_input, pick_workflow,
+        };
+        let Some(parsed) = parse_workflow_input(text) else {
+            return false;
+        };
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+            self.show_error("Start a conversation first, then run a workflow in it.", cx);
+            return true;
+        };
+        let (name, assignments) = match parsed {
+            Err(message) => {
+                self.show_error(message, cx);
+                return true;
+            }
+            Ok(WorkflowInput::List) => {
+                self.input.update(cx, |input, cx| input.set_text("", cx));
+                cx.emit(ComposerEvent::OpenSavedWorkflows);
+                return true;
+            }
+            Ok(WorkflowInput::Run { name, assignments }) => (name, assignments),
+        };
+        let Some(params) = self.saved_list_params(cx) else {
+            self.show_error(
+                "This chat's device cannot run saved workflows yet. Update Zeron there.",
+                cx,
+            );
+            return true;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.show_error("Engine not connected", cx);
+            return true;
+        };
+        let key = self.current_key.clone();
+        cx.spawn(async move |this, cx| {
+            let list = engine
+                .client()
+                .call(methods::WORKFLOW_SAVED_LIST, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| {
+                    serde_json::from_value::<zeron_proto::SavedWorkflowList>(v)
+                        .map_err(|e| e.to_string())
+                });
+            this.update(cx, |composer, cx| {
+                // The draft changed or another chat opened meanwhile: drop it.
+                if composer.current_key != key {
+                    return;
+                }
+                let outcome = list.and_then(|list| {
+                    let wf = pick_workflow(&name, &list.workflows)?.clone();
+                    let bound =
+                        bind_assignments(&wf, &assignments).map_err(|errors| errors.join(" "))?;
+                    Ok((wf, bound))
+                });
+                match outcome {
+                    Err(message) => composer.show_error(message, cx),
+                    Ok((workflow, bound)) => {
+                        composer
+                            .input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        composer.drafts.remove(&composer.current_key);
+                        cx.emit(ComposerEvent::SavedWorkflow {
+                            chat_id,
+                            workflow,
+                            args: bound.args,
+                            missing: bound.missing,
+                        });
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
     fn on_submit(&mut self, cx: &mut Context<Self>) {
         if self
             .input
@@ -7951,6 +8211,14 @@ impl Composer {
         // Leading indentation distinguishes literal Markdown from native commands
         // and skill invocations. Only the empty-content check may trim the draft.
         let text = self.input.read(cx).text().to_string();
+        // `/goal …` is a Zeron command with arguments: it never reaches the agent.
+        if self.run_goal_input(&text, cx) {
+            return;
+        }
+        // `/workflow …` starts a saved workflow: it never reaches the agent.
+        if self.run_workflow_input(&text, cx) {
+            return;
+        }
         if let Some(action) = self
             .slash_cache
             .get(&self.slash.context)
@@ -8001,6 +8269,20 @@ impl Composer {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
             ModifiedSubmitTarget::ActivateLatestQueued => self.activate_latest_queued(cx),
         }
+    }
+
+    /// Capture knob `ZERON_OPEN_SAVED=slash:<text>`: type `text` into the
+    /// draft and open its completion, as if it had been typed.
+    pub(crate) fn capture_draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_text(text.to_owned(), cx));
+        self.update_slash(text, text.len(), cx);
+    }
+
+    /// The agent, model and reasoning the composer would start a new chat with,
+    /// for chats other surfaces create (a saved workflow's launcher).
+    pub(crate) fn resolved_chat_config(&self, cx: &App) -> Option<zeron_proto::ChatConfig> {
+        self.pickers.read(cx).resolved(cx).chat_config()
     }
 
     /// Queue a Run doc command with an optimistic echo — or, with the agent
@@ -8239,6 +8521,7 @@ impl Composer {
         // Optimistic echo (client-minted id doubles as the persisted message id,
         // so the doc frame dedups it away).
         let echo = SessionMessageEntry {
+            origin: None,
             id: message_id.clone(),
             role: zeron_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -8404,7 +8687,7 @@ impl Composer {
                     // flicker. A queued message has no transcript echo at all;
                     // its queue row is the only representation until dispatch.
                     if should_publish_optimistic_echo(queue) {
-                        let refreshed = SessionMessageEntry {
+                        let refreshed = SessionMessageEntry { origin: None,
                             id: message_id.clone(),
                             role: zeron_doc::MessageRole::User,
                             parts: vec![MessagePart::Text {
@@ -9018,7 +9301,7 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -9031,6 +9314,51 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        // A workflow approval carries its analysed graph in `meta`: draw that
+        // instead of the plain text (which stays the contract for clients
+        // that cannot). The answers are the stock options either way.
+        let approval_meta = crate::workflow::approval::parse_meta(question.meta.as_ref());
+        match (&approval_meta, &self.workflow_approval) {
+            (Some(meta), current)
+                if current
+                    .as_ref()
+                    .is_none_or(|a| a.request_id != wizard.request_id) =>
+            {
+                let model = crate::workflow::approval::ApprovalModel::from_meta(meta);
+                let highlight = crate::workflow::approval::highlight_excerpt(&model.excerpt);
+                self.workflow_approval = Some(WorkflowApprovalUi {
+                    request_id: wizard.request_id.clone(),
+                    model,
+                    highlight,
+                    // Capture knob: `ZERON_WORKFLOW_APPROVAL=script`.
+                    script_open: std::env::var("ZERON_WORKFLOW_APPROVAL").as_deref()
+                        == Ok("script"),
+                });
+            }
+            (None, Some(_)) => self.workflow_approval = None,
+            _ => {}
+        }
+        let is_approval = approval_meta.is_some();
+        let approval_block = approval_meta.is_some().then(|| {
+            let ui = self.workflow_approval.as_ref().expect("set above");
+            let this = cx.entity().downgrade();
+            crate::workflow::approval::approval_block(
+                &ui.model,
+                ui.highlight.as_ref(),
+                ui.script_open,
+                move |_, cx| {
+                    this.update(cx, |composer, cx| {
+                        if let Some(ui) = composer.workflow_approval.as_mut() {
+                            ui.script_open = !ui.script_open;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                &theme,
+                window,
+            )
+        });
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -9158,15 +9486,18 @@ impl Composer {
                                 )
                             }),
                     )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
+                    .when(approval_block.is_none(), |el| {
+                        el.child(
+                            div()
+                                .mt(px(6.0))
+                                .text_size(crate::typography::ui_rems(15.0))
+                                .line_height(px(20.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(question.question.clone())),
+                        )
+                    })
+                    .children(approval_block)
                     .when(question.multi_select, |el| {
                         el.child(
                             div()
@@ -9185,17 +9516,20 @@ impl Composer {
                             .children(options),
                     )
                     // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+                    // input entity). An approval is a yes or a no: nothing to
+                    // type, and a typed reply would not match either label.
+                    .when(!is_approval, |el| {
+                        el.child(
+                            div()
+                                .mt(px(12.0))
+                                .border_t_1()
+                                .border_color(crate::theme::hairline(0.06))
+                                .pt(px(12.0))
+                                .pb(px(4.0))
+                                .px(px(4.0))
+                                .child(self.input.clone()),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -10100,7 +10434,7 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let wizard = self.render_wizard(window, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 
@@ -10115,6 +10449,19 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_comments(cx).len(),
             );
+        // The checklist tray stacks above the queue (or directly above the
+        // composer), one step narrower than what follows it.
+        let has_queue = !self.state.read(cx).queue.is_empty();
+        let todo_panel = self.render_todo_panel(has_queue, window, cx);
+        // The goal tray tops the stack, one step narrower than each tray below.
+        let below = usize::from(has_queue) + usize::from(todo_panel.is_some());
+        let container = container
+            .when_some(self.render_goal_panel(below, window, cx), |el, panel| {
+                el.child(motion::fade_quick("composer-goal", div().child(panel)))
+            });
+        let container = container.when_some(todo_panel, |el, panel| {
+            el.child(motion::fade_quick("composer-todo", div().child(panel)))
+        });
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {
@@ -11428,6 +11775,61 @@ mod tests {
     }
 
     #[test]
+    fn saved_workflows_are_completion_rows_that_survive_the_workspace_command_merge() {
+        use zeron_proto::{SavedArg, SavedArgType, SavedScope, SavedWorkflowSummary};
+        let wf = |name: &str, shadowed: Option<SavedScope>| SavedWorkflowSummary {
+            name: name.into(),
+            scope: SavedScope::Global,
+            description: format!("{name} does it"),
+            when_to_use: None,
+            args: vec![SavedArg {
+                name: "base".into(),
+                ty: SavedArgType::String,
+                required: false,
+                default: Some(serde_json::json!("main")),
+                description: None,
+            }],
+            path: None,
+            project_root: None,
+            space_id: None,
+            modified_at: None,
+            shadowed_by: shadowed,
+            shadows: vec![],
+        };
+        let rows = saved_workflow_candidates(&[
+            wf("pr-review", None),
+            wf("hidden", Some(SavedScope::Project)),
+        ]);
+        assert_eq!(
+            rows.len(),
+            1,
+            "a workflow another scope hides is not offered"
+        );
+        assert_eq!(rows[0].name, "workflow:pr-review");
+        assert_eq!(rows[0].saved_workflow.as_deref(), Some("pr-review"));
+        assert_eq!(rows[0].input_hint.as_deref(), Some("base=main"));
+        assert!(rows[0].description.starts_with("Global workflow"));
+        // The merge that re-adds Zeron's own commands keeps them.
+        let merged = with_workspace_commands(rows, true);
+        assert!(merged.iter().any(|r| r.saved_workflow.is_some()));
+        assert!(
+            merged
+                .iter()
+                .any(|r| r.workspace_command == Some(WorkspaceCommand::Workflow))
+        );
+        // Typing `workflow` finds the command and every saved row.
+        let names: Vec<&str> = merged.iter().map(|r| r.name.as_str()).collect();
+        let hits = crate::popover::filter_indices("workflow", &names);
+        assert!(hits.len() >= 2, "{hits:?}");
+        // Offered only inside a chat.
+        assert!(
+            !with_workspace_commands(vec![], false)
+                .iter()
+                .any(|r| r.workspace_command == Some(WorkspaceCommand::Workflow))
+        );
+    }
+
+    #[test]
     fn workspace_commands_preserve_native_commands_and_avoid_collisions() {
         let native = invocation_candidates(
             vec![
@@ -11445,7 +11847,7 @@ mod tests {
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 13);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
@@ -11454,7 +11856,7 @@ mod tests {
             workspace_command_for_text("/zeron:zeron:model", &rows),
             Some(WorkspaceCommand::Model)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 13);
         let draft_rows = with_workspace_commands(vec![], false);
         assert_eq!(draft_rows.len(), 4);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
@@ -11574,6 +11976,7 @@ mod tests {
                             description: String::new(),
                             input_hint: None,
                             workspace_command: None,
+                            saved_workflow: None,
                             invocation: invocation.clone(),
                         }],
                     );
@@ -11592,6 +11995,75 @@ mod tests {
                     );
                     assert!(composer.failure.is_none());
                 }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn accepting_a_saved_workflow_row_types_the_command_for_its_arguments(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use zeron_proto::{SavedScope, SavedWorkflowSummary};
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                let draft = "run /workflow:pr now";
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text(draft, cx));
+                composer.update_slash(draft, "run /workflow:pr".len(), cx);
+                assert!(composer.slash.token.is_some());
+                composer.slash_cache.insert(
+                    composer.slash.context.clone(),
+                    saved_workflow_candidates(&[SavedWorkflowSummary {
+                        name: "pr-review".into(),
+                        scope: SavedScope::Project,
+                        description: "Review".into(),
+                        when_to_use: None,
+                        args: vec![],
+                        path: None,
+                        project_root: None,
+                        space_id: None,
+                        modified_at: None,
+                        shadowed_by: None,
+                        shadows: vec![],
+                    }]),
+                );
+                composer.refilter_slash(cx);
+                composer.accept_slash(cx);
+                assert_eq!(
+                    composer.input.read(cx).text(),
+                    "run /workflow pr-review  now",
+                    "the row becomes the command, ready for key=value"
+                );
+                assert!(composer.slash.token.is_none());
+                assert!(composer.failure.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_workflow_command_never_reaches_the_agent_and_needs_a_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                assert!(!composer.run_workflow_input("hello", cx));
+                assert!(!composer.run_workflow_input("/workflows", cx));
+                assert!(!composer.run_workflow_input("/goal x", cx));
+                assert!(composer.failure.is_none());
+                // No chat is open: said, not sent.
+                assert!(composer.run_workflow_input("/workflow pr-review base=dev", cx));
+                assert!(
+                    composer
+                        .failure
+                        .as_deref()
+                        .is_some_and(|f| f.contains("Start a conversation first"))
+                );
+                // A bare `/workflow` has nothing to look up: it just opens the page.
+                composer.failure = None;
+                assert!(composer.run_workflow_input("/workflow", cx));
             })
             .unwrap();
     }
@@ -14092,6 +14564,7 @@ mod tests {
 
     fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
         UserInputQuestion {
+            meta: None,
             id: id.into(),
             header: "Header".into(),
             question: format!("Question {id}"),
@@ -14991,6 +15464,7 @@ mod tests {
             q.prefill = Some("  initial\ntext\n".into());
             q.multiline = true;
             vec![SessionMessageEntry {
+                origin: None,
                 id: "assistant".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Input {
@@ -15062,6 +15536,7 @@ mod tests {
             resolved: false,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
+            origin: None,
             id: "m".into(),
             role: MessageRole::Assistant,
             parts,
@@ -15096,6 +15571,7 @@ mod tests {
         let t = vec![
             entry(Some(MessageStatus::Aborted), vec![input_part.clone()]),
             SessionMessageEntry {
+                origin: None,
                 id: "m2".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Text {
@@ -15129,6 +15605,7 @@ mod tests {
         // found (a last-entry-only read vanished the panel exactly when the
         // user typed, bricking the answer flow).
         let user_echo = SessionMessageEntry {
+            origin: None,
             id: "u2".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {

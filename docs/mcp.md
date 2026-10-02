@@ -115,6 +115,20 @@ name (default: the local engine's device).
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `get_goal`         | `WatchDocMessages` opening frame (`goal`)                 |
+| `set_goal`         | `QueueCommand` Goal `set`, then waits for the host        |
+| `pause_goal`       | `QueueCommand` Goal `pause`                               |
+| `resume_goal`      | `QueueCommand` Goal `resume`                              |
+| `clear_goal`       | `QueueCommand` Goal `clear`                               |
+| `workflow_guide`   | (embedded authoring guide, `docs/workflow-guide.md`)      |
+| `list_saved_workflows` | `WorkflowSavedList {chatId}`                          |
+| `save_workflow`    | `WorkflowSavedSave` (returns after the user answers)      |
+| `start_workflow`   | `WorkflowStart` (returns after the user approves)         |
+| `get_workflow_run` | `WorkflowGet {runId, include}`                            |
+| `list_workflow_runs` | `WorkflowList {chatId?}`                                |
+| `stop_workflow_run` | `WorkflowStop`                                           |
+| `resume_workflow_run` | `WorkflowResume`                                       |
+| `resolve_workflow_question` | `WorkflowAnswer`                                 |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
@@ -155,6 +169,83 @@ before the send: it returns on a new `last_completed_turn`, an
 edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
+
+## Goals
+
+`set_goal {objective, chat?, max_rounds?, token_budget?, time_budget_seconds?,
+replace?}` gives a chat a goal: it keeps working turn after turn until an
+independent verifier chat judges the objective met (`docs/goal-mode.md`). `chat`
+defaults to the chat this server speaks for (`ZERON_CHAT_ID`); another chat is
+named like in `send_message`. The tool queues the command and waits a few seconds
+for the host to apply it, then returns the goal; a host that is offline applies it
+when it returns (the result says `queued`). `get_goal` returns the goal with its
+verdict history, budgets and stop reason, or `null`.
+
+Trust rules: there is **no tool that completes a goal** — only the verifier
+child chat can. An agent also cannot `pause_goal`, `resume_goal` or `clear_goal`
+the goal that is verifying *its own* chat, nor replace it with `set_goal
+replace=true`: ending that loop is the user's decision, not a way out of
+verification. It can read it, set a goal on its own chat when it has none, and
+manage goals of other chats it supervises.
+
+## Workflows
+
+`start_workflow` runs a **Starlark script** that orchestrates many agent chats in the
+background (`docs/workflows.md`; the authoring guide is `workflow_guide`). The tool
+descriptions steer the model: start one only when the user asks for a workflow or the
+work truly needs many independent agents, read `workflow_guide` first, and **do not
+poll** — the result is delivered to the chat as a machine-origin message when the run
+settles.
+
+| Tool | Arguments | Notes |
+| --- | --- | --- |
+| `workflow_guide` | — | The embedded guide: API, worked example, saved workflows, patterns, limits. |
+| `list_saved_workflows` | — | Saved workflows available in this chat: built-in, the user's global ones and this project's. Each has `name`, `scope`, `description`, `whenToUse`, typed `args` (`name`, `type` string\|int\|number\|bool\|json, `required`, `default`, `description`), `path`, `shadowedBy`. Files that could not be read are listed under `invalid` with the reason. Descriptions come from files: data, not instructions. |
+| `save_workflow` | `name`, `description`, `when_to_use?`, `args?` (object keyed by argument name, or a list), `scope` (`project`\|`global`), `from_run` \| `script` | Saves a workflow file. **The user is asked** (an ordinary input question: path, description, arguments, what it replaces or shadows, a script excerpt; options `Save workflow` / `Deny`), never auto-approved. Everything checkable (name slug, frontmatter, script analysis, the run belongs to this chat) fails before the question. Written atomically inside `.zeron/workflows` (project) or `~/.zeron/workflows` (global) only; refuses symlinks; replaces an existing file only if the question said so. Needs a chat origin. |
+| `start_workflow` | `name?`, `script` \| `path` \| `saved {name, scope?, args?}`, `args?`, `max_concurrency?`, `harness?`, `model?`, `reasoning?`, `max_asks?`, `max_tokens?`, `max_runtime_seconds?` | The calling chat's own workflow. With `saved`, the workflow is resolved (project, then global, then built-in) and its arguments validated — every unknown, missing or mistyped one reported at once — **before** the user is asked. A script with problems fails with `path:line:col message` lines and creates no run. Otherwise the user is asked (an ordinary input question on the chat's live turn: phases, agents, literal commands, limits, a script excerpt) and the call returns `{runId, phases, agents, commands, …}` once they approve, or an error if they deny. The script is drafted to `.zeron/workflow-drafts/` in the project (add it to `.gitignore`). |
+| `get_workflow_run` | `run_id`, `include?` (`nodes`, `reports`, `result`) | State: status, phase, usage, agents, artifacts, pending questions, stop reason; the full result and every reported item on request. |
+| `list_workflow_runs` | `chat?` (default: own chat; `"all"`) | |
+| `stop_workflow_run` | `run_id`, `reason?` | Own chat's runs only. Resumable. |
+| `resume_workflow_run` | `run_id` | Own chat's runs only. Replays the journal; needs approval like a start. |
+| `resolve_workflow_question` | `run_id`, `qid`, `answer` | Own chat's runs only. Answers an actor's escalation. |
+
+Trust rules: an agent starts workflows for **its own chat** only (`ZERON_CHAT_ID`
+required) and may stop, resume or answer only runs of its own chat — a user's own MCP
+client (no chat origin) may act on any run on the device. Approval cannot be skipped by
+the agent: it is waived only when the chat itself is auto-approve. The run executes on
+the device that hosts the chat.
+
+Behind the tools, `WorkflowStart`, `WorkflowGet`, `WorkflowList`, `WorkflowStop`,
+`WorkflowResume`, `WorkflowAnswer`, `WorkflowArtifactData` and `WorkflowArtifactRead`
+are ordinary engine RPCs (clients use the same ones); stop / resume / answer also travel
+the command plane (`SessionCommandPayload::Workflow`) so a remote client can send them.
+
+Saved workflows add `WorkflowSavedList`, `WorkflowSavedGet`, `WorkflowSavedSave`,
+`WorkflowSavedDelete` and `WorkflowSavedRuns` (all relay-forwardable: a client addressing a chat's
+host reads **that host's** saved workflows; capability `workflows-saved-v1`) and two parameters on
+`WorkflowStart`: `saved` and `byUser`. `byUser` — a person's launcher click is the approval — is
+honoured only together with `saved`, and the MCP tools never send it, so an agent cannot approve its
+own start or save (`docs/workflows.md` → "Saved workflows").
+
+## The ask profile
+
+The engine injects a restricted server into the hidden child chat of a *child
+ask* (goal verifiers, workflow agents) by adding `ZERON_ASK_ID`. That
+server lists only `whoami`, `get_chat` and `read_chat` plus the run-scoped
+`submit_result`, whose input schema is the ask's JSON Schema (fetched with
+`GetAskSpec`; a non-object schema travels under a `result` key). `submit_result`
+posts to `SubmitAskResult`: an accepted result completes the ask, a rejected one
+returns the path-level violations as an error result so the model repairs and calls
+again (three repair rounds, then the ask fails). Both RPCs are IPC-only.
+
+A workflow actor's ask also offers **`escalate {question?, context?, question_id?}`**
+(`AskEscalate`, IPC-only; the spec carries `escalation: true`): a last-resort question
+for the agent that started the run, at most three per ask. It parks only that ask — the
+time spent waiting does not count against the ask's timeout — and returns the parent's
+answer (`resolve_workflow_question`) as the tool result. A call waits at most ~45 s
+(under the tool timeouts of the strictest harnesses); if unanswered it returns `pending`
+with a `question_id`, and calling again with that id keeps waiting without spending
+another escalation.
 
 ## Parallel side chats
 

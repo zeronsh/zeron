@@ -79,7 +79,7 @@ const ROW_GAP: f32 = 0.0;
 const ROW_SLOT: f32 = ROW_HEIGHT + ROW_GAP;
 const ROW_PAD_X: f32 = 8.0;
 const ROW_RADIUS: f32 = 8.0;
-const PANEL_RADIUS: f32 = 16.0;
+pub(crate) const PANEL_RADIUS: f32 = 16.0;
 const PANEL_PAD_X: f32 = 4.0;
 const PANEL_PAD_TOP: f32 = 4.0;
 /// The custom 24px queue glyphs have quieter geometry than the legacy set, so
@@ -252,7 +252,7 @@ fn queue_hidden_attachments_label(labels: &[String], shown: usize) -> Option<Str
     Some(format!("{} more: {}", hidden.len(), hidden.join(" · ")))
 }
 
-fn queue_panel_surface(theme: &Theme) -> gpui::Div {
+pub(crate) fn queue_panel_surface(theme: &Theme) -> gpui::Div {
     div()
         .occlude()
         .rounded_t(px(PANEL_RADIUS))

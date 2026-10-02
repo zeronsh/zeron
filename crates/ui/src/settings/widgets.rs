@@ -453,6 +453,12 @@ pub fn option_card(
 
 /// Section labels and page titles sit a little inside the blocks' edge.
 const SECTION_LABEL_INSET: f32 = 8.0;
+
+/// The inset section labels and page headers share, for pages that line up
+/// their own text with them.
+pub fn section_label_inset() -> f32 {
+    SECTION_LABEL_INSET
+}
 /// Air between one section and the next.
 const SECTION_GAP: f32 = 32.0;
 

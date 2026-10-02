@@ -349,6 +349,15 @@ impl SessionsEngine {
             .is_some_and(|h| h.steerable)
     }
 
+    /// The Zeron MCP server a run-scoped child (an ask's chat) must carry in
+    /// its `RunRequest::mcp`: the restricted ask toolset, bound to `ask_id`.
+    /// `None` while the engine serves no IPC port — such a child could never
+    /// submit its result.
+    pub fn ask_mcp_server(&self, chat_id: &str, ask_id: &str) -> Option<zeron_proto::McpServer> {
+        self.inner
+            .zeron_mcp_with(chat_id, &[(zeron_proto::ASK_ID_ENV, ask_id)])
+    }
+
     /// The last request dispatched for a chat (steer→new-turn fallback).
     pub fn last_request(&self, chat_id: &str) -> Option<RunRequest> {
         lock(&self.inner.last_requests).get(chat_id).cloned()
@@ -801,6 +810,56 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Raise a question set in a chat that has a live run — an engine-side
+    /// twin of the harness' input bridge. The question reaches every client
+    /// exactly like a harness's (an `InputRequested` event, status
+    /// `AwaitingInput`) and is answered through `respond_input`. The receiver
+    /// yields the answers; an interrupt, or the run ending first, yields
+    /// nothing (`Err`) or an empty list, which callers treat as "no".
+    /// `None` when the chat has no live run to carry the question.
+    pub fn request_input(
+        &self,
+        chat_id: &str,
+        questions: Vec<UserInputQuestion>,
+    ) -> Option<oneshot::Receiver<Vec<UserInputAnswer>>> {
+        let (pending, engine_tx) = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()))?;
+        let (answer_tx, answer_rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
+        let request_id = new_id();
+        lock(&pending).insert(request_id.clone(), answer_tx);
+        engine_tx
+            .send(AgentEvent::InputRequested {
+                request_id: request_id.clone(),
+                questions,
+            })
+            .ok()?;
+        tokio::spawn(async move {
+            tokio::select! {
+                answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+                _ = tx.closed() => {
+                    lock(&pending).remove(&request_id);
+                    let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                }
+            }
+        });
+        Some(rx)
+    }
+
+    /// The harness implementation for `id`, as a run would resolve it.
+    pub fn resolve_harness(
+        &self,
+        id: HarnessId,
+    ) -> Result<Arc<dyn zeron_harness::Harness>, zeron_harness::HarnessError> {
+        self.inner.registry.resolve(id)
+    }
+
+    /// The harness catalog as `ListHarnesses` reports it.
+    pub fn harness_descriptors(&self) -> Vec<HarnessDescriptor> {
+        self.inner.registry.descriptors()
+    }
+
     /// Resolve a pending `request_input` question set. Returns `false` when no such
     /// request is pending (unknown id, or the run already settled).
     pub fn respond_input(
@@ -879,7 +938,10 @@ impl SessionsEngine {
                         .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
                 })
                 .unwrap_or(false);
-            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            // A child ask's chat is never revived: the verdict it was running
+            // for has no waiter any more (the ask died with the engine).
+            let ask_child = handle.doc().ask_child().is_some();
+            let will_resume = !ask_child && fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
 
             let note = if will_resume {
                 "Run interrupted by engine restart — resuming"
@@ -897,6 +959,10 @@ impl SessionsEngine {
             self.set_status(&chat_id, SessionStatus::Idle, false);
             tracing::info!(chat = %chat_id, stamped, will_resume, attempts, "recovered stale session journal");
             recovered += 1;
+            if ask_child && let Some(ws) = self.inner.workspace() {
+                // Its ask's cleanup never ran: file it away like a finished one.
+                let _ = ws.set_chat_archived(&chat_id, true);
+            }
 
             if !will_resume {
                 continue;
@@ -1195,22 +1261,38 @@ impl Inner {
     /// originating chat + device so the agent's side chats link back here.
     /// None when the engine serves no port or its executable is unknown.
     fn zeron_mcp(&self, chat_id: &str) -> Option<zeron_proto::McpServer> {
+        self.zeron_mcp_with(chat_id, &[])
+    }
+
+    /// [`Self::zeron_mcp`] plus extra environment — how a run-scoped server
+    /// (a child ask's restricted toolset) is stamped.
+    fn zeron_mcp_with(
+        &self,
+        chat_id: &str,
+        extra_env: &[(&str, &str)],
+    ) -> Option<zeron_proto::McpServer> {
         let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
         if port == 0 {
             return None;
         }
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let mut env: std::collections::BTreeMap<String, String> = [
+            ("ZERON_IPC_PORT".to_owned(), port.to_string()),
+            ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+            ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
+        ]
+        .into_iter()
+        .collect();
+        env.extend(
+            extra_env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
         Some(zeron_proto::McpServer {
             name: "zeron".into(),
             command,
             args: vec!["mcp".into()],
-            env: [
-                ("ZERON_IPC_PORT".to_owned(), port.to_string()),
-                ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
-                ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
-            ]
-            .into_iter()
-            .collect(),
+            env,
         })
     }
 
@@ -1554,6 +1636,7 @@ impl SubagentSink {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent segment close failed");
         }
         let entry = SessionMessageEntry {
+            origin: None,
             id: new_id(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -2464,6 +2547,15 @@ async fn drive_run(
                 continue;
             }
         }
+        // Billing usage is not persisted, but a goal's token budget counts it.
+        if let AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+        } = &event
+            && let Some(host) = inner.doc_host()
+        {
+            host.note_turn_usage(&chat_id, input_tokens.saturating_add(*output_tokens));
+        }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
         if let AgentEvent::ContextUsage { tokens, window } = &event {
             if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
@@ -2938,6 +3030,7 @@ mod tests {
         .link();
         let previous = format!("Previous {skill}\nSecond line with \\ and \"quotes\"");
         doc.push_message(&zeron_doc::SessionMessageEntry {
+            origin: None,
             id: "u1".into(),
             role: zeron_doc::MessageRole::User,
             parts: vec![zeron_doc::MessagePart::Text {
@@ -2979,6 +3072,7 @@ mod tests {
             ("u3", zeron_doc::MessageRole::User, "future pending request"),
         ] {
             doc.push_message(&zeron_doc::SessionMessageEntry {
+                origin: None,
                 id: id.into(),
                 role,
                 parts: vec![zeron_doc::MessagePart::Text {

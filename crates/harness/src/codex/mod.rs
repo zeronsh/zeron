@@ -1339,6 +1339,14 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    // Codex's `update_plan` tool: the whole checklist, replaced
+                    // on every call, with an in-progress step.
+                    "turn/plan/updated" => {
+                        for ev in normalize::plan_update_events(&params) {
+                            if !send(&event_tx, ev).await { break 'main; }
+                        }
+                    }
+
                     "turn/completed" => {
                         let id = turn_id(&params);
                         router.note_completed(&id);
@@ -1792,6 +1800,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                 if id.is_empty() { format!("q{ix}") } else { id }
             };
             let question = UserInputQuestion {
+                meta: None,
                 id: new_message_id(),
                 header: {
                     let h = field(["header", "title", "label"]);
@@ -1869,6 +1878,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
         )
     };
     UserInputQuestion {
+        meta: None,
         id: new_message_id(),
         header,
         question,

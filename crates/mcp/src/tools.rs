@@ -37,7 +37,9 @@ pub struct ToolDef {
 }
 
 pub struct Tools {
-    zeron: Arc<Zeron>,
+    pub(crate) zeron: Arc<Zeron>,
+    /// The advertised `submit_result` (ask servers only), fetched once.
+    pub(crate) ask_tool: tokio::sync::OnceCell<crate::ask::AskTool>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -55,7 +57,7 @@ fn chat_key_schema(extra: Value) -> Value {
     json!({ "type": "object", "properties": properties, "required": ["chat"] })
 }
 
-fn catalog() -> Vec<ToolDef> {
+pub(crate) fn catalog() -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
             name: "whoami",
@@ -214,6 +216,8 @@ fn catalog() -> Vec<ToolDef> {
             }),
         });
     }
+    tools.extend(crate::goals::catalog());
+    tools.extend(crate::workflows::catalog());
     tools
 }
 
@@ -389,21 +393,65 @@ fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
 
 impl Tools {
     pub fn new(zeron: Arc<Zeron>) -> Self {
-        Self { zeron }
+        Self {
+            zeron,
+            ask_tool: tokio::sync::OnceCell::new(),
+        }
     }
 
-    pub fn list(&self) -> Vec<ToolDef> {
+    /// The tools this server exposes: the full catalog normally; inside a
+    /// child ask only the read tools plus `submit_result` (an ask's chat can
+    /// look around but cannot message, spawn, or steer anything).
+    pub async fn list(&self) -> Vec<ToolDef> {
+        if self.zeron.origin().ask_id.is_some() {
+            let mut defs: Vec<ToolDef> = catalog()
+                .into_iter()
+                .filter(|t| crate::ask::ASK_READ_TOOLS.contains(&t.name))
+                .collect();
+            let tool = self.ask_tool().await;
+            defs.push(tool.def());
+            defs.extend(tool.escalate_def());
+            return defs;
+        }
         catalog()
     }
 
     pub fn has(&self, name: &str) -> bool {
+        if self.zeron.origin().ask_id.is_some() {
+            return name == crate::ask::SUBMIT_RESULT
+                || name == crate::ask::ESCALATE
+                || crate::ask::ASK_READ_TOOLS.contains(&name);
+        }
         catalog().iter().any(|t| t.name == name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        if !self.has(name) {
+            return Err(format!("unknown tool: {name}"));
+        }
+        if name == crate::ask::SUBMIT_RESULT {
+            return self.submit_result(args).await;
+        }
+        if name == crate::ask::ESCALATE {
+            return self.escalate(args).await;
+        }
         let result = match name {
+            "workflow_guide" => self.workflow_guide().await,
+            "list_saved_workflows" => self.list_saved_workflows().await,
+            "save_workflow" => self.save_workflow(parse(args)?).await,
+            "start_workflow" => self.start_workflow(parse(args)?).await,
+            "get_workflow_run" => self.get_workflow_run(parse(args)?).await,
+            "list_workflow_runs" => self.list_workflow_runs(parse(args)?).await,
+            "stop_workflow_run" => self.stop_workflow_run(parse(args)?).await,
+            "resume_workflow_run" => self.resume_workflow_run(parse(args)?).await,
+            "resolve_workflow_question" => self.resolve_workflow_question(parse(args)?).await,
+            "get_goal" => self.get_goal(parse(args)?).await,
+            "set_goal" => self.set_goal(parse(args)?).await,
+            "pause_goal" => self.pause_goal(parse(args)?).await,
+            "resume_goal" => self.resume_goal(parse(args)?).await,
+            "clear_goal" => self.clear_goal(parse(args)?).await,
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
             "list_projects" => self.list_projects().await,
@@ -1102,6 +1150,21 @@ mod tests {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        /// The goal every transcript watch reports (goal tools read it).
+        goal: Mutex<Option<Value>>,
+        /// Becomes the reported goal once any command is queued (the host
+        /// "applying" it).
+        goal_on_command: Mutex<Option<Value>>,
+        /// What `SubmitAskResult` answers.
+        submit_reply: Mutex<Option<Value>>,
+        /// `Workflow*` RPCs fail with this message when set.
+        workflow_error: Mutex<Option<String>>,
+        /// The chat every run reported by `WorkflowGet` belongs to.
+        workflow_owner: Mutex<String>,
+        /// The ask spec offers `escalate`.
+        ask_escalation: Mutex<bool>,
+        /// What `AskEscalate` answers.
+        escalate_reply: Mutex<Option<Value>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1148,18 +1211,124 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
-                methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
-                    { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
-                      "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
-                    { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
-                      "status": "complete",
-                      "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
-                ]})),
+                methods::WATCH_DOC_MESSAGES => {
+                    let mut frame = json!({ "reset": [
+                        { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
+                          "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
+                        { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
+                          "status": "complete",
+                          "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
+                    ]});
+                    if let Some(goal) = self.goal.lock().unwrap().clone() {
+                        frame["goal"] = goal;
+                    }
+                    stream(frame)
+                }
+                methods::WORKFLOW_START
+                | methods::WORKFLOW_GET
+                | methods::WORKFLOW_LIST
+                | methods::WORKFLOW_STOP
+                | methods::WORKFLOW_RESUME
+                | methods::WORKFLOW_ANSWER
+                | methods::WORKFLOW_SAVED_LIST
+                | methods::WORKFLOW_SAVED_SAVE => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    if let Some(message) = self.workflow_error.lock().unwrap().clone() {
+                        return Err(RpcError::Failed(message));
+                    }
+                    RpcReply::Value(match method {
+                        methods::WORKFLOW_SAVED_LIST => json!({
+                            "workflows": [
+                                {
+                                    "name": "pr-review", "scope": "project",
+                                    "description": "Review the changes", "whenToUse": "Asked for a review",
+                                    "args": [{"name": "base", "type": "string", "required": false, "default": "main"}],
+                                    "path": "/repo/comet/.zeron/workflows/pr-review.star",
+                                    "projectRoot": "/repo/comet", "modifiedAt": 1,
+                                    "shadows": ["builtin"]
+                                },
+                                {
+                                    "name": "pr-review", "scope": "builtin",
+                                    "description": "The built-in", "args": [], "shadowedBy": "project"
+                                }
+                            ],
+                            "invalid": [{"path": "/repo/comet/.zeron/workflows/bad.star", "scope": "project", "reason": "bad.star:2:3 unknown key `x`"}]
+                        }),
+                        methods::WORKFLOW_SAVED_SAVE => json!({
+                            "workflow": {"name": "mine", "scope": "global"},
+                            "path": "/home/u/.zeron/workflows/mine.star", "overwrote": false
+                        }),
+                        methods::WORKFLOW_START => json!({
+                            "runId": "run-1", "name": "Demo",
+                            "graph": {
+                                "phases": [{ "name": "review" }, { "name": "gate" }],
+                                "actors": [{}, {}],
+                                "commands": [{ "command": "cargo" }]
+                            },
+                            "warnings": [], "maxConcurrency": 4,
+                            "draftPath": ".zeron/workflow-drafts/demo-abc.star"
+                        }),
+                        methods::WORKFLOW_GET => json!({
+                            "run": { "runId": "run-1", "chatId": *self.workflow_owner.lock().unwrap(), "status": "running" }
+                        }),
+                        methods::WORKFLOW_LIST => {
+                            json!([{ "runId": "run-1", "status": "running" }])
+                        }
+                        methods::WORKFLOW_STOP => json!({ "stopped": true }),
+                        methods::WORKFLOW_RESUME => {
+                            json!({ "runId": "run-2", "resumedFrom": "run-1" })
+                        }
+                        _ => json!({ "answered": true }),
+                    })
+                }
+                methods::ASK_ESCALATE => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(
+                        self.escalate_reply
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or(json!({
+                                "status": "answered", "questionId": "q1", "answer": "Postgres",
+                                "message": "Answer from the parent agent:\nPostgres", "left": 2
+                            })),
+                    )
+                }
+                methods::GET_ASK_SPEC => RpcReply::Value(json!({
+                    "escalation": *self.ask_escalation.lock().unwrap(),
+                    "askId": "ask-1",
+                    "resultSchema": {
+                        "type": "object",
+                        "properties": { "passed": { "type": "boolean" } },
+                        "required": ["passed"]
+                    },
+                    "resultDescription": "the verdict",
+                })),
+                methods::SUBMIT_ASK_RESULT => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(self.submit_reply.lock().unwrap().clone().unwrap_or(json!({
+                        "accepted": true, "message": "Result received.", "violations": [], "repairsLeft": 3
+                    })))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
                         .unwrap()
                         .push((method.to_owned(), params));
+                    if method == methods::QUEUE_COMMAND
+                        && let Some(goal) = self.goal_on_command.lock().unwrap().take()
+                    {
+                        *self.goal.lock().unwrap() = Some(goal);
+                    }
                     if method == methods::QUEUE_COMMAND
                         && let Some(barrier) = &self.dispatch_barrier
                     {
@@ -1227,6 +1396,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-beta-2".into()),
                 device_id: Some("dev-local".into()),
+                ..Origin::default()
             },
         );
         let err = tools
@@ -1334,6 +1504,7 @@ mod tests {
         let tools = tools(
             world.clone(),
             Origin {
+                ask_id: None,
                 chat_id: Some("chat-beta-2".into()),
                 device_id: None,
             },
@@ -1481,6 +1652,7 @@ mod tests {
         let side = tools(
             world.clone(),
             Origin {
+                ask_id: None,
                 chat_id: Some("chat-beta-2".into()),
                 device_id: None,
             },
@@ -1550,5 +1722,640 @@ mod tests {
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
         );
+    }
+
+    fn ask_origin() -> Origin {
+        Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: Some("dev-local".into()),
+            ask_id: Some("ask-1".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ask_server_lists_only_read_tools_and_the_run_scoped_submit_result() {
+        let ask_tools = tools(Arc::new(World::default()), ask_origin());
+        let listed = ask_tools.list().await;
+        let mut names: Vec<&str> = listed.iter().map(|d| d.name).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["get_chat", "read_chat", "submit_result", "whoami"]);
+        let submit = listed.iter().find(|d| d.name == "submit_result").unwrap();
+        assert_eq!(
+            submit.input_schema["properties"]["passed"]["type"],
+            "boolean"
+        );
+        assert_eq!(submit.input_schema["description"], "the verdict");
+        // Everything that could message, spawn, steer or set goals is gone.
+        for gone in [
+            "send_message",
+            "create_chat",
+            "interrupt_chat",
+            "set_goal",
+            "archive_chat",
+        ] {
+            assert!(!ask_tools.has(gone), "{gone}");
+            assert!(ask_tools.call(gone, json!({})).await.is_err());
+        }
+        // …and the normal catalog never offers submit_result.
+        let normal = tools(Arc::new(World::default()), Origin::default());
+        assert!(!normal.has("submit_result"));
+        assert!(
+            normal
+                .list()
+                .await
+                .iter()
+                .all(|d| d.name != "submit_result")
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_result_forwards_the_arguments_and_returns_violations_as_an_error() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), ask_origin());
+        let ok = tools
+            .call("submit_result", json!({ "passed": true }))
+            .await
+            .unwrap();
+        assert_eq!(ok["accepted"], true);
+        {
+            let writes = world.writes.lock().unwrap();
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::SUBMIT_ASK_RESULT);
+            assert_eq!(params["chatId"], "chat-beta-2");
+            assert_eq!(params["askId"], "ask-1");
+            assert_eq!(params["result"], json!({ "passed": true }));
+        }
+        *world.submit_reply.lock().unwrap() = Some(json!({
+            "accepted": false,
+            "message": "Rejected: /passed: expected boolean",
+            "violations": [{ "path": "/passed", "message": "expected boolean" }],
+            "repairsLeft": 2
+        }));
+        let err = tools
+            .call("submit_result", json!({ "passed": "yes" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("/passed"), "{err}");
+    }
+
+    fn goal_json_value(id: &str, objective: &str, status: &str) -> Value {
+        json!({
+            "id": id, "objective": objective, "summaryTitle": objective, "status": status,
+            "iteration": 1, "maxRounds": 25, "tokensUsed": 40, "verifierTokensUsed": 2,
+            "timeUsedSeconds": 9, "createdAt": 1, "updatedAt": 2,
+            "verdicts": [], "pending": { "kind": "turn", "round": 1, "messageId": "m", "startedAt": 1 }
+        })
+    }
+
+    #[tokio::test]
+    async fn get_goal_reports_the_goal_without_the_ledger() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let none = tools
+            .call("get_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert!(none["goal"].is_null());
+        *world.goal.lock().unwrap() = Some(goal_json_value("g1", "Ship it", "active"));
+        let got = tools
+            .call("get_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(got["goal"]["objective"], "Ship it");
+        assert_eq!(got["goal"]["tokensTotal"], 42);
+        assert!(got["goal"].get("pending").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_goal_queues_a_goal_command_for_the_chat() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+                ask_id: None,
+            },
+        );
+        // The host applies it: the goal shows up in the next transcript watch.
+        *world.goal_on_command.lock().unwrap() =
+            Some(goal_json_value("g2", "Fix the build", "active"));
+        let result = tools
+            .call(
+                "set_goal",
+                json!({ "chat": "alpha", "objective": "Fix the build", "max_rounds": 5, "token_budget": 9000 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["goal"]["id"], "g2");
+        let writes = world.writes.lock().unwrap();
+        let (method, params) = writes.last().unwrap();
+        assert_eq!(method, methods::QUEUE_COMMAND);
+        assert_eq!(params["chatId"], "chat-alpha-1");
+        assert_eq!(params["command"]["kind"], "goal");
+        assert_eq!(params["command"]["command"]["action"], "set");
+        assert_eq!(params["command"]["command"]["objective"], "Fix the build");
+        assert_eq!(params["command"]["command"]["limits"]["maxRounds"], 5);
+        assert_eq!(params["command"]["command"]["limits"]["tokenBudget"], 9000);
+        assert_eq!(params["command"]["command"]["replace"], false);
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_pause_clear_resume_or_replace_its_own_goal() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+                ask_id: None,
+            },
+        );
+        for tool in ["pause_goal", "resume_goal", "clear_goal"] {
+            let err = tools.call(tool, json!({})).await.unwrap_err();
+            assert!(err.contains("only the user can"), "{tool}: {err}");
+            let err = tools
+                .call(tool, json!({ "chat": "beta" }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("only the user can"), "{tool}: {err}");
+        }
+        let err = tools
+            .call("set_goal", json!({ "objective": "x", "replace": true }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("own chat"), "{err}");
+        assert!(
+            world.writes.lock().unwrap().is_empty(),
+            "nothing reached the command plane"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_chats_goal_can_be_paused() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+                ask_id: None,
+            },
+        );
+        *world.goal.lock().unwrap() = Some(goal_json_value("g", "x", "paused"));
+        let result = tools
+            .call("pause_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(result["applied"], true);
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(
+            writes.last().unwrap().1["command"]["command"]["action"],
+            "pause"
+        );
+    }
+
+    // ── workflows ────────────────────────────────────────────────────────
+
+    fn chat_origin(chat: &str) -> Origin {
+        Origin {
+            chat_id: Some(chat.into()),
+            device_id: None,
+            ask_id: None,
+        }
+    }
+
+    fn last_write(world: &World) -> (String, Value) {
+        world
+            .writes
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a write")
+    }
+
+    #[tokio::test]
+    async fn workflow_tools_are_listed_and_the_guide_is_served() {
+        let t = tools(Arc::new(World::default()), chat_origin("chat-beta-2"));
+        for name in [
+            "workflow_guide",
+            "start_workflow",
+            "get_workflow_run",
+            "list_workflow_runs",
+            "stop_workflow_run",
+            "resume_workflow_run",
+            "resolve_workflow_question",
+        ] {
+            assert!(t.has(name), "{name}");
+        }
+        let guide = t.call("workflow_guide", json!({})).await.unwrap();
+        assert!(guide["guide"].as_str().unwrap().contains("def main(args)"));
+    }
+
+    #[tokio::test]
+    async fn saved_workflow_tools_are_listed_and_start_takes_a_saved_source() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        assert!(t.has("list_saved_workflows") && t.has("save_workflow"));
+        let defs = catalog();
+        let start = defs.iter().find(|d| d.name == "start_workflow").unwrap();
+        assert!(start.description.contains("`saved`"));
+        assert_eq!(
+            start.input_schema["properties"]["saved"]["required"],
+            json!(["name"])
+        );
+        let save = defs.iter().find(|d| d.name == "save_workflow").unwrap();
+        assert!(save.description.contains("USER IS ASKED"));
+        assert_eq!(
+            save.input_schema["required"],
+            json!(["name", "description", "scope"])
+        );
+        assert_eq!(
+            save.input_schema["properties"]["scope"]["enum"],
+            json!(["project", "global"])
+        );
+
+        t.call(
+            "start_workflow",
+            json!({"saved": {"name": "pr-review", "scope": "project", "args": {"base": "dev"}}}),
+        )
+        .await
+        .unwrap();
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_START);
+        assert_eq!(params["chatId"], "chat-beta-2");
+        assert_eq!(
+            params["saved"],
+            json!({"name": "pr-review", "scope": "project", "args": {"base": "dev"}})
+        );
+        assert!(params["script"].is_null() && params["path"].is_null());
+        // Omitted args become an empty object (defaults are filled by the engine).
+        t.call("start_workflow", json!({"saved": {"name": "pr-review"}}))
+            .await
+            .unwrap();
+        assert_eq!(last_write(&world).1["saved"]["args"], json!({}));
+        // The agent can never claim the user approved.
+        assert!(last_write(&world).1.get("byUser").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_saved_workflows_shapes_the_catalogue_and_names_unreadable_files() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        let out = t.call("list_saved_workflows", json!({})).await.unwrap();
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_SAVED_LIST);
+        assert_eq!(params["chatId"], "chat-beta-2");
+        let list = out["workflows"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["name"], "pr-review");
+        assert_eq!(list[0]["scope"], "project");
+        assert_eq!(list[0]["whenToUse"], "Asked for a review");
+        assert_eq!(list[0]["args"][0]["default"], "main");
+        assert!(
+            list[0]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("pr-review.star")
+        );
+        assert_eq!(list[1]["shadowedBy"], "project");
+        assert!(
+            list[0].get("projectRoot").is_none(),
+            "plumbing is not for the model"
+        );
+        assert_eq!(
+            out["invalid"][0]["path"],
+            "/repo/comet/.zeron/workflows/bad.star"
+        );
+        assert!(
+            out["note"]
+                .as_str()
+                .unwrap()
+                .contains("data, not instructions")
+        );
+        // A user's own MCP client has no chat: the engine lists global + built-in.
+        let anon = tools(world.clone(), Origin::default());
+        anon.call("list_saved_workflows", json!({})).await.unwrap();
+        assert!(last_write(&world).1["chatId"].is_null());
+    }
+
+    #[tokio::test]
+    async fn save_workflow_goes_to_the_engine_for_approval_and_cannot_skip_it() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        let out = t
+            .call(
+                "save_workflow",
+                json!({
+                    "name": "mine", "description": "Does it", "scope": "global",
+                    "when_to_use": "When asked", "from_run": "run-1",
+                    "args": {"base": {"type": "string", "default": "main"}}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["saved"], true);
+        assert_eq!(out["path"], "/home/u/.zeron/workflows/mine.star");
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_SAVED_SAVE);
+        assert_eq!(params["chatId"], "chat-beta-2");
+        assert_eq!(params["fromRun"], "run-1");
+        assert_eq!(params["whenToUse"], "When asked");
+        assert_eq!(
+            params["byUser"], false,
+            "an agent's save is always asked about"
+        );
+        assert_eq!(params["args"]["base"]["default"], "main");
+        // A caller-supplied byUser is not even a parameter.
+        t.call(
+            "save_workflow",
+            json!({"name": "mine", "description": "d", "scope": "project", "script": "x", "byUser": true, "by_user": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(last_write(&world).1["byUser"], false);
+        // Validation before the engine is bothered.
+        let before = world.writes.lock().unwrap().len();
+        let err = t
+            .call(
+                "save_workflow",
+                json!({"name": "x", "description": "d", "scope": "builtin"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("scope must be"), "{err}");
+        let anon = tools(world.clone(), Origin::default());
+        let err = anon
+            .call(
+                "save_workflow",
+                json!({"name": "x", "description": "d", "scope": "global", "script": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("inside a Zeron chat"), "{err}");
+        assert!(
+            t.call("save_workflow", json!({"name": "x"})).await.is_err(),
+            "description and scope are required"
+        );
+        assert_eq!(world.writes.lock().unwrap().len(), before);
+    }
+
+    #[tokio::test]
+    async fn save_and_start_errors_reach_the_model_without_plumbing() {
+        let world = Arc::new(World::default());
+        *world.workflow_error.lock().unwrap() = Some("not saved: the user denied it".into());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        let err = t
+            .call(
+                "save_workflow",
+                json!({"name": "x", "description": "d", "scope": "global", "script": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, "not saved: the user denied it");
+        *world.workflow_error.lock().unwrap() = Some(
+            "unknown argument 'zzz' (declared: base)\nmissing required argument 'ticket'".into(),
+        );
+        let err = t
+            .call(
+                "start_workflow",
+                json!({"saved": {"name": "pr-review", "args": {"zzz": 1}}}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("unknown argument 'zzz'")
+                && err.contains("missing required argument 'ticket'"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_workflow_targets_the_callers_own_chat_and_shapes_the_answer() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        let out = t
+            .call(
+                "start_workflow",
+                json!({
+                    "name": "Demo", "script": "def main(args): return 1",
+                    "args": {"n": 3}, "max_concurrency": 4, "harness": "codex",
+                    "max_asks": 50, "max_tokens": 1000
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["runId"], "run-1");
+        assert_eq!(out["phases"], json!(["review", "gate"]));
+        assert_eq!(out["agents"], 2);
+        assert_eq!(out["commands"], json!(["cargo"]));
+        assert!(out["note"].as_str().unwrap().contains("Do not poll"));
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_START);
+        assert_eq!(params["chatId"], "chat-beta-2");
+        assert_eq!(params["args"], json!({"n": 3}));
+        assert_eq!(params["maxConcurrency"], 4);
+        assert_eq!(params["harness"], "codex");
+        assert_eq!(params["maxAsks"], 50);
+        assert_eq!(params["maxTokens"], 1000);
+        assert!(params["path"].is_null());
+
+        // No chat to deliver the result to: refused before reaching the engine.
+        let before = world.writes.lock().unwrap().len();
+        let anon = tools(world.clone(), Origin::default());
+        let err = anon
+            .call("start_workflow", json!({"script": "x"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("inside a Zeron chat"), "{err}");
+        assert_eq!(world.writes.lock().unwrap().len(), before);
+    }
+
+    #[tokio::test]
+    async fn start_workflow_errors_reach_the_model_without_plumbing() {
+        let world = Arc::new(World::default());
+        *world.workflow_error.lock().unwrap() =
+            Some("workflow.star:2:5 phase \"x\" contains no ask() or run()".into());
+        let t = tools(world, chat_origin("chat-beta-2"));
+        let err = t
+            .call("start_workflow", json!({"script": "x"}))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("workflow.star:2:5"), "{err}");
+        assert!(!err.contains("WorkflowStart"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn get_validates_include_and_list_defaults_to_the_own_chat() {
+        let world = Arc::new(World::default());
+        *world.workflow_owner.lock().unwrap() = "chat-beta-2".into();
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        t.call(
+            "get_workflow_run",
+            json!({"run_id": "run-1", "include": ["nodes", "result"]}),
+        )
+        .await
+        .unwrap();
+        let (_, params) = last_write(&world);
+        assert_eq!(params["include"], json!(["nodes", "result"]));
+        assert!(
+            t.call(
+                "get_workflow_run",
+                json!({"run_id": "run-1", "include": ["everything"]})
+            )
+            .await
+            .is_err()
+        );
+        t.call("list_workflow_runs", json!({})).await.unwrap();
+        assert_eq!(last_write(&world).1["chatId"], "chat-beta-2");
+        t.call("list_workflow_runs", json!({"chat": "all"}))
+            .await
+            .unwrap();
+        assert!(last_write(&world).1["chatId"].is_null());
+        t.call("list_workflow_runs", json!({"chat": "alpha"}))
+            .await
+            .unwrap();
+        assert_eq!(last_write(&world).1["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
+    async fn an_agent_acts_only_on_its_own_chats_runs() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        // A run of another chat: stop, resume and answer are refused before the engine acts.
+        *world.workflow_owner.lock().unwrap() = "chat-alpha-1".into();
+        for (tool, args) in [
+            ("stop_workflow_run", json!({"run_id": "run-1"})),
+            ("resume_workflow_run", json!({"run_id": "run-1"})),
+            (
+                "resolve_workflow_question",
+                json!({"run_id": "run-1", "qid": "q", "answer": "a"}),
+            ),
+        ] {
+            let err = t.call(tool, args).await.unwrap_err();
+            assert!(err.contains("your own chat"), "{tool}: {err}");
+        }
+        assert!(
+            world
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(m, _)| m == methods::WORKFLOW_GET),
+            "only the ownership lookup reached the engine"
+        );
+        // Its own run: allowed.
+        *world.workflow_owner.lock().unwrap() = "chat-beta-2".into();
+        let stopped = t
+            .call(
+                "stop_workflow_run",
+                json!({"run_id": "run-1", "reason": "enough"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped["stopped"], true);
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_STOP);
+        assert_eq!(params["reason"], "enough");
+        let resumed = t
+            .call("resume_workflow_run", json!({"run_id": "run-1"}))
+            .await
+            .unwrap();
+        assert_eq!(resumed["runId"], "run-2");
+        t.call(
+            "resolve_workflow_question",
+            json!({"run_id": "run-1", "qid": "q9", "answer": "Postgres"}),
+        )
+        .await
+        .unwrap();
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_ANSWER);
+        assert_eq!(
+            (params["qid"].as_str(), params["answer"].as_str()),
+            (Some("q9"), Some("Postgres"))
+        );
+        // A user's own MCP client (no chat origin) may act on any run.
+        *world.workflow_owner.lock().unwrap() = "chat-alpha-1".into();
+        let user = tools(world.clone(), Origin::default());
+        user.call("stop_workflow_run", json!({"run_id": "run-1"}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn workflow_tools_are_never_offered_inside_an_ask_and_escalate_only_when_enabled() {
+        let world = Arc::new(World::default());
+        let plain = tools(world.clone(), ask_origin());
+        let names: Vec<_> = plain.list().await.iter().map(|d| d.name).collect();
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.contains("workflow") && *n != "escalate"),
+            "{names:?}"
+        );
+        assert!(
+            plain
+                .call("start_workflow", json!({"script": "x"}))
+                .await
+                .is_err()
+        );
+        // A workflow actor can neither read the saved catalogue nor write to it.
+        for (tool, args) in [
+            ("list_saved_workflows", json!({})),
+            (
+                "save_workflow",
+                json!({"name": "x", "description": "d", "scope": "global", "script": "x"}),
+            ),
+        ] {
+            assert!(plain.call(tool, args).await.is_err(), "{tool}");
+        }
+        // Not offered: calling it is refused without reaching the engine.
+        let err = plain
+            .call("escalate", json!({"question": "?"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not available"), "{err}");
+
+        *world.ask_escalation.lock().unwrap() = true;
+        let actor = tools(world.clone(), ask_origin());
+        let listed = actor.list().await;
+        let escalate = listed
+            .iter()
+            .find(|d| d.name == "escalate")
+            .expect("offered");
+        assert!(escalate.description.contains("Last resort"));
+        assert!(listed.iter().any(|d| d.name == "submit_result"));
+        let out = actor
+            .call(
+                "escalate",
+                json!({"question": "Which database?", "context": "two configured"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "answered");
+        assert_eq!(out["answer"], "Postgres");
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::ASK_ESCALATE);
+        assert_eq!(params["question"], "Which database?");
+        assert_eq!(params["askId"], "ask-1");
+        // Pending is a result, not an error; a refusal is an error the model reads.
+        *world.escalate_reply.lock().unwrap() = Some(json!({
+            "status": "pending", "questionId": "q1", "message": "No answer yet. Your question is still pending", "left": 2
+        }));
+        let pending = actor
+            .call("escalate", json!({"question": "?"}))
+            .await
+            .unwrap();
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(pending["question_id"], "q1");
+        *world.escalate_reply.lock().unwrap() = Some(json!({
+            "status": "refused", "questionId": "", "message": "You have no escalations left", "left": 0
+        }));
+        let err = actor
+            .call("escalate", json!({"question": "?"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("no escalations left"), "{err}");
     }
 }

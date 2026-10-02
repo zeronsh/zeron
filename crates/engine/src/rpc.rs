@@ -149,6 +149,21 @@ struct QueueCommandParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AskRefParams {
+    chat_id: String,
+    ask_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubmitAskParams {
+    chat_id: String,
+    ask_id: String,
+    result: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RelayCommandParams {
     chat_id: String,
     /// The full command entry, client-minted id included — the exactly-once
@@ -1337,6 +1352,21 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            // A chat's workflows run on its host: reads and controls are
+            // addressed to that device like the rest of the chat's surface.
+            | methods::WORKFLOW_START
+            | methods::WORKFLOW_GET
+            | methods::WORKFLOW_LIST
+            | methods::WORKFLOW_STOP
+            | methods::WORKFLOW_RESUME
+            | methods::WORKFLOW_ANSWER
+            | methods::WORKFLOW_ARTIFACT_DATA
+            | methods::WORKFLOW_ARTIFACT_READ
+            | methods::WORKFLOW_SAVED_LIST
+            | methods::WORKFLOW_SAVED_GET
+            | methods::WORKFLOW_SAVED_SAVE
+            | methods::WORKFLOW_SAVED_DELETE
+            | methods::WORKFLOW_SAVED_RUNS
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
@@ -1479,8 +1509,18 @@ fn doc_messages_stream(
             doc,
             None,
             zeron_doc::TranscriptBaseline::default(),
+            None::<Option<zeron_proto::Goal>>,
+            None::<(u64, zeron_proto::WorkflowRunsState)>,
         ),
-        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
+        |(
+            mut rx,
+            mut prev,
+            doc,
+            mut previous_usage,
+            mut opening_baseline,
+            mut sent_goal,
+            mut sent_workflows,
+        )| async move {
             loop {
                 if prev.is_some() {
                     rx.changed().await.ok()?;
@@ -1524,17 +1564,79 @@ fn doc_messages_stream(
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
                 let usage = doc.context_usage();
-                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
+                // The goal rides only the frames where it changed (see
+                // `TranscriptUpdate::goal`); the opening frame always sends it.
+                let goal = doc.goal();
+                // A reset frame (the opening one, or a diff that grew to
+                // transcript size) replaces the viewer's whole view of the
+                // chat, so it restates the goal.
+                let goal_changed = sent_goal.as_ref() != Some(&goal)
+                    || matches!(frame, TranscriptFrame::Reset { .. });
+                // Workflow runs: whole on a reset frame, a delta against what
+                // this subscription last saw otherwise (read only when the
+                // doc's workflow revision moved).
+                let is_reset = matches!(frame, TranscriptFrame::Reset { .. });
+                let revision = doc.workflow_revision();
+                let workflows =
+                    if !is_reset && sent_workflows.as_ref().is_some_and(|(r, _)| *r == revision) {
+                        None
+                    } else {
+                        let now = doc.workflow_runs();
+                        match (&sent_workflows, is_reset) {
+                            (Some((_, before)), false) => {
+                                let delta = before.diff(&now);
+                                sent_workflows = Some((revision, now));
+                                delta.map(zeron_proto::WorkflowsUpdate::Delta)
+                            }
+                            _ => {
+                                let nothing = now.runs.is_empty() && revision == 0;
+                                let update = (!nothing)
+                                    .then(|| zeron_proto::WorkflowsUpdate::Full(now.clone()));
+                                sent_workflows = Some((revision, now));
+                                update
+                            }
+                        }
+                    };
+                if frame.is_empty_delta()
+                    && usage == previous_usage
+                    && replay_baseline.is_none()
+                    && !goal_changed
+                    && workflows.is_none()
+                {
                     continue;
                 }
                 previous_usage = usage;
+                let (goal_update, goal_cleared) = match (&goal, goal_changed) {
+                    (Some(goal), true) => (Some(goal.clone()), false),
+                    (None, true) => (
+                        None,
+                        sent_goal.as_ref().is_some_and(Option::is_some)
+                            && !matches!(frame, TranscriptFrame::Reset { .. }),
+                    ),
+                    _ => (None, false),
+                };
+                sent_goal = Some(goal);
                 let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage,
                     replay_baseline,
+                    goal: goal_update,
+                    goal_cleared,
+                    workflows,
                 })
                 .ok()?;
-                return Some((value, (rx, prev, doc, previous_usage, opening_baseline)));
+                return Some((
+                    value,
+                    (
+                        rx,
+                        prev,
+                        doc,
+                        previous_usage,
+                        opening_baseline,
+                        sent_goal,
+                        sent_workflows,
+                    ),
+                ));
             }
         },
     )
@@ -1554,6 +1656,9 @@ async fn opening_doc_messages_stream(
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: handle.doc().context_usage(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+            goal: handle.doc().goal(),
+            goal_cleared: false,
+            workflows: None,
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
         preview["historyPending"] = serde_json::Value::Bool(true);
@@ -1678,6 +1783,14 @@ impl RpcService for AuthRpc {
             }
             _ => Err(RpcError::UnknownMethod(method.to_string())),
         }
+    }
+}
+
+impl EngineRpc {
+    fn workflows(&self) -> Result<crate::workflow::WorkflowService, RpcError> {
+        self.doc_host
+            .workflows()
+            .ok_or_else(|| RpcError::Failed("workflows are not available".into()))
     }
 }
 
@@ -1854,6 +1967,440 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }
+            methods::GET_ASK_SPEC => {
+                let p: AskRefParams = parse_params(params)?;
+                let spec = self
+                    .doc_host
+                    .asks()
+                    .and_then(|asks| asks.spec_for(&p.chat_id, &p.ask_id))
+                    .ok_or_else(|| RpcError::Failed("no such ask in this chat".into()))?;
+                RpcReply::value(&spec)
+            }
+            methods::WORKFLOW_START => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    #[serde(default)]
+                    name: Option<String>,
+                    #[serde(default)]
+                    script: Option<String>,
+                    #[serde(default)]
+                    path: Option<String>,
+                    #[serde(default)]
+                    args: serde_json::Value,
+                    #[serde(default)]
+                    max_concurrency: Option<u32>,
+                    #[serde(default)]
+                    harness: Option<String>,
+                    #[serde(default)]
+                    model: Option<String>,
+                    #[serde(default)]
+                    reasoning: Option<String>,
+                    #[serde(default)]
+                    max_asks: Option<u32>,
+                    #[serde(default)]
+                    max_tokens: Option<u64>,
+                    #[serde(default)]
+                    max_runtime_seconds: Option<u64>,
+                    #[serde(default)]
+                    saved: Option<SavedParams>,
+                    #[serde(default)]
+                    by_user: bool,
+                }
+                #[derive(Deserialize)]
+                struct SavedParams {
+                    name: String,
+                    #[serde(default)]
+                    scope: Option<zeron_proto::SavedScope>,
+                    #[serde(default)]
+                    args: serde_json::Value,
+                }
+                let p: Params = parse_params(params)?;
+                let wf = self.workflows()?;
+                let outcome = wf
+                    .start(
+                        &p.chat_id,
+                        crate::workflow::StartRequest {
+                            name: p.name,
+                            script: p.script,
+                            path: p.path,
+                            args: p.args,
+                            max_concurrency: p.max_concurrency,
+                            harness: p.harness,
+                            model: p.model,
+                            reasoning: p.reasoning,
+                            budgets: zeron_proto::WorkflowBudgets {
+                                max_asks: p.max_asks,
+                                max_tokens: p.max_tokens,
+                                max_runtime_seconds: p.max_runtime_seconds,
+                            },
+                            saved: p.saved.map(|s| crate::workflow::SavedStart {
+                                name: s.name,
+                                scope: s.scope,
+                                args: s.args,
+                            }),
+                            by_user: p.by_user,
+                        },
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "runId": outcome.run_id,
+                    "name": outcome.name,
+                    "graph": outcome.graph,
+                    "warnings": outcome.warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    "maxConcurrency": outcome.max_concurrency,
+                    "draftPath": outcome.draft_path,
+                }))
+            }
+            methods::WORKFLOW_GET => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    #[serde(default)]
+                    include: Vec<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let view = self
+                    .workflows()?
+                    .get(&p.run_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let has = |what: &str| p.include.iter().any(|i| i == what);
+                let mut run = serde_json::to_value(&view.run).unwrap_or_default();
+                if let Some(o) = run.as_object_mut() {
+                    // Counts instead of lists unless asked for.
+                    let nodes = o
+                        .get("nodes")
+                        .and_then(|n| n.as_array())
+                        .map_or(0, Vec::len);
+                    o.insert("nodeCount".into(), nodes.into());
+                    if !has("nodes") {
+                        o.remove("nodes");
+                    }
+                    o.remove("graph");
+                }
+                let mut out = serde_json::json!({ "run": run });
+                // What a "run again" needs; small by construction (≤ 64 KB).
+                out["args"] = view.args.clone();
+                if let Some(saved) = &view.saved {
+                    out["saved"] = serde_json::to_value(saved).unwrap_or_default();
+                }
+                if has("reports") {
+                    out["reportItems"] = serde_json::Value::Array(view.reports);
+                }
+                if has("result") {
+                    out["result"] = view.result.unwrap_or(serde_json::Value::Null);
+                }
+                RpcReply::value(&out)
+            }
+            methods::WORKFLOW_SAVED_LIST => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    all: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let list = self
+                    .workflows()?
+                    .saved_list(
+                        &crate::workflow::SavedContext {
+                            chat_id: p.chat_id,
+                            space_id: p.space_id,
+                        },
+                        p.all,
+                    )
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&list)
+            }
+            methods::WORKFLOW_SAVED_GET => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    name: String,
+                    #[serde(default)]
+                    scope: Option<zeron_proto::SavedScope>,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let detail = self
+                    .workflows()?
+                    .saved_get(
+                        &crate::workflow::SavedContext {
+                            chat_id: p.chat_id,
+                            space_id: p.space_id,
+                        },
+                        &p.name,
+                        p.scope,
+                    )
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&detail)
+            }
+            methods::WORKFLOW_SAVED_SAVE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    name: String,
+                    description: String,
+                    #[serde(default)]
+                    when_to_use: Option<String>,
+                    #[serde(default)]
+                    args: Option<serde_json::Value>,
+                    scope: zeron_proto::SavedScope,
+                    #[serde(default)]
+                    from_run: Option<String>,
+                    #[serde(default)]
+                    script: Option<String>,
+                    #[serde(default)]
+                    by_user: bool,
+                    #[serde(default)]
+                    overwrite: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let source = match (p.from_run, p.script) {
+                    (Some(run), None) => crate::workflow::SaveSource::FromRun(run),
+                    (None, Some(script)) => crate::workflow::SaveSource::Script(script),
+                    _ => {
+                        return Err(RpcError::Failed(
+                            "pass exactly one of `fromRun` and `script`".into(),
+                        ));
+                    }
+                };
+                let args = match p.args {
+                    Some(v) => Some(
+                        crate::workflow::parse_args_declaration(&v).map_err(RpcError::Failed)?,
+                    ),
+                    None => None,
+                };
+                let out = self
+                    .workflows()?
+                    .saved_save(
+                        &p.chat_id,
+                        crate::workflow::SaveRequest {
+                            name: p.name,
+                            description: p.description,
+                            when_to_use: p.when_to_use,
+                            args,
+                            scope: p.scope,
+                            source,
+                            by_user: p.by_user,
+                            overwrite: p.overwrite,
+                        },
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "workflow": out.summary,
+                    "path": out.path.to_string_lossy(),
+                    "overwrote": out.overwrote,
+                }))
+            }
+            methods::WORKFLOW_SAVED_DELETE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    name: String,
+                    scope: zeron_proto::SavedScope,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                self.workflows()?
+                    .saved_delete(
+                        &crate::workflow::SavedContext {
+                            chat_id: p.chat_id,
+                            space_id: p.space_id,
+                        },
+                        &p.name,
+                        p.scope,
+                    )
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "deleted": true }))
+            }
+            methods::WORKFLOW_SAVED_RUNS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    name: String,
+                    scope: zeron_proto::SavedScope,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                let p: Params = parse_params(params)?;
+                let wf = self.workflows()?;
+                let project = wf
+                    .saved_project(&crate::workflow::SavedContext {
+                        chat_id: p.chat_id,
+                        space_id: p.space_id,
+                    })
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&wf.saved_runs(
+                    &p.name,
+                    p.scope,
+                    project.as_ref(),
+                    p.limit.unwrap_or(10).clamp(1, 50),
+                ))
+            }
+            methods::WATCH_WORKFLOW_ACTIVITY => Ok(RpcReply::Stream(watch_stream(
+                self.workflows()?.watch_activity(),
+            ))),
+            methods::WORKFLOW_LIST => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                RpcReply::value(&self.workflows()?.list(p.chat_id.as_deref()))
+            }
+            methods::WORKFLOW_STOP => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    #[serde(default)]
+                    reason: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let was_running = self
+                    .workflows()?
+                    .stop(&p.run_id, p.reason.as_deref())
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "stopped": was_running }))
+            }
+            methods::WORKFLOW_RESUME => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    #[serde(default)]
+                    args: Option<serde_json::Value>,
+                    #[serde(default)]
+                    by_user: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let outcome = self
+                    .workflows()?
+                    .resume(&p.run_id, p.args, p.by_user)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "runId": outcome.run_id,
+                    "name": outcome.name,
+                    "resumedFrom": p.run_id,
+                }))
+            }
+            methods::WORKFLOW_ANSWER => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    qid: String,
+                    answer: String,
+                }
+                let p: Params = parse_params(params)?;
+                self.workflows()?
+                    .resolve_question(&p.run_id, &p.qid, &p.answer)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "answered": true }))
+            }
+            methods::WORKFLOW_ARTIFACT_DATA => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    artifact_id: String,
+                }
+                let p: Params = parse_params(params)?;
+                let index = self
+                    .workflows()?
+                    .artifact_index(&p.run_id, &p.artifact_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&index)
+            }
+            methods::WORKFLOW_ARTIFACT_READ => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    artifact_id: String,
+                    #[serde(default)]
+                    version: Option<u32>,
+                    #[serde(default)]
+                    offset: u64,
+                    #[serde(default)]
+                    limit: Option<u64>,
+                }
+                let p: Params = parse_params(params)?;
+                let chunk = self
+                    .workflows()?
+                    .artifact_read(
+                        &p.run_id,
+                        &p.artifact_id,
+                        p.version,
+                        p.offset,
+                        p.limit.unwrap_or(256 * 1024),
+                    )
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let (encoding, data) = match String::from_utf8(chunk.bytes.clone()) {
+                    Ok(text) => ("utf8", text),
+                    Err(_) => {
+                        use base64::Engine as _;
+                        (
+                            "base64",
+                            base64::engine::general_purpose::STANDARD.encode(&chunk.bytes),
+                        )
+                    }
+                };
+                RpcReply::value(&serde_json::json!({
+                    "version": chunk.version,
+                    "offset": chunk.offset,
+                    "total": chunk.total,
+                    "encoding": encoding,
+                    "data": data,
+                }))
+            }
+            methods::ASK_ESCALATE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    #[serde(flatten)]
+                    request: zeron_proto::EscalateRequest,
+                }
+                let p: Params = parse_params(params)?;
+                let asks = self
+                    .doc_host
+                    .asks()
+                    .ok_or_else(|| RpcError::Failed("asks are not available".into()))?;
+                RpcReply::value(&asks.escalate(&p.chat_id, p.request).await)
+            }
+            methods::SUBMIT_ASK_RESULT => {
+                let p: SubmitAskParams = parse_params(params)?;
+                let asks = self
+                    .doc_host
+                    .asks()
+                    .ok_or_else(|| RpcError::Failed("asks are not available".into()))?;
+                RpcReply::value(&asks.submit(&p.chat_id, &p.ask_id, p.result))
+            }
             methods::FORK_SIDE_CHAT => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -1954,6 +2501,7 @@ impl RpcService for EngineRpc {
                     target
                         .doc()
                         .push_message(&zeron_doc::SessionMessageEntry {
+                            origin: None,
                             duration_ms: None,
                             id: marker_id.clone(),
                             role: zeron_doc::MessageRole::System,
@@ -3687,6 +4235,7 @@ mod tests {
         handle
             .doc()
             .push_message(&zeron_doc::SessionMessageEntry {
+                origin: None,
                 id: "turn".into(),
                 role: zeron_doc::MessageRole::Assistant,
                 parts: (0..500)
@@ -3807,6 +4356,20 @@ mod tests {
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
         ));
+    }
+
+    #[test]
+    fn saved_workflow_methods_follow_the_device_that_owns_the_folders() {
+        for method in [
+            methods::WORKFLOW_SAVED_LIST,
+            methods::WORKFLOW_SAVED_GET,
+            methods::WORKFLOW_SAVED_SAVE,
+            methods::WORKFLOW_SAVED_DELETE,
+            methods::WORKFLOW_SAVED_RUNS,
+        ] {
+            assert!(forwardable(method), "{method}");
+            assert!(!is_stream_method(method), "{method}");
+        }
     }
 
     #[test]
@@ -3975,6 +4538,7 @@ mod context_usage_tests {
         let append = |id: &str| {
             source
                 .push_message(&zeron_doc::SessionMessageEntry {
+                    origin: None,
                     id: id.into(),
                     role: zeron_doc::MessageRole::Assistant,
                     parts: vec![zeron_doc::MessagePart::Text {
@@ -4096,6 +4660,7 @@ mod context_usage_tests {
         sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
             .unwrap();
         let entry = |id: &str| zeron_doc::SessionMessageEntry {
+            origin: None,
             id: id.into(),
             role: zeron_doc::MessageRole::Assistant,
             parts: vec![zeron_doc::MessagePart::Text {
