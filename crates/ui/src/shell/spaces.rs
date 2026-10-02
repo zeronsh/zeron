@@ -9,7 +9,9 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
-use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
+use crate::pickers::{
+    breadcrumbs, browser_rows, completion_prefix_len, parent_path, path_under, same_path,
+};
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
 use zeron_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
@@ -2185,6 +2187,17 @@ pub(super) struct AddSpaceFlow {
     _search_events: Subscription,
 }
 
+impl AddSpaceFlow {
+    /// The browsed device uses Windows paths, where `\` separates too.
+    fn windows_paths(&self) -> bool {
+        self.browser
+            .ready()
+            .map(|listing| listing.path.as_str())
+            .or(self.home.as_deref())
+            .is_some_and(crate::pickers::is_windows_path)
+    }
+}
+
 /// Folder crumbs shown before the middle folds into `…`, and how many of the
 /// deepest stay visible once it does.
 const CRUMB_FOLDERS_MAX: usize = 3;
@@ -2224,13 +2237,6 @@ fn device_glyph(platform: &str) -> &'static str {
         "ios" | "android" => icons::SMARTPHONE,
         _ => icons::MONITOR,
     }
-}
-
-/// Segment-aware "is `path` at or under `base`" (`/media/a` is not under
-/// `/media/ab`); a root base covers everything.
-fn path_under(path: &str, base: &str) -> bool {
-    let base = base.trim_end_matches('/');
-    base.is_empty() || path == base || path.starts_with(&format!("{base}/"))
 }
 
 /// The space-row Rename dialog (same shape as [`RenameChatDialog`]).
@@ -5442,7 +5448,7 @@ impl Shell {
         };
         if rows.is_empty() {
             let text = flow.search.read(cx).text().to_string();
-            if text.starts_with('/') || text.starts_with('~') {
+            if crate::pickers::is_path_query(&text) {
                 if let Some(target) = crate::pickers::typed_path_target(&text, flow.home.as_deref())
                 {
                     self.add_space_descend(target, false, cx);
@@ -5489,7 +5495,9 @@ impl Shell {
                 return false;
             };
             let text = flow.search.read(cx).text().to_string();
-            if text.ends_with('/') && (text.starts_with('/') || text.starts_with('~')) {
+            let windows = flow.windows_paths() || crate::pickers::is_windows_path(&text);
+            let separator_typed = text.ends_with('/') || (windows && text.ends_with('\\'));
+            if separator_typed && crate::pickers::is_path_query(&text) {
                 let target = crate::pickers::typed_path_target(&text, flow.home.as_deref());
                 let Some(target) = target else {
                     // Path-shaped but unresolvable (`~/…` before home is
@@ -5505,10 +5513,14 @@ impl Shell {
                 return false;
             };
             let text = flow.search.read(cx).text().to_string();
-            let Some(query) = text.strip_suffix('/') else {
+            let windows = flow.windows_paths();
+            let query = text
+                .strip_suffix('/')
+                .or_else(|| text.strip_suffix('\\').filter(|_| windows));
+            let Some(query) = query else {
                 return false;
             };
-            if query.is_empty() || query.contains('/') {
+            if query.is_empty() || query.contains('/') || (windows && query.contains('\\')) {
                 return false;
             }
             let Some(listing) = flow.browser.ready() else {
@@ -5666,7 +5678,7 @@ impl Shell {
             .read(cx)
             .spaces
             .iter()
-            .find(|s| s.device_id == device.id && s.path == path)
+            .find(|s| s.device_id == device.id && same_path(&s.path, &path))
             .map(|s| s.id.clone())
         {
             self.add_space = None;
@@ -5913,6 +5925,7 @@ impl Shell {
         let active = flow.active;
         let loading = matches!(flow.browser, Loadable::Idle | Loadable::Loading);
         let drives_loading = matches!(flow.drives, Loadable::Loading);
+        let windows_paths = flow.windows_paths();
         let ghost = self
             .add_space_completion(cx)
             .map(|(_, suffix)| SharedString::from(suffix));
@@ -6084,7 +6097,12 @@ impl Shell {
                 ),
                 ProjectStep::Folders => (
                     "No folders match",
-                    "Type a path like ~/code or /mnt to jump there.".to_string(),
+                    if windows_paths {
+                        r"Type a path like ~\code or D:\ to jump there."
+                    } else {
+                        "Type a path like ~/code or /mnt to jump there."
+                    }
+                    .to_string(),
                 ),
             };
             results = results.child(command_palette::palette_empty(&theme, title, hint));
@@ -6161,7 +6179,7 @@ impl Shell {
                     specs.push(Crumb {
                         name: name.into(),
                         glyph: None,
-                        current: full == open_path,
+                        current: same_path(&full, &open_path),
                         target: CrumbTarget::Folder(full),
                     });
                 }
