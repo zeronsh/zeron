@@ -1,3 +1,5 @@
+#[path = "browser-fixture/storage.rs"]
+mod storage;
 #[path = "browser-fixture/transcript_links.rs"]
 mod transcript_links;
 #[cfg(target_os = "linux")]
@@ -130,7 +132,11 @@ fn main() -> anyhow::Result<()> {
     );
     std::fs::create_dir_all(&output)?;
     let temp = tempfile::tempdir()?;
-    let data = temp.path().to_path_buf();
+    let data = std::env::var_os("ZERON_BROWSER_STORAGE_ROOT")
+        .map(PathBuf::from).unwrap_or_else(|| temp.path().to_path_buf());
+    let storage_root = data.clone();
+    let storage_profile = std::env::var("ZERON_BROWSER_STORAGE_PROFILE").unwrap_or_else(|_| "local".into());
+    let storage_url = std::env::var("ZERON_BROWSER_STORAGE_URL").ok();
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let _origin = format!("http://{}", listener.local_addr()?);
     std::thread::spawn(move || {
@@ -178,7 +184,7 @@ fn main() -> anyhow::Result<()> {
             let mut s = state::AppState::new();
             s.connection = zeron_proto::view::ConnectionStatus::Ready;
             s.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
-            s.local_device_id = Some("local".into());
+            s.local_device_id = Some(storage_profile.clone());
             s.devices = vec![serde_json::from_value(serde_json::json!({"id":"local","name":"This device","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()];
             s.selected_chat = Some("browser-fixture".into()); s.selected_space = Some("project".into());
             s.auto_selected = true; s.chats_synced = true; s.spaces_synced = true;
@@ -198,6 +204,13 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                if let Some(url) = &storage_url {
+                    storage::exercise(window, state.clone(), &storage_root, &storage_profile, url, cx).await?;
+                    std::fs::write(output.join("storage-result.json"), serde_json::to_vec(&serde_json::json!({
+                        "profile": storage_profile, "url": url, "status": "pass"
+                    }))?)?;
+                    return Ok(());
+                }
                 if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
                 }
@@ -252,7 +265,7 @@ fn main() -> anyhow::Result<()> {
                     second.read_with(cx, |b, _| b.fixture_eval("document.title = document.cookie.includes('browserfixture=shared') ? 'Shared login' : 'Missing cookie'"));
                     let deadline = std::time::Instant::now() + Duration::from_secs(5);
                     while !second.read_with(cx, |b, _| b.page.title == "Shared login") {
-                        anyhow::ensure!(std::time::Instant::now() < deadline, "tabs did not share ephemeral website data"); pause(cx, 50).await;
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "tabs did not share website data"); pause(cx, 50).await;
                     }
                     anyhow::ensure!(first.read_with(cx, |b, _| b.page.title == "Updated title"), "second tab replaced first tab state");
                 }
@@ -502,6 +515,11 @@ fn main() -> anyhow::Result<()> {
             drop(state);
             let _ = window.update(cx, |_, window, _| window.remove_window());
             pause(cx, 100).await;
+            // AppKit terminate: exits the process without returning from Application::run.
+            // Report failure before entering that path so native runners cannot see a false pass.
+            if result.lock().unwrap().is_some() {
+                std::process::exit(1);
+            }
             cx.update(|cx| cx.quit());
         }).detach();
     });

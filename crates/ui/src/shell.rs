@@ -1840,7 +1840,7 @@ pub struct Shell {
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
     browser_context: crate::browser::BrowserContext,
-    browser_profile: Option<String>,
+    browser_profile: Option<crate::browser::profile::BrowserProfile>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -3458,6 +3458,30 @@ impl Shell {
         outcome
     }
 
+    fn sync_browser_profile(&mut self, cx: &mut Context<Self>) {
+        let browser_profile = {
+            let state = self.state.read(cx);
+            crate::browser::profile::BrowserProfile::for_workspace(
+                &self.data_dir,
+                state.workspace_scope,
+                state.auth.as_ref(),
+                state.local_device_id.as_deref(),
+            )
+        };
+        if browser_profile != self.browser_profile {
+            for browser in self.browsers.values() {
+                browser.update(cx, |browser, cx| browser.close(cx));
+            }
+            self.browsers.clear();
+            self.browser_subs.clear();
+            self.browser_context = browser_profile
+                .clone()
+                .map(crate::browser::BrowserContext::for_profile)
+                .unwrap_or_default();
+            self.browser_profile = browser_profile;
+        }
+    }
+
     /// Browser tabs are independent instances owned by the current session.
     fn add_browser_surface(
         &mut self,
@@ -3468,6 +3492,7 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
+        self.sync_browser_profile(cx);
         let key = self.panel_key(cx);
         let remote = {
             let state = self.state.read(cx);
@@ -12254,25 +12279,7 @@ impl Render for Shell {
             .clone()
             .unwrap_or_else(|| self.state.read(cx).gate());
 
-        let browser_profile = {
-            let state = self.state.read(cx);
-            crate::links::workspace_locator(
-                state.workspace_scope,
-                state.auth.as_ref(),
-                state.local_device_id.as_deref(),
-            )
-        };
-        if browser_profile.is_some() && browser_profile != self.browser_profile {
-            if self.browser_profile.is_some() {
-                for browser in self.browsers.values() {
-                    browser.update(cx, |browser, cx| browser.close(cx));
-                }
-                self.browsers.clear();
-                self.browser_subs.clear();
-                self.browser_context = crate::browser::BrowserContext::default();
-            }
-            self.browser_profile = browser_profile;
-        }
+        self.sync_browser_profile(cx);
         let browser_active = matches!(gate, GatePhase::Ready)
             && !restart_required
             && matches!(self.route, Route::Chat)
@@ -15587,6 +15594,69 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn browser_profile_changes_clear_tabs_and_reselect_the_stable_identity(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "session".into();
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                    state.local_device_id = Some("device-a".into());
+                });
+                // Selecting the identity happens before navigation, without requiring a render.
+                shell.add_browser_surface(None, window, cx);
+                let original = shell.browser_profile.clone().unwrap();
+                shell.active_chat = "another-chat".into();
+                shell.add_browser_surface(None, window, cx);
+                assert_eq!(shell.browsers.len(), 2);
+                assert_eq!(shell.browser_profile.as_ref(), Some(&original));
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("device-b".into())
+                });
+                shell.sync_browser_profile(cx);
+                assert!(shell.browsers.is_empty());
+                assert!(shell.browser_subs.is_empty());
+                assert_ne!(shell.browser_profile.as_ref(), Some(&original));
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("device-a".into())
+                });
+                shell.sync_browser_profile(cx);
+                assert_eq!(shell.browser_profile.as_ref(), Some(&original));
+                shell.add_browser_surface(None, window, cx);
+                shell
+                    .state
+                    .update(cx, |state, _| state.workspace_scope = None);
+                shell.sync_browser_profile(cx);
+                assert!(shell.browser_profile.is_none());
+                assert!(shell.browsers.is_empty());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

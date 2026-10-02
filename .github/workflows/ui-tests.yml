@@ -12,6 +12,7 @@ on:
       - 'scripts/*cursor-sdk*'
       - '.github/workflows/cursor-*.yml'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/test-browser-storage.py'
       - '.github/workflows/ui-tests.yml'
   push:
     branches: [main]
@@ -25,6 +26,7 @@ on:
       - 'scripts/*cursor-sdk*'
       - '.github/workflows/cursor-*.yml'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/test-browser-storage.py'
       - '.github/workflows/ui-tests.yml'
   workflow_dispatch:
 
@@ -84,10 +86,13 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
             libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev
             libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake
-            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xdotool openbox
+            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xauth xdotool openbox
             weston ffmpeg imagemagick fonts-noto-cjk
       - name: Build browser fixture
         run: cargo build --locked -p zeron-ui --example browser-fixture --features browser-fixture
+      - name: Persistent browser profiles across app launches
+        timeout-minutes: 5
+        run: xvfb-run -a python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
       - name: X11 and Wayland browser regressions
         timeout-minutes: 5
         env:

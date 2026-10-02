@@ -21,26 +21,64 @@ use objc2_web_kit::{
 };
 use std::{
     cell::{Cell, RefCell},
+    mem::ManuallyDrop,
     rc::Rc,
 };
 use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
 
 #[derive(Default)]
 struct BrowserStore {
+    profile: Option<super::profile::BrowserProfile>,
     store: Option<Retained<objc2_web_kit::WKWebsiteDataStore>>,
     preview_hosts: std::collections::BTreeSet<String>,
 }
 #[derive(Clone, Default)]
 pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
 impl BrowserData {
+    pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
+        thread_local! {
+            // Keep named stores alive through process termination, including
+            // after the last window closes or the active identity changes.
+            // macOS runs Rust TLS destructors during AppKit's exit(). Releasing
+            // a WKWebsiteDataStore there removes its network session before
+            // WebKit's UI-process-disconnect handler can flush its cookies.
+            // In particular, deleted cookies can reappear on the next launch.
+            // Intentionally skip this registry's destructor: WebKit must still
+            // own the sessions when our process disconnects, and the OS reclaims
+            // these process-lifetime references on exit.
+            static PROFILES: ManuallyDrop<RefCell<std::collections::HashMap<std::path::PathBuf, Rc<RefCell<BrowserStore>>>>> =
+                ManuallyDrop::new(RefCell::new(std::collections::HashMap::new()));
+        }
+        PROFILES.with(|profiles| {
+            let mut profiles = profiles.borrow_mut();
+            if let Some(store) = profiles.get(&profile.root) {
+                return Self(store.clone());
+            }
+            let root = profile.root.clone();
+            let store = Rc::new(RefCell::new(BrowserStore {
+                profile: Some(profile),
+                ..Default::default()
+            }));
+            profiles.insert(root, store.clone());
+            Self(store)
+        })
+    }
     fn configuration(
         &self,
         mtm: MainThreadMarker,
     ) -> Retained<objc2_web_kit::WKWebViewConfiguration> {
         let mut data = self.0.borrow_mut();
         if data.store.is_none() {
-            data.store =
-                Some(unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) });
+            data.store = Some(unsafe {
+                match &data.profile {
+                    Some(profile) if persistent_profiles_supported() => {
+                        let identifier =
+                            objc2_foundation::NSUUID::from_bytes(profile.data_store_identifier());
+                        objc2_web_kit::WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm)
+                    }
+                    _ => objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
+                }
+            });
             if let Err(error) =
                 configure_preview_proxy(data.store.as_ref().unwrap(), &data.preview_hosts)
             {
@@ -75,6 +113,21 @@ impl BrowserData {
                 tracing::warn!(%error, "preview hostname proxy unavailable");
             }
         }
+    }
+}
+
+/// macOS 12/13 have only a single default persistent store. Do not silently
+/// share it across accounts; retain isolated temporary stores on those systems.
+pub(super) fn persistent_profiles_supported() -> bool {
+    unsafe {
+        msg_send![class!(WKWebsiteDataStore), respondsToSelector: sel!(dataStoreForIdentifier:)]
+    }
+}
+
+impl BrowserData {
+    pub(super) fn persistence_notice(&self) -> Option<&'static str> {
+        (self.0.borrow().profile.is_some() && !persistent_profiles_supported())
+            .then_some("Logins are temporary on this macOS version. Use macOS 14 or later, or open this page in your default browser, to keep them.")
     }
 }
 
@@ -298,7 +351,6 @@ impl NativePage {
             .with_webview_configuration(data.configuration(mtm))
             .with_visible(false)
             .with_focused(false)
-            .with_incognito(true)
             .with_new_window_req_handler(move |url, _| {
                 if allowed_navigation(&url) {
                     let _ = new_tab.try_send(NativeEvent::NewTab(url));
@@ -817,6 +869,25 @@ impl NativePage {
     pub fn fixture_visible(&self) -> bool {
         !self.0.borrow().view.isHidden()
     }
+    pub fn fixture_cookies(&self, completion: impl FnOnce(Vec<String>) + 'static) {
+        use objc2_foundation::{NSArray, NSHTTPCookie};
+        let completion = RefCell::new(Some(completion));
+        let block = block2::RcBlock::new(move |cookies: std::ptr::NonNull<NSArray<NSHTTPCookie>>| {
+            let cookies = unsafe { cookies.as_ref() };
+            let values = cookies.iter().map(|cookie| format!(
+                "{}={}; domain={}; path={}; httpOnly={}; sessionOnly={}",
+                cookie.name(), cookie.value(), cookie.domain(), cookie.path(),
+                cookie.isHTTPOnly(), cookie.isSessionOnly()
+            )).collect();
+            if let Some(completion) = completion.borrow_mut().take() {
+                completion(values);
+            }
+        });
+        unsafe {
+            self.0.borrow().view.configuration().websiteDataStore().httpCookieStore().getAllCookies(&block);
+        }
+    }
+
     pub fn fixture_eval(&self, script: &str) {
         unsafe {
             self.0

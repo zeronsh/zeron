@@ -9,6 +9,7 @@ on:
       - 'crates/**'
       - 'edge/**'
       - 'scripts/run-macos-browser-fixture.sh'
+      - 'scripts/test-browser-storage.py'
       - 'scripts/ci/run-macos-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
@@ -22,6 +23,7 @@ on:
       - 'crates/**'
       - 'edge/**'
       - 'scripts/run-macos-browser-fixture.sh'
+      - 'scripts/test-browser-storage.py'
       - 'scripts/ci/run-macos-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
@@ -130,6 +132,9 @@ jobs:
         run: |
           scripts/ci/run-macos-fixture.sh target/debug/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
           test -f "$RUNNER_TEMP/browser-captures/result.txt"
+      - name: Persistent browser profiles across app launches
+        timeout-minutes: 5
+        run: python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
       - name: Upload browser screenshots
         if: always()
         uses: actions/upload-artifact@v4
