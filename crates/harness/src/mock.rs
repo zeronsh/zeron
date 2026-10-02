@@ -196,6 +196,7 @@ impl Harness for MockHarness {
         let (body, tail) = self.script.split_at(done_ix);
         let error_event = mock_error.then(|| AgentEvent::Error {
             message: "Claude usage limit reached — try again after the limit resets.".into(),
+            cause: None,
         });
         // Dev/testing knob: `ZERON_MOCK_CODE=1` appends rust + ts code blocks
         // (keywords, strings, numbers, comments) plus inline code — for

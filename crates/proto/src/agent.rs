@@ -476,6 +476,18 @@ pub enum DoneStatus {
     Errored,
 }
 
+/// Why a run failed, when the harness can tell: it picks the error card's
+/// remedy. `Other` absorbs causes added by newer peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ErrorCause {
+    /// The agent's login is missing, expired or revoked; signing in again
+    /// fixes it.
+    SignedOut,
+    #[serde(other)]
+    Other,
+}
+
 /// The normalized streaming event every harness emits.
 ///
 /// Mirrors zeron's `AgentEvent` tagged enum.
@@ -551,6 +563,9 @@ pub enum AgentEvent {
     },
     Error {
         message: String,
+        /// Additive: older engines and journals omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<ErrorCause>,
     },
     #[serde(rename_all = "camelCase")]
     InputRequested {
@@ -614,6 +629,41 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn error_cause_is_additive_on_the_wire() {
+        // Older engines and journals omit it; without one, none is written.
+        let legacy: AgentEvent = serde_json::from_str(r#"{"type":"error","message":"x"}"#).unwrap();
+        let bare = AgentEvent::Error {
+            message: "x".into(),
+            cause: None,
+        };
+        assert_eq!(legacy, bare);
+        assert!(!serde_json::to_string(&bare).unwrap().contains("cause"));
+
+        let signed_out = AgentEvent::Error {
+            message: "x".into(),
+            cause: Some(ErrorCause::SignedOut),
+        };
+        let json = serde_json::to_string(&signed_out).unwrap();
+        assert!(json.contains(r#""cause":"signedOut""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(&json).unwrap(),
+            signed_out
+        );
+
+        // A cause a newer peer added still parses.
+        let newer: AgentEvent =
+            serde_json::from_str(r#"{"type":"error","message":"x","cause":"quotaExceeded"}"#)
+                .unwrap();
+        assert_eq!(
+            newer,
+            AgentEvent::Error {
+                message: "x".into(),
+                cause: Some(ErrorCause::Other),
+            }
+        );
     }
 
     /// Drivers spell the key differently; the chip must not care which one

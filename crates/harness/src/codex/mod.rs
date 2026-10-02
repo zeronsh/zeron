@@ -1464,7 +1464,7 @@ async fn run_session(session: Session) {
                             .or_else(|| params.get("message").and_then(Value::as_str))
                             .unwrap_or("Codex error")
                             .to_owned();
-                        if !send(&event_tx, AgentEvent::Error { message }).await {
+                        if !send(&event_tx, AgentEvent::Error { message, cause: None }).await {
                             break 'main;
                         }
                     }
@@ -1671,6 +1671,7 @@ async fn steer_as_new_turn(
                 event_tx,
                 AgentEvent::Error {
                     message: format!("Steering failed: {e}"),
+                    cause: None,
                 },
             )
             .await;

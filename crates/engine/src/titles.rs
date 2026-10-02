@@ -297,7 +297,7 @@ async fn collect_text(
                     "title generation attempted to use a tool".into(),
                 ));
             }
-            AgentEvent::Error { message } => {
+            AgentEvent::Error { message, .. } => {
                 return Err(EngineError::Other(format!("titling run error: {message}")));
             }
             AgentEvent::Done { status, error, .. } => {

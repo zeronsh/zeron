@@ -206,7 +206,7 @@ async fn real_pi_mock_lifecycle() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, AgentEvent::Error { message }
+            .any(|e| matches!(e, AgentEvent::Error { message, .. }
             if message.contains("without the previous context"))),
         "{events:?}"
     );

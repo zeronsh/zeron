@@ -183,7 +183,7 @@ async fn unrestorable_session_starts_fresh_with_a_visible_notice() {
     .await
     .unwrap();
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::Error { message }
+        events.iter().any(|e| matches!(e, AgentEvent::Error { message, .. }
             if message.contains("missing-session") && message.contains("without the previous context"))),
         "{events:?}"
     );

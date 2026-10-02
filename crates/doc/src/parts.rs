@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
+use zeron_proto::{
+    AgentEvent, ErrorCause, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion,
+};
 
 use crate::constants::MSG_INLINE_MAX;
 
@@ -203,6 +205,9 @@ pub enum MessagePart {
     Error {
         id: String,
         message: String,
+        /// Additive: older writers omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<ErrorCause>,
     },
     /// The seam in a forked chat's transcript: everything above was copied
     /// from `source_chat_id` when the fork was cut, everything below is this
@@ -423,11 +428,12 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
             }
         }
-        AgentEvent::Error { message } => {
+        AgentEvent::Error { message, cause } => {
             let id = format!("e{}", out.len());
             out.push(MessagePart::Error {
                 id,
                 message: message.clone(),
+                cause: *cause,
             });
         }
         AgentEvent::Done { error, .. } => {
@@ -436,6 +442,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(MessagePart::Error {
                     id,
                     message: message.clone(),
+                    cause: None,
                 });
             }
         }

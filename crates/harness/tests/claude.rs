@@ -491,7 +491,7 @@ async fn error_codes_map_to_readable_messages() {
     let errors: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Error { message, .. } => Some(message.as_str()),
             _ => None,
         })
         .collect();

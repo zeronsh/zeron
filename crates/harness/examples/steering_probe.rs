@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                             if injected && (0..3).all(|i| workspace.path().join(format!("followup-{i}")).exists()) { break; }
                         }
-                        AgentEvent::Error { message } => eprintln!("{name}: {message}"),
+                        AgentEvent::Error { message, .. } => eprintln!("{name}: {message}"),
                         _ => {}
                     }
                 }

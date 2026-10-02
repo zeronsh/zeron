@@ -1632,7 +1632,7 @@ async fn acp_failed_load_announces_lost_context() {
     let mut req = request("fresh");
     req.resume = Some("missing".into());
     let events = run_to_end(&lifecycle_fixture(), req, ctl).await;
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("without the previous context"))));
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message.contains("without the previous context"))));
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
