@@ -32,6 +32,20 @@ fn fixture_path() -> PathBuf {
     path
 }
 
+/// A fake CLI that predates the undocumented `--thinking-display` flag (#477).
+fn legacy_fixture_path() -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("fake-claude-legacy.sh");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+    path
+}
+
 fn harness() -> ClaudeHarness {
     ClaudeHarness::new().with_executable(fixture_path())
 }
@@ -764,6 +778,46 @@ async fn title_run_disables_tools_and_denies_unexpected_permissions() {
             }
         )),
         "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn thinking_display_reaches_a_cli_that_accepts_it() {
+    // The flag is what asks newer models for a readable thinking summary;
+    // gating it must not cost it on a CLI that parses it (#477).
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("scenario:thinking-display"), controls).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "--thinking-display summarized must be passed to a CLI that accepts it: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cli_that_rejects_thinking_display_still_runs_the_turn() {
+    // Pre-2.1 installs reject the flag in the argument parser, before any
+    // frame, so the whole launch used to die with "claude exited unexpectedly
+    // (still running): error: unknown option '--thinking-display'" (#477).
+    let harness = ClaudeHarness::new().with_executable(legacy_fixture_path());
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness, request("scenario:happy"), controls).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "the flag must be dropped, not the turn: {events:?}"
     );
 }
 

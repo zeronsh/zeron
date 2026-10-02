@@ -34,8 +34,12 @@
   - interrupt: control request; >=2.1.205 response carries {still_queued:[uuids]}.
 - Resume: --resume=<session_id> (equals form; cwd-scoped), --continue, --fork-session.
 - One-shot interrupt: SIGTERM (kills bash trees, runs SessionEnd hooks, exit 143).
-- Input side de facto stable but undocumented (claude-code#24594) — pin min CLI version + gate on
-  capabilities.
+- Input side de facto stable but undocumented (claude-code#24594) — gate launch flags on
+  capabilities instead of assuming them: `--thinking-display` is probed once per executable
+  (crates/harness/src/claude/capabilities.rs) because a CLI that predates it rejects the flag in
+  the argument parser, before the run's first frame (#477). `--help` does not list it and
+  `--version` short-circuits validation, so the probe is a real (bounded, stdin-closed) launch.
+  `--permission-prompt-tool` has the same failure mode and still needs its own gate.
 
 ## Codex app-server protocol
 - Handshake: initialize {clientInfo, capabilities{experimentalApi, optOutNotificationMethods}} ->

@@ -14,6 +14,12 @@
 //!   auto-allow (zeron sessions run unattended, parity with the ACP
 //!   harness's preferred-allow behavior); `AskUserQuestion` round-trips
 //!   through [`RunControls::request_input`].
+//! - THINKING DISPLAY: `--thinking-display summarized` asks for the summary
+//!   newer models need before they emit readable thinking text (raw reasoning
+//!   stays provider-private). Like `--permission-prompt-tool` it is
+//!   undocumented and version-gated, and a CLI that predates it rejects the
+//!   whole launch before its first frame, so the `capabilities` probe runs it
+//!   once per executable and drops the flag when the parser refuses.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
 //!   wake turn when a background task finishes — a fresh `init` (same
@@ -31,6 +37,7 @@
 //! - Interrupt: cancelling [`RunControls::interrupt`] sends the protocol-level
 //!   interrupt control request, then escalates to SIGTERM and SIGKILL.
 
+mod capabilities;
 pub mod catalog;
 mod discovery;
 mod normalize;
@@ -164,7 +171,12 @@ impl ClaudeHarness {
         })
     }
 
-    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
+    fn build_command(
+        &self,
+        exe: &PathBuf,
+        request: &RunRequest,
+        thinking_display: bool,
+    ) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
         cmd.args([
@@ -177,10 +189,15 @@ impl ClaudeHarness {
             "--verbose",
             "--include-partial-messages",
             "--replay-user-messages",
-            // Newer Claude models emit no readable thinking text unless a
-            // summary is asked for (raw reasoning stays provider-private).
-            "--thinking-display",
-            "summarized",
+        ]);
+        // Newer Claude models emit no readable thinking text unless a
+        // summary is asked for (raw reasoning stays provider-private).
+        // Undocumented and version-gated, so a CLI that predates it would
+        // reject the whole launch in its argument parser — gate it.
+        if thinking_display {
+            cmd.args(["--thinking-display", "summarized"]);
+        }
+        cmd.args([
             // Route permission prompts to the stdio control channel so
             // `can_use_tool` (and AskUserQuestion in particular) reaches us.
             // Undocumented flag; validated live against 2.1.228.
@@ -525,7 +542,10 @@ impl ClaudeHarness {
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = self.build_command(&exe, &request);
+        // One bounded probe per executable, cached: a CLI that rejects
+        // `--thinking-display` in its argument parser must still run the turn.
+        let thinking_display = capabilities::supports_thinking_display(&exe).await;
+        let mut cmd = self.build_command(&exe, &request, thinking_display);
         if title_only {
             cmd.args([
                 "--system-prompt",
