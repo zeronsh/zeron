@@ -220,6 +220,10 @@ pub mod methods {
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    /// Live CPU / memory / GPU / network / disk / process usage of a device
+    /// (`zeron_proto::SystemStats` frames; params `WatchSystemStatsRequest`).
+    /// Relay-forwardable. Sampling runs only while the stream is open.
+    pub const WATCH_SYSTEM_STATS: &str = "WatchSystemStats";
 }
 
 #[derive(Debug, thiserror::Error)]
