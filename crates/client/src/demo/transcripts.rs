@@ -5,7 +5,7 @@
 //! for benchmarks, and the scripted streaming reply.
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
-use zeron_proto::{TodoItem, ToolCall, UserInputQuestion};
+use zeron_proto::{TodoItem, TodoStatus, ToolCall, UserInputQuestion};
 
 pub(crate) const PHONE: &str = "ios-demo";
 
@@ -79,7 +79,7 @@ pub(crate) fn entry(
     created_at: i64,
     parts: Vec<MessagePart>,
 ) -> SessionMessageEntry {
-    SessionMessageEntry {
+    SessionMessageEntry { origin: None,
         id: id.into(),
         role,
         parts,
@@ -288,18 +288,15 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     "k3",
                     ToolCall::Todo {
                         items: vec![
-                            TodoItem {
-                                text: "Snap chunk splits to grapheme clusters".into(),
-                                done: true,
-                            },
-                            TodoItem {
-                                text: "Table test for ZWJ sequences".into(),
-                                done: true,
-                            },
-                            TodoItem {
-                                text: "Measure veil cost on 600-turn transcript".into(),
-                                done: false,
-                            },
+                            TodoItem::new(
+                                "Snap chunk splits to grapheme clusters",
+                                TodoStatus::Completed,
+                            ),
+                            TodoItem::new("Table test for ZWJ sequences", TodoStatus::Completed),
+                            TodoItem::new(
+                                "Measure veil cost on 600-turn transcript",
+                                TodoStatus::Pending,
+                            ),
                         ],
                     },
                     false,
@@ -345,6 +342,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     request_id: "req-1".into(),
                     questions: vec![
                         UserInputQuestion {
+                            meta: None,
                             id: "q1".into(),
                             header: "Catalog source".into(),
                             question:
@@ -360,6 +358,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                             multi_select: false,
                         },
                         UserInputQuestion {
+                            meta: None,
                             id: "q2".into(),
                             header: "Harnesses".into(),
                             question: "Which harnesses should the picker offer on phones?".into(),
@@ -788,6 +787,7 @@ pub(crate) fn asking() -> Vec<Step> {
     vec![
         Step::Text("Before I continue I need one decision:".into()),
         Step::Question(vec![UserInputQuestion {
+            meta: None,
             id: "q1".into(),
             header: "Scope".into(),
             question: "Should the fix cover Android too?".into(),

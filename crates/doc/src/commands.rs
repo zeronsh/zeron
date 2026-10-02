@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{RunRequest, UserInputAnswer};
+use zeron_proto::{GoalCommand, RunRequest, UserInputAnswer, WorkflowCommand};
 
 use crate::constants::COMMAND_DEFAULT_TTL_MS;
 
@@ -21,6 +21,12 @@ pub enum SessionCommandKind {
     Steer,
     Interrupt,
     RespondInput,
+    /// Goal-mode mutation (`/goal`); additive — hosts that predate it skip
+    /// the entry as unreadable and the goal simply never changes there.
+    Goal,
+    /// Workflow control (stop, resume, answer an escalation); additive like
+    /// `Goal`: an older host skips it as unreadable.
+    Workflow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +60,12 @@ pub enum SessionCommandPayload {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
+    Goal {
+        command: GoalCommand,
+    },
+    Workflow {
+        command: WorkflowCommand,
+    },
 }
 
 impl SessionCommandPayload {
@@ -63,6 +75,8 @@ impl SessionCommandPayload {
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
+            SessionCommandPayload::Goal { .. } => SessionCommandKind::Goal,
+            SessionCommandPayload::Workflow { .. } => SessionCommandKind::Workflow,
         }
     }
 }

@@ -16,12 +16,14 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
+pub mod ask;
 pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod goal;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
@@ -40,6 +42,7 @@ pub mod terminals;
 pub mod titles;
 mod transcript_history;
 pub mod uploads;
+pub mod workflow;
 pub mod workspace_files;
 pub mod workspace_host;
 
@@ -246,12 +249,35 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        doc_host.set_asks(ask::AskService::new(
+            sessions.clone(),
+            workspace.clone(),
+            doc_host.clone(),
+        ));
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
+        // Dev knob: a scripted verifier for demos with the mock harness.
+        if std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0") {
+            doc_host.set_ask_backend(ask::demo_verifier());
+        } else if std::env::var("ZERON_MOCK_WORKFLOW").is_ok_and(|v| !v.is_empty() && v != "0") {
+            // Dev knob: workflow agents are scripted (no model, no child chats).
+            doc_host.set_ask_backend(ask::demo_workflow_agents());
+        }
+        let workflows = workflow::WorkflowService::new(
+            doc_host.clone(),
+            sessions.clone(),
+            workspace.clone(),
+            profile.store_root(),
+        );
+        // Runs the last process left mid-flight are settled as interrupted.
+        workflows.reconcile();
+        doc_host.set_workflows(workflows);
+        // Goals that were running when the engine last stopped resume here.
+        doc_host.set_goal_index(profile.store_root().join("goals.json"));
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
         let change_requests = CheckoutChangeRequests::start(repos.clone(), &device_id);

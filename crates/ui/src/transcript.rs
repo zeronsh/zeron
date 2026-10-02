@@ -889,7 +889,14 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
         ToolCall::WebSearch { query } => query.clone(),
         ToolCall::Todo { items } => items
             .iter()
-            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
+            .map(|i| {
+                let mark = match i.status() {
+                    zeron_proto::TodoStatus::Completed => "[x]",
+                    zeron_proto::TodoStatus::InProgress => "[~]",
+                    zeron_proto::TodoStatus::Pending => "[ ]",
+                };
+                format!("{mark} {}", i.text)
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         ToolCall::Mcp {
@@ -1062,6 +1069,9 @@ pub enum RowKind {
         source_chat_id: SharedString,
         source_title: SharedString,
     },
+    /// Goal mode: a round's controller-sent prompt, a verdict, a pause…
+    /// rendered as a compact marker instead of a bubble.
+    GoalMarker(crate::goal_panel::GoalMarker),
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1295,6 +1305,20 @@ pub fn rows_for_entry(
     let mut rows: Vec<Row> = Vec::new();
     let streaming = entry.status == Some(MessageStatus::Streaming);
     let entry_id: SharedString = entry.id.clone().into();
+
+    // Goal machinery (a round's prompt, verdicts, pauses) is not conversation.
+    if let Some(marker) = crate::goal_panel::goal_marker(entry) {
+        return vec![Row {
+            id: format!("{}#goal", entry.id).into(),
+            version: fnv1a(marker.label().as_bytes()) ^ fnv1a(marker.detail.as_bytes()),
+            turn_start: true,
+            kind: RowKind::GoalMarker(marker),
+            entry_id,
+            timestamp: None,
+            copy_text: None,
+            compact_fold: None,
+        }];
+    }
 
     if entry.role == MessageRole::User {
         let raw: String = entry
@@ -6634,6 +6658,7 @@ impl Transcript {
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::GoalMarker(marker) => crate::goal_panel::marker_element(marker, &theme),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -9236,7 +9261,7 @@ mod tests {
                 state.update(cx, |state, cx| {
                     state
                         .receive_transcript_update(
-                            zeron_doc::TranscriptUpdate {
+                            zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                 frame,
                                 replay_baseline,
                                 context_usage: None,
@@ -9349,7 +9374,7 @@ mod tests {
             assistant("b", MessageStatus::Complete, vec![tool_part("t", "pwd")]),
         ];
         let first = worker
-            .prepare(&zeron_doc::TranscriptUpdate {
+            .prepare(&zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                 frame: zeron_doc::TranscriptFrame::reset(&original),
                 context_usage: None,
                 replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&original)),
@@ -9361,7 +9386,7 @@ mod tests {
             text: "omega".into(),
         }];
         let next = worker
-            .prepare(&zeron_doc::TranscriptUpdate {
+            .prepare(&zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                 frame: zeron_doc::diff_transcript(&original, &changed),
                 context_usage: None,
                 replay_baseline: None,
@@ -9384,7 +9409,7 @@ mod tests {
                     MessagePart::Text { id: format!("part-{i}"), text: format!("## Result {i}\n\n**Markdown** with `code` and [links](https://example.com).\n") }
                 }).collect())]
             };
-            let update = zeron_doc::TranscriptUpdate {
+            let update = zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                 replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
                 frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
                 context_usage: None,
@@ -9468,7 +9493,7 @@ mod tests {
                 state.update(cx, |state, cx| {
                     state
                         .receive_opening_transcript_update(
-                            zeron_doc::TranscriptUpdate {
+                            zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                 frame: zeron_doc::TranscriptFrame::reset(entries),
                                 replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
                                     entries,
@@ -9524,7 +9549,7 @@ mod tests {
             state.update(cx, |state, cx| {
                 state
                     .receive_transcript_update(
-                        zeron_doc::TranscriptUpdate {
+                        zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                             frame: zeron_doc::diff_transcript(&full, &live),
                             replay_baseline: None,
                             context_usage: None,
@@ -9564,7 +9589,7 @@ mod tests {
                 let frame = zeron_doc::diff_transcript(&state.transcript, &history);
                 state
                     .receive_transcript_update(
-                        zeron_doc::TranscriptUpdate {
+                        zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                             frame,
                             context_usage: None,
                             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&history)),
@@ -9575,7 +9600,7 @@ mod tests {
                 // Both updates land before the transcript observes/render them.
                 state
                     .receive_transcript_update(
-                        zeron_doc::TranscriptUpdate {
+                        zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                             frame: zeron_doc::diff_transcript(&history, &live),
                             context_usage: None,
                             replay_baseline: None,
@@ -9610,7 +9635,7 @@ mod tests {
                     let frame = zeron_doc::diff_transcript(&state.transcript, entries);
                     state
                         .receive_transcript_update(
-                            zeron_doc::TranscriptUpdate {
+                            zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                 frame,
                                 replay_baseline: baseline,
                                 context_usage: None,
@@ -9667,7 +9692,7 @@ mod tests {
                 state.select_chat(Some("new-chat".into()), cx);
                 state
                     .receive_transcript_update(
-                        zeron_doc::TranscriptUpdate {
+                        zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                             frame: zeron_doc::TranscriptFrame::reset(&[]),
                             context_usage: None,
                             replay_baseline: Some(Default::default()),
@@ -9685,7 +9710,7 @@ mod tests {
             state.update(cx, |state, cx| {
                 state
                     .receive_transcript_update(
-                        zeron_doc::TranscriptUpdate {
+                        zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                             frame: zeron_doc::diff_transcript(&[], &live),
                             context_usage: None,
                             replay_baseline: None,
@@ -9719,7 +9744,7 @@ mod tests {
                 assert!(matches!(&frame, zeron_doc::TranscriptFrame::Reset { .. }));
                 state
                     .receive_transcript_update(
-                        zeron_doc::TranscriptUpdate {
+                        zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                             frame,
                             context_usage: None,
                             replay_baseline: None,
@@ -10474,7 +10499,7 @@ mod tests {
     }
 
     fn assistant(id: &str, status: MessageStatus, parts: Vec<MessagePart>) -> SessionMessageEntry {
-        SessionMessageEntry {
+        SessionMessageEntry { origin: None,
             id: id.into(),
             role: MessageRole::Assistant,
             parts,
@@ -11844,7 +11869,7 @@ mod tests {
                         state.select_chat(Some("chat".into()), cx);
                         state
                             .receive_transcript_update(
-                                zeron_doc::TranscriptUpdate {
+                                zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                     frame: zeron_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
                                     replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
@@ -11872,7 +11897,7 @@ mod tests {
                     this.state.update(cx, |state, cx| {
                         state
                             .receive_transcript_update(
-                                zeron_doc::TranscriptUpdate {
+                                zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                     frame: zeron_doc::diff_transcript(&history, &next),
                                     context_usage: None,
                                     // The RPC must retain its opening cutoff when
@@ -11927,7 +11952,7 @@ mod tests {
                         state.select_chat(Some("chat".into()), cx);
                         state
                             .receive_transcript_update(
-                                zeron_doc::TranscriptUpdate {
+                                zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                     frame: zeron_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
                                     replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
@@ -11939,7 +11964,7 @@ mod tests {
                             .unwrap();
                         state
                             .receive_transcript_update(
-                                zeron_doc::TranscriptUpdate {
+                                zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                     frame: zeron_doc::diff_transcript(&history, &live),
                                     context_usage: None,
                                     replay_baseline: None,
@@ -11989,7 +12014,7 @@ mod tests {
                     this.state.update(cx, |state, cx| {
                         state
                             .receive_transcript_update(
-                                zeron_doc::TranscriptUpdate {
+                                zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                     frame: zeron_doc::diff_transcript(&live, &next),
                                     context_usage: None,
                                     replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
@@ -12096,7 +12121,7 @@ mod tests {
                             let frame = zeron_doc::diff_transcript(&state.transcript, &updated);
                             state
                                 .receive_transcript_update(
-                                    zeron_doc::TranscriptUpdate {
+                                    zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                                         frame,
                                         context_usage: None,
                                         replay_baseline: Some(
@@ -13826,14 +13851,8 @@ mod tests {
         );
         let todo = ToolCall::Todo {
             items: vec![
-                zeron_proto::TodoItem {
-                    text: "a".into(),
-                    done: true,
-                },
-                zeron_proto::TodoItem {
-                    text: "b".into(),
-                    done: false,
-                },
+                zeron_proto::TodoItem::new("a", zeron_proto::TodoStatus::Completed),
+                zeron_proto::TodoItem::new("b", zeron_proto::TodoStatus::Pending),
             ],
         };
         assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_string()));
@@ -13913,21 +13932,16 @@ mod tests {
         // Todos list one item per line with checkbox state.
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {
             items: vec![
-                zeron_proto::TodoItem {
-                    text: "a".into(),
-                    done: true,
-                },
-                zeron_proto::TodoItem {
-                    text: "b".into(),
-                    done: false,
-                },
+                zeron_proto::TodoItem::new("a", zeron_proto::TodoStatus::Completed),
+                zeron_proto::TodoItem::new("b", zeron_proto::TodoStatus::InProgress),
+                zeron_proto::TodoItem::new("c", zeron_proto::TodoStatus::Pending),
             ],
         }) else {
             panic!("expected an output block")
         };
         assert_eq!(
             lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
-            vec!["[x] a", "[ ] b"]
+            vec!["[x] a", "[~] b", "[ ] c"]
         );
 
         // Blank invocation → no block; the chip stays a plain card.
@@ -13951,7 +13965,7 @@ mod tests {
         assert_eq!(format_timestamp(ms, &tz), "Jul 1, 3:45 PM");
 
         // User entries carry the strip on their single row (pending too).
-        let user = SessionMessageEntry {
+        let user = SessionMessageEntry { origin: None,
             id: "u1".into(),
             role: MessageRole::User,
             parts: vec![text_part("p1", "hi")],

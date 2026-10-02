@@ -788,7 +788,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                     Arc::new(Entry {
                         id: pending.message_id.clone(),
                         rev,
-                        message: Arc::new(SessionMessageEntry {
+                        message: Arc::new(SessionMessageEntry { origin: None,
                             id: pending.message_id.clone(),
                             role: MessageRole::User,
                             parts: vec![MessagePart::Text {

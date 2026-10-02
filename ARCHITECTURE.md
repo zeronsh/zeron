@@ -147,6 +147,11 @@ zeron/
                                  # checkout-diff sync, terminals (portable-pty), uploads,
                                  # agent accounts (cred swap), auth (WorkOS via edge),
                                  # device-room host/peers, identity
+    workflow/     zeron-workflow # dynamic workflows, pure half: the Starlark runtime and its
+                                 # host API, static analysis + diagnostics, call-site identity,
+                                 # the run-state reducer (`docs/workflows.md`). Only the engine
+                                 # (and tests) depend on it: clients and mobile consume the
+                                 # wire/state types in zeron-proto and never link an interpreter
     rpc/          zeron-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
                                  # tungstenite) + in-memory transport; device-room virtual
                                  # sockets ({s,k,to,from} frames)

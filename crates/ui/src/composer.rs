@@ -4993,6 +4993,10 @@ impl Render for ComposerInput {
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
     WorkspaceCommand(WorkspaceCommand),
+    /// Open another chat (the goal tray's link to a verifier chat).
+    OpenChat {
+        chat_id: String,
+    },
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -5337,6 +5341,8 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    /// `/goal` — completing it inserts the command for an objective to follow.
+    Goal,
 }
 
 impl WorkspaceCommand {
@@ -5366,6 +5372,12 @@ impl WorkspaceCommand {
                 true,
             ),
             (Self::Stop, "stop", "Zeron: stop the active run", true),
+            (
+                Self::Goal,
+                "goal",
+                "Zeron: keep working until a verifier says the objective is met",
+                true,
+            ),
         ]
     }
 }
@@ -5666,7 +5678,7 @@ pub struct Composer {
     /// connected"). Chat-scoped failures survive navigation and render only
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
-    failure_key: Option<String>,
+    pub(crate) failure_key: Option<String>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
     /// Requests already answered locally (suppresses the panel until the doc
@@ -5699,6 +5711,16 @@ pub struct Composer {
     /// Rows awaiting a host-authoritative removal acknowledgement. They stay
     /// visible but inert until the host wins the race against queue delivery.
     pub(crate) queue_removing: HashSet<String>,
+    /// The agent's checklist tray: latest list of the selected chat, and the
+    /// per-chat open/fold state (in memory, like the right-pane flags).
+    pub(crate) todo_cache: crate::todo_panel::TodoCache,
+    pub(crate) todo_panels: HashMap<String, crate::todo_panel::TodoPanelState>,
+    pub(crate) todo_scroll: gpui::ScrollHandle,
+    /// The goal tray's per-chat presentation state, scroll, and the one-second
+    /// repaint that keeps its elapsed time moving while a goal runs.
+    pub(crate) goal_panels: HashMap<String, crate::goal_panel::GoalPanelState>,
+    pub(crate) goal_scroll: gpui::ScrollHandle,
+    pub(crate) goal_ticker: Option<Task<()>>,
     /// Whether the modifier overlay should currently reveal the queue hint.
     /// The shell owns modifier tracking and clears this on window deactivation.
     queue_shortcut_revealed: bool,
@@ -5979,6 +6001,12 @@ impl Composer {
             queue_full_preview: None,
             queue_previews: HashMap::new(),
             queue_removing: HashSet::new(),
+            todo_cache: Default::default(),
+            todo_panels: HashMap::new(),
+            todo_scroll: gpui::ScrollHandle::new(),
+            goal_panels: HashMap::new(),
+            goal_scroll: gpui::ScrollHandle::new(),
+            goal_ticker: None,
             queue_shortcut_revealed: false,
             expanded_mode: false,
             flip_epoch: 0,
@@ -7452,6 +7480,15 @@ impl Composer {
         else {
             return;
         };
+        if command.workspace_command == Some(WorkspaceCommand::Goal) {
+            // Takes an argument: leave `/goal ` in the input for the objective.
+            self.input.update(cx, |input, cx| {
+                input.replace_plain_token(token.range, "/goal ", cx)
+            });
+            self.reset_slash(None, cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = command.workspace_command {
             self.execute_workspace_command(action, token.range, cx);
             return;
@@ -7951,6 +7988,10 @@ impl Composer {
         // Leading indentation distinguishes literal Markdown from native commands
         // and skill invocations. Only the empty-content check may trim the draft.
         let text = self.input.read(cx).text().to_string();
+        // `/goal …` is a Zeron command with arguments: it never reaches the agent.
+        if self.run_goal_input(&text, cx) {
+            return;
+        }
         if let Some(action) = self
             .slash_cache
             .get(&self.slash.context)
@@ -8239,6 +8280,7 @@ impl Composer {
         // Optimistic echo (client-minted id doubles as the persisted message id,
         // so the doc frame dedups it away).
         let echo = SessionMessageEntry {
+            origin: None,
             id: message_id.clone(),
             role: zeron_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -8404,7 +8446,7 @@ impl Composer {
                     // flicker. A queued message has no transcript echo at all;
                     // its queue row is the only representation until dispatch.
                     if should_publish_optimistic_echo(queue) {
-                        let refreshed = SessionMessageEntry {
+                        let refreshed = SessionMessageEntry { origin: None,
                             id: message_id.clone(),
                             role: zeron_doc::MessageRole::User,
                             parts: vec![MessagePart::Text {
@@ -10115,6 +10157,19 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_comments(cx).len(),
             );
+        // The checklist tray stacks above the queue (or directly above the
+        // composer), one step narrower than what follows it.
+        let has_queue = !self.state.read(cx).queue.is_empty();
+        let todo_panel = self.render_todo_panel(has_queue, window, cx);
+        // The goal tray tops the stack, one step narrower than each tray below.
+        let below = usize::from(has_queue) + usize::from(todo_panel.is_some());
+        let container = container
+            .when_some(self.render_goal_panel(below, window, cx), |el, panel| {
+                el.child(motion::fade_quick("composer-goal", div().child(panel)))
+            });
+        let container = container.when_some(todo_panel, |el, panel| {
+            el.child(motion::fade_quick("composer-todo", div().child(panel)))
+        });
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {
@@ -11445,7 +11500,7 @@ mod tests {
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 12);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
@@ -11454,7 +11509,7 @@ mod tests {
             workspace_command_for_text("/zeron:zeron:model", &rows),
             Some(WorkspaceCommand::Model)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 12);
         let draft_rows = with_workspace_commands(vec![], false);
         assert_eq!(draft_rows.len(), 4);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
@@ -14092,6 +14147,7 @@ mod tests {
 
     fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
         UserInputQuestion {
+            meta: None,
             id: id.into(),
             header: "Header".into(),
             question: format!("Question {id}"),
@@ -14991,6 +15047,7 @@ mod tests {
             q.prefill = Some("  initial\ntext\n".into());
             q.multiline = true;
             vec![SessionMessageEntry {
+                origin: None,
                 id: "assistant".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Input {
@@ -15062,6 +15119,7 @@ mod tests {
             resolved: false,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
+            origin: None,
             id: "m".into(),
             role: MessageRole::Assistant,
             parts,
@@ -15096,6 +15154,7 @@ mod tests {
         let t = vec![
             entry(Some(MessageStatus::Aborted), vec![input_part.clone()]),
             SessionMessageEntry {
+                origin: None,
                 id: "m2".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Text {
@@ -15129,6 +15188,7 @@ mod tests {
         // found (a last-entry-only read vanished the panel exactly when the
         // user typed, bricking the answer flow).
         let user_echo = SessionMessageEntry {
+            origin: None,
             id: "u2".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
