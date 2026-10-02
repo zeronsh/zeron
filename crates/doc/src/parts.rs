@@ -191,6 +191,12 @@ pub enum MessagePart {
         /// its tagged text deltas (capped; display-only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_tail: Option<String>,
+        /// The chats a Zeron MCP `create_chat`/`create_chats` call created,
+        /// read from its result by the fold — the one slice of that output
+        /// the doc keeps, so every device can link the call to its chats
+        /// (additive; empty for every other tool and for older writers).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        created_chat_ids: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -357,6 +363,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    created_chat_ids: Vec::new(),
                 });
             }
         }
@@ -375,12 +382,25 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     diff: diff_slot,
                     output_bytes,
                     diff_stats,
+                    call,
+                    created_chat_ids,
                     ..
                 } = p
                     && pid == id
                 {
                     *e = *is_error;
                     *resolved = true;
+                    // A Zeron create call's result names the chats it made:
+                    // keep just their ids (the output itself stays out).
+                    if !*is_error && zeron_proto::created_chats::create_chat_op(call).is_some() {
+                        *created_chat_ids = output
+                            .as_deref()
+                            .map(zeron_proto::created_chats::parse_created_chats)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|chat| chat.chat_id)
+                            .collect();
+                    }
                     // Tool OUTPUTS never enter the doc (2026-08-10 product
                     // call: chips are one-liners — name + call info — like
                     // pre-output builds; the R2 sidecar is parked with them,
@@ -985,6 +1005,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                created_chat_ids: Vec::new(),
             },
         ];
         let chunks = split_parts(&parts);
@@ -1068,6 +1089,56 @@ mod tests {
             new_text: "one\ntwo\n".into(),
         });
         assert_eq!((stat.additions, stat.deletions), (2, 0));
+    }
+
+    #[test]
+    fn fold_keeps_only_the_chat_ids_a_zeron_create_call_made() {
+        let fold = |call: ToolCall, is_error: bool, output: &str| {
+            let mut parts = Vec::new();
+            fold_event_into_parts(&mut parts, &AgentEvent::ToolCall { id: "t".into(), call });
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolResult {
+                    id: "t".into(),
+                    is_error,
+                    output: Some(output.into()),
+                    diff: None,
+                },
+            );
+            match parts.remove(0) {
+                MessagePart::Tool {
+                    created_chat_ids,
+                    output,
+                    ..
+                } => {
+                    assert_eq!(output, None);
+                    created_chat_ids
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        let zeron = |tool: &str| ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: tool.into(),
+            input: None,
+        };
+        let single = r#"{"chatId":"w1","kind":"chat","deviceId":"gpu"}"#;
+        assert_eq!(fold(zeron("create_chat"), false, single), ["w1"]);
+        // OpenCode's name for the same tool.
+        let opencode = ToolCall::Unknown {
+            name: "zeron_create_chat".into(),
+            input: None,
+        };
+        assert_eq!(fold(opencode, false, single), ["w1"]);
+        // Failed calls, other tools and other servers keep nothing.
+        assert!(fold(zeron("create_chat"), true, single).is_empty());
+        assert!(fold(zeron("list_chats"), false, single).is_empty());
+        let github = ToolCall::Mcp {
+            server: "github".into(),
+            tool: "create_chat".into(),
+            input: None,
+        };
+        assert!(fold(github, false, single).is_empty());
     }
 
     #[test]

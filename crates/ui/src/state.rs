@@ -1776,10 +1776,11 @@ impl AppState {
 
     // ---- queries ----
 
-    /// Non-archived, top-level chats in sidebar order. Chats spawned by
-    /// another chat (`parent_chat_id`, the Zeron MCP's orchestration link)
-    /// are the parent's workers, not sessions the user started: they stay
-    /// reachable by id/deep link but never take a sidebar row or jump slot.
+    /// Non-archived, top-level chats in sidebar order. Side chats
+    /// (`parent_chat_id`, placement under another chat) stay reachable by
+    /// id/deep link but never take a sidebar row or jump slot. Provenance
+    /// alone (`spawned_by_chat_id`, an agent's `create_chat { kind: "chat" }`)
+    /// does not hide a chat: those are real top-level sessions.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
@@ -3695,6 +3696,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
+            spawned_by_chat_id: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -4696,6 +4698,26 @@ mod tests {
         assert_eq!(rows, ["parent"]);
         // The child row itself is still addressable (deep links, tabs).
         assert!(state.chats.iter().any(|c| c.id == "child"));
+    }
+
+    #[test]
+    fn visible_chats_list_agent_spawned_top_level_chats() {
+        let mut state = AppState::new();
+        let spawner = chat("spawner", 0, Some(1));
+        // `create_chat { kind: "chat" }`: provenance only, no placement.
+        let mut worker = chat("worker", 1, Some(2));
+        worker.spawned_by_chat_id = Some("spawner".into());
+        // `create_chat { kind: "side" }`: placement and provenance.
+        let mut side = chat("side", 2, Some(3));
+        side.parent_chat_id = Some("spawner".into());
+        side.spawned_by_chat_id = Some("spawner".into());
+        let mut archived_worker = chat("archived", 3, Some(4));
+        archived_worker.spawned_by_chat_id = Some("spawner".into());
+        archived_worker.archived = true;
+        state.apply_chats(vec![spawner, worker, side, archived_worker]);
+        let mut visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
+        visible.sort_unstable();
+        assert_eq!(visible, ["spawner", "worker"]);
     }
 
     #[test]

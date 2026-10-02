@@ -3887,6 +3887,12 @@ impl Shell {
                     cx,
                 );
             }
+            // The live row decides placement (a side chat docks beside its
+            // parent, a top-level one is selected); `side` is the card's
+            // reading of the same row.
+            TranscriptEvent::OpenChat { chat_id, side: _ } => {
+                self.open_child_chat_tab(chat_id, cx);
+            }
         }
     }
 
@@ -7006,6 +7012,19 @@ impl Shell {
             .is_some_and(|chat| {
                 self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
             });
+        // Agent-spawned top-level chats name their spawner (sidebar rows
+        // only — the palette row is a search hit, not a place to navigate
+        // sideways from).
+        let spawned_by = (search_query.is_none() && !preview)
+            .then(|| {
+                let state = self.state.read(cx);
+                state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == id)
+                    .and_then(|chat| spaces::spawned_by_affordance(chat, &state.chats))
+            })
+            .flatten();
         let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
@@ -7463,6 +7482,50 @@ impl Shell {
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
                     ))
+                    .when_some(spawned_by, |el, spawned_by| {
+                        // Provenance, not status: the transcript's agent
+                        // glyph at the remote icon's size and tone, with the
+                        // spawner's name on hover. Clicking it opens the
+                        // spawner; the row's own click still opens this chat.
+                        let label = SharedString::from(spawned_by.label);
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("{row_id}-spawned-by")))
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("chat-spawned-by-{id}")
+                                })
+                                .flex_none()
+                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE + 4.0))
+                                .mx(px(-2.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.0))
+                                .aria_label(label.clone())
+                                .tooltip(crate::settings::widgets::text_tooltip(label))
+                                .child(
+                                    icon(icons::BOT)
+                                        .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                        .text_color(subline.opacity(if archived_muted {
+                                            0.4
+                                        } else {
+                                            1.0
+                                        })),
+                                )
+                                .when_some(spawned_by.spawner_id, |el, spawner| {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.bg(crate::theme::wash(0.10)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.open_chat(spawner.clone(), cx);
+                                        }))
+                                }),
+                        )
+                    })
                     .when(!compact && !show_label && remote, |el| {
                         el.child(
                             icon(icons::REMOTE_SERVER)
@@ -12935,6 +12998,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
+            spawned_by_chat_id: None,
         }
     }
 

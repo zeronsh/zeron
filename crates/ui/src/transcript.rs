@@ -54,6 +54,8 @@ use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
 use zeron_syntax::LanguageId as Lang;
 
+mod created_chats;
+
 // ---------------------------------------------------------------------------
 // Constants (mugen ports)
 // ---------------------------------------------------------------------------
@@ -371,6 +373,10 @@ pub struct ToolItem {
     /// per-delta header rewrites read as noise). Never rendered; still
     /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
+    /// The chats a Zeron `create_chat`/`create_chats` call's result names
+    /// ([`created_chats::parse_created_chats`]); `None` for other tools and
+    /// for results the doc does not carry.
+    pub(crate) created_chats: Option<Arc<Vec<created_chats::CreatedChat>>>,
     /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
     /// riding the tool group — the thought process belongs inside the
     /// combined "Ran N commands" accordion, opening/closing with the same
@@ -384,9 +390,11 @@ pub struct ToolItem {
 /// Subagent spawn chips — [`ToolCall::is_subagent_spawn`], the shared genus
 /// every driver decodes its spawn tool into. These stay out of the
 /// collapsible "Called N tools" wrap so a running subagent is visible
-/// without opening the fold.
+/// without opening the fold. Zeron `create_chat`/`create_chats` calls share
+/// the genus: they spawn agents too, and their chip is the link to the
+/// chats they made.
 fn is_agent_call(call: &ToolCall) -> bool {
-    call.is_subagent_spawn()
+    call.is_subagent_spawn() || created_chats::create_chat_op(call).is_some()
 }
 
 /// The chip's GENUS is the call itself, never the ref: docs written before
@@ -727,6 +735,7 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
+        created_chats: None,
         kind: ToolItemKind::Thought,
     }
 }
@@ -1219,6 +1228,10 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         if let Some(tail) = &t.subagent_tail {
             acc.extend_from_slice(tail.as_bytes());
         }
+        for chat in t.created_chats.iter().flat_map(|chats| chats.iter()) {
+            acc.extend_from_slice(chat.chat_id.as_bytes());
+            acc.push(0);
+        }
     }
     acc.push(auto_open as u8);
     fnv1a(&acc)
@@ -1417,6 +1430,7 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                created_chat_ids,
                 ..
             } => {
                 let item = ToolItem {
@@ -1433,6 +1447,10 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
+                    created_chats: created_chats::create_chat_op(call)
+                        .map(|_| created_chats::named_chats(created_chat_ids, output.as_deref()))
+                        .filter(|chats| !chats.is_empty())
+                        .map(Arc::new),
                     kind: ToolItemKind::Call,
                 };
                 if compact {
@@ -3143,6 +3161,14 @@ pub struct Transcript {
     /// frames reuse settled blocks' text+runs; the incremental parser's stable
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
+    /// The transcript's settled Zeron create calls whose chats must be
+    /// recovered from provenance, keyed by (chat, transcript revision) —
+    /// rescanned only when the transcript changes, not per paint.
+    create_call_sites: Option<(
+        (Option<String>, u64),
+        Arc<Vec<created_chats::CreateCallSite>>,
+        Arc<HashSet<String>>,
+    )>,
     workspace_link: Option<render::LinkUi>,
     /// File-link roots per linking chat, valid for one
     /// `AppState::link_roots_revision`: every rendered row asks for them.
@@ -3294,6 +3320,10 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// A created-chat card (a Zeron `create_chat`/`create_chats` call):
+    /// open that chat — a side chat docks beside its parent like a footer
+    /// row, a top-level chat is selected like its sidebar row.
+    OpenChat { chat_id: String, side: bool },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3486,6 +3516,7 @@ impl Transcript {
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
+            create_call_sites: None,
             workspace_link: None,
             file_link_roots: Default::default(),
             inline_code_links: Default::default(),
@@ -6987,6 +7018,120 @@ impl Transcript {
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
     }
 
+    /// For each chip in `tools`: the chats a settled Zeron create call made,
+    /// as cards — `None` for every other chip, for running or failed calls,
+    /// and for calls whose chats are unknown (those keep the plain chip).
+    ///
+    /// Ids come from the call's own result when the doc carries it, else
+    /// from the chats' provenance: every chat whose `spawnedByChatId` is
+    /// this transcript's chat, matched back to the calls by creation time
+    /// ([`created_chats::attribute_spawned_chats`]). Titles, kind, host and
+    /// status are read live from the chat rows, like the sidebar.
+    fn created_chat_cards(
+        &mut self,
+        tools: &[ToolItem],
+        cx: &mut Context<Self>,
+    ) -> Vec<Option<Vec<CreatedChatCard>>> {
+        let settled = |tool: &ToolItem| {
+            tool.kind == ToolItemKind::Call
+                && tool.resolved
+                && !tool.is_error
+                && created_chats::create_chat_op(&tool.call).is_some()
+        };
+        if !tools.iter().any(settled) {
+            return vec![None; tools.len()];
+        }
+        // Provenance names the spawner's chat, so only a chat's own
+        // transcript (not a subagent doc) can recover ids from it.
+        let attributed = match (&self.doc_override, self.chat_id.clone()) {
+            (None, Some(chat_id)) => {
+                let state = self.state.read(cx);
+                let key = (Some(chat_id.clone()), state.transcript_revision);
+                if self
+                    .create_call_sites
+                    .as_ref()
+                    .is_none_or(|(cached, _, _)| cached != &key)
+                {
+                    let (sites, claimed) = created_chats::create_call_sites(&state.transcript);
+                    self.create_call_sites = Some((key, Arc::new(sites), Arc::new(claimed)));
+                }
+                let (_, sites, claimed) = self.create_call_sites.as_ref().unwrap();
+                let spawned: Vec<(String, i64)> = state
+                    .chats
+                    .iter()
+                    .filter(|chat| {
+                        chat.spawned_by_chat_id.as_deref() == Some(chat_id.as_str())
+                            && !claimed.contains(&chat.id)
+                    })
+                    .map(|chat| (chat.id.clone(), chat.created_at.timestamp_millis()))
+                    .collect();
+                created_chats::attribute_spawned_chats(sites, &spawned)
+            }
+            _ => HashMap::new(),
+        };
+        let state = self.state.read(cx);
+        let now = chrono::Utc::now();
+        tools
+            .iter()
+            .map(|tool| {
+                if !settled(tool) {
+                    return None;
+                }
+                let named: Vec<created_chats::CreatedChat> = match &tool.created_chats {
+                    Some(chats) => chats.as_ref().clone(),
+                    None => attributed
+                        .get(&tool.part_id)?
+                        .iter()
+                        .map(|id| created_chats::CreatedChat {
+                            chat_id: id.clone(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                };
+                let cards: Vec<CreatedChatCard> = named
+                    .into_iter()
+                    .map(|created| {
+                        let live = state.chats.iter().find(|c| c.id == created.chat_id);
+                        let side = live
+                            .map(|chat| chat.parent_chat_id.is_some())
+                            .or(created.side)
+                            .unwrap_or(false);
+                        let title = live
+                            .and_then(|chat| chat.title.as_deref())
+                            .or(created.title.as_deref())
+                            .map(str::trim)
+                            .filter(|title| !title.is_empty())
+                            .map(single_line)
+                            .unwrap_or_else(|| {
+                                if side { "New side chat" } else { "New chat" }.into()
+                            });
+                        let device_id = live
+                            .map(|chat| chat.device_id.as_str())
+                            .or(created.device_id.as_deref());
+                        let remote = device_id
+                            .is_some_and(|id| state.local_device_id.as_deref() != Some(id));
+                        let device = remote
+                            .then(|| {
+                                device_id
+                                    .and_then(|id| state.device_name(id))
+                                    .or(created.device_name.as_deref())
+                                    .map(|name| SharedString::from(name.to_owned()))
+                            })
+                            .flatten();
+                        CreatedChatCard {
+                            chat_id: created.chat_id,
+                            title: title.into(),
+                            side,
+                            device,
+                            status: live.map(|chat| state.display_status_for(chat, now)),
+                        }
+                    })
+                    .collect();
+                (!cards.is_empty()).then_some(cards)
+            })
+            .collect()
+    }
+
     fn render_tool_group(
         &mut self,
         row_id: &SharedString,
@@ -7075,17 +7220,22 @@ impl Transcript {
                     .toggled_at
                     .is_some_and(|at| at.elapsed() < TOOL_FOLD.total()));
         let tools = if body_visible { tools.as_slice() } else { &[] };
+        // Zeron create_chat(s) calls that settled into real chats render as
+        // one link card per chat (live title/status), resolved per paint.
+        let created_cards = self.created_chat_cards(tools, cx);
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
         // needs no row rebuild — arrival is a cx.notify, like a fold toggle.
         let details: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| {
+            .zip(&created_cards)
+            .map(|(tool, cards)| {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
-                if is_spawn_link(tool) {
+                // Created-chat cards likewise open the chats they name.
+                if is_spawn_link(tool) || cards.is_some() {
                     return None;
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
@@ -7107,7 +7257,12 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
+            .zip(&created_cards)
+            .map(|(tool, cards)| {
+                tool.invocation
+                    .clone()
+                    .filter(|_| !is_spawn_link(tool) && cards.is_none())
+            })
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
@@ -7244,6 +7399,15 @@ impl Transcript {
                     }
                 }
                 target
+            })
+            .collect();
+        // A card per created chat, stacked in the chip's own slot.
+        let row_heights: Vec<f32> = row_heights
+            .into_iter()
+            .zip(&created_cards)
+            .map(|(height, cards)| match cards {
+                Some(cards) => base_row_height * cards.len() as f32,
+                None => height,
             })
             .collect();
         let reduce_motion = cx.reduce_motion();
@@ -7439,6 +7603,16 @@ impl Transcript {
                         collapses,
                         theme,
                         cx.entity_id(),
+                        cx,
+                    );
+                }
+                if let Some(cards) = created_cards[ix].as_ref() {
+                    return created_chat_chips(
+                        cards,
+                        &format!("{row_id}#c{ix}"),
+                        collapses,
+                        base_row_height,
+                        theme,
                         cx,
                     );
                 }
@@ -8716,8 +8890,28 @@ fn subagent_chip(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> AnyElement {
+    link_chip(
+        id,
+        chip_header_row(tool, Some(ChipTrail::OpenArrow), theme, view, cx),
+        Some(Box::new(on_open)),
+        rail,
+        CHIP_HEIGHT,
+    )
+}
+
+type LinkChipClick = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>;
+
+/// The spawn chip's card around `header`: the whole card is the click when
+/// `on_open` is set (a card with nothing to open stays inert).
+fn link_chip(
+    id: SharedString,
+    header: gpui::Div,
+    on_open: Option<LinkChipClick>,
+    rail: bool,
+    height: f32,
+) -> AnyElement {
     div()
-        .h(px(CHIP_HEIGHT))
+        .h(px(height))
         .w_full()
         .flex_none()
         .flex()
@@ -8747,18 +8941,217 @@ fn subagent_chip(
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.03))
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                .on_click(on_open)
-                .child(chip_header_row(
-                    tool,
-                    Some(ChipTrail::OpenArrow),
-                    theme,
-                    view,
-                    cx,
-                )),
+                .when_some(on_open, |card, on_open| {
+                    card.cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.05)))
+                        .on_click(on_open)
+                })
+                .child(header),
         )
         .into_any_element()
+}
+
+/// One chat a settled Zeron create call made, as its card shows it.
+#[derive(Debug, Clone, PartialEq)]
+struct CreatedChatCard {
+    chat_id: String,
+    title: SharedString,
+    /// Placed under the spawner (`kind: "side"`) rather than top-level.
+    side: bool,
+    /// The host's name when it is not this device.
+    device: Option<SharedString>,
+    /// Live display status; `None` when the chat row is gone (deleted, or
+    /// not synced yet) — the card then has nothing to open.
+    status: Option<zeron_proto::ChatIndicator>,
+}
+
+/// The cards a Zeron `create_chat`/`create_chats` chip becomes once its
+/// chats exist: the spawn chip's card, one per created chat, each the link
+/// to its chat — "Chat"/"Side chat" where the spawn chip says "Agent", the
+/// live title as the detail, the host when remote, and the sidebar's status
+/// glyph and word. The whole card opens the chat
+/// ([`TranscriptEvent::OpenChat`]).
+fn created_chat_chips(
+    cards: &[CreatedChatCard],
+    id_prefix: &str,
+    rail: bool,
+    height: f32,
+    theme: &Theme,
+    cx: &mut Context<Transcript>,
+) -> AnyElement {
+    let view = cx.entity_id();
+    let mut column = div().w_full().flex_none().flex().flex_col();
+    for (ix, card) in cards.iter().enumerate() {
+        let opens = card.status.is_some();
+        let chat_id = card.chat_id.clone();
+        let side = card.side;
+        let header = created_chat_header(card, opens, theme, view, cx);
+        let on_open: Option<LinkChipClick> = opens.then(|| {
+            Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(TranscriptEvent::OpenChat {
+                    chat_id: chat_id.clone(),
+                    side,
+                });
+            })) as LinkChipClick
+        });
+        column = column.child(link_chip(
+            SharedString::from(format!("{id_prefix}.{ix}")),
+            header,
+            on_open,
+            rail,
+            height,
+        ));
+    }
+    column.into_any_element()
+}
+
+/// A created chat's card header — [`chip_header_row`]'s spawn-chip layout:
+/// icon tile, medium label, truncating detail, faint trailing meta, the
+/// status glyph, and the open-arrow tile.
+fn created_chat_header(
+    card: &CreatedChatCard,
+    opens: bool,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
+    let status = card
+        .status
+        .filter(|status| *status != zeron_proto::ChatIndicator::Idle);
+    let mut row = div()
+        .h(px(CHIP_HEADER_HEIGHT))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(8.0))
+        .text_size(px(TOOL_LABEL_SIZE))
+        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        .child(
+            div()
+                .size(px(18.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .bg(crate::theme::ink(0.08))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .flex()
+                .items_center()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .child(SharedString::from(if card.side { "Side chat" } else { "Chat" })),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .flex()
+                .items_center()
+                .truncate()
+                .text_color(theme.text.opacity(0.85))
+                .child(div().min_w_0().truncate().child(card.title.clone())),
+        )
+        .when_some(card.device.clone(), |row, device| {
+            // The host, like the spawn chip's model: bare faint text, since
+            // the trailing tiles are the affordances.
+            row.child(
+                div()
+                    .flex_none()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(
+                        crate::icons::icon(crate::icons::REMOTE_SERVER)
+                            .size(px(11.0))
+                            .text_color(theme.text_faint),
+                    )
+                    .child(device),
+            )
+        });
+    if let Some(status) = status {
+        // The sidebar row's status corner: glyph + word in its tone.
+        let color = crate::shell::spaces::status_dot_color(status, theme);
+        let glyph = match status {
+            zeron_proto::ChatIndicator::Working => div()
+                .flex_none()
+                .child(crate::loaders::mini_glyph_spinner(
+                    format!("created-chat-{}", card.chat_id),
+                    2.0,
+                    theme.glyph,
+                    view,
+                    cx,
+                ))
+                .into_any_element(),
+            zeron_proto::ChatIndicator::Completed => crate::icons::icon(crate::icons::CHECK)
+                .size(px(11.0))
+                .flex_none()
+                .text_color(color)
+                .into_any_element(),
+            _ => div()
+                .size(px(6.0))
+                .flex_none()
+                .rounded_full()
+                .bg(color)
+                .into_any_element(),
+        };
+        let label = match status {
+            zeron_proto::ChatIndicator::Working => "Working",
+            zeron_proto::ChatIndicator::AwaitingInput => "Input",
+            zeron_proto::ChatIndicator::Errored => "Failed",
+            zeron_proto::ChatIndicator::Completed => "Done",
+            zeron_proto::ChatIndicator::Idle => "",
+        };
+        row = row.child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(glyph)
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(color)
+                        .child(SharedString::from(label)),
+                ),
+        );
+    }
+    row.when(opens, |row| {
+        row.child(
+            div()
+                .size(px(18.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .bg(crate::theme::ink(0.06))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted.opacity(0.8)),
+                ),
+        )
+    })
 }
 
 fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
@@ -11362,6 +11755,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         }
     }
 
@@ -11484,7 +11878,67 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         }
+    }
+
+    #[test]
+    fn zeron_create_calls_are_spawn_chips_that_carry_their_created_chats() {
+        let create = |id: &str, tool: &str, output: Option<&str>| MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: tool.into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            output: output.map(str::to_owned),
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            created_chat_ids: Vec::new(),
+        };
+        let batch = r#"{"results":[{"index":0,"isError":false,"result":{"chatId":"w1","kind":"chat"}},{"index":1,"isError":false,"result":{"chatId":"s1","kind":"side"}}]}"#;
+        let entry = assistant(
+            "m-create",
+            MessageStatus::Complete,
+            vec![
+                tool_part("a", "ls"),
+                create("c1", "create_chats", Some(batch)),
+                // Synced docs carry no output: the chip still splits out,
+                // with its chats recovered from provenance at paint.
+                create("c2", "create_chat", None),
+                tool_part("b", "pwd"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let groups: Vec<&Arc<Vec<ToolItem>>> = rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::ToolGroup { tools, .. } => Some(tools),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups.len(), 3);
+        assert!(!tool_group_collapses(groups[1]));
+        assert_eq!(groups[1].len(), 2);
+        let named: Vec<&str> = groups[1][0]
+            .created_chats
+            .as_deref()
+            .unwrap()
+            .iter()
+            .map(|chat| chat.chat_id.as_str())
+            .collect();
+        assert_eq!(named, ["w1", "s1"]);
+        assert!(groups[1][1].created_chats.is_none());
+        // Not a subagent link: nothing binds a subagent doc to it.
+        assert!(!is_spawn_link(&groups[1][0]));
     }
 
     #[test]
@@ -13655,6 +14109,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chats: None,
             kind: ToolItemKind::Call,
         };
         let edit = |p: &str| ToolItem {
@@ -13674,6 +14129,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chats: None,
             kind: ToolItemKind::Call,
         };
         let tools = vec![
@@ -13709,6 +14165,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                created_chats: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -13726,6 +14183,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                created_chats: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -13741,6 +14199,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                created_chats: None,
                 kind: ToolItemKind::Call,
             },
         ];

@@ -126,10 +126,17 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
                 is_error,
                 resolved,
                 output,
+                created_chat_ids,
                 ..
             } => {
                 if options.include_tools {
-                    tools.push(tool_line(call, *is_error, *resolved, output.as_deref()));
+                    let mut line = tool_line(call, *is_error, *resolved, output.as_deref());
+                    // A Zeron create call names the chats it made, so an
+                    // orchestrator reading a transcript can follow them.
+                    if !created_chat_ids.is_empty() {
+                        line.push_str(&format!(" [created: {}]", created_chat_ids.join(", ")));
+                    }
+                    tools.push(line);
                 }
             }
             MessagePart::Input {
@@ -271,6 +278,27 @@ mod tests {
                         subagent_ref: None,
                         subagent_status: None,
                         subagent_tail: None,
+                        created_chat_ids: Vec::new(),
+                    },
+                    MessagePart::Tool {
+                        id: "z".into(),
+                        call: ToolCall::Mcp {
+                            server: "zeron".into(),
+                            tool: "create_chats".into(),
+                            input: None,
+                        },
+                        is_error: false,
+                        resolved: true,
+                        output: None,
+                        diff: None,
+                        output_ref: None,
+                        output_bytes: None,
+                        diff_ref: None,
+                        diff_stats: None,
+                        subagent_ref: None,
+                        subagent_status: None,
+                        subagent_tail: None,
+                        created_chat_ids: vec!["w1".into(), "s1".into()],
                     },
                     MessagePart::Text {
                         id: "t2".into(),
@@ -289,7 +317,13 @@ mod tests {
         assert_eq!(rendered.len(), 2);
         assert_eq!(rendered[0].text, "hello");
         assert_eq!(rendered[1].text, "done");
-        assert_eq!(rendered[1].tools, vec!["exec: cargo test → ok"]);
+        assert_eq!(
+            rendered[1].tools,
+            vec![
+                "exec: cargo test → ok",
+                "mcp: zeron/create_chats [created: w1, s1]"
+            ]
+        );
         assert!(rendered[1].reasoning.is_none(), "reasoning is opt-in");
         assert_eq!(
             rendered[1]

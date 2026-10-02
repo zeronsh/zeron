@@ -526,10 +526,15 @@ enum MutateParams {
         /// Cwd override (isolated-worktree path); default = the space's folder.
         #[serde(default)]
         cwd: Option<String>,
-        /// The chat whose agent is creating this one (Zeron MCP); recorded
-        /// on the row as `parentChatId` for orchestration trees.
+        /// Placement: the chat this one hangs off as a side chat (Zeron
+        /// MCP `kind: side`); recorded on the row as `parentChatId`.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// Provenance: the chat whose agent is creating this one (Zeron
+        /// MCP, either kind); recorded as `spawnedByChatId`. Additive — an
+        /// older engine ignores it and the chat simply reads as user-made.
+        #[serde(default)]
+        spawned_by_chat_id: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1099,15 +1104,19 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                spawned_by_chat_id,
             } => {
                 self.workspace
-                    .create_chat_with_parent(
+                    .create_chat_linked(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
                         config,
                         cwd,
-                        parent_chat_id,
+                        crate::ChatLinks {
+                            parent_chat_id,
+                            spawned_by_chat_id,
+                        },
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -1908,6 +1917,8 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.parent_chat_id = Some(parent_chat_id);
+                // A fork is the user's own side chat, whoever made the source.
+                chat.spawned_by_chat_id = None;
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();

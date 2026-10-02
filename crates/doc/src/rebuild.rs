@@ -183,6 +183,7 @@ mod tests {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    created_chat_ids: Vec::new(),
                 },
             ],
             created_at: 5,

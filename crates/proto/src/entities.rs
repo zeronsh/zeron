@@ -232,12 +232,56 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// Provenance, independent of placement: the chat whose agent created
+    /// this one through the Zeron MCP server. A side chat carries both this
+    /// and `parent_chat_id`; an agent-spawned TOP-LEVEL chat carries only
+    /// this, so it lists in the sidebar like a user-created chat while still
+    /// saying who started it. Absent for user-created chats and on rows from
+    /// older engines; a dangling id (spawner deleted) is tolerated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_chat_id: Option<String>,
 }
 
 impl Chat {
+    /// True when this chat is a side chat (hangs off a parent and stays out
+    /// of the main sidebar).
+    pub fn is_side_chat(&self) -> bool {
+        self.parent_chat_id.is_some()
+    }
+
     /// True when this chat syncs over the chat2 dumb relay.
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2
+    }
+}
+
+/// Deepest agent-spawn chain allowed: a user-created chat is depth 0, a chat
+/// its agent spawns is depth 1, and so on. A chat AT this depth can still run
+/// but cannot create further chats (side or top-level). The guard exists so a
+/// top-level spawned chat — which, unlike a side chat, may itself spawn — can
+/// never recurse without bound.
+pub const MAX_SPAWN_DEPTH: usize = 3;
+
+/// How many agent-spawn hops separate `chat_id` from a user-created chat,
+/// following `spawned_by_chat_id` through `spawned_by` (id → its spawner, or
+/// `None` for a user-created / unknown chat). A dangling spawner id ends the
+/// chain there. `None` means the chain loops (or is absurdly long), which a
+/// caller must treat as "over the limit".
+pub fn spawn_depth(chat_id: &str, spawned_by: impl Fn(&str) -> Option<String>) -> Option<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let mut current = chat_id.to_owned();
+    let mut depth = 0usize;
+    loop {
+        if !seen.insert(current.clone()) || depth > 64 {
+            return None;
+        }
+        match spawned_by(&current) {
+            Some(spawner) if !spawner.trim().is_empty() => {
+                depth += 1;
+                current = spawner;
+            }
+            _ => return Some(depth),
+        }
     }
 }
 
@@ -1399,6 +1443,51 @@ mod tests {
                 "currentContentHash": "hash-3",
             })
         );
+    }
+
+    #[test]
+    fn spawned_by_is_additive_and_independent_of_placement() {
+        // A row from an older engine: neither link, parses as top-level.
+        let legacy: Chat = serde_json::from_value(serde_json::json!({
+            "id": "c", "deviceId": "d", "title": null, "archived": false,
+            "cwd": null, "branch": null, "checkoutId": null, "config": null,
+            "lastMessagePreview": null, "lastMessageAt": null,
+            "createdAt": "2026-09-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(legacy.spawned_by_chat_id, None);
+        assert!(!legacy.is_side_chat());
+        // Unset provenance is not written, so older peers see the same shape.
+        let value = serde_json::to_value(&legacy).unwrap();
+        assert!(value.get("spawnedByChatId").is_none());
+
+        // An agent-spawned top-level chat: provenance without a parent.
+        let mut spawned = legacy.clone();
+        spawned.spawned_by_chat_id = Some("coordinator".into());
+        let value = serde_json::to_value(&spawned).unwrap();
+        assert_eq!(value["spawnedByChatId"], "coordinator");
+        assert!(value.get("parentChatId").is_none());
+        let back: Chat = serde_json::from_value(value).unwrap();
+        assert_eq!(back, spawned);
+        assert!(!back.is_side_chat());
+    }
+
+    #[test]
+    fn spawn_depth_follows_provenance_and_rejects_loops() {
+        use std::collections::HashMap;
+        let links: HashMap<&str, &str> = [("c", "b"), ("b", "a"), ("x", "y"), ("y", "x")]
+            .into_iter()
+            .collect();
+        let lookup = |id: &str| links.get(id).map(|s| (*s).to_owned());
+        assert_eq!(spawn_depth("a", lookup), Some(0), "user-created");
+        assert_eq!(spawn_depth("b", lookup), Some(1));
+        assert_eq!(spawn_depth("c", lookup), Some(2));
+        // A dangling spawner (deleted) ends the chain rather than failing.
+        assert_eq!(
+            spawn_depth("d", |id| (id == "d").then(|| "gone".to_owned())),
+            Some(1)
+        );
+        assert_eq!(spawn_depth("x", lookup), None, "a loop is over the limit");
     }
 
     #[test]

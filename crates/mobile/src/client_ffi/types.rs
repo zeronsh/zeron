@@ -505,6 +505,11 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device (open sessions only).
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// The chat whose agent created this one (Zeron MCP): set on
+    /// agent-spawned top-level chats, which list like any other session.
+    pub spawned_by_chat_id: Option<String>,
+    /// The spawner's title for a "Spawned by …" line (`None`: unknown).
+    pub spawned_by_title: Option<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -545,6 +550,8 @@ impl From<&zc::SessionRow> for SessionRow {
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
+            spawned_by_chat_id: r.spawned_by_chat_id.clone(),
+            spawned_by_title: r.spawned_by_title.clone(),
             room_gen: r.room_gen,
         }
     }

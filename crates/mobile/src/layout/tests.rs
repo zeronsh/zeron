@@ -520,6 +520,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         subagent_ref: Some("sub-1".into()),
         subagent_status: Some(status),
         subagent_tail: None,
+        created_chat_ids: Vec::new(),
     };
     let frame_for = |status: SubagentStatus| {
         let mut w = worker(390.0);

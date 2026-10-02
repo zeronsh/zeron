@@ -126,7 +126,9 @@ impl Shell {
         self.open_side_chat_tab(chat, key, true, cx);
     }
 
-    /// Open an existing side chat (a footer row) in the right pane.
+    /// Open an existing side chat (a footer row) in the right pane. A
+    /// top-level chat an agent spawned has its own sidebar row, so it opens
+    /// the way that row does: selected in the main view.
     pub(super) fn open_child_chat_tab(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(chat) = self
             .state
@@ -138,6 +140,10 @@ impl Shell {
         else {
             return;
         };
+        if chat.parent_chat_id.is_none() {
+            self.open_chat(chat.id, cx);
+            return;
+        }
         let key = self.panel_key(cx);
         self.open_side_chat(chat, key, cx);
     }

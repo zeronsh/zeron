@@ -2261,6 +2261,48 @@ pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
     }
 }
 
+/// The sidebar's "spawned by" marker on an agent-spawned top-level chat:
+/// the tooltip text and, when the spawner row still exists, the chat a
+/// click opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnedBy {
+    pub label: String,
+    pub spawner_id: Option<String>,
+}
+
+/// `None` for chats a user started, and for side chats — those already sit
+/// under their parent, so provenance would only repeat the placement. An
+/// agent's `create_chat { kind: "chat" }` row names its spawner by title;
+/// a spawner that was deleted (or has not synced yet) reads generically.
+pub(crate) fn spawned_by_affordance(
+    chat: &zeron_proto::Chat,
+    chats: &[zeron_proto::Chat],
+) -> Option<SpawnedBy> {
+    if chat.parent_chat_id.is_some() {
+        return None;
+    }
+    let spawner_id = chat.spawned_by_chat_id.as_deref()?;
+    Some(match chats.iter().find(|c| c.id == spawner_id) {
+        Some(spawner) => SpawnedBy {
+            label: format!(
+                "Spawned by {}",
+                spawner
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(crate::transcript::single_line)
+                    .unwrap_or_else(|| "New session".into())
+            ),
+            spawner_id: Some(spawner.id.clone()),
+        },
+        None => SpawnedBy {
+            label: "Spawned by an agent".into(),
+            spawner_id: None,
+        },
+    })
+}
+
 // Handle-based rail host for the spaces dropdown: its list is a plain
 // tracked scroller, so the trait's default metrics/press/drag (off the live
 // ScrollHandle) apply unchanged.
@@ -6683,6 +6725,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
+            spawned_by_chat_id: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -6722,6 +6765,45 @@ mod tests {
         promote_local_device_group(&mut groups, Some("not-present"));
 
         assert_eq!(groups, before);
+    }
+
+    #[test]
+    fn spawned_by_affordance_names_the_spawner_and_targets_it() {
+        use super::{SpawnedBy, spawned_by_affordance};
+        let mut spawner = chat("spawner");
+        spawner.title = Some("Coordinate the\nrelease".into());
+        let mut worker = chat("worker");
+        worker.spawned_by_chat_id = Some("spawner".into());
+        let chats = vec![spawner.clone(), worker.clone()];
+        assert_eq!(
+            spawned_by_affordance(&worker, &chats),
+            Some(SpawnedBy {
+                label: "Spawned by Coordinate the release".into(),
+                spawner_id: Some("spawner".into()),
+            })
+        );
+
+        // An untitled spawner reads like its own sidebar row.
+        let untitled = vec![chat("spawner"), worker.clone()];
+        assert_eq!(
+            spawned_by_affordance(&worker, &untitled).unwrap().label,
+            "Spawned by New session"
+        );
+
+        // Deleted (or not yet synced) spawner: generic label, nothing to open.
+        assert_eq!(
+            spawned_by_affordance(&worker, std::slice::from_ref(&worker)),
+            Some(SpawnedBy {
+                label: "Spawned by an agent".into(),
+                spawner_id: None,
+            })
+        );
+
+        // User-started chats and side chats carry no marker.
+        assert_eq!(spawned_by_affordance(&spawner, &chats), None);
+        let mut side = worker.clone();
+        side.parent_chat_id = Some("spawner".into());
+        assert_eq!(spawned_by_affordance(&side, &chats), None);
     }
 }
 

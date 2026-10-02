@@ -277,7 +277,8 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
     running
 }
 
-/// A side chat of the active chat, as the footer lists it.
+/// A side chat of the active chat, or a top-level chat its agent spawned,
+/// as the footer lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ChildChatRow {
     pub chat_id: String,
@@ -286,11 +287,17 @@ pub(super) struct ChildChatRow {
     pub time_ago: SharedString,
     /// The chat's linked pull request, drawn as the sidebar's badge.
     pub change_request: Option<zeron_proto::ChangeRequestSummary>,
+    /// A top-level chat this chat's agent spawned (`create_chat { kind:
+    /// "chat" }`): it has its own sidebar row, so opening it selects it
+    /// rather than docking it beside the parent.
+    pub top_level: bool,
     activity: DateTime<Utc>,
 }
 
-/// The live (unarchived) children of `chat_id`, most recent activity first —
-/// the same order the sidebar's Sessions list keeps.
+/// The live (unarchived) children of `chat_id` — its side chats plus the
+/// top-level chats its agent spawned, so a coordinator can find its workers
+/// in one place — most recent activity first, the same order the sidebar's
+/// Sessions list keeps.
 pub(super) fn child_chat_rows(
     state: &AppState,
     chat_id: &str,
@@ -299,11 +306,18 @@ pub(super) fn child_chat_rows(
     let mut rows: Vec<ChildChatRow> = state
         .chats
         .iter()
-        .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
+        .filter(|chat| {
+            !chat.archived
+                && match chat.parent_chat_id.as_deref() {
+                    Some(parent) => parent == chat_id,
+                    None => chat.spawned_by_chat_id.as_deref() == Some(chat_id),
+                }
+        })
         .map(|chat| {
             let activity = chat.last_message_at.unwrap_or(chat.created_at);
             ChildChatRow {
                 chat_id: chat.id.clone(),
+                top_level: chat.parent_chat_id.is_none(),
                 title: child_chat_title(chat).into(),
                 status: state.display_status_for(chat, now),
                 time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
@@ -322,7 +336,13 @@ pub(super) fn child_chat_title(chat: &Chat) -> String {
     chat.title
         .clone()
         .or_else(|| chat.last_message_preview.clone())
-        .unwrap_or_else(|| "New side chat".into())
+        .unwrap_or_else(|| {
+            if chat.parent_chat_id.is_some() {
+                "New side chat".into()
+            } else {
+                "New chat".into()
+            }
+        })
 }
 
 /// What the footer would draw for `chat_id`, hashed. Cheap enough to run on
@@ -337,6 +357,7 @@ pub(super) fn fingerprint(state: &AppState, chat_id: &str, now: DateTime<Utc>) -
     0xC0FFEEu64.hash(&mut hasher);
     for row in child_chat_rows(state, chat_id, now) {
         row.chat_id.hash(&mut hasher);
+        row.top_level.hash(&mut hasher);
         row.title.as_ref().hash(&mut hasher);
         (row.status as u8).hash(&mut hasher);
         row.time_ago.as_ref().hash(&mut hasher);
@@ -813,7 +834,11 @@ impl FilesSurface {
             let menu_id = row.chat_id.clone();
             list = list.child(
                 compact_row(format!("files-chat-{}", row.chat_id), theme)
-                    .aria_label(SharedString::from(format!("Open side chat {}", row.title)))
+                    .aria_label(SharedString::from(if row.top_level {
+                        format!("Open chat {}", row.title)
+                    } else {
+                        format!("Open side chat {}", row.title)
+                    }))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.stop_propagation();
                         cx.emit(FilesEvent::OpenChildChat(open_id.clone()));
@@ -1084,6 +1109,7 @@ mod tests {
             subagent_ref: doc.map(str::to_owned),
             subagent_status: status,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         }
     }
 
@@ -1266,6 +1292,48 @@ mod tests {
         assert_eq!(rows[0].title.as_ref(), "New side chat");
         assert_eq!(rows[1].title.as_ref(), "Investigate caching");
         assert_eq!(rows[0].status, ChatIndicator::Idle);
+    }
+
+    #[test]
+    fn child_chat_rows_include_top_level_chats_this_chat_spawned() {
+        let spawned = |id: &str, parent: Option<&str>, by: &str, minutes_ago: i64| {
+            let mut chat = chat(id, parent, minutes_ago);
+            chat.spawned_by_chat_id = Some(by.into());
+            chat
+        };
+        let mut archived_worker = spawned("gone", None, "main", 1);
+        archived_worker.archived = true;
+        let mut state = AppState::new();
+        state.apply_chats(vec![
+            chat("main", None, 60),
+            // A user-made side chat and an agent-made one: both placed here.
+            chat("side", Some("main"), 20),
+            spawned("agent-side", Some("main"), "main", 15),
+            // Top-level workers this chat's agent spawned.
+            spawned("worker", None, "main", 5),
+            archived_worker,
+            // Spawned by `main` but placed under another chat: that chat's
+            // footer owns it.
+            spawned("placed-elsewhere", Some("other"), "main", 3),
+            // Another chat's worker.
+            spawned("foreign", None, "other", 2),
+            chat("other", None, 40),
+        ]);
+        let rows = child_chat_rows(&state, "main", Utc::now());
+        assert_eq!(
+            rows.iter().map(|r| r.chat_id.as_str()).collect::<Vec<_>>(),
+            ["worker", "agent-side", "side"]
+        );
+        assert!(rows[0].top_level);
+        assert_eq!(rows[0].title.as_ref(), "New chat");
+        assert!(!rows[1].top_level && !rows[2].top_level);
+        assert_eq!(rows[1].title.as_ref(), "New side chat");
+        // The footer fingerprint moves when a worker is spawned.
+        let before = fingerprint(&state, "main", Utc::now());
+        let mut chats = state.chats.clone();
+        chats.push(spawned("worker-2", None, "main", 0));
+        state.apply_chats(chats);
+        assert_ne!(before, fingerprint(&state, "main", Utc::now()));
     }
 
     #[test]

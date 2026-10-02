@@ -273,6 +273,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         harness_session_id: None,
         harness_session_cwd: None,
         parent_chat_id: Some("parent-chat".into()),
+        spawned_by_chat_id: None,
         space_id: None,
         last_seen_at: None,
         room_gen: None,
@@ -1515,4 +1516,47 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
             .as_deref(),
         Some("main")
     );
+}
+
+#[test]
+fn spawned_top_level_chat_keeps_provenance_across_devices_updates_and_restart() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let mut worker = chat("worker", "dev-b");
+    worker.parent_chat_id = None;
+    worker.spawned_by_chat_id = Some("coordinator".into());
+    a.upsert_chat(&worker).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(b.chat("worker").unwrap(), Some(worker.clone()));
+    // A rename and an archive from the other device leave provenance alone.
+    b.rename_chat("worker", "Train on the GPU box").unwrap();
+    b.set_chat_archived("worker", true).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let synced = a.chat("worker").unwrap().unwrap();
+    assert_eq!(synced.spawned_by_chat_id.as_deref(), Some("coordinator"));
+    assert_eq!(synced.parent_chat_id, None, "top-level: no placement link");
+    let restored = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "dev-a").unwrap();
+    assert_eq!(
+        restored
+            .chat("worker")
+            .unwrap()
+            .unwrap()
+            .spawned_by_chat_id
+            .as_deref(),
+        Some("coordinator")
+    );
+}
+
+#[test]
+fn rows_without_provenance_read_as_user_created() {
+    // An older engine's upsert never writes `spawnedByChatId`.
+    let mut a = RegistryDoc::new("dev-a");
+    let mut plain = chat("plain", "dev-a");
+    plain.parent_chat_id = None;
+    a.upsert_chat(&plain).unwrap();
+    let read = a.chat("plain").unwrap().unwrap();
+    assert_eq!(read.spawned_by_chat_id, None);
+    assert_eq!(read.parent_chat_id, None);
 }

@@ -126,6 +126,9 @@ struct DocPartJson {
     /// One-line live tail of the subagent's output (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_tail: Option<String>,
+    /// Chats a Zeron `create_chat(s)` call created (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_chat_ids: Option<Vec<String>>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -170,6 +173,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_ref,
             subagent_status,
             subagent_tail,
+            created_chat_ids,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -193,6 +197,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 .to_owned()
             }),
             subagent_tail: subagent_tail.clone(),
+            created_chat_ids: (!created_chat_ids.is_empty()).then(|| created_chat_ids.clone()),
             ..Default::default()
         },
         MessagePart::Input {
@@ -251,6 +256,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
+                created_chat_ids: p.created_chat_ids.unwrap_or_default(),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -900,6 +906,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(ids) = &doc_part.created_chat_ids {
+        map.insert("createdChatIds", loro_value_from_json(&serde_json::json!(ids)))?;
+    }
     Ok(())
 }
 
@@ -1064,6 +1073,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1350,6 +1360,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(ids) = &doc_part.created_chat_ids {
+        map.insert("createdChatIds", loro_value_from_json(&serde_json::json!(ids)))?;
+    }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
@@ -1576,6 +1589,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -1606,6 +1620,61 @@ mod tests {
         }
     }
 
+    /// A Zeron create call's kept chat ids survive the streaming writer's
+    /// in-place resolve and a snapshot round trip, like the subagent keys.
+    #[test]
+    fn created_chat_ids_ride_the_segment_writer_and_snapshots() {
+        let doc = SessionDoc::init("c1").unwrap();
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
+        let mut parts = Vec::new();
+        crate::fold_event_into_parts(
+            &mut parts,
+            &zeron_proto::AgentEvent::ToolCall {
+                id: "t".into(),
+                call: zeron_proto::ToolCall::Mcp {
+                    server: "zeron".into(),
+                    tool: "create_chats".into(),
+                    input: None,
+                },
+            },
+        );
+        w.sync(&parts).unwrap();
+        crate::fold_event_into_parts(
+            &mut parts,
+            &zeron_proto::AgentEvent::ToolResult {
+                id: "t".into(),
+                is_error: false,
+                output: Some(
+                    serde_json::json!({ "results": [
+                        { "index": 0, "isError": false, "result": { "chatId": "w1", "kind": "chat" } },
+                        { "index": 1, "isError": false, "result": { "chatId": "s1", "kind": "side" } }
+                    ]})
+                    .to_string(),
+                ),
+                diff: None,
+            },
+        );
+        w.sync(&parts).unwrap();
+        let other = LoroDoc::new();
+        other.import(&doc.export_snapshot().unwrap()).unwrap();
+        let restored = SessionDoc::from_doc(other);
+        for doc in [&doc, &restored] {
+            match &doc.read_entries().unwrap()[0].parts[0] {
+                MessagePart::Tool {
+                    created_chat_ids,
+                    output,
+                    resolved,
+                    ..
+                } => {
+                    assert!(*resolved);
+                    assert_eq!(created_chat_ids, &["w1", "s1"]);
+                    assert_eq!(output, &None, "the output itself stays out");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn update_subagent_chip_refuses_non_spawn_parts() {
         // The genus gate at the doc boundary: whatever id a driver keys its
@@ -1628,6 +1697,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         };
         let parts = vec![
             tool(
@@ -1963,6 +2033,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                created_chat_ids: Vec::new(),
             }],
             created_at: 1,
             device_id: "dev-a".into(),

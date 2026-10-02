@@ -868,3 +868,87 @@ async fn orphaned_history_steer_still_owes_the_history() {
     );
     core.shutdown().await;
 }
+
+/// `Mutate createChat` records both orchestration links independently: a
+/// side chat carries placement + provenance, an agent-spawned top-level chat
+/// provenance only (so it lists in the sidebar). Provenance is depth-guarded
+/// as a backstop to the MCP server, and a fork (the user's own side chat)
+/// never inherits its source's provenance.
+#[tokio::test]
+async fn create_chat_records_provenance_and_guards_spawn_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let create = |id: &str, parent: Option<&str>, by: Option<&str>| {
+        let mut params = serde_json::json!({
+            "op": "createChat", "chatId": id, "deviceId": core.device_id,
+        });
+        if let Some(parent) = parent {
+            params["parentChatId"] = parent.into();
+        }
+        if let Some(by) = by {
+            params["spawnedByChatId"] = by.into();
+        }
+        let client = &client;
+        async move { client.call(methods::MUTATE, params).await }
+    };
+    create("coord", None, None).await.unwrap();
+    create("side", Some("coord"), Some("coord")).await.unwrap();
+    create("w1", None, Some("coord")).await.unwrap();
+    create("w2", None, Some("w1")).await.unwrap();
+    create("w3", None, Some("w2")).await.unwrap();
+
+    let chat = |id: &str| core.workspace.chat(id).unwrap().unwrap();
+    assert_eq!(chat("coord").spawned_by_chat_id, None);
+    assert_eq!(chat("side").parent_chat_id.as_deref(), Some("coord"));
+    assert_eq!(chat("side").spawned_by_chat_id.as_deref(), Some("coord"));
+    assert_eq!(chat("w1").parent_chat_id, None, "top-level: no placement");
+    assert_eq!(chat("w1").spawned_by_chat_id.as_deref(), Some("coord"));
+
+    // w3 sits at MAX_SPAWN_DEPTH: nothing more may be spawned from it.
+    assert_eq!(zeron_proto::MAX_SPAWN_DEPTH, 3);
+    let err = create("w4", None, Some("w3")).await.unwrap_err().to_string();
+    assert!(err.contains("cannot create chats"), "{err}");
+    assert!(core.workspace.chat("w4").unwrap().is_none());
+
+    // Every device's chat list carries the field (serde-additive on the wire).
+    let listed = client
+        .subscribe_scoped(methods::WATCH_CHATS, serde_json::json!({}))
+        .await
+        .unwrap()
+        .recv()
+        .await
+        .unwrap();
+    let w1 = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "w1")
+        .unwrap();
+    assert_eq!(w1["spawnedByChatId"], "coord");
+    assert!(w1.get("parentChatId").is_none());
+
+    // The user's own fork of a spawned chat is not agent-spawned.
+    let source = core.doc_host.open("w1").unwrap();
+    for (id, role) in [("u1", MessageRole::User), ("a1", MessageRole::Assistant)] {
+        source
+            .doc()
+            .push_message(&message(id, role, "hi", MessageStatus::Complete))
+            .unwrap();
+    }
+    let fork = client
+        .call_as::<zeron_proto::Chat>(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "fork", "sourceChatId": "w1" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fork.parent_chat_id.as_deref(), Some("w1"));
+    assert_eq!(fork.spawned_by_chat_id, None);
+}

@@ -100,6 +100,12 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device, if any.
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// Provenance: the chat whose agent created this one (Zeron MCP). Set on
+    /// agent-spawned top-level chats (listed normally) and side chats alike.
+    pub spawned_by_chat_id: Option<String>,
+    /// The spawner's display title, for a "Spawned by …" line; `None` when
+    /// the spawner row is gone or not synced yet.
+    pub spawned_by_title: Option<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
 }
@@ -406,6 +412,8 @@ fn hash_row(row: &SessionRow) -> u64 {
     }
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
+    row.spawned_by_chat_id.hash(&mut h);
+    row.spawned_by_title.hash(&mut h);
     row.room_gen.hash(&mut h);
     h.finish()
 }
@@ -416,6 +424,7 @@ struct RowContext<'a> {
     sessions: HashMap<&'a str, &'a Session>,
     pinned: HashSet<&'a str>,
     section_of: HashMap<&'a str, &'a str>,
+    chats: HashMap<&'a str, &'a Chat>,
 }
 
 fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<SessionRow> {
@@ -507,6 +516,20 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         pull_request: change_request_for_chat(chat, cx.change_requests).cloned(),
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
+        spawned_by_chat_id: chat.spawned_by_chat_id.clone(),
+        spawned_by_title: chat
+            .spawned_by_chat_id
+            .as_deref()
+            .and_then(|id| rc.chats.get(id))
+            .map(|spawner| {
+                spawner
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or("New session")
+                    .to_owned()
+            }),
         room_gen: chat.room_gen.unwrap_or(1),
     };
     row.revision = hash_row(&row);
@@ -536,6 +559,7 @@ pub(crate) fn derive(
         }
     }
     let rc = RowContext {
+        chats: state.chats.iter().map(|c| (c.id.as_str(), c)).collect(),
         spaces: state.spaces.iter().map(|s| (s.id.as_str(), s)).collect(),
         devices: state.devices.iter().map(|d| (d.id.as_str(), d)).collect(),
         sessions: state
@@ -792,5 +816,79 @@ mod tests {
         assert_eq!(relative_time_label(now - 34 * 60_000, now), "34m");
         assert_eq!(relative_time_label(now - 4 * 3_600_000 - 1, now), "4h");
         assert_eq!(relative_time_label(now - 2 * 86_400_000, now), "2d");
+    }
+
+    fn chat(id: &str, title: &str, parent: Option<&str>, spawned_by: Option<&str>) -> Chat {
+        Chat {
+            id: id.into(),
+            device_id: "laptop".into(),
+            title: Some(title.into()),
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: parent.map(str::to_owned),
+            spawned_by_chat_id: spawned_by.map(str::to_owned),
+        }
+    }
+
+    /// Agent-spawned top-level chats list on the phone's front page like any
+    /// session, carrying who spawned them; spawned side chats stay children.
+    #[test]
+    fn spawned_top_level_chats_list_normally_with_their_spawner() {
+        let state = WorkspaceState {
+            devices: vec![],
+            spaces: vec![],
+            chats: vec![
+                chat("coord", "Coordinator", None, None),
+                chat("worker", "Train on the GPU box", None, Some("coord")),
+                chat("side", "Quick check", Some("coord"), Some("coord")),
+                chat("orphan", "Spawner deleted", None, Some("gone")),
+            ],
+            sessions: vec![],
+        };
+        let presence = HashMap::new();
+        let send_states = HashMap::new();
+        let snapshot = derive(
+            &state,
+            None,
+            &DeriveContext {
+                self_device_id: "laptop",
+                now: Utc::now(),
+                presence: &presence,
+                change_requests: &[],
+                send_states: &send_states,
+                synced: true,
+                previous: None,
+            },
+        );
+        let listed: HashSet<&str> = snapshot
+            .projectless
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(listed, HashSet::from(["coord", "worker", "orphan"]));
+        let worker = snapshot.session("worker").unwrap();
+        assert_eq!(worker.spawned_by_chat_id.as_deref(), Some("coord"));
+        assert_eq!(worker.spawned_by_title.as_deref(), Some("Coordinator"));
+        let orphan = snapshot.session("orphan").unwrap();
+        assert_eq!(orphan.spawned_by_title, None, "unknown spawner, no title");
+        assert_eq!(snapshot.session("coord").unwrap().spawned_by_chat_id, None);
+        let children: Vec<&str> = snapshot
+            .children("coord")
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(children, ["side"]);
     }
 }

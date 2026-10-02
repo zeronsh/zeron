@@ -190,6 +190,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The two orchestration links a new chat can carry (see
+/// [`WorkspaceHost::create_chat_linked`]). Both default to none: a chat the
+/// user created.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatLinks {
+    /// Placement: a side chat under this chat (hidden from the sidebar).
+    pub parent_chat_id: Option<String>,
+    /// Provenance: the chat whose agent created this one.
+    pub spawned_by_chat_id: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct WorkspaceHost {
     inner: Arc<WorkspaceHostInner>,
@@ -906,8 +917,57 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
+        self.create_chat_linked(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            ChatLinks {
+                parent_chat_id,
+                spawned_by_chat_id: None,
+            },
+        )
+    }
+
+    /// [`create_chat`](Self::create_chat) with both orchestration links:
+    /// placement (`parentChatId`: a side chat under that chat) and provenance
+    /// (`spawnedByChatId`: whose agent created it). A top-level agent-spawned
+    /// chat carries only provenance. Provenance is depth-guarded here as a
+    /// backstop to the MCP server's own check ([`zeron_proto::MAX_SPAWN_DEPTH`]),
+    /// so no client can grow an unbounded spawn chain.
+    pub fn create_chat_linked(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        links: ChatLinks,
+    ) -> Result<(), EngineError> {
+        let ChatLinks {
+            parent_chat_id,
+            spawned_by_chat_id,
+        } = links;
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
+        }
+        let spawned_by_chat_id = spawned_by_chat_id.filter(|p| !p.trim().is_empty());
+        if let Some(spawner) = spawned_by_chat_id.as_deref() {
+            let chats = self.read(|doc| doc.read_chats())?;
+            let depth = zeron_proto::spawn_depth(spawner, |id| {
+                chats
+                    .iter()
+                    .find(|c| c.id == id)
+                    .and_then(|c| c.spawned_by_chat_id.clone())
+            });
+            if depth.is_none_or(|d| d >= zeron_proto::MAX_SPAWN_DEPTH) {
+                return Err(EngineError::Other(format!(
+                    "chat {spawner} is {} agent spawns deep; chats at depth {} cannot create chats",
+                    depth.map_or_else(|| "too many".to_owned(), |d| d.to_string()),
+                    zeron_proto::MAX_SPAWN_DEPTH
+                )));
+            }
         }
         let space = match space_id {
             Some(space_id) => match self.read(|doc| doc.space(space_id))? {
@@ -953,6 +1013,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                spawned_by_chat_id,
             })
         })?;
         Ok(())

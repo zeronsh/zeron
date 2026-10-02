@@ -244,13 +244,34 @@ impl Zeron {
     }
 
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
-        let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
+        self.harnesses_on(None).await
+    }
+
+    /// Harnesses offered on `device` (`None`: this engine's own). A remote
+    /// device is asked through the engine's `targetDeviceId` relay forward,
+    /// so the answer reflects what that host can actually run.
+    pub async fn harnesses_on(&self, device: Option<&str>) -> anyhow::Result<Vec<HarnessInfo>> {
+        let value = self
+            .call(methods::LIST_HARNESSES, targeted(json!({}), device))
+            .await?;
         serde_json::from_value(value).context("ListHarnesses: unexpected shape")
     }
 
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
+        self.models_on(harness, None).await
+    }
+
+    /// [`models`](Self::models) as offered on `device` (`None`: local).
+    pub async fn models_on(
+        &self,
+        harness: HarnessId,
+        device: Option<&str>,
+    ) -> anyhow::Result<Vec<Model>> {
         let value = self
-            .call(methods::LIST_MODELS, json!({ "harness": harness }))
+            .call(
+                methods::LIST_MODELS,
+                targeted(json!({ "harness": harness }), device),
+            )
             .await?;
         serde_json::from_value(value).context("ListModels: unexpected shape")
     }
@@ -473,6 +494,38 @@ impl Zeron {
     }
 }
 
+/// `params` routed to `device` when it names another engine.
+fn targeted(mut params: Value, device: Option<&str>) -> Value {
+    if let Some(device) = device.filter(|d| !d.is_empty()) {
+        params["targetDeviceId"] = json!(device);
+    }
+    params
+}
+
+/// A device heartbeating within this window counts as online — the Devices
+/// page's window (engines beat every 15s; 70s tolerates missed beats).
+pub const HOST_ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(70);
+
+/// Can this device run chats? Engines stamp `capabilities` on their own row
+/// (desktop, headless, and on-device Android engines alike); a row without
+/// any is either an older engine — judged by its OS — or a phone client that
+/// only views chats hosted elsewhere.
+pub fn is_execution_host(device: &Device) -> bool {
+    !device.capabilities.is_empty()
+        || !matches!(
+            device.platform.to_ascii_lowercase().as_str(),
+            "ios" | "ipados" | "android"
+        )
+}
+
+/// Online now: this engine's own device always is; others by heartbeat.
+pub fn is_online(device: &Device, local_device_id: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    device.id == local_device_id
+        || device
+            .last_seen_at
+            .is_some_and(|at| now.signed_duration_since(at) <= HOST_ONLINE_WINDOW)
+}
+
 /// The session row that speaks for `chat`: the host device's, else the
 /// freshest one (a chat re-homed mid-flight can briefly have two).
 pub fn session_for(sessions: &[Session], chat: &Chat) -> Option<Session> {
@@ -651,6 +704,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
+            spawned_by_chat_id: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

@@ -7357,6 +7357,15 @@ public struct SessionRow: Equatable, Hashable {
     public var sendState: SendState?
     public var parentChatId: String?
     /**
+     * The chat whose agent created this one (Zeron MCP): set on
+     * agent-spawned top-level chats, which list like any other session.
+     */
+    public var spawnedByChatId: String?
+    /**
+     * The spawner's title for a "Spawned by …" line (`None`: unknown).
+     */
+    public var spawnedByTitle: String?
+    /**
      * 2 = chat2; 1 = legacy (not dialable).
      */
     public var roomGen: UInt32
@@ -7395,6 +7404,13 @@ public struct SessionRow: Equatable, Hashable {
          * Oldest unadopted send from this device (open sessions only).
          */sendState: SendState?, parentChatId: String?, 
         /**
+         * The chat whose agent created this one (Zeron MCP): set on
+         * agent-spawned top-level chats, which list like any other session.
+         */spawnedByChatId: String?, 
+        /**
+         * The spawner's title for a "Spawned by …" line (`None`: unknown).
+         */spawnedByTitle: String?, 
+        /**
          * 2 = chat2; 1 = legacy (not dialable).
          */roomGen: UInt32) {
         self.id = id
@@ -7426,6 +7442,8 @@ public struct SessionRow: Equatable, Hashable {
         self.pullRequest = pullRequest
         self.sendState = sendState
         self.parentChatId = parentChatId
+        self.spawnedByChatId = spawnedByChatId
+        self.spawnedByTitle = spawnedByTitle
         self.roomGen = roomGen
     }
 
@@ -7474,6 +7492,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
+                spawnedByChatId: FfiConverterOptionString.read(from: &buf), 
+                spawnedByTitle: FfiConverterOptionString.read(from: &buf), 
                 roomGen: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -7508,6 +7528,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypePullRequest.write(value.pullRequest, into: &buf)
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
+        FfiConverterOptionString.write(value.spawnedByChatId, into: &buf)
+        FfiConverterOptionString.write(value.spawnedByTitle, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
     }
 }
