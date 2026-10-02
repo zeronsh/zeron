@@ -5229,6 +5229,23 @@ impl Shell {
             submit_task: None,
             _search_events: search_events,
         });
+        // Start on the device already in context (the new-session canvas's
+        // target: its project's host, the device pick, else this one), as
+        // the iOS flow does. ← and the crumb still reach every device; an
+        // offline or unknown one starts on that list instead.
+        let context = {
+            let state = self.state.read(cx);
+            state.effective_device_id().and_then(|id| {
+                state
+                    .devices
+                    .iter()
+                    .find(|device| device.id == id && state.device_online(&id, Utc::now()))
+                    .cloned()
+            })
+        };
+        if let Some(device) = context {
+            self.add_space_pick_device(device, cx);
+        }
         cx.notify();
     }
 
@@ -6801,6 +6818,85 @@ mod project_flow_tests {
         let mut deep = vec!["a", "b", "c", "d", "e"];
         assert_eq!(fold_crumb_folders(&mut deep), ["a", "b", "c"]);
         assert_eq!(deep, ["d", "e"]);
+    }
+
+    /// A shell where `local` is this device and `remote` last sent a
+    /// heartbeat at `remote_seen` (`None` = offline); `pick` is the
+    /// new-session canvas's device pick.
+    fn shell_with_devices(
+        cx: &mut gpui::TestAppContext,
+        data_dir: &std::path::Path,
+        pick: Option<&str>,
+        remote_seen: Option<&str>,
+    ) -> Entity<Shell> {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        cx.new(|cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.selected_device = pick.map(str::to_string);
+                state.devices = serde_json::from_value(serde_json::json!([
+                    {"id":"local","name":"Desktop","platform":"windows","lastSeenAt":null},
+                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":remote_seen}
+                ]))
+                .unwrap();
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data_dir.into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn new_project_starts_on_the_device_in_context(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let mut start = |pick, remote_seen| {
+            let shell = shell_with_devices(cx, data.path(), pick, remote_seen);
+            shell.update(cx, |shell, cx| {
+                shell.open_add_space(cx);
+                let flow = shell.add_space.as_ref().unwrap();
+                (flow.step, flow.device.as_ref().map(|d| d.id.clone()))
+            })
+        };
+        // This device: straight to its locations, as on iOS.
+        let local = (ProjectStep::Locations, Some("local".to_string()));
+        assert_eq!(start(None, None), local);
+        // A picked remote that's online: its locations.
+        let remote = (ProjectStep::Locations, Some("remote".to_string()));
+        assert_eq!(start(Some("remote"), Some(now.as_str())), remote);
+        // A picked remote that's offline: the list, to choose another.
+        assert_eq!(start(Some("remote"), None), (ProjectStep::Devices, None));
+    }
+
+    #[gpui::test]
+    fn new_project_still_reaches_every_device(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        let shell = shell_with_devices(cx, data.path(), None, None);
+        shell.update(cx, |shell, cx| {
+            shell.open_add_space(cx);
+            let step = shell.add_space.as_ref().unwrap().step;
+            assert_eq!(step, ProjectStep::Locations);
+            // Back goes to the full device list.
+            shell.add_space_go_up(cx);
+            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Devices);
+            assert_eq!(shell.add_space_devices(cx).len(), 2);
+        });
     }
 
     #[gpui::test]
