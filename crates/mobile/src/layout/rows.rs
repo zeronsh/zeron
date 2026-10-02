@@ -15,10 +15,14 @@ use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
+use zeron_proto::goal_view::GoalMarker;
+use zeron_proto::{Goal, MessageOrigin, TodoItem, WorkflowEventMarker, WorkflowRunsState};
 use zeron_text::WhiteSpace;
 
+use super::cards::{Card, place_card};
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
 use super::markdown::{Ctx, PBlock, PText, Px, place, place_text, prepare_block, prepare_plain};
+use super::status::{self, UiState};
 use super::style::{Family, TYPE, Weight};
 use super::tools::{ThoughtState, ToolGroup, place_tools};
 
@@ -31,6 +35,9 @@ pub enum RowKind {
     Chip,
     Image,
     Working,
+    /// A bordered status surface: the goal strip, the todo strip, a workflow
+    /// run. Its taps are `WidgetKind::Action` widgets.
+    Card,
 }
 
 /// A user message awaiting its host echo (client-minted id = the echo's id).
@@ -49,6 +56,14 @@ pub struct TranscriptInput {
     pub working: bool,
     pub working_since_ms: Option<i64>,
     pub streaming: bool,
+    /// The chat's goal (`meta.goal`): drawn as a strip after the transcript.
+    pub goal: Option<Arc<Goal>>,
+    /// The agent's latest checklist: a strip after the transcript.
+    pub todo: Option<Arc<Vec<TodoItem>>>,
+    /// The chat's workflow runs: a card where each run started.
+    pub workflows: Arc<WorkflowRunsState>,
+    /// Wall time of the snapshot (a goal's elapsed time reads from it).
+    pub now_ms: i64,
 }
 
 pub(crate) fn row_key(id: &str) -> u64 {
@@ -78,6 +93,8 @@ pub(crate) struct Chip {
     pub icon: &'static str,
     pub color: ColorRole,
     pub text: PText,
+    /// A quieter second paragraph (a verdict's reason, a pause message).
+    pub detail: Option<PText>,
 }
 
 // Cores are built once and shared behind Arc; boxing variants only adds a hop.
@@ -87,6 +104,7 @@ pub(crate) enum Content {
     User(UserBubble),
     Tools(ToolGroup),
     Chip(Chip),
+    Card(Card),
     Image { reference: String },
     Working { since_ms: Option<i64>, streaming: bool },
 }
@@ -115,6 +133,8 @@ pub(crate) enum Gap {
     Reply,
     Block,
     Heading,
+    /// Between the strips that close the transcript.
+    Tray,
 }
 
 pub(crate) mod geom {
@@ -137,6 +157,8 @@ pub(crate) mod geom {
     pub const CHIP_LINE: f32 = 32.0;
     pub const IMAGE: f32 = 260.0;
     pub const WORKING: f32 = 36.0;
+    /// Above the status strips that close the transcript.
+    pub const GAP_TRAY: f32 = 10.0;
 }
 
 impl Gap {
@@ -148,6 +170,7 @@ impl Gap {
             Gap::Reply => GAP_REPLY,
             Gap::Block => GAP_BLOCK,
             Gap::Heading => GAP_HEADING,
+            Gap::Tray => GAP_TRAY,
         })
     }
 }
@@ -180,6 +203,14 @@ pub(crate) struct RowBuilder {
     pub collapsed: HashSet<u64>,
     /// Per-tool inline detail overrides (row detail key → open).
     pub detail_open: HashMap<u64, bool>,
+    /// What the person toggled on the status cards.
+    pub ui: UiState,
+    /// Workflow run cards by run id: (signature, row).
+    cards: HashMap<String, (u64, Arc<RowCore>)>,
+    /// Marker entries of workflow runs: entry id → (is a start, run id).
+    workflow_markers: HashMap<String, (bool, String)>,
+    goal_row: Option<(u64, Arc<RowCore>)>,
+    todo_row: Option<(u64, Arc<RowCore>)>,
 }
 
 pub(crate) fn quick_hash(s: &str) -> u64 {
@@ -236,8 +267,10 @@ impl RowBuilder {
             out.extend(rows);
         }
         self.entries.retain(|id, _| live_entries.contains(id.as_str()));
+        self.workflow_markers.retain(|id, _| live_entries.contains(id.as_str()));
         self.parts.retain(|id, _| live_parts.contains(id));
         self.thoughts.retain(|id, _| live_parts.contains(id));
+        let mut out = self.overlay_workflows(ctx, input, out);
 
         // Optimistic sends not yet echoed by the host.
         let mut live_pending = HashSet::new();
@@ -282,7 +315,121 @@ impl RowBuilder {
             let core = self.working.clone().expect("set above");
             out.push(Placed { core, gap: Gap::Reply });
         }
+        self.push_trays(ctx, input, &mut out);
         out
+    }
+
+    /// A card in place of each workflow run's "started" marker, with the
+    /// run's end markers folded into it. A run the state does not list (not
+    /// synced yet, trimmed past the cap) keeps its plain markers, so nothing
+    /// a person could read is ever lost.
+    fn overlay_workflows(&mut self, ctx: &mut Ctx, input: &TranscriptInput, rows: Vec<Placed>) -> Vec<Placed> {
+        let runs = &input.workflows;
+        if runs.runs.is_empty() {
+            self.cards.clear();
+            return rows;
+        }
+        let newest = runs.runs.last().map(|r| r.header.run_id.clone());
+        let carded: HashSet<String> = rows
+            .iter()
+            .filter_map(|p| match self.workflow_markers.get(&*p.core.entry_id) {
+                Some((true, run_id)) if runs.run(run_id).is_some() => Some(run_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(rows.len());
+        for p in rows {
+            match self.workflow_markers.get(&*p.core.entry_id).cloned() {
+                Some((true, run_id)) if carded.contains(&run_id) => {
+                    let run = runs.run(&run_id).expect("carded runs are listed");
+                    let open = self.ui.open.get(&format!("wf:{run_id}")).copied().unwrap_or_else(|| status::default_open(newest.as_deref() == Some(run_id.as_str())));
+                    let sig = status::run_sig(run, &self.ui, open);
+                    let core = match self.cards.get(&run_id) {
+                        Some((s, core)) if *s == sig => core.clone(),
+                        _ => {
+                            let (card, copy) = status::workflow_card(ctx, run, &status::RunContext { ui: &self.ui, open });
+                            let core = Arc::new(RowCore {
+                                key: row_key(&format!("wf-card:{run_id}")),
+                                version: next_version(),
+                                kind: RowKind::Card,
+                                entry_id: p.core.entry_id.clone(),
+                                content: Content::Card(card),
+                                copy_text: copy,
+                            });
+                            self.cards.insert(run_id.clone(), (sig, core.clone()));
+                            core
+                        }
+                    };
+                    out.push(Placed { core, gap: p.gap });
+                }
+                // The card already says how the run ended.
+                Some((false, run_id)) if carded.contains(&run_id) => {}
+                _ => out.push(p),
+            }
+        }
+        self.cards.retain(|id, _| carded.contains(id));
+        out
+    }
+
+    /// The strips that close the transcript, the way the desktop docks them
+    /// above the composer: the goal, then the checklist.
+    fn push_trays(&mut self, ctx: &mut Ctx, input: &TranscriptInput, out: &mut Vec<Placed>) {
+        match &input.goal {
+            Some(goal) => {
+                let open = self.ui.open.get("goal").copied().unwrap_or(false);
+                let failure = self.ui.failures.get("goal").map(String::as_str);
+                let sig = status::goal_sig(goal, input.now_ms, open, failure);
+                let core = match &self.goal_row {
+                    Some((s, core)) if *s == sig => core.clone(),
+                    _ => {
+                        let (card, copy) = status::goal_card(ctx, goal, input.now_ms, open, failure);
+                        let core = Arc::new(RowCore {
+                            key: row_key("#goal"),
+                            version: next_version(),
+                            kind: RowKind::Card,
+                            entry_id: Arc::from("#goal"),
+                            content: Content::Card(card),
+                            copy_text: copy,
+                        });
+                        self.goal_row = Some((sig, core.clone()));
+                        core
+                    }
+                };
+                out.push(Placed { core, gap: Gap::Tray });
+            }
+            None => self.goal_row = None,
+        }
+        match &input.todo {
+            Some(items) => {
+                let summary = zeron_proto::todo_view::TodoSummary::of(items);
+                let finished = summary.finished();
+                // Reaching "all done, turn over" tidies the strip once.
+                self.ui.todo.observe(finished && !input.working);
+                if self.ui.todo.is_dismissed(items, finished) {
+                    self.todo_row = None;
+                    return;
+                }
+                let sig = status::todo_sig(items, &self.ui.todo, input.working);
+                let core = match &self.todo_row {
+                    Some((s, core)) if *s == sig => core.clone(),
+                    _ => {
+                        let (card, copy) = status::todo_card(ctx, items, &self.ui.todo, input.working);
+                        let core = Arc::new(RowCore {
+                            key: row_key("#todo"),
+                            version: next_version(),
+                            kind: RowKind::Card,
+                            entry_id: Arc::from("#todo"),
+                            content: Content::Card(card),
+                            copy_text: copy,
+                        });
+                        self.todo_row = Some((sig, core.clone()));
+                        core
+                    }
+                };
+                out.push(Placed { core, gap: Gap::Tray });
+            }
+            None => self.todo_row = None,
+        }
     }
 
     /// Drop cached rows owning `key` so the next build re-prepares them
@@ -321,6 +468,37 @@ impl RowBuilder {
                 Gap::Block
             }
         };
+        if let Some(origin) = &entry.origin {
+            // Goal and workflow machinery is not conversation: a round prompt
+            // is a compact marker (not a bubble), lifecycle events are one line.
+            let first_text = entry
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let user = entry.role == MessageRole::User;
+            if let Some(marker) = GoalMarker::from_origin(origin, user, first_text) {
+                if let MessageOrigin::WorkflowEvent { run_id, marker: m, .. } = origin {
+                    let start = matches!(m, WorkflowEventMarker::Started | WorkflowEventMarker::Resumed);
+                    let end = matches!(m, WorkflowEventMarker::Completed | WorkflowEventMarker::Errored | WorkflowEventMarker::Stopped);
+                    if start || end {
+                        self.workflow_markers.insert(entry.id.clone(), (start, run_id.clone()));
+                    }
+                }
+                let gap = if first {
+                    Gap::First
+                } else if user {
+                    Gap::Turn
+                } else {
+                    gap_for(&rows, false)
+                };
+                rows.push(Placed { core: Arc::new(marker_row(ctx, &entry.id, &marker)), gap });
+                return rows;
+            }
+        }
         if entry.role == MessageRole::User {
             let text: String = entry
                 .parts
@@ -584,8 +762,33 @@ fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, co
             icon,
             color,
             text: prepare_plain(ctx, text, style, lh, if color == ColorRole::Danger { ColorRole::Danger } else { ColorRole::TextSecondary }, WhiteSpace::Normal),
+            detail: None,
         }),
         copy_text: text.to_owned(),
+    }
+}
+
+/// A goal / workflow marker as a compact row: a tinted icon, one label, and
+/// a quieter line under it when the event has a reason to give.
+fn marker_row(ctx: &mut Ctx, entry_id: &str, marker: &GoalMarker) -> RowCore {
+    let look = status::marker_look(marker);
+    let (size, lh) = TYPE.small;
+    let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
+    let lh = ctx.typo.px(lh);
+    let text = prepare_plain(ctx, &look.label, style, lh, ColorRole::TextSecondary, WhiteSpace::Normal);
+    let detail_style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
+    let detail = look.detail.as_deref().map(|d| prepare_plain(ctx, d, detail_style, lh, ColorRole::TextTertiary, WhiteSpace::Normal));
+    let mut copy = look.label.clone();
+    if let Some(d) = &look.detail {
+        copy.push_str(&format!(" — {d}"));
+    }
+    RowCore {
+        key: row_key(&format!("{entry_id}#marker")),
+        version: next_version(),
+        kind: RowKind::Chip,
+        entry_id: Arc::from(entry_id),
+        content: Content::Chip(Chip { icon: look.icon, color: look.color, text, detail }),
+        copy_text: copy,
     }
 }
 
@@ -611,9 +814,12 @@ pub(crate) fn place_row(core: &RowCore, gap: Gap, px: Px, width: f32, mut out: O
                     None,
                 );
             }
-            let th = place_text(&c.text, x + px.v(24.0), top + px.v(4.0), cw - px.v(24.0), out);
-            h.max(th + px.v(8.0))
+            let mut out = out;
+            let th = place_text(&c.text, x + px.v(24.0), top + px.v(4.0), cw - px.v(24.0), out.as_deref_mut());
+            let dh = c.detail.as_ref().map_or(0.0, |d| place_text(d, x + px.v(24.0), top + px.v(4.0) + th, cw - px.v(24.0), out));
+            h.max(th + dh + px.v(8.0))
         }
+        Content::Card(card) => place_card(card, px, x, top, cw, out),
         Content::Image { reference } => {
             let side = px.v(IMAGE).min(cw);
             if let Some(out) = out {
@@ -742,7 +948,8 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Block(b) => block(b),
         Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes(),
         Content::Tools(t) => super::tools::heap_bytes(t),
-        Content::Chip(c) => c.text.p.heap_bytes(),
+        Content::Chip(c) => c.text.p.heap_bytes() + c.detail.as_ref().map_or(0, |d| d.p.heap_bytes()),
+        Content::Card(c) => super::cards::heap_bytes(c),
         Content::Image { reference } => reference.len(),
         Content::Working { .. } => 0,
     }

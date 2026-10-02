@@ -125,6 +125,9 @@ pub enum DemoFixture {
     NoProjects,
     /// Only this phone — no execution hosts.
     IosOnly,
+    /// The standard dataset plus a chat with a checklist, a goal and two
+    /// workflow runs.
+    Workflows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -164,6 +167,7 @@ impl From<DemoOptions> for zc::DemoOptions {
                 DemoFixture::Standard => zc::DemoFixture::Standard,
                 DemoFixture::NoProjects => zc::DemoFixture::NoProjects,
                 DemoFixture::IosOnly => zc::DemoFixture::IosOnly,
+                DemoFixture::Workflows => zc::DemoFixture::Workflows,
             },
             transcript_scale: match o.transcript_scale {
                 TranscriptScale::Normal => zc::TranscriptScale::Normal,

@@ -35,6 +35,7 @@ impl Dialogs {
         let title = string(frame, "title");
         let message = string(frame, "message");
         let question = UserInputQuestion {
+            meta: None,
             id: uuid::Uuid::new_v4().to_string(),
             header: "Pi".into(),
             question: if message.is_empty() {

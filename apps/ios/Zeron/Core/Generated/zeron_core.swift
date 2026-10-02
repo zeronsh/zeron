@@ -3321,6 +3321,14 @@ public func FfiConverterTypeTextSystem_lower(_ value: TextSystem) -> UInt64 {
 public protocol TranscriptViewProtocol: AnyObject, Sendable {
     
     /**
+     * A tap on a card control: `payload` is the `Action` widget's payload.
+     * Everything it can mean is decided here — folding a card, pausing a
+     * goal, stopping a run, loading an artifact — except navigation, which
+     * is returned for the platform to perform.
+     */
+    func act(payload: String)  -> ActionOutcome
+    
+    /**
      * Follow a session's transcript: every snapshot (coalesced by the
      * client) becomes a layout input. Returns false for an unknown chat.
      */
@@ -3416,6 +3424,22 @@ public convenience init(text: TextSystem, listener: LayoutListener) {
 
     
 
+    
+    /**
+     * A tap on a card control: `payload` is the `Action` widget's payload.
+     * Everything it can mean is decided here — folding a card, pausing a
+     * goal, stopping a run, loading an artifact — except navigation, which
+     * is returned for the platform to perform.
+     */
+open func act(payload: String) -> ActionOutcome  {
+    return try!  FfiConverterTypeActionOutcome_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_act(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(payload),uniffiCallStatus
+    )
+})
+}
     
     /**
      * Follow a session's transcript: every snapshot (coalesced by the
@@ -5328,6 +5352,14 @@ public struct HostCapabilities: Equatable, Hashable {
      * The chat's harness steers mid-turn (unknown until a live catalog).
      */
     public var midTurnSteering: Bool?
+    /**
+     * The host runs goal mode (`/goal`, the goal strip's controls).
+     */
+    public var goalMode: Bool
+    /**
+     * The host runs dynamic workflows.
+     */
+    public var workflows: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -5337,7 +5369,13 @@ public struct HostCapabilities: Equatable, Hashable {
          */queuedAttachments: Bool, 
         /**
          * The chat's harness steers mid-turn (unknown until a live catalog).
-         */midTurnSteering: Bool?) {
+         */midTurnSteering: Bool?, 
+        /**
+         * The host runs goal mode (`/goal`, the goal strip's controls).
+         */goalMode: Bool, 
+        /**
+         * The host runs dynamic workflows.
+         */workflows: Bool) {
         self.messageQueue = messageQueue
         self.queueActions = queueActions
         self.queueAttachments = queueAttachments
@@ -5345,6 +5383,8 @@ public struct HostCapabilities: Equatable, Hashable {
         self.queueEditLease = queueEditLease
         self.queuedAttachments = queuedAttachments
         self.midTurnSteering = midTurnSteering
+        self.goalMode = goalMode
+        self.workflows = workflows
     }
 
     
@@ -5369,7 +5409,9 @@ public struct FfiConverterTypeHostCapabilities: FfiConverterRustBuffer {
                 cleanAttachmentText: FfiConverterBool.read(from: &buf), 
                 queueEditLease: FfiConverterBool.read(from: &buf), 
                 queuedAttachments: FfiConverterBool.read(from: &buf), 
-                midTurnSteering: FfiConverterOptionBool.read(from: &buf)
+                midTurnSteering: FfiConverterOptionBool.read(from: &buf), 
+                goalMode: FfiConverterBool.read(from: &buf), 
+                workflows: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5381,6 +5423,8 @@ public struct FfiConverterTypeHostCapabilities: FfiConverterRustBuffer {
         FfiConverterBool.write(value.queueEditLease, into: &buf)
         FfiConverterBool.write(value.queuedAttachments, into: &buf)
         FfiConverterOptionBool.write(value.midTurnSteering, into: &buf)
+        FfiConverterBool.write(value.goalMode, into: &buf)
+        FfiConverterBool.write(value.workflows, into: &buf)
     }
 }
 
@@ -8262,6 +8306,84 @@ public func FfiConverterTypeWorktreeSpec_lower(_ value: WorktreeSpec) -> RustBuf
 }
 
 
+/**
+ * What the platform does after `TranscriptView::act`.
+ */
+
+public enum ActionOutcome: Equatable, Hashable {
+    
+    /**
+     * Handled here; the next frame shows the result.
+     */
+    case done
+    /**
+     * Navigate to this chat (an agent's chat opened from a workflow run).
+     */
+    case openChat(chatId: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ActionOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeActionOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = ActionOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ActionOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .done
+        
+        case 2: return .openChat(chatId: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ActionOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .done:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .openChat(chatId):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(chatId, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeActionOutcome_lift(_ buf: RustBuffer) throws -> ActionOutcome {
+    return try FfiConverterTypeActionOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeActionOutcome_lower(_ value: ActionOutcome) -> RustBuffer {
+    return FfiConverterTypeActionOutcome.lower(value)
+}
+
+
+
 
 public enum AuthCallback: Equatable, Hashable {
     
@@ -9556,6 +9678,11 @@ public enum DemoFixture: Equatable, Hashable {
      * Only this phone — no execution hosts.
      */
     case iosOnly
+    /**
+     * The standard dataset plus a chat with a checklist, a goal and two
+     * workflow runs.
+     */
+    case workflows
 
 
 
@@ -9583,6 +9710,8 @@ public struct FfiConverterTypeDemoFixture: FfiConverterRustBuffer {
         
         case 3: return .iosOnly
         
+        case 4: return .workflows
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -9601,6 +9730,10 @@ public struct FfiConverterTypeDemoFixture: FfiConverterRustBuffer {
         
         case .iosOnly:
             writeInt(&buf, Int32(3))
+        
+        
+        case .workflows:
+            writeInt(&buf, Int32(4))
         
         }
     }
@@ -10347,6 +10480,11 @@ public enum RowKind: Equatable, Hashable {
     case chip
     case image
     case working
+    /**
+     * A bordered status surface: the goal strip, the todo strip, a workflow
+     * run. Its taps are `WidgetKind::Action` widgets.
+     */
+    case card
 
 
 
@@ -10380,6 +10518,8 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
         
         case 6: return .working
         
+        case 7: return .card
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -10410,6 +10550,10 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
         
         case .working:
             writeInt(&buf, Int32(6))
+        
+        
+        case .card:
+            writeInt(&buf, Int32(7))
         
         }
     }
@@ -10603,6 +10747,12 @@ public enum SendOutcome: Equatable, Hashable {
      */
     case queued(queueId: String
     )
+    /**
+     * A slash command (`/goal …`) the core carried out itself; nothing went
+     * to the agent. `notice` is a line worth showing, when there is one.
+     */
+    case command(notice: String?
+    )
 
 
 
@@ -10633,6 +10783,9 @@ public struct FfiConverterTypeSendOutcome: FfiConverterRustBuffer {
         case 3: return .queued(queueId: try FfiConverterString.read(from: &buf)
         )
         
+        case 4: return .command(notice: try FfiConverterOptionString.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -10654,6 +10807,11 @@ public struct FfiConverterTypeSendOutcome: FfiConverterRustBuffer {
         case let .queued(queueId):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(queueId, into: &buf)
+            
+        
+        case let .command(notice):
+            writeInt(&buf, Int32(4))
+            FfiConverterOptionString.write(notice, into: &buf)
             
         }
     }
@@ -11152,6 +11310,14 @@ public enum WidgetKind: Equatable, Hashable {
     case toolToggle(detail: UInt64, `open`: Bool
     )
     /**
+     * A tap target carrying an action string (`payload`). The painter hands
+     * it to `TranscriptView::act`; what it means (toggle a card, stop a
+     * run, open a chat) is decided in Rust. `label` is its accessibility
+     * label.
+     */
+    case action(label: String
+    )
+    /**
      * Shimmer sweep over the active group's title (text drawn by the canvas
      * underneath; the painter re-draws those runs brighter through a moving
      * gradient).
@@ -11209,7 +11375,10 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case 11: return .toolToggle(detail: try FfiConverterUInt64.read(from: &buf), open: try FfiConverterBool.read(from: &buf)
         )
         
-        case 12: return .shimmer
+        case 12: return .action(label: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 13: return .shimmer
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11281,8 +11450,13 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             FfiConverterBool.write(`open`, into: &buf)
             
         
-        case .shimmer:
+        case let .action(label):
             writeInt(&buf, Int32(12))
+            FfiConverterString.write(label, into: &buf)
+            
+        
+        case .shimmer:
+            writeInt(&buf, Int32(13))
         
         }
     }
@@ -13400,6 +13574,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_platformmeasurer_measure_run() != 60773) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_act() != 19576) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_attach() != 3138) {

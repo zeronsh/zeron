@@ -1,0 +1,79 @@
+[0] User y=0 h=109
+      x=   83 Audit our dependencies, then review
+      x=   83 the whole repo for security
+      x=   83 problems.
+[1] Card y=109 h=159
+      x=   56 Workflow completed · dependency-audit
+      x=   56 3 phases · 7 agents
+      scroller 330x32 (content 353): collect | 2/2 | compare | 4/4 | report | 1/1
+      scroller 330x32 (content 482): Security review summary | Findings by severity | Coverage
+      action "Expand the workflow" -> wf.toggle:run-done @(18,18 354x61)
+      icon arrow.triangle.branch
+      icon chevron.right
+      icon doc.text
+      action "Open Security review summary" -> wf.artifact:run-done:summary @(0,-6 201x44)
+      icon tablecells
+      action "Open Findings by severity" -> wf.artifact:run-done:findings @(207,-6 167x44)
+      icon chart.bar
+      action "Open Coverage" -> wf.artifact:run-done:coverage @(380,-6 102x44)
+[2] Chip y=268 h=76
+      x=   42 Result of workflow dependency-audit (completed)
+      x=   42 sent to the agent
+      icon checkmark.circle
+[3] Tools y=344 h=47
+      x=   50 Updated todos
+[4] Markdown y=391 h=62
+      x=   18 The audit is clean. I set a goal so I keep going
+      x=   18 until the review passes.
+[5] Chip y=453 h=44
+      x=   42 Goal set · Make the security review pass
+      icon target
+[6] Chip y=497 h=77
+      x=   42 Verifier · round 1 not satisfied
+      x=   42 Two findings are still open. — next: Fix the path
+      x=   42 traversal in the upload handler
+      icon arrow.right.circle
+[7] Chip y=574 h=76
+      x=   42 Goal · round 2: Fix the path traversal in the upload
+      x=   42 handler
+      icon target
+[8] Card y=650 h=186
+      x=   56 Workflow running · security-review
+      x=   56 5 phases · 17 agents · 3 working
+      x=   52 1 agent is waiting for your answer
+      scroller 330x32 (content 534): scan | 3/3 | review | 5/8 | verify | 0/3 | fix | 0/2 | report | 0/1
+      scroller 330x32 (content 482): Security review summary | Findings by severity | Coverage
+      action "Expand the workflow" -> wf.toggle:run-live @(18,18 354x61)
+      icon arrow.triangle.branch
+      spinner
+      icon chevron.right
+      icon questionmark.bubble
+      icon doc.text
+      action "Open Security review summary" -> wf.artifact:run-live:summary @(0,-6 201x44)
+      icon tablecells
+      action "Open Findings by severity" -> wf.artifact:run-live:findings @(207,-6 167x44)
+      icon chart.bar
+      action "Open Coverage" -> wf.artifact:run-live:coverage @(380,-6 102x44)
+[9] Markdown y=836 h=87
+      x=   18 Started the review workflow. Eight reviewers
+      x=   18 are looking at the code in parallel; I will fix
+      x=   18 what they find.
+[10] Card y=923 h=90
+      x=   56 Goal  Active  R3 · 17m 0s
+      x=   56 Round 3: Add a regression test for the
+      x=   56 upload path
+      action "Expand goal" -> goal.toggle @(18,10 354x80)
+      icon target
+      spinner
+      icon chevron.right
+      icon pause.fill
+      action "Pause goal" -> goal.pause @(300,8 44x44)
+[11] Card y=1013 h=150
+      x=   56 Todo · 1/3
+      x=   52 Map the attack surface
+      x=   52 Fix the path traversal in the upload handler
+      x=   52 Add a regression test for the upload path
+      action "Collapse the list" -> todo.toggle @(18,10 354x44)
+      icon tool-checklist
+      icon chevron.down
+      icon checkmark

@@ -189,6 +189,11 @@ pub enum WidgetKind {
     ToolRail { trunk_x: f32, bend: f32, branch_end: f32, row_mid: f32, tops: Vec<f32>, heights: Vec<f32> },
     /// Tap target toggling one tool row's inline detail.
     ToolToggle { detail: u64, open: bool },
+    /// A tap target carrying an action string (`payload`). The painter hands
+    /// it to `TranscriptView::act`; what it means (toggle a card, stop a
+    /// run, open a chat) is decided in Rust. `label` is its accessibility
+    /// label.
+    Action { label: String },
     /// Shimmer sweep over the active group's title (text drawn by the canvas
     /// underneath; the painter re-draws those runs brighter through a moving
     /// gradient).

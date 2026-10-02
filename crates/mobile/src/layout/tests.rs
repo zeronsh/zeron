@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use super::*;
 
-struct Quiet;
+pub(crate) struct Quiet;
 impl LayoutListener for Quiet {
     fn frame_ready(&self, _revision: u64) {}
 }
@@ -39,9 +39,9 @@ pub(crate) fn text_system() -> Arc<TextSystem> {
     TextSystem::new(faces, Some(Arc::new(FixedFallback)))
 }
 
-fn worker(width: f32) -> Worker {
+pub(crate) fn worker(width: f32) -> Worker {
     let ts = text_system();
-    let mut w = Worker::new(&ts, Arc::new(Shared { frame: Mutex::new(Arc::new(LayoutFrame::empty())) }), Arc::new(Quiet));
+    let mut w = Worker::new(&ts, Arc::new(Shared::new()), Arc::new(Quiet));
     w.width = width;
     w
 }
@@ -171,7 +171,7 @@ fn thinking_renders_styled_markdown_not_markers() {
     );
     let mut w = worker(390.0);
     w.input = TranscriptInput {
-        entries: vec![Arc::new(SessionMessageEntry {
+        entries: vec![Arc::new(SessionMessageEntry { origin: None,
             id: "a".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Reasoning { id: "r0".into(), text: reasoning.into() }],
@@ -211,7 +211,7 @@ fn thinking_renders_styled_markdown_not_markers() {
     for width in [280.0, 320.0, 430.0, 744.0, 1024.0] {
         let mut w = worker(width);
         w.input = TranscriptInput {
-            entries: vec![Arc::new(SessionMessageEntry {
+            entries: vec![Arc::new(SessionMessageEntry { origin: None,
                 id: "a".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Reasoning { id: "r0".into(), text: reasoning.into() }],
@@ -244,7 +244,7 @@ fn streaming_thought_markdown_settles_to_the_fresh_parse() {
     use zeron_doc::schema::{MessageRole, SessionMessageEntry};
     let text = "**Checking** the `parser`\n\n1. first step\n2. second with [docs](https://example.com)\n\n> note\n\n```rust\nfn main() {}\n```";
     let entry = |status: MessageStatus, text: &str| {
-        Arc::new(SessionMessageEntry {
+        Arc::new(SessionMessageEntry { origin: None,
             id: "a".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Reasoning { id: "r0".into(), text: text.to_owned() }],
@@ -294,7 +294,7 @@ fn thought_input(text: &str, streaming: bool) -> TranscriptInput {
     use zeron_doc::parts::{MessagePart, MessageStatus};
     use zeron_doc::schema::{MessageRole, SessionMessageEntry};
     TranscriptInput {
-        entries: vec![Arc::new(SessionMessageEntry {
+        entries: vec![Arc::new(SessionMessageEntry { origin: None,
             id: "a".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Reasoning { id: "r0".into(), text: text.to_owned() }],
@@ -436,7 +436,7 @@ fn bench_layout_passes() {
     for i in 0..updates {
         text.push_str(["word ", "more ", "text\n\n", "`code` ", "**bold** "][i % 5]);
         let mut e = entries.clone();
-        e.push(Arc::new(SessionMessageEntry {
+        e.push(Arc::new(SessionMessageEntry { origin: None,
             id: "live".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Text { id: "t0".into(), text: text.clone() }],
@@ -446,7 +446,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true };
+        w.input = TranscriptInput { entries: e, working: true, streaming: true, ..Default::default() };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();
@@ -524,7 +524,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
     let frame_for = |status: SubagentStatus| {
         let mut w = worker(390.0);
         w.input = TranscriptInput {
-            entries: vec![Arc::new(SessionMessageEntry {
+            entries: vec![Arc::new(SessionMessageEntry { origin: None,
                 id: "a".into(),
                 role: MessageRole::Assistant,
                 parts: vec![spawn(status)],

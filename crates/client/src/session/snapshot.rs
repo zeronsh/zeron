@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use zeron_proto::{ChatIndicator, ContextUsage, UserInputQuestion};
+use zeron_proto::{
+    ChatIndicator, ContextUsage, Goal, TodoItem, ToolCall, UserInputQuestion, WorkflowRunsState,
+};
 
 use crate::connectivity::SendState;
 
@@ -104,6 +106,13 @@ pub struct SessionSnapshot {
     /// `entries[transcript_len..]` (same order, same ids).
     pub pending: Vec<PendingSend>,
     pub context_usage: Option<ContextUsage>,
+    /// The chat's goal (`meta.goal`, written by its host), when it has one.
+    pub goal: Option<Arc<Goal>>,
+    /// The chat's workflow runs (`meta.workflowRuns`), oldest first.
+    pub workflows: Arc<WorkflowRunsState>,
+    /// The checklist the agent most recently wrote (`None` when it never
+    /// wrote one, or the last write cleared it).
+    pub todo: Option<Arc<Vec<TodoItem>>>,
     /// Content is present (local snapshot loaded or first sync landed). False
     /// = show a loader, not an empty chat.
     pub hydrated: bool,
@@ -242,6 +251,10 @@ pub struct HostCapabilities {
     pub queued_attachments: bool,
     /// The chat's harness steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The host runs goal mode (`goal-mode-v1`): it executes `goal` commands.
+    pub goal_mode: bool,
+    /// The host runs dynamic workflows (`workflows-v1`).
+    pub workflows: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,4 +312,131 @@ pub struct ComposerState {
     /// The last message this device submitted (scroll-to-own-send target).
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+}
+
+/// The checklist the agent wrote last. Every harness that plans writes the
+/// whole list on each update, so only the newest `Todo` part counts (ACP plans
+/// reuse one tool id: "latest part", not "first part with this id"). An empty
+/// write clears it. Walks back from the newest entry and stops at the first
+/// hit; a chat that never planned scans its parts once per change.
+pub fn latest_todo(entries: &[Arc<Entry>]) -> Option<Arc<Vec<TodoItem>>> {
+    let items = entries
+        .iter()
+        .rev()
+        .filter(|entry| entry.role() == MessageRole::Assistant)
+        .flat_map(|entry| entry.parts().iter().rev())
+        .find_map(|part| match part {
+            MessagePart::Tool {
+                call: ToolCall::Todo { items },
+                ..
+            } => Some(items),
+            _ => None,
+        })?;
+    (!items.is_empty()).then(|| Arc::new(items.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeron_doc::SessionMessageEntry;
+
+    fn items(spec: &str) -> Vec<TodoItem> {
+        // x = completed, > = in progress, . = pending
+        spec.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                TodoItem::new(
+                    format!("item {i}"),
+                    match c {
+                        'x' => zeron_proto::TodoStatus::Completed,
+                        '>' => zeron_proto::TodoStatus::InProgress,
+                        _ => zeron_proto::TodoStatus::Pending,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn todo_entry(id: &str, role: MessageRole, lists: &[(&str, Vec<TodoItem>)]) -> Arc<Entry> {
+        let parts = lists
+            .iter()
+            .map(|(part, list)| MessagePart::Tool {
+                id: (*part).into(),
+                call: ToolCall::Todo { items: list.clone() },
+                is_error: false,
+                resolved: true,
+                output: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            })
+            .collect();
+        Arc::new(Entry {
+            id: id.into(),
+            rev: 1,
+            message: Arc::new(SessionMessageEntry {
+                origin: None,
+                id: id.into(),
+                role,
+                parts,
+                created_at: 0,
+                device_id: "d".into(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            }),
+            echo: None,
+            append: None,
+        })
+    }
+
+    #[test]
+    fn the_newest_list_wins_across_and_within_entries() {
+        let first = todo_entry("a", MessageRole::Assistant, &[("p", items("x.."))]);
+        let second = todo_entry(
+            "b",
+            MessageRole::Assistant,
+            &[("p1", items("xx.")), ("p2", items("xx>"))],
+        );
+        let latest = latest_todo(&[first, second]).unwrap();
+        assert_eq!(*latest, items("xx>"));
+        // An ACP plan reuses one tool id; the newer segment still wins.
+        let old = todo_entry("c", MessageRole::Assistant, &[("plan", items(">.."))]);
+        let new = todo_entry("d", MessageRole::Assistant, &[("plan", items("x>."))]);
+        assert_eq!(*latest_todo(&[old, new]).unwrap(), items("x>."));
+    }
+
+    #[test]
+    fn an_empty_write_clears_and_user_entries_are_ignored() {
+        let list = todo_entry("a", MessageRole::Assistant, &[("p", items("x."))]);
+        let cleared = todo_entry("b", MessageRole::Assistant, &[("q", Vec::new())]);
+        assert!(latest_todo(&[list.clone(), cleared]).is_none());
+        let user = todo_entry("u", MessageRole::User, &[("p", items("."))]);
+        assert!(latest_todo(&[user]).is_none());
+        assert!(latest_todo(&[]).is_none());
+        assert_eq!(*latest_todo(&[list]).unwrap(), items("x."));
+    }
+
+    #[test]
+    fn a_reply_becomes_a_page_and_binary_has_no_text() {
+        let page = super::super::ArtifactPage::from_reply(&serde_json::json!({
+            "version": {"version": 2, "contentType": "text/markdown", "title": "Doc"},
+            "offset": 0, "total": 5, "encoding": "utf8", "data": "# Doc",
+        }))
+        .unwrap();
+        assert_eq!((page.version, page.total), (2, 5));
+        assert_eq!(page.text.as_deref(), Some("# Doc"));
+        let bin = super::super::ArtifactPage::from_reply(&serde_json::json!({
+            "version": {"version": 1, "contentType": "application/octet-stream"},
+            "total": 9, "encoding": "base64", "data": "AAAA",
+        }))
+        .unwrap();
+        assert!(bin.text.is_none());
+        assert!(super::super::ArtifactPage::from_reply(&serde_json::json!({})).is_none());
+    }
 }

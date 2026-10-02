@@ -117,6 +117,9 @@ pub enum DemoFixture {
     NoProjects,
     /// Only this phone — no execution hosts (`-ios-only`).
     IosOnly,
+    /// The standard dataset plus a chat with a checklist, a goal and two
+    /// workflow runs (`-workflows`): the status cards of docs/workflows-mobile.md.
+    Workflows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,9 +9,12 @@
 //! frame's prepared rows (pure arithmetic, no measurement).
 
 pub mod display;
+mod act;
+mod cards;
 mod markdown;
 mod file_icons;
 mod rows;
+mod status;
 mod style;
 mod tools;
 
@@ -331,11 +334,35 @@ enum Msg {
     Viewport { width: f32, scale: f32 },
     Toggle(u64),
     ToggleDetail { row: u64, detail: u64, open: bool },
+    /// A tap on a card control (`WidgetKind::Action`'s payload).
+    Act(String),
+    /// An artifact preview finished loading (or failed).
+    Fetched { run: String, artifact: String, view: status::ArtifactView },
     Shutdown,
 }
 
 struct Shared {
     frame: Mutex<Arc<LayoutFrame>>,
+    /// The attached session: where card controls send their commands.
+    handle: Mutex<Option<zeron_client::SessionHandle>>,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            frame: Mutex::new(Arc::new(LayoutFrame::empty())),
+            handle: Mutex::new(None),
+        }
+    }
+}
+
+/// What the platform does after `TranscriptView::act`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ActionOutcome {
+    /// Handled here; the next frame shows the result.
+    Done,
+    /// Navigate to this chat (an agent's chat opened from a workflow run).
+    OpenChat { chat_id: String },
 }
 
 /// One transcript's layout engine.
@@ -352,13 +379,16 @@ impl TranscriptView {
     #[uniffi::constructor]
     pub fn new(text: Arc<TextSystem>, listener: Arc<dyn LayoutListener>) -> Arc<Self> {
         let (tx, rx) = mpsc::channel();
-        let shared = Arc::new(Shared {
-            frame: Mutex::new(Arc::new(LayoutFrame::empty())),
-        });
+        let shared = Arc::new(Shared::new());
         let worker_shared = shared.clone();
+        let worker_tx = tx.clone();
         thread::Builder::new()
             .name("zeron-layout".into())
-            .spawn(move || Worker::new(&text, worker_shared, listener).run(rx))
+            .spawn(move || {
+                let mut worker = Worker::new(&text, worker_shared, listener);
+                worker.tx = Some(worker_tx);
+                worker.run(rx)
+            })
             .expect("spawn layout thread");
         Arc::new(Self {
             tx: Mutex::new(tx),
@@ -374,6 +404,7 @@ impl TranscriptView {
             return false;
         };
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        *self.shared.handle.lock().unwrap() = Some(handle.clone());
         let guard = handle.watch(move |snap| {
             let input = TranscriptInput {
                 entries: snap.transcript_messages(),
@@ -388,6 +419,12 @@ impl TranscriptView {
                 working: snap.working,
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
+                goal: snap.goal.clone(),
+                todo: snap.todo.clone(),
+                workflows: snap.workflows.clone(),
+                now_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64),
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -412,6 +449,18 @@ impl TranscriptView {
         self.send(Msg::ToggleDetail { row, detail, open });
     }
 
+    /// A tap on a card control: `payload` is the `Action` widget's payload.
+    /// Everything it can mean is decided here — folding a card, pausing a
+    /// goal, stopping a run, loading an artifact — except navigation, which
+    /// is returned for the platform to perform.
+    pub fn act(&self, payload: String) -> ActionOutcome {
+        if let Some(chat_id) = payload.strip_prefix("chat:") {
+            return ActionOutcome::OpenChat { chat_id: chat_id.to_owned() };
+        }
+        self.send(Msg::Act(payload));
+        ActionOutcome::Done
+    }
+
     /// The latest published frame.
     pub fn frame(&self) -> Arc<LayoutFrame> {
         self.shared.frame.lock().unwrap().clone()
@@ -424,6 +473,7 @@ impl TranscriptView {
 
     pub fn close(&self) {
         self.watch.lock().unwrap().take();
+        self.shared.handle.lock().unwrap().take();
         self.send(Msg::Shutdown);
     }
 }
@@ -450,7 +500,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         entries: entries
             .into_iter()
             .map(|e| {
-                Arc::new(SessionMessageEntry {
+                Arc::new(SessionMessageEntry { origin: None,
                     parts: vec![MessagePart::Text {
                         id: "t0".into(),
                         text: e.text,
@@ -469,6 +519,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working,
         working_since_ms: None,
         streaming: working,
+        ..Default::default()
     }
 }
 
@@ -489,6 +540,8 @@ pub(crate) struct Worker {
     revision: u64,
     shared: Arc<Shared>,
     listener: Option<Arc<dyn LayoutListener>>,
+    /// Back into this worker's own queue (artifact fetches report here).
+    tx: Option<Sender<Msg>>,
 }
 
 impl Worker {
@@ -510,6 +563,7 @@ impl Worker {
             revision: 0,
             shared,
             listener: Some(listener),
+            tx: None,
         }
     }
 
@@ -533,6 +587,7 @@ impl Worker {
                             self.builder.expanded = old.expanded;
                             self.builder.collapsed = old.collapsed;
                             self.builder.detail_open = old.detail_open;
+                            self.builder.ui = old.ui;
                             self.heights.clear();
                             self.cache = WidthCache::new();
                         }
@@ -543,6 +598,18 @@ impl Worker {
                         self.builder.detail_open.insert(detail, !open);
                         self.builder.invalidate(row);
                         dirty = true;
+                    }
+                    Msg::Act(payload) => {
+                        self.act(&payload);
+                        dirty = true;
+                    }
+                    Msg::Fetched { run, artifact, view } => {
+                        // A late answer for a preview the person closed (or
+                        // swapped) in the meantime is dropped.
+                        if self.builder.ui.artifact.get(&run) == Some(&artifact) {
+                            self.builder.ui.artifacts.insert((run, artifact), view);
+                            dirty = true;
+                        }
                     }
                     Msg::Toggle(key) => {
                         if !self.builder.expanded.remove(&key) && !self.builder.collapsed.remove(&key) {
@@ -642,3 +709,5 @@ impl Worker {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_cards;

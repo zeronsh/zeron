@@ -283,6 +283,10 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
             capabilities: if caps {
                 capability::ALL_QUEUE
                     .iter()
+                    .chain(&[
+                        zeron_proto::capabilities::GOAL_MODE_V1,
+                        zeron_proto::capabilities::WORKFLOWS_V1,
+                    ])
                     .map(|c| (*c).to_owned())
                     .collect()
             } else {
@@ -358,7 +362,7 @@ pub(crate) fn seed(
             doc.reconcile_sidebar_pins(true)?;
             return Ok(Seeded { change_requests });
         }
-        DemoFixture::Standard => {}
+        DemoFixture::Standard | DemoFixture::Workflows => {}
     }
     for device in &all_devices {
         doc.upsert_device(device)?;
@@ -367,7 +371,33 @@ pub(crate) fn seed(
     for space in &spaces {
         doc.upsert_space(space)?;
     }
-    for demo in chats() {
+    let mut demo_chats = chats();
+    if fixture == DemoFixture::Workflows {
+        demo_chats.push(DemoChat {
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 3 * MIN,
+            seen: false,
+            ..DemoChat {
+                id: super::workflows::CHAT,
+                space: Some("space-zeron"),
+                device: MAC,
+                title: "Security review",
+                preview: "Started the review workflow.",
+                harness: HarnessId::ClaudeCode,
+                model: "claude-fable-5",
+                reasoning: ReasoningLevel::XHigh,
+                branch: Some("security-review"),
+                pr: None,
+                status: None,
+                last_ago_ms: HOUR,
+                created_ago_ms: DAY,
+                seen: true,
+                archived: false,
+                parent: None,
+            }
+        });
+    }
+    for demo in demo_chats {
         let space = demo.space.and_then(|id| spaces.iter().find(|s| s.id == id));
         let last = now - demo.last_ago_ms;
         let source_context = match (demo.branch, space) {

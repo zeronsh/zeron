@@ -75,6 +75,9 @@ pub enum SendOutcome {
     Steered { message_id: String },
     /// Parked on the shared queue.
     Queued { queue_id: String },
+    /// A slash command (`/goal …`) the core carried out itself; nothing went
+    /// to the agent. `notice` is a line worth showing, when there is one.
+    Command { notice: Option<String> },
 }
 
 impl From<zc::SendOutcome> for SendOutcome {
@@ -83,6 +86,7 @@ impl From<zc::SendOutcome> for SendOutcome {
             zc::SendOutcome::Started { message_id } => SendOutcome::Started { message_id },
             zc::SendOutcome::Steered { message_id } => SendOutcome::Steered { message_id },
             zc::SendOutcome::Queued { queue_id } => SendOutcome::Queued { queue_id },
+            zc::SendOutcome::Command { notice } => SendOutcome::Command { notice },
         }
     }
 }
@@ -98,6 +102,10 @@ pub struct HostCapabilities {
     pub queued_attachments: bool,
     /// The chat's harness steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The host runs goal mode (`/goal`, the goal strip's controls).
+    pub goal_mode: bool,
+    /// The host runs dynamic workflows.
+    pub workflows: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -273,6 +281,8 @@ impl From<&zc::ComposerState> for ComposerState {
                     queue_edit_lease: caps.queue_edit_lease,
                     queued_attachments: caps.queued_attachments,
                     mid_turn_steering: caps.mid_turn_steering,
+                    goal_mode: caps.goal_mode,
+                    workflows: caps.workflows,
                 },
             },
             live: LiveStatus {

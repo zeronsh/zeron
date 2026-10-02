@@ -101,7 +101,7 @@ final class AppModel {
         let args = ProcessInfo.processInfo.arguments
         let scale: TranscriptScale = args.contains("-huge") ? .huge : args.contains("-big") ? .big : .normal
         return DemoOptions(
-            fixture: args.contains("-no-projects") ? .noProjects : args.contains("-ios-only") ? .iosOnly : .standard,
+            fixture: args.contains("-no-projects") ? .noProjects : args.contains("-ios-only") ? .iosOnly : args.contains("-workflows") ? .workflows : .standard,
             transcriptScale: scale,
             streamSpeed: args.contains("-fast") ? .fast : .realistic,
             longReply: args.contains("-longreply")

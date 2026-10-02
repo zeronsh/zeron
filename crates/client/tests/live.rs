@@ -260,7 +260,7 @@ fn host_answers(edge: &MockEdge, host_doc: &LoroDoc) -> Option<String> {
         .set_command_status(&command_id, SessionCommandStatus::Applied, None)
         .unwrap();
     let now = zeron_client_now();
-    let entry = |id: &str, role, device: &str, text: &str| SessionMessageEntry {
+    let entry = |id: &str, role, device: &str, text: &str| SessionMessageEntry { origin: None,
         id: id.into(),
         role,
         parts: vec![MessagePart::Text {

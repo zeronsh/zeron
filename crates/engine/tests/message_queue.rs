@@ -110,6 +110,7 @@ impl Harness for HeldHarness {
             // Only the engine can mint a request id it will honour, so the
             // question has to go through controls rather than the stream.
             (controls.request_input)(vec![UserInputQuestion {
+                meta: None,
                 id: "q1".into(),
                 header: "Choose".into(),
                 question: "which one?".into(),

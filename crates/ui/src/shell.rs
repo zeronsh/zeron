@@ -706,6 +706,8 @@ pub enum RightSurface {
     /// keys [`Shell::subagent_tabs`].
     Subagent(u64),
     SideChat(u64),
+    /// A workflow run's pane — the handle keys [`Shell::workflow_tabs`].
+    Workflow(u64),
 }
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
@@ -1721,6 +1723,14 @@ struct SubagentTab {
     _events: Subscription,
 }
 
+/// One right-pane workflow run: the run it follows and its pane entity.
+struct WorkflowTab {
+    chat_id: String,
+    run_id: String,
+    pane: Entity<crate::workflow::pane::WorkflowRunPane>,
+    _events: Subscription,
+}
+
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
@@ -1833,6 +1843,9 @@ pub struct Shell {
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
     subagent_seq: u64,
+    /// Workflow run panes by surface id.
+    workflow_tabs: std::collections::HashMap<u64, WorkflowTab>,
+    workflow_seq: u64,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
@@ -1996,6 +2009,9 @@ pub struct Shell {
     /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`,
     /// `ZERON_DEMO_UPLOAD`) — see [`Shell::new`].
     debug_dialog: Option<String>,
+    /// Capture knob `ZERON_OPEN_WORKFLOW` (`run`, `run:artifact=<id>` or
+    /// `run:phase=<name>`): open the newest run's pane once it is in state.
+    debug_workflow: Option<String>,
     debug_gate: Option<GatePhase>,
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
@@ -2111,6 +2127,7 @@ impl Shell {
                     this.pending_workspace_command = Some(*command);
                     cx.notify();
                 }
+                ComposerEvent::OpenChat { chat_id } => this.open_chat(chat_id.clone(), cx),
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
@@ -2224,6 +2241,7 @@ impl Shell {
         // `ZERON_FORCE_GATE=signin|org|failed` renders that gate regardless of
         // real auth state (display-only — for styling passes).
         let debug_dialog = std::env::var("ZERON_OPEN_DIALOG").ok();
+        let debug_workflow = std::env::var("ZERON_OPEN_WORKFLOW").ok();
         // `ZERON_DEMO_UPLOAD=<pct>:<image path>` fabricates an in-flight image
         // send on the selected chat (echo bubble + frozen thumbnail progress
         // ring) — display-only; a real upload can't be paused for a capture.
@@ -2286,6 +2304,8 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
+            workflow_tabs: std::collections::HashMap::new(),
+            workflow_seq: 0,
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
@@ -2390,6 +2410,7 @@ impl Shell {
             resort_epoch: 0,
             was_window_active: false,
             debug_dialog,
+            debug_workflow,
             debug_gate,
             debug_upload,
             sidebar_tween: None,
@@ -2489,7 +2510,40 @@ impl Shell {
 
     // ---- splash ----
 
+    /// Opening a chat acknowledges the workflow runs that ended in it: the
+    /// sidebar stops listing them. Device-local (`workflow_seen_runs`).
+    fn acknowledge_workflow_runs(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        let ids = {
+            let state = state.read(cx);
+            let Some(chat) = state.selected_chat.as_deref() else {
+                return;
+            };
+            let mut ids = state
+                .workflow_activity
+                .chats
+                .get(chat)
+                .map(|briefs| crate::workflow::model::settled_run_ids(briefs))
+                .unwrap_or_default();
+            ids.extend(
+                state
+                    .workflows
+                    .runs
+                    .iter()
+                    .filter(|r| r.header.status.is_settled())
+                    .map(|r| r.header.run_id.clone()),
+            );
+            ids
+        };
+        if ids.is_empty() {
+            return;
+        }
+        if crate::workflow::model::mark_seen(&mut self.settings.workflow_seen_runs, &ids) {
+            self.schedule_save(cx);
+        }
+    }
+
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        self.acknowledge_workflow_runs(state, cx);
         self.prune_file_explorers(cx);
         self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
@@ -2525,6 +2579,39 @@ impl Shell {
         // and all of them independently reattach to the new local runtime.
         if signed_out_synced && self.runtime_change_task.is_none() {
             self.start_local_runtime_transition(false, cx);
+        }
+        // Capture knob: open the newest workflow run's pane (screenshots).
+        if let Some(spec) = self.debug_workflow.clone()
+            && let Some(run_id) = state
+                .read(cx)
+                .workflows
+                .runs
+                .last()
+                .map(|r| r.header.run_id.clone())
+        {
+            self.debug_workflow = None;
+            let (landing, artifact) = match spec.split_once(':') {
+                Some((_, rest)) => match rest.split_once('=') {
+                    Some(("artifact", id)) => (None, Some(id.to_owned())),
+                    Some(("phase", name)) => (Some(name.to_owned()), None),
+                    _ => (None, None),
+                },
+                None => (None, None),
+            };
+            // `run:actor` also opens the first agent's chat beside the pane.
+            let first_actor = spec.ends_with(":actor").then(|| {
+                state.read(cx).workflows.runs.last().and_then(|run| {
+                    run.actors
+                        .iter()
+                        .find_map(|a| a.child_chat_id.clone().map(|c| (c, a.name.clone())))
+                })
+            });
+            self.add_workflow_surface(run_id, landing, artifact, cx);
+            if let Some(Some((child, name))) = first_actor
+                && let Some(chat) = state.read(cx).selected_chat.clone()
+            {
+                self.add_subagent_surface(chat, child, name, false, cx);
+            }
         }
         // Capture knob: the add-space palette needs only the device registry.
         if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
@@ -2580,6 +2667,7 @@ impl Shell {
                     std::slice::from_ref(&pending_path),
                 );
                 let echo = zeron_doc::SessionMessageEntry {
+                    origin: None,
                     id: "demo-upload-echo".into(),
                     role: zeron_doc::MessageRole::User,
                     parts: vec![zeron_doc::MessagePart::Text {
@@ -3108,6 +3196,10 @@ impl Shell {
                     .subagent_tabs
                     .get(id)
                     .map(|tab| (*surface, tab.title.clone(), false, None)),
+                RightSurface::Workflow(id) => self
+                    .workflow_tabs
+                    .get(id)
+                    .map(|tab| (*surface, tab.pane.read(cx).title(cx), false, None)),
                 RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
                     let browser = browser.read(cx);
                     (
@@ -3167,6 +3259,7 @@ impl Shell {
             | RightSurface::Terminal(_)
             | RightSurface::SideChat(_)
             | RightSurface::Subagent(_)
+            | RightSurface::Workflow(_)
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -3288,7 +3381,7 @@ impl Shell {
                     });
                 }
             }
-            RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::Subagent(_) | RightSurface::Workflow(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -3887,7 +3980,111 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::OpenWorkflowRun { run_id, landing } => {
+                self.add_workflow_surface(run_id.clone(), landing.clone(), None, cx);
+            }
+            TranscriptEvent::OpenWorkflowActor {
+                chat_id,
+                child_chat_id,
+                title,
+            } => {
+                self.add_subagent_surface(
+                    chat_id.clone(),
+                    child_chat_id.clone(),
+                    title.clone(),
+                    false,
+                    cx,
+                );
+            }
+            TranscriptEvent::OpenWorkflowArtifact {
+                run_id,
+                artifact_id,
+            } => {
+                self.add_workflow_surface(run_id.clone(), None, Some(artifact_id.clone()), cx);
+            }
         }
+    }
+
+    /// A sidebar run line: open its chat and that run's pane.
+    pub(crate) fn open_chat_run(
+        &mut self,
+        chat_id: String,
+        run_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chat(chat_id, cx);
+        self.add_workflow_surface(run_id, None, None, cx);
+    }
+
+    /// Open (or focus) the pane of a workflow run in the right pane, optionally
+    /// scrolled to a phase or showing one of its artifacts. A run pane lives
+    /// with the chat that owns the run.
+    fn add_workflow_surface(
+        &mut self,
+        run_id: String,
+        landing: Option<String>,
+        artifact: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+            return;
+        };
+        self.set_surfaces_open(true, cx);
+        let existing = self
+            .workflow_tabs
+            .iter()
+            .find(|(_, tab)| tab.run_id == run_id && tab.chat_id == chat_id)
+            .map(|(&id, tab)| (id, tab.pane.clone()));
+        let (id, pane) = match existing {
+            Some(found) => found,
+            None => {
+                self.workflow_seq += 1;
+                let id = self.workflow_seq;
+                let pane = cx.new(|cx| {
+                    crate::workflow::pane::WorkflowRunPane::new(
+                        self.state.clone(),
+                        chat_id.clone(),
+                        run_id.clone(),
+                        cx,
+                    )
+                });
+                let events = cx.subscribe(&pane, {
+                    let chat_id = chat_id.clone();
+                    move |this: &mut Shell, _, event, cx| match event {
+                        crate::workflow::pane::PaneEvent::OpenActor {
+                            child_chat_id,
+                            title,
+                        } => this.add_subagent_surface(
+                            chat_id.clone(),
+                            child_chat_id.clone(),
+                            title.clone(),
+                            false,
+                            cx,
+                        ),
+                    }
+                });
+                self.workflow_tabs.insert(
+                    id,
+                    WorkflowTab {
+                        chat_id,
+                        run_id,
+                        pane: pane.clone(),
+                        _events: events,
+                    },
+                );
+                let key = self.panel_key(cx);
+                self.right_tabs
+                    .entry(key)
+                    .or_default()
+                    .push(RightSurface::Workflow(id));
+                (id, pane)
+            }
+        };
+        pane.update(cx, |pane, cx| match &artifact {
+            Some(artifact) => pane.open_artifact(artifact, cx),
+            None => pane.land_on(landing, cx),
+        });
+        self.set_right_active(RightSurface::Workflow(id), cx);
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -3987,6 +4184,9 @@ impl Shell {
                     let entries: Vec<zeron_doc::SessionMessageEntry> =
                         serde_json::from_str(value.get("text")?.as_str()?).ok()?;
                     let update = zeron_doc::TranscriptUpdate {
+                        goal: None,
+                        goal_cleared: false,
+                        workflows: None,
                         replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
                         frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
                         context_usage: None,
@@ -4050,7 +4250,8 @@ impl Shell {
     ) {
         let was_active = self.resolved_right_active(cx) == surface;
         let restore_focus = was_active && self.navigation_focus.in_right(window, cx);
-        self.navigation_focus.remember(&self.shortcut_focus, window, cx);
+        self.navigation_focus
+            .remember(&self.shortcut_focus, window, cx);
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
@@ -4108,6 +4309,9 @@ impl Shell {
                     self.state
                         .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
                 }
+            }
+            RightSurface::Workflow(id) => {
+                self.workflow_tabs.remove(&id);
             }
             RightSurface::Picker => {}
         }
@@ -7695,13 +7899,19 @@ impl Shell {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
         let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn.chats.iter()
+        let chat = conn
+            .chats
+            .iter()
             .find(|c| Some(c.chat_id.as_str()) == selected);
         let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
                 "Changes could not be saved".into(),
-                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
             ),
             S::Disabled => return None,
             S::Connected => {
@@ -7709,9 +7919,13 @@ impl Shell {
                 (
                     caption.into(),
                     loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
+                        "chat-sync-spinner",
+                        2.0,
+                        theme.text_muted,
+                        self.sidebar_pane.entity_id(),
+                        cx,
+                    )
+                    .into_any_element(),
                 )
             }
             S::Offline => (
@@ -7963,7 +8177,6 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
-
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -10616,6 +10829,10 @@ impl Shell {
                     panel.into_any_element()
                 }
                 RightSurface::SideChat(id) => self.render_side_chat(id, cx),
+                RightSurface::Workflow(id) if self.workflow_tabs.contains_key(&id) => div()
+                    .size_full()
+                    .child(self.workflow_tabs.get(&id).expect("checked").pane.clone())
+                    .into_any_element(),
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
                     let transcript = self
                         .subagent_tabs
@@ -10982,6 +11199,7 @@ impl Shell {
                     .unwrap_or(icons::LIST),
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Subagent(_) => icons::BOT,
+                RightSurface::Workflow(_) => icons::GIT_BRANCH,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Picker => icons::PLUS,
@@ -11009,6 +11227,10 @@ impl Shell {
                     .browsers
                     .get(&id)
                     .is_some_and(|b| b.read(cx).page.loading),
+                RightSurface::Workflow(id) => self
+                    .workflow_tabs
+                    .get(&id)
+                    .is_some_and(|tab| tab.pane.read(cx).is_live(cx)),
                 RightSurface::Subagent(id) => self.subagent_tabs.get(&id).is_some_and(|tab| {
                     self.state
                         .read(cx)
@@ -11122,22 +11344,20 @@ impl Shell {
                 // up the carve-out. The bubble dispatch reaches the chip
                 // before the strip, and the handler consumes the drag, so
                 // the two never double-apply.
-                .on_drop::<RightTabDrag>(cx.listener(
-                    move |this, payload: &RightTabDrag, _, cx| {
-                        if payload.panel_key != this.panel_key(cx) {
-                            this.right_tab_drag = None;
-                            cx.notify();
-                            return;
-                        }
-                        let to = this
-                            .right_tab_drag
-                            .as_ref()
-                            .map(|d| d.over)
-                            .unwrap_or(payload.from);
+                .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
+                    if payload.panel_key != this.panel_key(cx) {
                         this.right_tab_drag = None;
-                        this.reorder_right_tabs(payload.from, to, cx);
-                    },
-                ))
+                        cx.notify();
+                        return;
+                    }
+                    let to = this
+                        .right_tab_drag
+                        .as_ref()
+                        .map(|d| d.over)
+                        .unwrap_or(payload.from);
+                    this.right_tab_drag = None;
+                    this.reorder_right_tabs(payload.from, to, cx);
+                }))
                 .child(
                     // Leading slot: the surface's icon.
                     div()
@@ -13003,17 +13223,26 @@ mod tests {
 
         chat.sync_state = S::Waiting;
         chat.connected = false;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
         chat.sync_state = S::Offline;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Offline — changes are saved")
+        );
 
         // Real pending pushes remain visible even with a live room.
         chat.connected = true;
         chat.pending_pushes = 1;
         chat.sync_state = S::Waiting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
     }
@@ -14511,7 +14740,8 @@ mod exit_regressions {
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.wallpaper_folder = Some(dir.path().join("wallpapers"));
                         settings.wallpaper_source = Some(dir.path().join("wallpapers/current.png"));
-                        settings.wallpaper_history = vec![dir.path().join("wallpapers/current.png")];
+                        settings.wallpaper_history =
+                            vec![dir.path().join("wallpapers/current.png")];
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.terminal_font_family = terminal_family.clone();
@@ -14533,8 +14763,14 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
-                        assert_eq!(current.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
-                        assert_eq!(current.wallpaper_folder, Some(dir.path().join("wallpapers")));
+                        assert_eq!(
+                            current.wallpaper_history,
+                            vec![dir.path().join("wallpapers/current.png")]
+                        );
+                        assert_eq!(
+                            current.wallpaper_folder,
+                            Some(dir.path().join("wallpapers"))
+                        );
                         assert_eq!(
                             current.wallpaper_source,
                             Some(dir.path().join("wallpapers/current.png"))
@@ -14562,7 +14798,10 @@ mod exit_regressions {
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.window_geometry, geometry);
-                    assert_eq!(loaded.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                    assert_eq!(
+                        loaded.wallpaper_history,
+                        vec![dir.path().join("wallpapers/current.png")]
+                    );
                     assert_eq!(loaded.wallpaper_folder, Some(dir.path().join("wallpapers")));
                     assert_eq!(
                         loaded.wallpaper_source,

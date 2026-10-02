@@ -413,6 +413,8 @@ impl ClientInner {
                 .and_then(zeron_proto::version_triple)
                 .is_some_and(|v| v >= QUEUED_ATTACHMENTS_MIN),
             mid_turn_steering,
+            goal_mode: has(zeron_proto::capabilities::GOAL_MODE_V1),
+            workflows: has(zeron_proto::capabilities::WORKFLOWS_V1),
         }
     }
 

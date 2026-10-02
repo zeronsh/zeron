@@ -156,6 +156,9 @@ icon_assets![
     (PALETTE_SEARCH, "palette-search"),
     (COMMAND, "command"),
     (DOCUMENT, "document"),
+    // Workflow artifact kinds (table, metrics), drawn in the Solar linear weight.
+    (TABLE, "table"),
+    (CHART_BARS, "chart-bars"),
     (DOCUMENT_ADD, "document-add"),
     // File-kind glyphs, drawn in the same linear family for transcript badges.
     (FILE_CODE, "file-code"),
@@ -165,6 +168,9 @@ icon_assets![
     (FILE_IMAGE, "file-image"),
     (GLOBAL, "global"),
     (CHECKLIST, "checklist"),
+    // Goal mode: the objective target and the pause control.
+    (GOAL, "goal"),
+    (PAUSE, "pause"),
     (WIDGET, "widget"),
     (MAGIC_STICK_3, "magic-stick-3"),
     (WIFI_OFF, "wifi-off"),

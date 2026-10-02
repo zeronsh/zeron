@@ -569,6 +569,15 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         engine.toggleDetail(row: view.key, detail: detail, open: open)
     }
 
+    func rowView(_ view: RowView, action: String) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        pendingFold = view.key
+        // Folding, pausing, stopping… are decided in Rust; only navigation comes back.
+        if case let .openChat(chatId) = engine.act(payload: action) {
+            (window?.rootViewController as? AppRouter)?.openSession(chatId)
+        }
+    }
+
     func rowView(_ view: RowView, open url: URL) {
         guard let vc = findViewController() else { return }
         if url.scheme == "http" || url.scheme == "https" {

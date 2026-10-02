@@ -845,6 +845,11 @@ pub struct UiSettings {
     /// Device-local pins for local profiles; synced profiles use registry pins.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
+    /// Workflow runs whose end the user has seen (they opened the chat), so
+    /// the sidebar stops listing them. Device-local, newest last, bounded
+    /// (`workflow::model::SEEN_RUNS_MAX`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_seen_runs: Vec<String>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -994,6 +999,7 @@ impl Default for UiSettings {
             open_tabs: None,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
+            workflow_seen_runs: Vec::new(),
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
@@ -1638,6 +1644,7 @@ impl UiSettings {
             space_filter,
             sidebar_sections_by_profile,
             sidebar_pinned_session_ids_by_profile,
+            workflow_seen_runs,
             tab_order,
             space_order,
             sound_enabled,
@@ -2638,6 +2645,7 @@ mod tests {
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),
+            workflow_seen_runs: vec!["run-a".to_string()],
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (
                     "local".to_string(),

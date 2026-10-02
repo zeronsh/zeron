@@ -623,6 +623,7 @@ fn dictation_question_takeover_stops_capture_without_losing_draft(cx: &mut TestA
     });
     state.update(cx, |state, cx| {
         state.transcript = vec![SessionMessageEntry {
+            origin: None,
             duration_ms: None,
             id: "question-message".into(),
             role: MessageRole::Assistant,
@@ -635,6 +636,7 @@ fn dictation_question_takeover_stops_capture_without_losing_draft(cx: &mut TestA
                 request_id: "request".into(),
                 resolved: false,
                 questions: vec![UserInputQuestion {
+                    meta: None,
                     id: "q".into(),
                     header: "Choose".into(),
                     question: "Continue?".into(),

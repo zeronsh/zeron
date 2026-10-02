@@ -12,6 +12,7 @@
 mod fixtures;
 mod png;
 mod transcripts;
+pub mod workflows;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -265,10 +266,14 @@ impl DemoHost {
             ("chat-veil", Some(turns)) => {
                 transcripts::synthetic(turns, &host, now_ms() - turns as i64 * 60_000)
             }
+            (workflows::CHAT, _) => workflows::transcript(&host, now_ms()),
             _ => transcripts::fixture(chat_id, &host, last),
         };
         for entry in &entries {
             doc.push_message(entry).map_err(doc_err)?;
+        }
+        if chat_id == workflows::CHAT {
+            workflows::seed(&doc, now_ms()).map_err(doc_err)?;
         }
         Ok(doc)
     }
@@ -413,6 +418,14 @@ impl DemoHost {
                         transcripts::answered(&labels),
                         None,
                     );
+                }
+                // No controller loop here: the host applies the command's effect
+                // on the doc, which is what the phone's controls render.
+                SessionCommandPayload::Goal { command } => {
+                    let _ = core.write(|doc| workflows::goal_command(doc, command, now_ms()));
+                }
+                SessionCommandPayload::Workflow { command } => {
+                    let _ = core.write(|doc| workflows::workflow_command(doc, command));
                 }
             }
         }
@@ -812,6 +825,11 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if method == m::WORKFLOW_ARTIFACT_READ {
+            return Ok(workflows::artifact_reply(
+                params["artifactId"].as_str().unwrap_or_default(),
+            ));
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client

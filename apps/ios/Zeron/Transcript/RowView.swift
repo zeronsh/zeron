@@ -34,6 +34,7 @@ final class RowCanvas: UIView {
 protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, toggle key: UInt64)
     func rowView(_ view: RowView, toggleDetail detail: UInt64, open: Bool)
+    func rowView(_ view: RowView, action: String)
     func rowView(_ view: RowView, open url: URL)
     func rowView(_ view: RowView, imageFor reference: String, into imageView: UIImageView)
 }
@@ -150,6 +151,7 @@ final class RowView: UIView {
         case .chip: "row-chip"
         case .image: "row-image"
         case .working: "row-working"
+        case .card: "row-card"
         }
         element.accessibilityTraits = .staticText
         element.accessibilityFrameInContainerSpace = bounds
@@ -273,6 +275,17 @@ final class RowView: UIView {
                     guard let self else { return }
                     UISelectionFeedbackGenerator().selectionChanged()
                     self.delegate?.rowView(self, toggleDetail: detail, open: open)
+                }, for: .touchUpInside)
+                view = b
+            case let .action(label):
+                // A card control (goal / todo / workflow): Rust decides what the payload means.
+                let b = UIControl()
+                b.accessibilityLabel = label
+                b.accessibilityTraits = .button
+                let payload = w.payload ?? ""
+                b.addAction(UIAction { [weak self] _ in
+                    guard let self else { return }
+                    self.delegate?.rowView(self, action: payload)
                 }, for: .touchUpInside)
                 view = b
             case .shimmer:

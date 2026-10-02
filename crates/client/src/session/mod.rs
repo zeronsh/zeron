@@ -23,13 +23,14 @@ use zeron_doc::{
     SessionMessageEntry,
 };
 use zeron_proto::{
-    ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, WorktreeSpec,
+    ChatIndicator, ContextUsage, Goal, GoalCommand, RunRequest, SandboxLevel, UserInputAnswer,
+    WorkflowCommand, WorkflowRunsState, WorktreeSpec, goal_view,
 };
 
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
-    SnapshotDelta,
+    SnapshotDelta, latest_todo,
 };
 use transcript::{Dirty, Tracker};
 
@@ -101,6 +102,9 @@ pub enum SendOutcome {
     Steered { message_id: String },
     /// Parked on the shared queue.
     Queued { queue_id: String },
+    /// A slash command the client consumed (`/goal …`): nothing went to the
+    /// agent. `notice` is a line worth showing (the command's effect).
+    Command { notice: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +168,11 @@ struct CoreState {
     queue: Vec<QueuedMessage>,
     commands: Vec<SessionCommandEntry>,
     context_usage: Option<ContextUsage>,
+    /// `meta.goal`, re-read when the doc's meta changes.
+    goal: Option<Arc<Goal>>,
+    /// `meta.workflowRuns`, re-read only when its revision moved.
+    workflows: Arc<WorkflowRunsState>,
+    workflows_loaded: bool,
     /// Stable echo entries by message id.
     echoes: HashMap<String, Arc<Entry>>,
     pending: Vec<PendingSend>,
@@ -238,6 +247,9 @@ impl SessionCore {
                 queue: Vec::new(),
                 commands: Vec::new(),
                 context_usage: None,
+                goal: None,
+                workflows: Arc::default(),
+                workflows_loaded: false,
                 echoes: HashMap::new(),
                 pending: Vec::new(),
                 grace_started: HashMap::new(),
@@ -440,6 +452,17 @@ impl SessionCore {
             }
             if dirty.meta {
                 st.context_usage = self.doc.context_usage();
+                let goal = self.doc.goal();
+                if st.goal.as_deref() != goal.as_ref() {
+                    st.goal = goal.map(Arc::new);
+                }
+                // The runs are one small JSON value per entry; rebuilding them
+                // costs a deep read, so only when the host bumped the revision.
+                let revision = self.doc.workflow_revision();
+                if !st.workflows_loaded || st.workflows.revision != revision {
+                    st.workflows = Arc::new(self.doc.workflow_runs());
+                    st.workflows_loaded = true;
+                }
             }
             let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
             send_after = oldest_state(&st.pending);
@@ -532,7 +555,7 @@ impl SessionCore {
             delivery_degraded: degraded,
             room,
             transfer_progress: st.transfer_progress,
-            open_input: open_input(st.tracker.entries()),
+            open_input: open_input(st.tracker.entries(), &st.workflows),
             queue_error: st.queue_error.clone(),
             last_submitted_message_id: st.last_submitted.clone(),
             context_usage: st.context_usage,
@@ -675,8 +698,72 @@ fn queue_item(item: &QueuedMessage, device_id: &str, pending: &HashSet<String>) 
     }
 }
 
-/// The newest unresolved question with at least one question to answer.
-fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
+/// How much of an artifact a phone fetches (a document, a table page).
+pub const ARTIFACT_PREVIEW_BYTES: u64 = 192 * 1024;
+
+/// What `WorkflowArtifactRead` returned, reduced to what a viewer needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactPage {
+    pub version: u32,
+    pub content_type: String,
+    pub title: String,
+    /// Size of the whole artifact in bytes.
+    pub total: u64,
+    /// The page as text; `None` for binary content.
+    pub text: Option<String>,
+}
+
+impl ArtifactPage {
+    pub(crate) fn from_reply(reply: &serde_json::Value) -> Option<Self> {
+        let version = reply.get("version")?;
+        let utf8 = reply.get("encoding").and_then(|v| v.as_str()) == Some("utf8");
+        Some(Self {
+            version: version.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            content_type: version
+                .get("contentType")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            title: version
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            total: reply.get("total").and_then(|v| v.as_u64()).unwrap_or(0),
+            text: utf8
+                .then(|| {
+                    reply
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .flatten(),
+        })
+    }
+}
+
+/// Marks an [`InputRequest`] synthesised from a workflow's pending question
+/// (`workflow:<run id>:<question id>`), so `respond_input` knows to answer the
+/// run instead of the chat's own question ledger.
+const WORKFLOW_REQUEST_PREFIX: &str = "workflow:";
+
+pub(crate) fn workflow_request_id(run_id: &str, qid: &str) -> String {
+    format!("{WORKFLOW_REQUEST_PREFIX}{run_id}:{qid}")
+}
+
+/// Run ids are uuids and question ids are `q:`-free tokens, but split on the
+/// first `:` after the prefix only, so either may contain more.
+pub(crate) fn parse_workflow_request_id(request_id: &str) -> Option<(&str, &str)> {
+    request_id
+        .strip_prefix(WORKFLOW_REQUEST_PREFIX)?
+        .split_once(':')
+}
+
+/// The newest unresolved question with at least one question to answer: one
+/// the agent asked, else the oldest question a workflow agent is waiting on.
+/// The latter has no entry in the transcript (it lives in the run state), so
+/// it is shaped like one to ride the stock question panel.
+fn open_input(entries: &[Arc<Entry>], workflows: &WorkflowRunsState) -> Option<InputRequest> {
     for entry in entries.iter().rev() {
         for part in entry.message.parts.iter().rev() {
             if let MessagePart::Input {
@@ -695,7 +782,31 @@ fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
             }
         }
     }
-    None
+    workflows.runs.iter().find_map(|run| {
+        let q = run.pending_questions.first()?;
+        Some(InputRequest {
+            entry_id: String::new(),
+            request_id: workflow_request_id(&run.header.run_id, &q.qid),
+            questions: vec![zeron_proto::UserInputQuestion {
+                id: q.qid.clone(),
+                header: format!("{} · {}", q.actor_name, run.header.name),
+                question: if q.context.trim().is_empty() {
+                    q.question.clone()
+                } else {
+                    format!(
+                        "{}\n\n{}",
+                        q.question,
+                        zeron_proto::truncate_chars(q.context.trim(), 400)
+                    )
+                },
+                options: Vec::new(),
+                multi_select: false,
+                prefill: None,
+                multiline: true,
+                meta: None,
+            }],
+        })
+    })
 }
 
 /// Own run/steer commands whose message hasn't landed = pending echoes.
@@ -788,7 +899,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                     Arc::new(Entry {
                         id: pending.message_id.clone(),
                         rev,
-                        message: Arc::new(SessionMessageEntry {
+                        message: Arc::new(SessionMessageEntry { origin: None,
                             id: pending.message_id.clone(),
                             role: MessageRole::User,
                             parts: vec![MessagePart::Text {
@@ -855,6 +966,14 @@ fn build_snapshot(
         working_since_ms: live.working_since_ms,
         pending: st.pending.clone(),
         context_usage: st.context_usage,
+        goal: st.goal.clone(),
+        workflows: st.workflows.clone(),
+        // Entries unchanged: the checklist is too (no rescan per tick).
+        todo: if change.is_none() && previous.revision > 0 {
+            previous.todo.clone()
+        } else {
+            snapshot::latest_todo(transcript)
+        },
         hydrated: st.hydrated,
         delta: SnapshotDelta::default(),
         index: Arc::new(index),
@@ -978,6 +1097,13 @@ impl SessionHandle {
         if request.text.trim().is_empty() && request.attachments.is_empty() {
             return Err(ClientError::InvalidArgument("empty message".into()));
         }
+        // `/goal …` is a command for the chat's host, not a message for the
+        // agent (the desktop composer's rule: only a line that starts with it).
+        if request.attachments.is_empty()
+            && let Some(parsed) = goal_view::parse_goal_input(&request.text)
+        {
+            return self.run_goal_input(parsed);
+        }
         let composer = self.composer();
         // A turn is running, or a Run of ours is about to start one on a
         // reachable host (don't double-start in that ~RTT window).
@@ -1076,6 +1202,55 @@ impl SessionHandle {
         Ok(outcome)
     }
 
+    /// A typed `/goal …` line. Mirrors the desktop composer: a bare `/goal`
+    /// reports the goal, a plain objective must not replace a live goal
+    /// without `replace`, and pause / resume / clear need a goal to act on.
+    fn run_goal_input(
+        &self,
+        parsed: std::result::Result<goal_view::GoalInput, String>,
+    ) -> Result<SendOutcome> {
+        use goal_view::GoalInput;
+        let input = parsed.map_err(ClientError::InvalidArgument)?;
+        let goal = self.snapshot().goal.clone();
+        let command = match &input {
+            GoalInput::Show => {
+                let goal = goal
+                    .ok_or_else(|| ClientError::InvalidArgument(goal_view::NO_GOAL_HINT.into()))?;
+                let (chip, _) = goal_view::chip(&goal);
+                return Ok(SendOutcome::Command {
+                    notice: Some(format!(
+                        "Goal {}: {}",
+                        chip.to_lowercase(),
+                        goal_view::meta_line(&goal, crate::now_ms())
+                    )),
+                });
+            }
+            GoalInput::Set { replace, .. } => {
+                if !replace && goal_view::set_needs_replace(goal.as_deref()) {
+                    return Err(ClientError::InvalidArgument(
+                        goal_view::GOAL_REPLACE_HINT.into(),
+                    ));
+                }
+                input.command()
+            }
+            _ => {
+                if goal.is_none() {
+                    return Err(ClientError::InvalidArgument(goal_view::NO_GOAL_HINT.into()));
+                }
+                input.command()
+            }
+        };
+        let command = command.expect("every input but Show maps to a command");
+        let client = self.core.client()?;
+        if !self.composer().host.capabilities.goal_mode && !client.is_demo() {
+            return Err(ClientError::Unsupported(
+                "the host is too old for /goal — update Zeron on it".into(),
+            ));
+        }
+        self.goal_command(command)?;
+        Ok(SendOutcome::Command { notice: None })
+    }
+
     /// Stop the live turn.
     pub fn interrupt(&self) -> Result<()> {
         let client = self.core.client()?;
@@ -1087,8 +1262,76 @@ impl SessionHandle {
         Ok(())
     }
 
+    /// A goal mutation (`set`, `pause`, `resume`, `clear`): travels the command
+    /// plane, so the chat's host executes it wherever it runs. A host that
+    /// predates goal mode skips the unknown command; callers gate on
+    /// [`HostCapabilities::goal_mode`].
+    pub fn goal_command(&self, command: GoalCommand) -> Result<()> {
+        let client = self.core.client()?;
+        self.core.queue_command(
+            &client.config.device_id,
+            SessionCommandPayload::Goal { command },
+        )?;
+        client.after_command(&self.core, false);
+        Ok(())
+    }
+
+    /// A workflow mutation (`stop`, `resume`, `answer`), same plane.
+    pub fn workflow_command(&self, command: WorkflowCommand) -> Result<()> {
+        let client = self.core.client()?;
+        self.core.queue_command(
+            &client.config.device_id,
+            SessionCommandPayload::Workflow { command },
+        )?;
+        client.after_command(&self.core, false);
+        Ok(())
+    }
+
+    /// One artifact of a workflow run, as text (the newest version, the first
+    /// [`ARTIFACT_PREVIEW_BYTES`]): `WorkflowArtifactRead` on the chat's host.
+    pub async fn workflow_artifact(&self, run_id: &str, artifact_id: &str) -> Result<ArtifactPage> {
+        let client = self.core.client()?;
+        let host = client
+            .workspace
+            .chat(&self.core.chat_id)
+            .map(|c| c.device_id)
+            .ok_or_else(|| ClientError::NotFound(self.core.chat_id.clone()))?;
+        let reply = client
+            .host_rpc(
+                &host,
+                zeron_rpc::methods::WORKFLOW_ARTIFACT_READ,
+                serde_json::json!({
+                    "runId": run_id,
+                    "artifactId": artifact_id,
+                    "offset": 0,
+                    "limit": ARTIFACT_PREVIEW_BYTES,
+                }),
+            )
+            .await?;
+        ArtifactPage::from_reply(&reply)
+            .ok_or_else(|| ClientError::HostError("unreadable artifact reply".into()))
+    }
+
     /// Answer the open question panel.
     pub fn respond_input(&self, request_id: &str, answers: Vec<UserInputAnswer>) -> Result<()> {
+        if let Some((run_id, qid)) = parse_workflow_request_id(request_id) {
+            // A workflow agent's question: the answer goes to the run.
+            let answer = answers
+                .iter()
+                .flat_map(|a| a.labels.iter())
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if answer.is_empty() {
+                return Err(ClientError::InvalidArgument("the answer is empty".into()));
+            }
+            return self.workflow_command(WorkflowCommand::Answer {
+                run_id: run_id.to_owned(),
+                qid: qid.to_owned(),
+                answer,
+            });
+        }
         let client = self.core.client()?;
         self.core.queue_command(
             &client.config.device_id,
@@ -1445,5 +1688,19 @@ impl SessionHandle {
         client.after_command(&self.core, true);
         client.kick_room(&self.core.chat_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod workflow_request_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_questions_have_their_own_request_ids() {
+        let id = workflow_request_id("run-1", "q:2");
+        assert_eq!(parse_workflow_request_id(&id), Some(("run-1", "q:2")));
+        // The doc's own questions keep going through the ledger.
+        assert_eq!(parse_workflow_request_id("req-9"), None);
+        assert_eq!(parse_workflow_request_id("workflow:nocolon"), None);
     }
 }

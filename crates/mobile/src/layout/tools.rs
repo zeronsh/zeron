@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use zeron_doc::parts::{MessagePart, SubagentStatus};
 use zeron_markdown::parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle};
-use zeron_proto::ToolCall;
+use zeron_proto::{TodoStatus, ToolCall};
 use zeron_text::WhiteSpace;
 
 use super::display::{ColorRole, Decoration, DisplayBuilder, FadeEdge, WidgetKind};
@@ -175,7 +175,14 @@ fn call_text(call: &ToolCall) -> String {
         ToolCall::WebSearch { query } => query.clone(),
         ToolCall::Todo { items } => items
             .iter()
-            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
+            .map(|i| {
+                let mark = match i.status() {
+                    TodoStatus::Completed => "[x]",
+                    TodoStatus::InProgress => "[~]",
+                    TodoStatus::Pending => "[ ]",
+                };
+                format!("{mark} {}", i.text)
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         ToolCall::Mcp { server, tool, input } => match input {
@@ -784,7 +791,13 @@ impl RowBuilder {
                 let dkey = row_key(&format!("{id}/{}", part.id()));
                 match part {
                     MessagePart::Tool { call, is_error, resolved, subagent_ref, subagent_status, .. } => {
-                        let (label, detail) = zeron_proto::view::tool_chip_content(call);
+                        let (label, mut detail) = zeron_proto::view::tool_chip_content(call);
+                        if let ToolCall::Todo { items } = call
+                            && let Some(active) = zeron_proto::todo_view::TodoSummary::of(items).active
+                        {
+                            // The chip says what is being worked on, not only how far along.
+                            detail = format!("{detail} · {}", zeron_proto::view::single_line(&items[active].text));
+                        }
                         // Subagent lifecycle is distinct from `resolved`: under
                         // eager-done the spawn call resolves while the subagent
                         // still runs (desktop transcript.rs `running`/`failed`).

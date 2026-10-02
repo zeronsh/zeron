@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SteeringMode, TodoItem, ToolCall,
+    RunRequest, SteeringMode, TodoItem, TodoStatus, ToolCall,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -767,15 +767,19 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: t
-                        .get("content")
-                        .or_else(|| t.get("text"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into(),
-                    done: t.get("status").and_then(Value::as_str) == Some("completed")
-                        || t.get("completed").and_then(Value::as_bool) == Some(true),
+                .map(|t| {
+                    let status = if t.get("completed").and_then(Value::as_bool) == Some(true) {
+                        TodoStatus::Completed
+                    } else {
+                        TodoStatus::parse(t.get("status").and_then(Value::as_str).unwrap_or(""))
+                    };
+                    TodoItem::new(
+                        t.get("content")
+                            .or_else(|| t.get("text"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                        status,
+                    )
                 })
                 .collect(),
         },

@@ -1,0 +1,143 @@
+[0] User y=0 h=109
+      x=   82 Audit our dependencies,
+      x=   82 then review the whole repo
+      x=   82 for security problems.
+[1] Card y=109 h=159
+      x=   56 Workflow completed · dependency-audit
+      x=   56 3 phases · 7 agents
+      scroller 260x32 (content 353): collect | 2/2 | compare | 4/4 | report | 1/1
+      scroller 260x32 (content 482): Security review summary | Findings by severity | Coverage
+      action "Expand the workflow" -> wf.toggle:run-done @(18,18 284x61)
+      icon arrow.triangle.branch
+      icon chevron.right
+      icon doc.text
+      action "Open Security review summary" -> wf.artifact:run-done:summary @(0,-6 201x44)
+      icon tablecells
+      action "Open Findings by severity" -> wf.artifact:run-done:findings @(207,-6 167x44)
+      icon chart.bar
+      action "Open Coverage" -> wf.artifact:run-done:coverage @(380,-6 102x44)
+[2] Chip y=268 h=76
+      x=   42 Result of workflow dependency-audit
+      x=   42 (completed) sent to the agent
+      icon checkmark.circle
+[3] Tools y=344 h=47
+      x=   50 Updated todos
+[4] Markdown y=391 h=62
+      x=   18 The audit is clean. I set a goal so I
+      x=   18 keep going until the review passes.
+[5] Chip y=453 h=44
+      x=   42 Goal set · Make the security review pass
+      icon target
+[6] Chip y=497 h=77
+      x=   42 Verifier · round 1 not satisfied
+      x=   42 Two findings are still open. — next: Fix the
+      x=   42 path traversal in the upload handler
+      icon arrow.right.circle
+[7] Chip y=574 h=76
+      x=   42 Goal · round 2: Fix the path traversal in
+      x=   42 the upload handler
+      icon target
+[8] Card y=650 h=991
+      x=   56 Workflow running · security-review
+      x=   56 5 phases · 17 agents · 3 working
+      x=   52 review-6: Should I treat the vendored
+      x=   52 `third_party/` directory as in scope?
+      x=   30 It has 3 findings, all in code we do not
+      x=   30 edit.
+      x=   30 Answer in the box at the bottom of the
+      x=   30 chat.
+      x=   30 Agents · 17
+      x=   52 review-6  working
+      x=   52 turn 2 · 5 tool calls · last: Grep
+      x=   52 review-7  working
+      x=   52 turn 2 · 5 tool calls · last: Grep
+      x=   52 review-8  working
+      x=   52 turn 2 · 5 tool calls · last: Grep
+      x=   52 scan-1  done
+      x=   52 scan-2  done
+      x=   52 scan-3  done
+      x=   52 review-1  done
+      x=   52 review-2  done
+      x=   52 review-3  done
+      x=   52 review-4  done
+      x=   52 Show 7 more  7 not shown
+      x=   30 Artifacts · 3
+      x=   52 Security review summary  document · 1.8 KB
+      x=   52 Findings by severity  table · 612 B
+      x=   52 Coverage  metrics · 240 B
+      x=   30 Reports · 2
+      x=   30 Checked area 1: nothing needs changing.
+      x=   30 Checked area 2: nothing needs changing.
+      x=   30 3m 12s · 48.3k tokens · 11 steps
+      x=   30 3 of 8 running · 6 queued
+      x=   44 Stop workflow
+      scroller 260x32 (content 534): scan | 3/3 | review | 5/8 | verify | 0/3 | fix | 0/2 | report | 0/1
+      action "Collapse the workflow" -> wf.toggle:run-live @(18,18 284x61)
+      icon arrow.triangle.branch
+      spinner
+      icon chevron.down
+      icon questionmark.bubble
+      action "Open review-6's chat" -> chat:run-live-child-8 @(18,270 284x51)
+      spinner
+      action "Open review-7's chat" -> chat:run-live-child-9 @(18,321 284x51)
+      spinner
+      action "Open review-8's chat" -> chat:run-live-child-10 @(18,372 284x51)
+      spinner
+      action "Open scan-1's chat" -> chat:run-live-child-0 @(18,423 284x32)
+      icon checkmark
+      action "Open scan-2's chat" -> chat:run-live-child-1 @(18,455 284x32)
+      icon checkmark
+      action "Open scan-3's chat" -> chat:run-live-child-2 @(18,487 284x32)
+      icon checkmark
+      action "Open review-1's chat" -> chat:run-live-child-3 @(18,519 284x32)
+      icon checkmark
+      action "Open review-2's chat" -> chat:run-live-child-4 @(18,551 284x32)
+      icon checkmark
+      action "Open review-3's chat" -> chat:run-live-child-5 @(18,583 284x32)
+      icon checkmark
+      action "Open review-4's chat" -> chat:run-live-child-6 @(18,615 284x32)
+      icon checkmark
+      action "Show 7 more" -> wf.actors:run-live @(18,647 284x32)
+      icon chevron.down
+      action "Open Security review summary" -> wf.artifact:run-live:summary @(18,710 284x32)
+      icon doc.text
+      action "Open Findings by severity" -> wf.artifact:run-live:findings @(18,742 284x32)
+      icon tablecells
+      action "Open Coverage" -> wf.artifact:run-live:coverage @(18,774 284x32)
+      icon chart.bar
+      action "Stop the workflow" -> wf.stop:run-live @(30,942 121x44)
+[9] Markdown y=1641 h=87
+      x=   18 Started the review workflow. Eight
+      x=   18 reviewers are looking at the code in
+      x=   18 parallel; I will fix what they find.
+[10] Card y=1728 h=287
+      x=   56 Goal  Active
+      x=   56 Round 3: Add a regression
+      x=   56 test for the upload path
+      x=   30 Make the security review pass: every
+      x=   30 finding fixed or explained, and the test
+      x=   30 suite green.
+      x=   30 Round 3 of 25 · 51.3k tokens (verifier 3.1k)
+      x=   30 · 17m 0s
+      x=   30 Verifier, round 2: not satisfied — The fix
+      x=   30 has no regression test.
+      x=   44 Pause  Clear
+      action "Collapse goal" -> goal.toggle @(18,10 284x80)
+      icon target
+      spinner
+      icon chevron.down
+      icon pause.fill
+      action "Pause goal" -> goal.pause @(230,8 44x44)
+      action "Pause goal" -> goal.pause @(30,238 68x44)
+      action "Clear goal" -> goal.clear @(106,238 63x44)
+[11] Card y=2015 h=186
+      x=   56 Todo · 1/3
+      x=   52 Map the attack surface
+      x=   52 Fix the path traversal in the upload
+      x=   52 handler
+      x=   52 Add a regression test for the upload
+      x=   52 path
+      action "Collapse the list" -> todo.toggle @(18,10 284x44)
+      icon tool-checklist
+      icon chevron.down
+      icon checkmark

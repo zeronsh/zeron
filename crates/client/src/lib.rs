@@ -45,9 +45,10 @@ pub use config::{
 };
 pub use connectivity::{Connectivity, ConnectivityState, SendState};
 pub use error::ClientError;
+pub use demo::workflows as demo_workflows;
 pub use events::{ClientEvent, ClientListener};
 pub use session::{
-    AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
+    ARTIFACT_PREVIEW_BYTES, AppendHint, ArtifactPage, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
     LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,
     QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
     SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,

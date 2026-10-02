@@ -387,6 +387,34 @@ pub fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Whitespace collapsed and capped at 220 characters: one line of prose.
+pub fn one_line(text: &str) -> String {
+    crate::truncate_chars(&single_line(text), 220)
+}
+
+/// `42s`, `3m 12s`, `2h 5m`, `1d 4h`: a duration at one glance.
+pub fn format_elapsed(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
+    }
+}
+
+/// `842`, `12.4k`, `1.2M`.
+pub fn format_tokens(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0).replace(".0k", "k"),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0).replace(".0M", "M"),
+    }
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("{n} {one}")
