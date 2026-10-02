@@ -340,6 +340,20 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .text_color(theme.text)
 }
 
+/// The 2px underline marking the viewed top tab: sits on the tab row's
+/// bottom hairline (the tab is 32px tall inside a 40px row, so -4px lands
+/// exactly on the border), rounded like a capsule.
+pub(crate) fn tab_indicator(tint: gpui::Hsla) -> gpui::Div {
+    div()
+        .absolute()
+        .bottom(px(-4.0))
+        .left(px(6.0))
+        .right(px(6.0))
+        .h(px(2.0))
+        .rounded(px(1.0))
+        .bg(tint)
+}
+
 /// [`popover_card`] without the shared inset — for popovers that manage their
 /// own internal panes (the harness/model picker's rail + list split).
 pub fn popover_card_flush(theme: &Theme) -> gpui::Div {
@@ -477,6 +491,14 @@ fn exit_progress(since: std::time::Instant) -> f32 {
 /// primitive ignores `element_opacity`, so without this the glass slab would
 /// hold full strength through the fade and pop off at unmount.
 fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
+    frosted_menu_with_radius(exit, content, CARD_RADIUS)
+}
+
+fn frosted_menu_with_radius(
+    exit: Option<f32>,
+    content: AnyElement,
+    corner_radius: f32,
+) -> AnyElement {
     let blur = crate::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
     // Outside-dismiss listeners run during capture. Consume that same press
     // during bubble, after dismissal, so content behind the menu cannot act
@@ -494,7 +516,7 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
     .absolute()
     .inset_0();
     crate::frost::frosted(
-        CARD_RADIUS,
+        corner_radius,
         blur,
         div()
             .relative()
@@ -789,8 +811,18 @@ pub fn anchored_menu_above_end(
     content: AnyElement,
     closing: Option<std::time::Instant>,
 ) -> AnyElement {
+    anchored_menu_above_end_with_radius(id, content, closing, CARD_RADIUS)
+}
+
+/// Match the frost mask to a card that overrides the standard menu radius.
+pub(crate) fn anchored_menu_above_end_with_radius(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+    corner_radius: f32,
+) -> AnyElement {
     let exit = closing.map(exit_progress);
-    let content = frosted_menu(exit, content);
+    let content = frosted_menu_with_radius(exit, content, corner_radius);
     div()
         .absolute()
         .top_0()
@@ -822,6 +854,18 @@ pub fn menu_at(
     content: AnyElement,
     closing: Option<std::time::Instant>,
 ) -> AnyElement {
+    menu_at_with_priority(id, position, content, closing, 1)
+}
+
+/// Context menus launched from another popover need a higher layer so their
+/// rows receive clicks before the parent menu's outside-click guard.
+pub(crate) fn menu_at_with_priority(
+    id: impl Into<SharedString>,
+    position: Point<Pixels>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+    priority: usize,
+) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
     gpui::deferred(
@@ -831,7 +875,7 @@ pub fn menu_at(
             .snap_to_window_with_margin(px(8.0))
             .child(menu_motion(id.into(), exit, div().occlude().child(content))),
     )
-    .priority(1)
+    .priority(priority)
     .into_any_element()
 }
 

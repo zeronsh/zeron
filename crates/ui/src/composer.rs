@@ -5620,6 +5620,8 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
+    /// Installed only on the main conversation's composer by the shell.
+    pub(crate) chat_activity: Option<Entity<crate::chat_activity::ChatActivity>>,
     /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
@@ -5933,6 +5935,7 @@ impl Composer {
             input,
             queue_edit_draft: None,
             pickers,
+            chat_activity: None,
             drafts: HashMap::new(),
             attachments: HashMap::new(),
             appshots: HashMap::new(),
@@ -10271,6 +10274,11 @@ impl Render for Composer {
         };
         let text_pt = morph_text_pad(layout_morph_t);
         let surface_radius = COMPOSER_RADIUS - 4.0 * dock_amount;
+        if let Some(activity) = &self.chat_activity {
+            activity.update(cx, |activity, cx| {
+                activity.set_corner_radius(surface_radius, cx);
+            });
+        }
         let route_to_single_line =
             self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
@@ -10789,6 +10797,13 @@ impl Render for Composer {
                 self.account_usage
                     .update(cx, |usage, cx| usage.track(harness, target, cx));
             }
+            let state = self.state.read(cx);
+            let change_request = state
+                .selected_space_row()
+                .filter(|space| !self.side_chat && space.git_detected)
+                .and_then(|_| state.selected_chat_row())
+                .and_then(|chat| state.change_request_for_chat(chat))
+                .cloned();
             container.child(
                 div()
                     .w_full()
@@ -10820,13 +10835,21 @@ impl Render for Composer {
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(
-                                    // The footer row's own 4px gap: the PR badge
-                                    // ends flush with the row, so the rings keep
-                                    // their distance here.
                                     div()
                                         .flex_none()
-                                        .pl(px(4.0))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
                                         .pr(px(10.0))
+                                        .children(self.chat_activity.clone())
+                                        .children(change_request.map(|summary| {
+                                            crate::change_requests::pull_request_badge(
+                                                "composer-pull-request".into(),
+                                                summary,
+                                                crate::change_requests::ChangeRequestBadgeSurface::Composer,
+                                                &theme,
+                                            )
+                                        }))
                                         .child(self.account_usage.clone()),
                                 ),
                         )
