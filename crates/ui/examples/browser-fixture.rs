@@ -3,6 +3,9 @@ mod transcript_links;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[cfg(target_os = "linux")]
+#[path = "browser-fixture/linux_capture.rs"]
+mod linux_capture;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -35,7 +38,12 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
             .arg(&path)
             .status()?
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("import")
+        .args(["-window", &linux_capture::window_id()?.to_string()])
+        .arg(&path)
+        .status()?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let status = {
         let capture_window = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW").ok();
         let windows = std::process::Command::new("xdotool")
@@ -197,6 +205,8 @@ fn main() -> anyhow::Result<()> {
         cx.activate(true);
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
+                #[cfg(target_os = "linux")]
+                linux_capture::prepare(window, &output, cx).await?;
                 pause(cx, 1200).await;
                 if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
@@ -496,7 +506,17 @@ fn main() -> anyhow::Result<()> {
                 std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
-            if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
+            if let Err(error) = run {
+                eprintln!("Browser fixture failed: {error:#}");
+                #[cfg(target_os = "linux")]
+                {
+                    let directory = output.clone();
+                    cx.background_executor().spawn(async move {
+                        linux_capture::diagnostics(&directory);
+                    }).await;
+                }
+                *result.lock().unwrap() = Some(error.to_string());
+            }
             let _ = window.update(cx, |shell, window, cx| shell.fixture_blur_browser(window, cx));
             pause(cx, 200).await;
             drop(state);
