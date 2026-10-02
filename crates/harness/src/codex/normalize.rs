@@ -285,6 +285,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             if let Some(message) = error {
                 events.push(AgentEvent::Error {
                     message: message.into(),
+                    cause: None,
                 });
             } else {
                 let name = std::path::Path::new(&path)
@@ -387,6 +388,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
         }
         "error" => vec![AgentEvent::Error {
             message: str_field(item, &["message"]),
+            cause: None,
         }],
         "collabAgentToolCall" | "collab_agent_tool_call" => {
             let tool = str_field(item, &["tool"]);
@@ -611,6 +613,7 @@ impl ChildStream {
                     .or_else(|| params.get("message").and_then(Value::as_str))
                     .unwrap_or("Codex subagent error")
                     .to_owned(),
+                cause: None,
             }],
             _ => Vec::new(),
         }
@@ -1128,7 +1131,8 @@ mod generated_image_tests {
             assert_eq!(
                 events[2],
                 AgentEvent::Error {
-                    message: expected.into()
+                    message: expected.into(),
+                    cause: None,
                 }
             );
         }

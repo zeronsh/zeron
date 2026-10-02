@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                 }
-                AgentEvent::Error { message } => eprintln!("{message}"),
+                AgentEvent::Error { message, .. } => eprintln!("{message}"),
                 _ => {}
             }
         }

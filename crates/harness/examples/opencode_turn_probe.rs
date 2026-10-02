@@ -130,7 +130,7 @@ async fn main() {
             }) => {
                 eprintln!("USAGE {input_tokens}/{output_tokens}");
             }
-            Ok(AgentEvent::Error { message }) => eprintln!("CHIP {message}"),
+            Ok(AgentEvent::Error { message, .. }) => eprintln!("CHIP {message}"),
             Ok(other) => eprintln!("EV {other:?}"),
             Err(e) => eprintln!("ERR {e}"),
         }

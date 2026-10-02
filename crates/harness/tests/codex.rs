@@ -1560,7 +1560,7 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
                 assert_eq!(status, DoneStatus::Completed, "{error:?}");
                 events.push("done".into());
             }
-            AgentEvent::Error { message } => panic!("{message}"),
+            AgentEvent::Error { message, .. } => panic!("{message}"),
             _ => {}
         }
     }

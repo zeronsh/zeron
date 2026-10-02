@@ -3540,6 +3540,7 @@ async fn run_session(session: Session) {
                     );
                     let _ = send(&event_tx, AgentEvent::Error {
                         message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
+                        cause: None,
                     }).await;
                     let new = new_session(
                         &client,
@@ -4724,6 +4725,7 @@ async fn run_session(session: Session) {
                             prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
                             stall_hint,
                         ),
+                        cause: None,
                     },
                 )
                 .await;

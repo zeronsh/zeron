@@ -645,7 +645,7 @@ async fn provider_retries_surface_and_cap_out() {
     fake.emit(retry(1));
     fake.emit(retry(3));
     let ev = next_event(&mut stream).await;
-    let AgentEvent::Error { message } = &ev else {
+    let AgentEvent::Error { message, .. } = &ev else {
         panic!("expected a retry error chip, got {ev:?}");
     };
     assert!(
@@ -656,7 +656,7 @@ async fn provider_retries_surface_and_cap_out() {
 
     fake.emit(retry(8));
     let ev = next_event(&mut stream).await;
-    let AgentEvent::Error { message } = &ev else {
+    let AgentEvent::Error { message, .. } = &ev else {
         panic!("expected the give-up chip, got {ev:?}");
     };
     assert!(message.contains("Giving up"), "{message}");
@@ -695,7 +695,7 @@ async fn session_error_with_no_content_settles_errored() {
     let ev = next_event(&mut stream).await;
     assert!(matches!(
         &ev,
-        AgentEvent::Error { message } if message.contains("no credentials")
+        AgentEvent::Error { message, .. } if message.contains("no credentials")
     ));
     // opencode re-emits the same failure with an exception-name prefix and a
     // stack — that must NOT mint a second chip (field report: every failure

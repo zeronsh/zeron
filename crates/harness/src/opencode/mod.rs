@@ -1702,6 +1702,7 @@ async fn run_session(session: Session) {
             &event_tx,
             AgentEvent::Error {
                 message: e.to_string(),
+                cause: None,
             },
         )
         .await;
@@ -1816,6 +1817,7 @@ async fn run_session(session: Session) {
                     Err(e) => {
                         let _ = send(&event_tx, AgentEvent::Error {
                             message: e.to_string(),
+                            cause: None,
                         }).await;
                         turn.error = Some(e.to_string());
                         turn.aborted_for_retry = true;
@@ -1956,6 +1958,7 @@ async fn run_session(session: Session) {
                     &event_tx,
                     AgentEvent::Error {
                         message: failure.message.clone(),
+                        cause: None,
                     },
                 )
                 .await;
@@ -2019,6 +2022,7 @@ async fn run_session(session: Session) {
                                         &event_tx,
                                         AgentEvent::Error {
                                             message: message.clone(),
+                                            cause: None,
                                         },
                                     )
                                     .await;
@@ -2062,7 +2066,7 @@ async fn run_session(session: Session) {
                     "opencode made no progress for {}s after the prompt. {STALL_HINT}",
                     stall.unwrap_or(DEFAULT_STALL_BOUND).as_secs()
                 );
-                let _ = send(&event_tx, AgentEvent::Error { message: message.clone() }).await;
+                let _ = send(&event_tx, AgentEvent::Error { message: message.clone(), cause: None }).await;
                 let _ = server.abort_session(&session_id, dir).await;
                 settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                 let _ = send(&event_tx, AgentEvent::Done {
@@ -2124,7 +2128,7 @@ async fn run_session(session: Session) {
                             &server.stderr_tail,
                         );
                         if turn.active {
-                            let _ = send(&event_tx, AgentEvent::Error { message: message.clone() }).await;
+                            let _ = send(&event_tx, AgentEvent::Error { message: message.clone(), cause: None }).await;
                         }
                         settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                         let _ = send(&event_tx, AgentEvent::Done {
@@ -2719,7 +2723,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         let msg = format!(
                             "Giving up after {attempt} provider retries: {message}. {STALL_HINT}"
                         );
-                        if !send(event_tx, AgentEvent::Error { message: msg }).await {
+                        if !send(event_tx, AgentEvent::Error { message: msg, cause: None }).await {
                             return BusOutcome::ConsumerGone;
                         }
                         let _ = server.abort_session(session_id, dir).await;
@@ -2729,7 +2733,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                             "The provider is failing and opencode is retrying (attempt \
                              {attempt}): {message}"
                         );
-                        if !send(event_tx, AgentEvent::Error { message: msg }).await {
+                        if !send(event_tx, AgentEvent::Error { message: msg, cause: None }).await {
                             return BusOutcome::ConsumerGone;
                         }
                     }
@@ -2774,7 +2778,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             if kind == "session.error" {
                 turn.error = Some(message.clone());
             }
-            if !duplicate && !send(event_tx, AgentEvent::Error { message }).await {
+            if !duplicate && !send(event_tx, AgentEvent::Error { message, cause: None }).await {
                 return BusOutcome::ConsumerGone;
             }
             BusOutcome::Continue

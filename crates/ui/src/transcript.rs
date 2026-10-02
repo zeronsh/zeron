@@ -40,7 +40,7 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use zeron_proto::ToolCall;
+use zeron_proto::{ErrorCause, HarnessId, ToolCall};
 
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -1055,6 +1055,7 @@ pub enum RowKind {
     },
     ErrorChip {
         message: SharedString,
+        cause: Option<ErrorCause>,
     },
     /// The fork seam: a labeled divider between copied history and the
     /// chat's own turns.
@@ -1610,14 +1611,17 @@ pub fn rows_for_entry(
                     MessagePart::Error {
                         id: part_id,
                         message,
+                        cause,
                     } => {
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: message.len() as u64,
+                            // A remedy adds a line to the chip.
+                            version: (message.len() as u64) << 1 | cause.is_some() as u64,
                             turn_start: false,
                             kind: RowKind::ErrorChip {
                                 // Harness-generated; the chip is one line.
                                 message: single_line(message).into(),
+                                cause: *cause,
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -3293,6 +3297,13 @@ pub enum TranscriptEvent {
         doc_id: String,
         title: String,
         frozen: bool,
+    },
+    /// A signed-out error chip's "Sign in again": run `harness`'s sign-in on
+    /// the device hosting `chat_id`, then return to it.
+    SignIn {
+        chat_id: String,
+        harness: HarnessId,
+        device_id: String,
     },
 }
 
@@ -6221,6 +6232,33 @@ impl Transcript {
         }
     }
 
+    /// The signed-out chip's remedy, for the chat this transcript shows.
+    fn sign_in_remedy(
+        &self,
+        row_id: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let chat_id = self.chat_id.as_deref()?;
+        let chat = self.state.read(cx).chats.iter().find(|c| c.id == chat_id)?;
+        let chat_id = chat.id.clone();
+        let harness = chat.config.as_ref()?.harness;
+        let device_id = chat.device_id.clone();
+        let key = SharedString::from(format!("{row_id}-sign-in"));
+        Some(
+            crate::popover::btn_ghost(theme, "Sign in again", key.clone())
+                .id(key)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(TranscriptEvent::SignIn {
+                        chat_id: chat_id.clone(),
+                        harness,
+                        device_id: device_id.clone(),
+                    });
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
@@ -6632,7 +6670,13 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ErrorChip { message, cause } => {
+                let remedy = match cause {
+                    Some(ErrorCause::SignedOut) => self.sign_in_remedy(&row.id, &theme, cx),
+                    _ => None,
+                };
+                error_chip(message.clone(), remedy, &theme)
+            }
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
 
@@ -7832,14 +7876,17 @@ fn user_bubble_text(
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
+fn error_chip(message: SharedString, remedy: Option<AnyElement>, theme: &Theme) -> AnyElement {
     div()
         .py(px(4.0))
         .w_full()
         .child(
             notice_chip(theme, false, "Error", message, Tile)
                 .overflow_hidden()
-                .w_full(),
+                .w_full()
+                .when_some(remedy, |chip, remedy| {
+                    chip.child(div().flex().child(remedy))
+                }),
         )
         .into_any_element()
 }
@@ -10182,6 +10229,7 @@ mod tests {
             turn_start: true,
             kind: RowKind::ErrorChip {
                 message: SharedString::default(),
+                cause: None,
             },
             entry_id: entry_id.into(),
             timestamp: None,
@@ -11045,6 +11093,7 @@ mod tests {
                 MessagePart::Error {
                     id: "e1".into(),
                     message: "boom".into(),
+                    cause: None,
                 },
                 tool_part("t1", "pwd"),
                 text_part("r0", "the answer"),
@@ -11061,6 +11110,35 @@ mod tests {
             unreachable!();
         };
         assert_eq!(tools.len(), 2, "the error didn't split the work group");
+    }
+
+    #[test]
+    fn a_signed_out_error_row_carries_its_remedy() {
+        let error = |cause| {
+            let entry = assistant(
+                "a1",
+                MessageStatus::Complete,
+                vec![MessagePart::Error {
+                    id: "e0".into(),
+                    message: "Authentication failed".into(),
+                    cause,
+                }],
+            );
+            let rows = rows_for_entry(&entry, false, false, &mut parse);
+            let [row] = rows.as_slice() else {
+                panic!("one error row, got {}", rows.len());
+            };
+            let RowKind::ErrorChip { cause, .. } = row.kind else {
+                panic!("an error chip");
+            };
+            (cause, row.version)
+        };
+        let (signed_out, with_remedy) = error(Some(ErrorCause::SignedOut));
+        let (none, without) = error(None);
+        assert_eq!(signed_out, Some(ErrorCause::SignedOut));
+        assert_eq!(none, None);
+        // The remedy's line changes the row's height: its version moves.
+        assert_ne!(with_remedy, without);
     }
 
     #[test]
@@ -12986,6 +13064,7 @@ mod tests {
                     let mut row = viewport_row("prompt", "prompt");
                     row.kind = RowKind::ErrorChip {
                         message: "line\n".repeat(12).into(),
+                        cause: None,
                     };
                     this.rows = vec![row];
                     this.list.reset(1);
@@ -13011,6 +13090,7 @@ mod tests {
                     // Simulate completion removing content from the last row.
                     this.rows[0].kind = RowKind::ErrorChip {
                         message: "done".into(),
+                        cause: None,
                     };
                     this.list.remeasure_items(0..1);
                     cx.notify();
@@ -13030,6 +13110,7 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     this.rows[0].kind = RowKind::ErrorChip {
                         message: "line\n".repeat(100).into(),
+                        cause: None,
                     };
                     this.list.remeasure_items(0..1);
                     cx.notify();

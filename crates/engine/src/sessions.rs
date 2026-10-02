@@ -1044,6 +1044,7 @@ impl Inner {
                         },
                         AgentEvent::Error {
                             message: "Generated image unavailable".into(),
+                            cause: None,
                         },
                     ]
                 }
@@ -1899,6 +1900,7 @@ async fn drive_run(
             let parts = [MessagePart::Error {
                 id: "e0".into(),
                 message: message.clone(),
+                cause: None,
             }];
             if let Err(err) = finish_segment(
                 &doc,
@@ -1915,6 +1917,7 @@ async fn drive_run(
                 &chat_id,
                 &AgentEvent::Error {
                     message: message.clone(),
+                    cause: None,
                 },
             );
             inner.publish(

@@ -158,6 +158,7 @@ impl Normalizer {
                 self.error = Some(string(frame, "error").into());
                 events.push(AgentEvent::Error {
                     message: format!("Pi extension: {}", string(frame, "error")),
+                    cause: None,
                 });
             }
             _ => {}

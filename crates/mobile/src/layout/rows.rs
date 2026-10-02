@@ -409,7 +409,7 @@ impl RowBuilder {
                             let gap = gap_for(&rows, false);
                             rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "questionmark.bubble", ColorRole::Accent, &text)), gap });
                         }
-                        MessagePart::Error { id, message } => {
+                        MessagePart::Error { id, message, .. } => {
                             let gap = gap_for(&rows, false);
                             rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "exclamationmark.triangle", ColorRole::Danger, message)), gap });
                         }

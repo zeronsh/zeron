@@ -642,7 +642,7 @@ impl Runner {
         self.started(state["model"]["id"].as_str().unwrap_or("default").into())
             .await?;
         if let Some(message) = self.lost_context.take() {
-            self.emit(AgentEvent::Error { message }).await?;
+            self.emit(AgentEvent::Error { message, cause: None }).await?;
         }
         for frame in backlog {
             self.frame(frame).await?;

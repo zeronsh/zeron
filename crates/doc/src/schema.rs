@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
 use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
+use zeron_proto::ErrorCause;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -92,6 +93,9 @@ struct DocPartJson {
     resolved: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    /// Error cause (additive; absent on old rows and old writers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cause: Option<ErrorCause>,
     /// Fork seam (`kind: "fork"`, additive): the chat the history above was
     /// copied from, and its title at the time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,10 +211,11 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             resolved: Some(*resolved),
             ..Default::default()
         },
-        MessagePart::Error { id, message } => DocPartJson {
+        MessagePart::Error { id, message, cause } => DocPartJson {
             id: id.clone(),
             kind: "error".into(),
             message: Some(message.clone()),
+            cause: *cause,
             ..Default::default()
         },
         MessagePart::Fork {
@@ -269,6 +274,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "error" => MessagePart::Error {
             id: p.id,
             message: p.message.unwrap_or_default(),
+            cause: p.cause,
         },
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
@@ -311,6 +317,7 @@ fn image_part(
         _ => MessagePart::Error {
             id,
             message: "Generated image unavailable".into(),
+            cause: None,
         },
     }
 }
@@ -663,6 +670,7 @@ impl SessionDoc {
                 &MessagePart::Error {
                     id: part_id.to_string(),
                     message: message.to_string(),
+                    cause: None,
                 },
             )?;
             self.doc.commit();
@@ -864,6 +872,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
+    }
+    if let Some(cause) = doc_part.cause {
+        map.insert("cause", loro_value_from_json(&serde_json::to_value(cause)?))?;
     }
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
@@ -1070,6 +1081,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         return Some(MessagePart::Error {
             id,
             message: message.to_owned(),
+            cause: None,
         });
     }
     None
@@ -1323,6 +1335,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
+    if let Some(cause) = doc_part.cause {
+        map.insert("cause", loro_value_from_json(&serde_json::to_value(cause)?))?;
+    }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
     }
@@ -1434,6 +1449,37 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    #[test]
+    fn error_cause_round_trips_through_the_doc() {
+        let doc = SessionDoc::init("errors").unwrap();
+        let signed_out = MessagePart::Error {
+            id: "e0".into(),
+            message: "Authentication failed".into(),
+            cause: Some(zeron_proto::ErrorCause::SignedOut),
+        };
+        // As older writers stored them: no cause.
+        let plain = MessagePart::Error {
+            id: "e1".into(),
+            message: "Claude had a server error".into(),
+            cause: None,
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "a1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![signed_out.clone(), plain.clone()],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        assert_eq!(
+            doc.read_entries().unwrap()[0].parts,
+            vec![signed_out, plain]
+        );
     }
     use zeron_proto::{AgentEvent, ToolCall};
 
