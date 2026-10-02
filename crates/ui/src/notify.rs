@@ -17,8 +17,12 @@
 //!   `osascript`, attributed to Script Editor (cosmetics only).
 //! - Linux: `notify-send` (libnotify's CLI, present on every mainstream
 //!   desktop).
-//! - Windows: no-op for now — toasts require a registered AppUserModelID
-//!   (an installer concern); the chime still covers it.
+//! - Windows: WinRT toasts attributed to a per-user AppUserModelID
+//!   registration (`HKCU\Software\Classes\AppUserModelId`, written on the
+//!   first post). Unpackaged apps need no Start-menu shortcut that way, and
+//!   portable copies have none. A click reports the banner's chat id through
+//!   the toast's `Activated` event while Zeron runs; banners left from an
+//!   earlier run just dismiss.
 //! - `ZERON_DISABLE_NOTIFICATIONS` env kill-switch + the
 //!   `notificationsEnabled` ui-setting (checked by the caller);
 //! - failures are logged and swallowed — a missing notifier must never
@@ -42,13 +46,27 @@ pub fn post(title: &str, body: &str, chat_id: Option<&str>) {
     post_impl(title, body, chat_id);
 }
 
+/// Where platform notifiers may keep files. Windows toasts resolve their icon
+/// from an image on disk, and a portable Zeron is one executable. Call once at
+/// startup, before the first [`post`].
+pub fn init(data_dir: &std::path::Path) {
+    #[cfg(windows)]
+    let _ = toast::DATA_DIR.set(data_dir.to_path_buf());
+    #[cfg(not(windows))]
+    let _ = data_dir;
+}
+
 /// Route banner clicks: `handler` receives the clicked banner's chat id.
-/// Main thread only; replaces any previous handler. Only the native macOS
-/// path reports clicks (osascript and notify-send banners can't).
-pub fn on_click(handler: impl Fn(String) + 'static) {
+/// Replaces any previous handler. macOS calls it on the main thread; Windows
+/// calls it from a WinRT worker thread, so hand off rather than touching UI
+/// state inline. Only the native macOS and Windows paths report clicks
+/// (osascript and notify-send banners can't).
+pub fn on_click(handler: impl Fn(String) + Send + 'static) {
     #[cfg(target_os = "macos")]
     delegate::CLICK.with_borrow_mut(|slot| *slot = Some(Box::new(handler)));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    toast::set_click_handler(Box::new(handler));
+    #[cfg(not(any(target_os = "macos", windows)))]
     drop(handler);
 }
 
@@ -335,7 +353,177 @@ fn post_impl(title: &str, body: &str, _chat_id: Option<&str>) {
     });
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Posts on the calling (main) thread: WinRT activation needs COM, which
+/// gpui_windows initializes there, and `Show` returns without waiting.
+#[cfg(windows)]
+fn post_impl(title: &str, body: &str, chat_id: Option<&str>) {
+    if let Err(err) = toast::post(title, body, chat_id) {
+        tracing::debug!(error = %err, "windows toast failed");
+    }
+}
+
+#[cfg(windows)]
+mod toast {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::HSTRING;
+
+    /// The identity banners are attributed to — the macOS bundle id, so both
+    /// platforms name the app the same way.
+    const APP_ID: &str = "sh.zeron.app";
+    const REGISTRATION_KEY: &str = r"Software\Classes\AppUserModelId\sh.zeron.app";
+
+    /// The executable's own icon (`dist/windows/zeron.rc`). The registration's
+    /// `IconUri` ignores `.ico` files, so its PNG frame is written out instead.
+    const ICO: &[u8] = include_bytes!("../../../dist/windows/zeron.ico");
+    const ICON_FILE: &str = "notification-icon.png";
+
+    pub(super) static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+    type ClickHandler = Box<dyn Fn(String) + Send>;
+
+    /// Toast `Activated` handlers run on a WinRT worker thread.
+    static CLICK: Mutex<Option<ClickHandler>> = Mutex::new(None);
+
+    pub(super) fn set_click_handler(handler: ClickHandler) {
+        *CLICK.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(handler);
+    }
+
+    pub(super) fn post(
+        title: &str,
+        body: &str,
+        chat_id: Option<&str>,
+    ) -> windows::core::Result<()> {
+        register();
+        let xml = XmlDocument::new()?;
+        xml.LoadXml(&HSTRING::from(super::toast_xml(title, body)))?;
+        let toast = ToastNotification::CreateToastNotification(&xml)?;
+        if let Some(chat_id) = chat_id {
+            let chat_id = chat_id.to_string();
+            toast.Activated(&TypedEventHandler::new(move |_, _| {
+                if let Some(handler) = CLICK
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .as_ref()
+                {
+                    handler(chat_id.clone());
+                }
+                Ok(())
+            }))?;
+        }
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?.Show(&toast)
+    }
+
+    /// Name the app and give it an icon, once per run. Rewriting each launch
+    /// keeps `IconUri` pointing at this build's data dir; a failure only costs
+    /// the banner its name and icon.
+    fn register() {
+        static REGISTERED: OnceLock<()> = OnceLock::new();
+        REGISTERED.get_or_init(|| {
+            set_value("DisplayName", "Zeron");
+            if let Some(icon) = write_icon() {
+                set_value("IconUri", &icon.to_string_lossy());
+            }
+        });
+    }
+
+    fn write_icon() -> Option<PathBuf> {
+        let png = super::ico_png_frame(ICO)?;
+        let path = DATA_DIR.get()?.join(ICON_FILE);
+        if std::fs::read(&path).ok().as_deref() != Some(png)
+            && let Err(err) = std::fs::write(&path, png)
+        {
+            tracing::debug!(error = %err, "notification icon write failed");
+            return None;
+        }
+        Some(path)
+    }
+
+    fn set_value(name: &str, value: &str) {
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
+        let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (key, name, data) = (wide(REGISTRATION_KEY), wide(name), wide(value));
+        // RegSetKeyValueW creates the key when it's missing.
+        let status = unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                name.as_ptr(),
+                REG_SZ,
+                data.as_ptr().cast(),
+                (data.len() * size_of::<u16>()) as u32,
+            )
+        };
+        if status != 0 {
+            tracing::debug!(status, "notification registration failed");
+        }
+    }
+}
+
+/// The toast payload: title line, then body. Text is escaped for XML, and
+/// characters XML 1.0 can't carry (C0 controls other than tab and newlines)
+/// are dropped — `LoadXml` rejects the whole banner otherwise, and titles are
+/// model-generated.
+#[cfg(any(windows, test))]
+fn toast_xml(title: &str, body: &str) -> String {
+    format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text>\
+         </binding></visual></toast>",
+        xml_escape(title),
+        xml_escape(body),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            '\t' | '\n' | '\r' => out.push(c),
+            c if c < ' ' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The largest PNG-encoded frame of an `.ico` (entries: width byte where 0
+/// means 256, then size and offset as little-endian u32 at bytes 8 and 12).
+#[cfg(any(windows, test))]
+fn ico_png_frame(ico: &[u8]) -> Option<&[u8]> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(ico.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(ico.get(at..at + 4)?.try_into().ok()?));
+    if u16_at(0)? != 0 || u16_at(2)? != 1 {
+        return None;
+    }
+    (0..usize::from(u16_at(4)?))
+        .filter_map(|ix| {
+            let entry = 6 + ix * 16;
+            let width = match *ico.get(entry)? {
+                0 => 256,
+                width => u32::from(width),
+            };
+            let size = usize::try_from(u32_at(entry + 8)?).ok()?;
+            let offset = usize::try_from(u32_at(entry + 12)?).ok()?;
+            let frame = ico.get(offset..offset.checked_add(size)?)?;
+            frame
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+                .then_some((width, frame))
+        })
+        .max_by_key(|(width, _)| *width)
+        .map(|(_, frame)| frame)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn post_impl(_title: &str, _body: &str, _chat_id: Option<&str>) {}
 
 #[cfg(test)]
@@ -351,6 +539,31 @@ mod tests {
         );
         // Raw newlines would end the AppleScript statement mid-literal.
         assert_eq!(applescript_escape("two\nlines\r\n"), "two lines  ");
+    }
+
+    #[test]
+    fn toast_text_is_escaped_for_xml() {
+        assert_eq!(
+            xml_escape(r#"Fix <T> & "quotes" — it's"#),
+            "Fix &lt;T&gt; &amp; &quot;quotes&quot; — it&apos;s"
+        );
+        // XML 1.0 can't carry C0 controls; LoadXml would reject the banner.
+        assert_eq!(xml_escape("bell\u{7}\tand\nnewline"), "bell\tand\nnewline");
+        let xml = toast_xml("a & b", "Run finished");
+        assert!(xml.contains("<text>a &amp; b</text><text>Run finished</text>"));
+    }
+
+    #[test]
+    fn notification_icon_is_the_largest_png_frame() {
+        let ico: &[u8] = include_bytes!("../../../dist/windows/zeron.ico");
+        let png = ico_png_frame(ico).expect("zeron.ico carries PNG frames");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        // IHDR width, big-endian, right after the 8-byte signature and the
+        // chunk's length + type.
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 256);
+        // Truncated or non-icon input yields nothing rather than panicking.
+        assert_eq!(ico_png_frame(&ico[..40]), None);
+        assert_eq!(ico_png_frame(b"\x89PNG"), None);
     }
 
     #[cfg(target_os = "macos")]

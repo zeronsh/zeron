@@ -205,7 +205,9 @@ pub fn run_app(config: UiConfig) {
         })
         .detach();
         // Banner clicks land on the notified chat. The AppKit delegate fires
-        // mid-event, so hop through a channel rather than updating inline.
+        // mid-event and Windows toasts report clicks off the main thread, so
+        // hop through a channel rather than updating inline.
+        notify::init(&data_dir);
         let (click_tx, mut click_rx) = futures::channel::mpsc::unbounded::<String>();
         notify::on_click(move |chat_id| {
             let _ = click_tx.unbounded_send(chat_id);

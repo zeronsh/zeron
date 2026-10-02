@@ -13164,6 +13164,7 @@ dependencies = [
  "url",
  "usvg",
  "uuid",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
  "wry",
  "x11rb 0.14.0",

@@ -85,6 +85,9 @@ Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: ""; 
 Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\zeron\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"",0"
 Root: HKCU; Subkey: "Software\Classes\zeron\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"" ""%1"""
+; Toast identity. The app writes its DisplayName and IconUri on the first
+; notification (portable copies too); this entry lets uninstall remove it.
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\sh.zeron.app"; ValueType: none; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: nowait postinstall skipifsilent
