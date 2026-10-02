@@ -7,6 +7,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
       - 'edge/**'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/ci/run-macos-fixture.sh'
@@ -20,6 +21,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
       - 'edge/**'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/ci/run-macos-fixture.sh'
@@ -106,9 +108,9 @@ jobs:
         run: |
           cargo nextest run --no-run --locked \
             -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text \
-            --features zeron-ui/browser-fixture --lib --tests
+            --features zeron-ui/browser-fixture,zeron-ui/multi-window-fixture --lib --tests
           cargo build --locked -p zeron-update -p zeron-preview -p zeron-ui \
-            --features zeron-ui/browser-fixture --example browser-fixture --example preview-fixture
+            --features zeron-ui/browser-fixture,zeron-ui/multi-window-fixture --example browser-fixture --example preview-fixture --example multi-window-fixture
       - name: Check macOS application
         env:
           # Match the old `cargo check --release`: no debug assertions.
@@ -120,8 +122,13 @@ jobs:
           # tests run on Linux in ios-core.
           cargo nextest run --no-fail-fast --locked \
             -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text \
-            --features zeron-ui/browser-fixture --lib --tests \
-            -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/)))'
+            --features zeron-ui/browser-fixture,zeron-ui/multi-window-fixture --lib --tests \
+            -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/) | test(multi_window) | test(gui_instance)))'
+      - name: Native multiple-window lifecycle
+        timeout-minutes: 8
+        run: |
+          target/debug/examples/multi-window-fixture "$RUNNER_TEMP/multi-window"
+          test -f "$RUNNER_TEMP/multi-window/result.txt"
       - name: Native browser regression and screenshots
         timeout-minutes: 7
         env:

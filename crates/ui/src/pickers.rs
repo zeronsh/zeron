@@ -530,6 +530,7 @@ pub struct Pickers {
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
     defaults: ComposerDefaults,
+    defaults_base: ComposerDefaults,
     /// Where [`Self::defaults`] persists (`{data_dir}/composer-defaults.json`);
     /// `None` before bootstrap stamps the state (writes are skipped).
     data_dir: Option<PathBuf>,
@@ -792,6 +793,7 @@ impl Pickers {
             compact_keyboard: false,
             effort_bounds: None,
             config: DraftConfig::default(),
+            defaults_base: defaults.clone(),
             title,
             defaults,
             data_dir,
@@ -839,7 +841,7 @@ impl Pickers {
     }
 
     /// Persist the sticky defaults (best-effort; picks are rare and tiny).
-    fn save_defaults(&self) {
+    fn save_defaults(&mut self) {
         // The title picker never writes run picks into the composer's memory.
         if self.title.is_some() {
             return;
@@ -852,15 +854,26 @@ impl Pickers {
     fn reload_defaults(&mut self) {
         if let Some(dir) = self.data_dir.as_deref() {
             self.defaults = ComposerDefaults::load(dir);
+            self.defaults_base = self.defaults.clone();
             self.catalog_rev += 1;
         }
     }
 
-    fn persist_defaults(&self) {
-        if let Some(dir) = self.data_dir.as_deref()
-            && let Err(err) = self.defaults.save(dir)
-        {
-            tracing::warn!(error = %err, "composer-defaults save failed");
+    fn persist_defaults(&mut self) {
+        if let Some(dir) = self.data_dir.as_deref() {
+            let mut latest =
+                serde_json::to_value(ComposerDefaults::load(dir)).expect("defaults serialize");
+            let previous = serde_json::to_value(&self.defaults_base).expect("defaults serialize");
+            let next = serde_json::to_value(&self.defaults).expect("defaults serialize");
+            crate::settings::windows::merge_delta(&mut latest, &previous, &next);
+            if let Ok(merged) = serde_json::from_value::<ComposerDefaults>(latest) {
+                if let Err(err) = merged.save(dir) {
+                    tracing::warn!(error = %err, "composer-defaults save failed");
+                } else {
+                    self.defaults = merged;
+                    self.defaults_base = self.defaults.clone();
+                }
+            }
         }
     }
 
@@ -2325,11 +2338,7 @@ impl Pickers {
             self.defaults.project = state.selected_space.clone();
             self.defaults.no_project = state.no_project;
         }
-        if let Some(dir) = &self.data_dir {
-            if let Err(err) = self.defaults.save(dir) {
-                tracing::warn!(error = %err, "composer-defaults save failed");
-            }
-        }
+        self.save_defaults();
     }
 
     /// Devices in picker order: this device first, then by name.

@@ -518,6 +518,18 @@ impl Render for FileEditorTooltip {
 }
 
 impl FilesSurface {
+    pub(crate) fn lock_application_editors(&mut self, locked: bool, cx: &mut Context<Self>) {
+        for document in self.preview.documents.values() {
+            if let Some(editor) = &document.editor {
+                editor.update(cx, |editor, cx| {
+                    if editor.context_menu_capabilities().is_editable() == locked {
+                        editor.set_readonly(locked, cx);
+                    }
+                });
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_images_visible(&self) -> bool {
         self.preview.images_visible
@@ -3952,6 +3964,10 @@ impl FilesSurface {
             .as_ref()?
             .text
             .clone()
+    }
+
+    pub(crate) fn test_workspace_watch_ready(&self) -> bool {
+        self.watch_sequence.is_some()
     }
 
     pub(crate) fn test_document_phase(&self, path: &str) -> Option<String> {
