@@ -22,6 +22,7 @@ pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod engine_updates;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
@@ -150,10 +151,12 @@ pub struct EngineCore {
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
     links: std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
-    /// UpdateStatus stream + ApplyUpdate.
+    /// UpdateStatus stream.
     updater: std::sync::Mutex<Option<zeron_update::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Engine-owned self-update operations (attached with the updater).
+    engine_updates: std::sync::Mutex<Option<engine_updates::EngineUpdates>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -258,6 +261,7 @@ impl EngineCore {
         let workspace_files =
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
+        terminals.set_restart_gate(sessions.restart_gate());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = zeron_preview::PreviewService::new(
@@ -305,6 +309,7 @@ impl EngineCore {
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
+        harness_updates.set_restart_gate(sessions.restart_gate());
         harness_updates.start();
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
@@ -341,6 +346,7 @@ impl EngineCore {
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
+            engine_updates: std::sync::Mutex::new(None),
             _instance_lock: lock,
         })
     }
@@ -406,6 +412,20 @@ impl EngineCore {
             .updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updater);
+    }
+
+    pub fn set_engine_updates(&self, updates: engine_updates::EngineUpdates) {
+        *self
+            .engine_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updates);
+    }
+
+    pub fn engine_updates(&self) -> Option<engine_updates::EngineUpdates> {
+        self.engine_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn updater(&self) -> Option<zeron_update::Updater> {
@@ -475,6 +495,9 @@ impl EngineCore {
         if let Some(updater) = self.updater() {
             rpc = rpc.with_updater(updater);
         }
+        if let Some(updates) = self.engine_updates() {
+            rpc = rpc.with_engine_updates(updates);
+        }
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
@@ -518,6 +541,14 @@ impl EngineCore {
         if let Some(wake) = wake {
             wake.abort();
             let _ = wake.await;
+        }
+        let updates = self
+            .engine_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(updates) = updates {
+            updates.shutdown().await;
         }
         let updater = self
             .updater
@@ -812,18 +843,34 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
-        // Release checker: polls {edge}/releases hourly (wall clock); headless
-        // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
-        // on quiescence so a restart never lands under a live run or open PTY.
+        // Release checker: polls {edge}/releases hourly (wall clock). It only
+        // reports; headless installs with ZERON_AUTO_UPDATE=1 install and
+        // restart through the engine's update operations below, so a restart
+        // never lands under a live run or open PTY.
         // Spawned for every install: application updates must not depend on
         // workspace sync being enabled — the feed is the public release feed
         // (served without authentication), not an edge feature.
-        let quiescent: zeron_update::QuiescentCheck = {
+        let quiescent: engine_updates::IdleCheck = {
             let sessions = core.sessions.clone();
             let terminals = core.terminals.clone();
-            Arc::new(move || !sessions.any_active() && !terminals.any_open())
+            let harness_updates = core.harness_updates.clone();
+            Arc::new(move || {
+                !sessions.any_active() && !terminals.any_open() && !harness_updates.any_mutating()
+            })
         };
-        let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        let updater = zeron_update::Updater::spawn_engine(config.edge_url.clone());
+        // Every engine update and restart, requested or automatic, is an
+        // engine-owned operation that closes run/terminal admission at an idle
+        // instant first.
+        core.set_engine_updates(engine_updates::EngineUpdates::new(
+            &config.data_dir,
+            Arc::new(engine_updates::ManagedInstaller::new(
+                config.edge_url.clone(),
+            )),
+            Some(updater.clone()),
+            core.sessions.restart_gate(),
+            quiescent,
+        ));
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();
             let wake = tokio::spawn(async move {
@@ -891,11 +938,6 @@ impl Engine {
             .ok_or_else(|| EngineError::Other("synced workspace profile is not ready".into()))?;
 
         let runtime = Self::assemble_runtime(&config, auth, profile).await?;
-        // The desktop app or `zeron update` may install a newer binary under
-        // a running service; restart into it once no run or terminal is live.
-        if let Some(updater) = runtime.core().updater() {
-            updater.restart_when_superseded();
-        }
 
         // A daemon exists to serve this port, so a bind failure is fatal here —
         // unlike the headed app, which can still work over its in-process

@@ -123,6 +123,12 @@ pub enum EngineMode {
 trait EngineBackend: Send + Sync {
     fn client(&self) -> &RpcClient;
     fn mode(&self) -> EngineMode;
+    /// Reserve embedded work admission before a desktop update restart.
+    async fn prepare_update_restart(
+        &self,
+    ) -> Result<Option<zeron_engine::engine_updates::DesktopRestartPermit>, String> {
+        Ok(None)
+    }
     /// Graceful teardown (drains runs / flushes docs for the in-process engine).
     async fn shutdown(&self);
 }
@@ -145,6 +151,18 @@ impl EngineBackend for InProcessEngine {
     }
     fn mode(&self) -> EngineMode {
         EngineMode::InProcess
+    }
+    async fn prepare_update_restart(
+        &self,
+    ) -> Result<Option<zeron_engine::engine_updates::DesktopRestartPermit>, String> {
+        let runtime = self.runtime.lock().await;
+        let updates = runtime
+            .as_ref()
+            .and_then(|r| r.core().engine_updates())
+            .ok_or_else(|| {
+                "The embedded engine is still starting; try the update again shortly".to_string()
+            })?;
+        updates.prepare_desktop_restart().map(Some)
     }
     async fn shutdown(&self) {
         self.boot_task.abort();
@@ -536,6 +554,12 @@ impl EngineHandle {
 
     fn deferred_state(&self) -> Option<tokio::sync::watch::Receiver<DeferredEngineState>> {
         self.deferred_state.clone()
+    }
+
+    pub async fn prepare_update_restart(
+        &self,
+    ) -> Result<Option<zeron_engine::engine_updates::DesktopRestartPermit>, String> {
+        self.inner.prepare_update_restart().await
     }
 
     pub async fn shutdown(&self) {

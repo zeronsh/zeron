@@ -194,7 +194,7 @@ pub fn installed(id: HarnessId) -> bool {
     }
 }
 
-fn invalidate_versions(id: HarnessId) {
+pub fn invalidate_versions(id: HarnessId) {
     let (cli, _) = cli_and_dir(id);
     if id == HarnessId::Cursor {
         crate::executable::invalidate_versions(&[cli, "agent"]);

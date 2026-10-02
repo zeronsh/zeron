@@ -122,6 +122,19 @@ struct HarnessUpdateParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StartEngineUpdateParams {
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelEngineUpdateParams {
+    operation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DismissHarnessUpdateParams {
     harness: HarnessId,
     #[serde(default)]
@@ -625,6 +638,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
+    engine_updates: Option<crate::engine_updates::EngineUpdates>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
 }
@@ -670,6 +684,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             harness_updates: None,
+            engine_updates: None,
             local_import: None,
             engine_info,
         }
@@ -692,7 +707,7 @@ impl EngineRpc {
         self
     }
 
-    /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
+    /// Attach the release checker (UpdateStatus stream).
     pub fn with_updater(mut self, updater: zeron_update::Updater) -> Self {
         self.updater = Some(updater);
         self
@@ -703,6 +718,11 @@ impl EngineRpc {
         coordinator: crate::harness_updates::HarnessUpdateCoordinator,
     ) -> Self {
         self.harness_updates = Some(coordinator);
+        self
+    }
+
+    pub fn with_engine_updates(mut self, updates: crate::engine_updates::EngineUpdates) -> Self {
+        self.engine_updates = Some(updates);
         self
     }
 
@@ -730,6 +750,12 @@ impl EngineRpc {
         self.harness_updates
             .as_ref()
             .ok_or_else(|| RpcError::Failed("agent updates unavailable".into()))
+    }
+
+    fn engine_updates(&self) -> Result<&crate::engine_updates::EngineUpdates, RpcError> {
+        self.engine_updates
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("engine updates unavailable".into()))
     }
 
     fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
@@ -1031,6 +1057,10 @@ impl EngineRpc {
                 methods::WATCH_CHECKOUT_CHANGE_REQUEST
                     | methods::WATCH_WORKSPACE_GIT_STATUS
                     | methods::WATCH_HARNESS_UPDATES
+                    | methods::WATCH_ENGINE_UPDATE
+                    // The legacy probe must see "unknown method" / "updates
+                    // unavailable" to settle on instructions, not retry.
+                    | methods::UPDATE_STATUS
             ) {
                 let rx = match client.subscribe_checked(method, params).await {
                     Ok(rx) => rx,
@@ -1300,9 +1330,21 @@ where
             "No supported installer or required tools available on this device".into(),
         ));
     }
-    install()
-        .await
-        .map_err(|error| RpcError::Failed(error.to_string()))?;
+    struct Intent<'a>(&'a HarnessRegistry, HarnessId);
+    impl Drop for Intent<'_> {
+        fn drop(&mut self) {
+            self.0.end_update(self.1);
+        }
+    }
+    registry.begin_update(harness);
+    let _intent = Intent(registry, harness);
+    // Same order as agent updates: this agent's lease first, then the
+    // installer shared with every other agent.
+    let _lease = registry.update_lease(harness).await;
+    let _installer = registry.installer_lease().await;
+    let result = install().await;
+    registry.invalidate_installation(harness);
+    result.map_err(|error| RpcError::Failed(error.to_string()))?;
     Ok(registry.descriptors())
 }
 
@@ -1427,6 +1469,10 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_HARNESS_UPDATE
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
+            | methods::WATCH_ENGINE_UPDATE
+            | methods::CHECK_ENGINE_UPDATE
+            | methods::START_ENGINE_UPDATE
+            | methods::CANCEL_ENGINE_UPDATE
     )
 }
 
@@ -1443,6 +1489,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
+            | methods::WATCH_ENGINE_UPDATE
     )
 }
 
@@ -1713,6 +1760,7 @@ impl RpcService for EngineRpc {
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
             methods::INSTALL_HARNESS => {
                 let p: ListModelsParams = parse_params(params)?;
+                let _admission = self.sessions.restart_gate().admit().await.map_err(RpcError::Failed)?;
                 let installing = self.registry.installs.begin(p.harness)?;
                 let descriptors = install_harness_with(&self.registry, p.harness, || {
                     run_requested_install(p.harness, installing.cancel.clone())
@@ -2329,13 +2377,35 @@ impl RpcService for EngineRpc {
                 ))))
             }
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
-            methods::APPLY_UPDATE => {
-                let version = self
-                    .updater()?
-                    .apply()
+            methods::APPLY_UPDATE => Err(RpcError::Failed(
+                "Use StartEngineUpdate to update safely when idle, or run `zeron update` on this device. Legacy ApplyUpdate cannot report the restart lifecycle.".into(),
+            )),
+            methods::WATCH_ENGINE_UPDATE => Ok(RpcReply::Stream(watch_stream(
+                self.engine_updates()?.watch(),
+            ))),
+            methods::CHECK_ENGINE_UPDATE => {
+                let updates = self.engine_updates()?.clone();
+                // Engine-owned like agent checks: a vanished caller must not
+                // strand the published check state.
+                let state = tokio::spawn(async move { updates.check().await })
                     .await
-                    .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
-                RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
+                    .map_err(|error| RpcError::Failed(format!("update check failed: {error}")))?
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&state)
+            }
+            methods::START_ENGINE_UPDATE => {
+                let p: StartEngineUpdateParams = parse_params(params)?;
+                let ack = self
+                    .engine_updates()?
+                    .start(p.request_id)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&ack)
+            }
+            methods::CANCEL_ENGINE_UPDATE => {
+                let p: CancelEngineUpdateParams = parse_params(params)?;
+                RpcReply::value(&serde_json::json!({
+                    "cancelled": self.engine_updates()?.cancel(&p.operation_id),
+                }))
             }
             methods::WATCH_HARNESS_UPDATES => Ok(RpcReply::Stream(watch_stream(
                 self.harness_updates()?.watch(),
@@ -3842,6 +3912,16 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
+        // Engine updates address the device whose installation they change.
+        for method in [
+            methods::CHECK_ENGINE_UPDATE,
+            methods::START_ENGINE_UPDATE,
+            methods::CANCEL_ENGINE_UPDATE,
+        ] {
+            assert!(forwardable(method) && !is_stream_method(method), "{method}");
+        }
+        assert!(forwardable(methods::WATCH_ENGINE_UPDATE));
+        assert!(is_stream_method(methods::WATCH_ENGINE_UPDATE));
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —

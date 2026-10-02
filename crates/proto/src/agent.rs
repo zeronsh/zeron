@@ -93,11 +93,26 @@ pub struct HarnessUpdateFailure {
     pub retryable: bool,
 }
 
+/// Installation evidence from the device that owns and launches the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessInstallation {
+    pub launcher: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+}
+
 /// One row in the device-local harness-update stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessUpdateStatus {
     pub harness: HarnessId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation: Option<HarnessInstallation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -727,6 +742,7 @@ mod tests {
     fn harness_update_status_uses_stable_wire_names() {
         let status = HarnessUpdateStatus {
             harness: HarnessId::ClaudeCode,
+            installation: None,
             installed_version: Some("1.0.0".into()),
             latest_version: Some("1.1.0".into()),
             channel: Some("stable".into()),

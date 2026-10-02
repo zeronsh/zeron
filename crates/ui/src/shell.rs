@@ -74,6 +74,7 @@ mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
+mod updates;
 use side_chats::SideChatTab;
 mod tabs;
 
@@ -538,6 +539,8 @@ pub enum SettingsSection {
     General,
     Appshots,
     Archived,
+    /// Zeron and agent CLI updates on every device.
+    Updates,
 }
 
 impl SettingsSection {
@@ -550,6 +553,7 @@ impl SettingsSection {
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
         SettingsSection::Devices,
+        SettingsSection::Updates,
         SettingsSection::Files,
         SettingsSection::Appshots,
         SettingsSection::Archived,
@@ -595,6 +599,7 @@ impl SettingsSection {
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Archived => "archived",
+            SettingsSection::Updates => "updates",
         }
     }
 
@@ -612,6 +617,7 @@ impl SettingsSection {
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
             "archived" => SettingsSection::Archived,
+            "updates" => SettingsSection::Updates,
             _ => return None,
         })
     }
@@ -637,6 +643,7 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
+            SettingsSection::Updates => "Updates",
         }
     }
 }
@@ -1950,6 +1957,13 @@ pub struct Shell {
     harness_update_transition: Option<WidthTween>,
     harness_update_geometry: [Option<WidthTween>; 2],
     harness_update_scroll: settings::widgets::PageScroll,
+    /// Per-device engine update watches (see [`updates`]).
+    engine_update_devices: std::collections::BTreeMap<String, updates::EngineDevice>,
+    updates_page_scroll: settings::widgets::PageScroll,
+    /// Offers hidden from Home by the user (see `ZeronRow::dismiss_key`).
+    dismissed_updates: std::collections::HashSet<String>,
+    /// Refused update actions, shown on the row they belong to.
+    update_action_errors: updates::ActionErrors,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -2365,10 +2379,20 @@ impl Shell {
             harness_update_transition: None,
             harness_update_geometry: [None; 2],
             harness_update_scroll: settings::widgets::PageScroll::default(),
+            engine_update_devices: Default::default(),
+            updates_page_scroll: settings::widgets::PageScroll::default(),
+            dismissed_updates: Default::default(),
+            update_action_errors: Default::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
-            _app_update_observation: crate::app_update::AppUpdate::global(cx)
-                .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
+            _app_update_observation: crate::app_update::AppUpdate::global(cx).map(|update| {
+                cx.observe(&update, |this, _, cx| {
+                    // The app's own account supersedes a refused action.
+                    let key = (this.local_update_device(cx), updates::Component::App);
+                    this.update_action_errors.remove(&key);
+                    cx.notify();
+                })
+            }),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -4980,6 +5004,8 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            // Rendered by the shell: it owns the per-device update watches.
+            SettingsSection::Updates => self.render_updates_settings(window, cx),
         }
     }
 
@@ -6850,6 +6876,7 @@ impl Shell {
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+            SettingsSection::Updates => icons::REFRESH,
         };
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
@@ -8351,12 +8378,46 @@ impl Shell {
         let Some(update) = crate::app_update::AppUpdate::global(cx) else {
             return;
         };
-        if update
-            .update(cx, |update, cx| update.install_for_restart(&staged, cx))
-            .is_ok()
-        {
-            crate::app_menus::quit_after_save(cx);
-        }
+        let engine = self.state.read(cx).engine().cloned();
+        let preparation = gpui_tokio::Tokio::spawn(cx, async move {
+            match engine {
+                Some(engine) => engine.prepare_update_restart().await,
+                None => Err("The engine is not ready; try the update again shortly".to_string()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let permit = match preparation.await {
+                Ok(Ok(permit)) => permit,
+                result => {
+                    let message = match result {
+                        Ok(Err(message)) => message,
+                        Err(error) => error.to_string(),
+                        _ => unreachable!(),
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        // The sidebar strip and the Updates rows both start
+                        // this; the sidebar is not on screen for the rows.
+                        let key = (this.local_update_device(cx), updates::Component::App);
+                        this.update_action_errors.insert(key, message.clone());
+                        this.sidebar_notice = Some(message.into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = this.update(cx, |_, cx| {
+                if update
+                    .update(cx, |update, cx| update.install_for_restart(&staged, cx))
+                    .is_ok()
+                {
+                    if let Some(permit) = permit {
+                        permit.commit();
+                    }
+                    crate::app_menus::quit_after_save(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// The "Check for Updates…" dialog: checking, then the outcome, which

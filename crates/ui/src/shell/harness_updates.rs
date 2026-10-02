@@ -1,7 +1,10 @@
-//! Home's agent-update island: one bottom-anchored surface for the compact
-//! summary and the expanded list. Geometry uses the shell's reversible RESIZE
-//! tweens; content keeps its final width while the outer surface clips it.
+//! Home's Updates island: one bottom-anchored surface for the compact summary
+//! and the expanded list of Zeron engines and agent CLIs that need attention.
+//! Geometry uses the shell's reversible RESIZE tweens; content keeps its final
+//! width while the outer surface clips it. The full inventory, including
+//! current and unsupported installations, lives in Settings → Updates.
 
+use super::updates::{Component, RowAction, Tone, ZeronRow};
 use super::*;
 use zeron_proto::{HarnessId, HarnessUpdatePhase as Phase, HarnessUpdateStatus};
 
@@ -91,13 +94,13 @@ fn agent_name(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::ClaudeCode => "Claude Code",
         HarnessId::Codex => "Codex",
-        HarnessId::Cursor => "Cursor",
+        HarnessId::Cursor => "Cursor CLI",
         HarnessId::Devin => "Devin",
         HarnessId::Grok => "Grok",
         HarnessId::Hermes => "Hermes",
-        HarnessId::Pi => "Pi",
+        HarnessId::Pi => "Pi CLI",
         HarnessId::Opencode => "OpenCode",
-        HarnessId::Antigravity => "Antigravity",
+        HarnessId::Antigravity => "Antigravity ACP server",
         HarnessId::Mock => "Mock",
     }
 }
@@ -122,14 +125,26 @@ fn action(status: &HarnessUpdateStatus) -> Option<(&'static str, Option<&'static
         Phase::WaitingForIdle | Phase::Preparing | Phase::Downloading => {
             Some(("Cancel", Some(methods::CANCEL_HARNESS_UPDATE)))
         }
-        Phase::Failed => Some(("Check again", Some(methods::CHECK_HARNESS_UPDATES))),
+        Phase::Failed | Phase::Current | Phase::ManualActionRequired => {
+            Some(("Check again", Some(methods::CHECK_HARNESS_UPDATES)))
+        }
         _ => None,
     }
 }
 
-fn right_inset(has_button: bool) -> f32 {
-    if has_button { 5.0 } else { 12.0 }
-}
+/// The summary's height inside the card's 1px border.
+const CHIP_INNER: f32 = CHIP_HEIGHT - 2.0;
+/// Leading inset that makes the mark circles concentric with the pill end.
+const MARK_INSET: f32 = (CHIP_INNER - MARK_SIZE) / 2.0;
+/// Rows' leading inset inside the border.
+const ROW_INSET: f32 = 12.0;
+
+const DISMISS_SIZE: f32 = 24.0;
+/// The dismiss button is always the last control, so it owns the trailing
+/// inset that makes its circle concentric with the pill's end.
+const DISMISS_INSET: f32 = (CHIP_INNER - DISMISS_SIZE) / 2.0;
+/// Space between the last content control and the dismiss button.
+const DISMISS_GAP: f32 = 4.0;
 
 fn detail(status: &HarnessUpdateStatus) -> String {
     match status.phase {
@@ -138,7 +153,7 @@ fn detail(status: &HarnessUpdateStatus) -> String {
             (_, Some(latest)) => format!("Version {latest} available"),
             _ => "Update available".into(),
         },
-        Phase::WaitingForIdle => "Waiting for the current run".into(),
+        Phase::WaitingForIdle => "Waiting for idle".into(),
         Phase::Preparing => "Preparing update…".into(),
         Phase::Downloading => status
             .progress
@@ -152,16 +167,133 @@ fn detail(status: &HarnessUpdateStatus) -> String {
             .as_ref()
             .map(|v| format!("Updated to {v}"))
             .unwrap_or_else(|| "Updated".into()),
-        Phase::Failed => status
-            .error
-            .as_ref()
-            .map(|e| e.message.clone())
-            .unwrap_or_else(|| "Couldn’t check for updates".into()),
+        Phase::Failed => "Needs attention".into(),
         _ => "Checking for updates…".into(),
     }
 }
 
-fn mark_stack(statuses: &[UpdateRow], theme: &Theme) -> gpui::Div {
+/// Settings shows every monitored agent, not only notices.
+fn settings_detail(status: &HarnessUpdateStatus) -> String {
+    match status.phase {
+        Phase::Current => status
+            .installed_version
+            .as_ref()
+            .map(|v| format!("Up to date · {v}"))
+            .unwrap_or_else(|| "Up to date".into()),
+        Phase::ManualActionRequired => status
+            .installed_version
+            .as_ref()
+            .map(|v| format!("{v} · update manually"))
+            .unwrap_or_else(|| "Update manually".into()),
+        Phase::Dormant => "Updates off".into(),
+        _ => detail(status),
+    }
+}
+
+/// An agent status as a row of the unified surface.
+fn agent_row(row: &UpdateRow, settings: bool) -> ZeronRow {
+    let status = &row.status;
+    let tone = match status.phase {
+        Phase::Failed => Tone::Danger,
+        Phase::Updated => Tone::Done,
+        _ if active(status) => Tone::Active,
+        _ => Tone::Normal,
+    };
+    let detail = if !row.connected {
+        "Disconnected · reconnect to update".into()
+    } else if settings {
+        settings_detail(status)
+    } else {
+        detail(status)
+    };
+    let action = action(status).map(|(label, method)| {
+        (
+            label,
+            match method {
+                Some(methods::APPLY_HARNESS_UPDATE) => RowAction::Start,
+                Some(methods::CANCEL_HARNESS_UPDATE) => RowAction::Cancel {
+                    operation: String::new(),
+                },
+                Some(_) => RowAction::Check,
+                None => RowAction::Instructions,
+            },
+        )
+    });
+    ZeronRow {
+        device_id: row.device_id.clone(),
+        device_name: row.device_name.clone(),
+        component: Component::Agent(status.harness),
+        title: agent_name(status.harness).into(),
+        detail,
+        explanation: {
+            let mut parts: Vec<String> = status
+                .error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .or_else(|| status.manual_command.clone())
+                .into_iter()
+                .collect();
+            if settings && let Some(install) = &status.installation {
+                parts.push(format!("Launcher: {}", install.launcher));
+                if let Some(resolved) = &install.resolved
+                    && resolved != &install.launcher
+                {
+                    parts.push(format!("Target: {resolved}"));
+                }
+                if let Some(package) = &install.package {
+                    parts.push(format!("Package: {package}"));
+                }
+                if let Some(installer) = &install.installer {
+                    parts.push(format!("Installer: {installer}"));
+                }
+                if let Some(channel) = &status.channel {
+                    parts.push(format!("Channel: {channel}"));
+                }
+            }
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        },
+        tone,
+        action,
+        notice: status.show_update_notice(),
+        connected: row.connected,
+        offer: status
+            .latest_version
+            .clone()
+            .unwrap_or_else(|| "versionless".into()),
+    }
+}
+
+fn row_mark(row: &ZeronRow) -> (&'static str, Option<gpui::Hsla>) {
+    match row.component {
+        Component::Agent(harness) => crate::pickers::harness_brand_icon(harness),
+        Component::App | Component::Engine => (super::updates::zeron_mark(row), None),
+    }
+}
+
+/// The compact title for a single row.
+fn single_title(row: &ZeronRow, status: Option<&HarnessUpdateStatus>) -> Option<String> {
+    let Some(status) = status else {
+        return Some(format!("{} · {}", row.title, row.detail));
+    };
+    let name = agent_name(status.harness);
+    Some(match status.phase {
+        Phase::Available => status
+            .latest_version
+            .as_ref()
+            .map(|v| format!("{name} {v} available"))
+            .unwrap_or_else(|| format!("{name} update available")),
+        Phase::WaitingForIdle => format!("{name} · waiting for idle"),
+        Phase::Preparing => format!("Preparing {name}…"),
+        Phase::Downloading => format!("Downloading {name}…"),
+        Phase::Installing => format!("Updating {name}…"),
+        Phase::Verifying => format!("Verifying {name}…"),
+        Phase::Updated => format!("{name} updated"),
+        Phase::Failed => format!("{name} needs attention"),
+        _ => return None,
+    })
+}
+
+fn mark_stack(statuses: &[ZeronRow], theme: &Theme) -> gpui::Div {
     // Use the same registry order as the list. A phase change must not
     // reshuffle the overlapping brand marks.
     let count = statuses.len().min(MAX_MARKS);
@@ -179,8 +311,7 @@ fn mark_stack(statuses: &[UpdateRow], theme: &Theme) -> gpui::Div {
                 .enumerate()
                 .rev()
                 .map(|(index, row)| {
-                    let status = &row.status;
-                    let (mark, tint) = crate::pickers::harness_brand_icon(status.harness);
+                    let (mark, tint) = row_mark(row);
                     crate::frost::layered(
                         div()
                             .absolute()
@@ -226,15 +357,86 @@ fn text_width(text: &str, size: f32, window: &Window, theme: &Theme) -> f32 {
 }
 
 impl Shell {
+    /// Rows Home shows: Zeron engines and agent CLIs with something to act on
+    /// or in progress. The desktop app keeps its established sidebar strip,
+    /// so it is not repeated here.
+    fn home_update_rows(&self, cx: &App) -> Vec<(ZeronRow, Option<HarnessUpdateStatus>)> {
+        let zeron = self
+            .zeron_update_rows(false, cx)
+            .into_iter()
+            .filter(|row| row.notice)
+            .map(|row| (row, None));
+        let agents = visible_rows(&self.harness_update_devices, |id| {
+            self.state.read(cx).device_name(id).unwrap_or(id).to_owned()
+        })
+        .into_iter()
+        .map(|row| {
+            (
+                agent_row(&row, false).with_action_error(&self.update_action_errors),
+                Some(row.status),
+            )
+        });
+        zeron
+            .chain(agents)
+            .filter(|(row, _)| !row.hidden_by(&self.dismissed_updates))
+            .collect()
+    }
+
+    /// Hide everything Home currently offers. Settings still lists it all.
+    fn dismiss_home_updates(&mut self, cx: &mut Context<Self>) {
+        // Dismissing acknowledges a refused action; its offer goes with it.
+        self.update_action_errors.clear();
+        let keys: Vec<_> = self
+            .home_update_rows(cx)
+            .iter()
+            .filter(|(row, _)| matches!(row.tone, Tone::Normal | Tone::Done))
+            .map(|(row, _)| row.dismiss_key())
+            .collect();
+        self.dismissed_updates.extend(keys);
+        self.set_harness_updates_expanded(false, cx);
+        cx.notify();
+    }
+
+    /// Every agent row, for Settings (`notice_only == false`) or Home.
+    pub(super) fn agent_update_rows(&self, notice_only: bool, cx: &App) -> Vec<ZeronRow> {
+        let state = self.state.read(cx);
+        let local = state.engine().map(|e| e.engine_info().device_id.clone());
+        self.harness_update_devices
+            .iter()
+            .flat_map(|(id, updates)| {
+                let name = if local.as_deref() == Some(id.as_str()) {
+                    super::updates::THIS_DEVICE.to_owned()
+                } else {
+                    state.device_name(id).unwrap_or(id).to_owned()
+                };
+                updates
+                    .statuses
+                    .iter()
+                    .filter(move |status| {
+                        if notice_only {
+                            status.show_update_notice()
+                        } else {
+                            status.phase != Phase::Dormant
+                        }
+                    })
+                    .map(move |status| {
+                        agent_row(
+                            &UpdateRow {
+                                device_id: id.clone(),
+                                device_name: name.clone(),
+                                connected: updates.online && updates.connected,
+                                status: status.clone(),
+                            },
+                            !notice_only,
+                        )
+                        .with_action_error(&self.update_action_errors)
+                    })
+            })
+            .collect()
+    }
+
     pub(super) fn set_harness_updates_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
-        let expanded = expanded
-            && self
-                .harness_update_devices
-                .values()
-                .flat_map(|device| &device.statuses)
-                .filter(|row| row.show_update_notice())
-                .count()
-                > 1;
+        let expanded = expanded && self.home_update_rows(cx).len() > 1;
         if self.harness_update_expanded == expanded {
             return;
         }
@@ -255,7 +457,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_harness_update_steps(&mut self, device: String, cx: &mut Context<Self>) {
+    pub(super) fn open_harness_update_steps(&mut self, device: String, cx: &mut Context<Self>) {
         let target = (self.state.read(cx).local_device_id.as_deref() != Some(device.as_str()))
             .then_some(device);
         self.set_harness_updates_expanded(false, cx);
@@ -265,26 +467,24 @@ impl Shell {
         self.harnesses_page = Some(page);
     }
 
-    fn render_harness_update_action(
+    fn render_update_action(
         &mut self,
-        row: &UpdateRow,
+        row: &ZeronRow,
         interactive: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let status = &row.status;
+        let (label, action) = row.action.clone()?;
         let device = row.device_id.clone();
-        let key_device = device.clone();
-        let (label, method) = action(status)?;
+        let component = row.component;
         let theme = Theme::of(cx).for_settings_surface();
-        let harness = status.harness;
-        // The settings/details link is local UI and remains usable offline.
-        let available = method.is_none() || row.connected;
+        // Instructions are local UI and remain usable offline.
+        let available = matches!(action, RowAction::Instructions) || row.connected;
         let enabled = interactive && available;
-        let primary = method == Some(methods::APPLY_HARNESS_UPDATE);
+        let primary = matches!(action, RowAction::Start);
         Some(
             div()
                 .id(SharedString::from(format!(
-                    "harness-update-action-{device}-{harness:?}"
+                    "update-action-{device}-{component:?}"
                 )))
                 .h(px(26.0))
                 .px(px(9.0))
@@ -309,11 +509,7 @@ impl Shell {
                 })
                 .opacity(if available { 1.0 } else { 0.45 })
                 .role(gpui::Role::Button)
-                .aria_label(format!(
-                    "{label} · {} · {}",
-                    agent_name(harness),
-                    row.device_name
-                ))
+                .aria_label(format!("{label} · {} · {}", row.title, row.device_name))
                 .tab_index(if enabled { 0 } else { -1 })
                 .focus_visible(move |el| el.border_color(theme.accent))
                 .when(enabled, |button| {
@@ -322,26 +518,12 @@ impl Shell {
                         .hover(|el| el.opacity(0.85))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            if let Some(method) = method {
-                                this.run_harness_update_action(device.clone(), method, harness, cx);
-                            } else {
-                                this.open_harness_update_steps(device.clone(), cx);
-                            }
-                        }))
-                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                cx.stop_propagation();
-                                if let Some(method) = method {
-                                    this.run_harness_update_action(
-                                        key_device.clone(),
-                                        method,
-                                        harness,
-                                        cx,
-                                    );
-                                } else {
-                                    this.open_harness_update_steps(key_device.clone(), cx);
-                                }
-                            }
+                            this.run_update_row_action(
+                                device.clone(),
+                                component,
+                                action.clone(),
+                                cx,
+                            );
                         }))
                 })
                 .child(label)
@@ -358,20 +540,18 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         self.refresh_harness_update_watch(cx);
-        let marks = visible_rows(&self.harness_update_devices, |id| {
-            self.state.read(cx).device_name(id).unwrap_or(id).to_owned()
-        });
-        if marks.is_empty() {
+        let entries = self.home_update_rows(cx);
+        if entries.is_empty() {
             self.harness_update_expanded = false;
             self.harness_update_transition = None;
             self.harness_update_geometry = [None; 2];
             return None;
         }
         // Updates change in place; promoting active/completed rows makes
-        // harnesses jump beneath the pointer when an action is clicked.
-        let statuses = &marks;
+        // rows jump beneath the pointer when an action is clicked.
+        let statuses: Vec<ZeronRow> = entries.iter().map(|(row, _)| row.clone()).collect();
+        let marks = &statuses;
         let row = &statuses[0];
-        let status = &row.status;
         let multiple = statuses.len() > 1;
         if !multiple {
             self.set_harness_updates_expanded(false, cx);
@@ -382,32 +562,15 @@ impl Shell {
             if expanded { 1.0 } else { 0.0 },
         );
         let theme = Theme::of(cx).for_settings_surface();
-        let name = agent_name(status.harness);
-        let all_updated = statuses
-            .iter()
-            .all(|row| row.status.phase == Phase::Updated);
+        let all_updated = statuses.iter().all(|row| row.tone == Tone::Done);
         let mut title = if multiple {
             if all_updated {
-                format!("{} agents updated", statuses.len())
+                format!("{} updated", statuses.len())
             } else {
-                format!("{} agent updates", statuses.len())
+                format!("{} updates", statuses.len())
             }
         } else {
-            match status.phase {
-                Phase::Available => status
-                    .latest_version
-                    .as_ref()
-                    .map(|v| format!("{name} {v} available"))
-                    .unwrap_or_else(|| format!("{name} update available")),
-                Phase::WaitingForIdle => format!("{name} · waiting for idle"),
-                Phase::Preparing => format!("Preparing {name}…"),
-                Phase::Downloading => format!("Downloading {name}…"),
-                Phase::Installing => format!("Updating {name}…"),
-                Phase::Verifying => format!("Verifying {name}…"),
-                Phase::Updated => format!("{name} updated"),
-                Phase::Failed => format!("{name} update check failed"),
-                _ => return None,
-            }
+            single_title(row, entries[0].1.as_ref())?
         };
         let device_count = statuses
             .iter()
@@ -424,11 +587,11 @@ impl Shell {
         }
         let activity = if statuses
             .iter()
-            .any(|row| row.connected && active(&row.status))
+            .any(|row| row.connected && row.tone == Tone::Active)
         {
             Some(
                 loaders::mini_glyph_spinner(
-                    "home-agent-update-activity",
+                    "home-update-activity",
                     2.0,
                     theme.glyph,
                     cx.entity_id(),
@@ -443,7 +606,7 @@ impl Shell {
                     .text_color(theme.success)
                     .into_any_element(),
             )
-        } else if !multiple && status.phase == Phase::Failed {
+        } else if !multiple && row.tone == Tone::Danger {
             Some(
                 icon(icons::DANGER_TRIANGLE)
                     .size(px(14.0))
@@ -455,19 +618,14 @@ impl Shell {
         };
         let has_activity = activity.is_some();
         let action_label = (!multiple)
-            .then(|| action(status))
-            .flatten()
-            .map(|(label, _)| label);
+            .then(|| row.action.as_ref().map(|(label, _)| *label))
+            .flatten();
         let compact_action = if multiple {
             None
         } else {
-            self.render_harness_update_action(row, true, cx)
+            self.render_update_action(row, true, cx)
         };
-        let trailing = if multiple {
-            8.0
-        } else {
-            right_inset(action_label.is_some())
-        };
+        let trailing = DISMISS_INSET;
         let marks_width =
             MARK_SIZE + MARK_STEP * marks.len().min(MAX_MARKS).saturating_sub(1) as f32;
         let controls_width = if multiple {
@@ -476,9 +634,10 @@ impl Shell {
             action_label
                 .map(|label| text_width(label, 11.5, window, &theme) + 20.0 + 8.0)
                 .unwrap_or(0.0)
-        };
+        } + DISMISS_GAP
+            + DISMISS_SIZE;
         let max_width = (main_width - 32.0).max(0.0);
-        let compact_width = (12.0
+        let compact_width = (MARK_INSET
             + marks_width
             + 8.0
             + text_width(&title, 12.0, window, &theme)
@@ -509,13 +668,43 @@ impl Shell {
             size[axis] = self.eval_tween(self.harness_update_geometry[axis], target);
         }
         let radius = motion::lerp(19.0, 16.0, reveal);
-        let list_bottom_radius = (radius - 1.0).max(0.0);
+        // Everything inside the 1px border nests on this radius.
+        let inner_radius = (radius - 1.0).max(0.0);
+        let list_bottom_radius = inner_radius;
+        // Last control in the pill: its own circle sits concentric with the
+        // pill's end, and its click never reaches the summary's toggle.
+        let dismiss = div()
+            .id("home-update-dismiss")
+            .flex_none()
+            .size(px(DISMISS_SIZE))
+            .ml(px(DISMISS_GAP))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label("Dismiss updates")
+            .tab_index(0)
+            .hover(move |el| el.bg(theme.element_hover))
+            .focus_visible(move |el| el.bg(theme.accent.opacity(0.12)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.dismiss_home_updates(cx);
+            }))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            );
         let summary = div()
             .id("home-harness-update-summary")
-            .h(px(CHIP_HEIGHT))
+            .h(px(CHIP_INNER))
             .w_full()
             .flex_none()
-            .pl(px(12.0))
+            // Collapsed: the leading mark is concentric with the pill's end.
+            // Expanded: the title lines up with the rows' icons.
+            .pl(px(motion::lerp(MARK_INSET, ROW_INSET, reveal)))
             .pr(px(trailing))
             .flex()
             .items_center()
@@ -524,22 +713,19 @@ impl Shell {
                 el.cursor_pointer()
                     .role(gpui::Role::Button)
                     .aria_label(if expanded {
-                        "Collapse agent updates"
+                        "Collapse updates"
                     } else {
-                        "Show agent updates"
+                        "Show updates"
                     })
                     .tab_index(0)
-                    .rounded(px(radius))
+                    // Fill exactly what the summary occupies: the whole pill
+                    // when collapsed, only the card's top when expanded.
+                    .rounded_t(px(inner_radius))
+                    .rounded_b(px(inner_radius * (1.0 - reveal)))
                     .focus_visible(move |el| el.bg(theme.accent.opacity(0.12)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.set_harness_updates_expanded(!this.harness_update_expanded, cx);
-                    }))
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            this.set_harness_updates_expanded(!this.harness_update_expanded, cx);
-                        }
                     }))
             })
             .child(
@@ -549,7 +735,7 @@ impl Shell {
                     .mr(px(8.0 * (1.0 - reveal)))
                     .overflow_hidden()
                     .opacity(1.0 - crate::composer_dock::stage(reveal, 0.0, 0.55))
-                    .child(mark_stack(&marks, &theme)),
+                    .child(mark_stack(marks, &theme)),
             )
             .child(
                 div()
@@ -580,51 +766,40 @@ impl Shell {
                                 .top(px(5.0))
                                 .size(px(14.0))
                                 .text_color(theme.text_muted)
+                                // Collapsed points right; opening is a quarter
+                                // turn to point down at the list it reveals.
                                 .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                    std::f32::consts::PI * (1.0 - reveal),
+                                    -std::f32::consts::FRAC_PI_2 * (1.0 - reveal),
                                 ))),
                         ),
                 )
-            });
+            })
+            .child(dismiss);
         let rows = (reveal > 0.0).then(|| {
             let rows: Vec<_> = statuses
                 .iter()
                 .enumerate()
                 .map(|(index, row)| {
-                    let status = &row.status;
                     // Reveal after the surface has made room. Use the same
                     // reversible progress on exit; never replay a mount animation.
                     let row_reveal = crate::composer_dock::stage(reveal, 0.42, 0.9);
-                    let (mark, tint) = crate::pickers::harness_brand_icon(status.harness);
-                    let label = if row.connected {
-                        detail(status)
-                    } else {
-                        "Disconnected · reconnect to update".into()
-                    };
-                    let extra = status
-                        .error
-                        .as_ref()
-                        .map(|e| e.message.clone())
-                        .or_else(|| status.manual_command.clone())
-                        .unwrap_or_else(|| label.clone());
-                    let tooltip = Some(format!(
-                        "{} · {}\n{extra}",
-                        agent_name(status.harness),
-                        row.device_name
-                    ));
+                    let (mark, tint) = row_mark(row);
+                    let label = row.detail.clone();
+                    let extra = row.explanation.clone().unwrap_or_else(|| label.clone());
+                    let tooltip = Some(format!("{} · {}\n{extra}", row.title, row.device_name));
                     let row_action =
-                        self.render_harness_update_action(row, expanded && row_reveal >= 0.95, cx);
+                        self.render_update_action(row, expanded && row_reveal >= 0.95, cx);
                     div()
                         .id(SharedString::from(format!(
                             "harness-update-row-{}-{:?}",
-                            row.device_id, status.harness
+                            row.device_id, row.component
                         )))
                         .relative()
                         .top(px(3.0 * (1.0 - row_reveal)))
                         .opacity(row_reveal)
                         .h(px(ROW_HEIGHT))
                         .flex_none()
-                        .px(px(12.0))
+                        .px(px(ROW_INSET))
                         .flex()
                         .items_center()
                         .gap(px(10.0))
@@ -658,23 +833,28 @@ impl Shell {
                                         .line_height(crate::typography::ui_rems(16.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .truncate()
-                                        .child(agent_name(status.harness)),
+                                        .child(row.title.clone()),
                                 )
-                                .when(device_count > 1, |el| {
-                                    el.child(
-                                        div()
-                                            .text_size(crate::typography::ui_rems(11.0))
-                                            .line_height(crate::typography::ui_rems(14.0))
-                                            .text_color(theme.text_muted)
-                                            .truncate()
-                                            .child(row.device_name.clone()),
-                                    )
-                                })
+                                // Every row names its device: a Zeron row is
+                                // meaningless without knowing which install.
+                                .when(
+                                    device_count > 1 || row.component == Component::Engine,
+                                    |el| {
+                                        el.child(
+                                            div()
+                                                .text_size(crate::typography::ui_rems(11.0))
+                                                .line_height(crate::typography::ui_rems(14.0))
+                                                .text_color(theme.text_muted)
+                                                .truncate()
+                                                .child(row.device_name.clone()),
+                                        )
+                                    },
+                                )
                                 .child(
                                     div()
                                         .text_size(crate::typography::ui_rems(11.0))
                                         .line_height(crate::typography::ui_rems(14.0))
-                                        .text_color(if status.phase == Phase::Failed {
+                                        .text_color(if row.tone == Tone::Danger {
                                             theme.danger
                                         } else {
                                             theme.text_muted
@@ -683,7 +863,7 @@ impl Shell {
                                         .child(label),
                                 ),
                         )
-                        .when(status.phase == Phase::Updated, |el| {
+                        .when(row.tone == Tone::Done, |el| {
                             el.child(icon(icons::CHECK).size(px(14.0)).text_color(theme.success))
                         })
                         .children(row_action)
@@ -723,10 +903,11 @@ impl Shell {
             div()
                 .id("home-harness-update-list-host")
                 .absolute()
-                .top(px(CHIP_HEIGHT))
-                // Keep the final layout centered as the shell widens, so
-                // neither edge appears attached to a moving clipping boundary.
-                .left(px((size[0] - list_width) * 0.5 + 1.0))
+                // Absolute insets are measured inside the card's border:
+                // start just under the divider and stay centered in the
+                // inner width, so neither edge rides a clipping boundary.
+                .top(px(CHIP_INNER + 1.0))
+                .left(px((size[0] - list_width) * 0.5))
                 .w(px((list_width - 2.0).max(0.0)))
                 .h(px((list_height - CHIP_HEIGHT - 1.0).max(0.0)))
                 .rounded_bl(px(list_bottom_radius))
@@ -742,15 +923,7 @@ impl Shell {
                 .child(list)
                 .children(rail)
         });
-        let single_tooltip = (!multiple)
-            .then(|| {
-                status
-                    .error
-                    .as_ref()
-                    .map(|e| e.message.clone())
-                    .or_else(|| status.manual_command.clone())
-            })
-            .flatten();
+        let single_tooltip = (!multiple).then(|| row.explanation.clone()).flatten();
         let card = div()
             .id("home-harness-update-card")
             .relative()
@@ -781,7 +954,7 @@ impl Shell {
                 el.child(
                     div()
                         .absolute()
-                        .top(px(CHIP_HEIGHT))
+                        .top(px(CHIP_INNER))
                         .left(px(0.0))
                         .right(px(0.0))
                         .h(px(1.0))
@@ -793,6 +966,7 @@ impl Shell {
         Some(crate::frost::frosted(radius, 16.0, card).into_any_element())
     }
     pub(super) fn refresh_harness_update_watch(&mut self, cx: &mut Context<Self>) {
+        self.refresh_engine_update_watch(cx);
         let state = self.state.read(cx);
         if !matches!(state.connection, ConnectionStatus::Ready) {
             self.harness_update_devices.clear();
@@ -821,6 +995,44 @@ impl Shell {
             let updates = self.harness_update_devices.get_mut(&device).unwrap();
             let engine = engine.clone();
             updates.watch = Some(cx.spawn(async move |this, cx| {
+                // Devices only re-check on their own slow schedules (agents
+                // every 6h); ask for a fresh look when what we hold is stale.
+                let _refresher = cx.spawn({
+                    let this = this.clone();
+                    let engine = engine.clone();
+                    let device = device.clone();
+                    async move |cx| {
+                        let mut delay = Duration::from_secs(3);
+                        loop {
+                            cx.background_executor().timer(delay).await;
+                            delay = super::updates::REFRESH_POLL;
+                            let due = this.update(cx, |shell, _| {
+                                let now = Utc::now().timestamp_millis();
+                                shell.harness_update_devices.get(&device).is_some_and(|d| {
+                                    d.online
+                                        && d.connected
+                                        && d.statuses
+                                            .iter()
+                                            .filter(|s| s.phase != Phase::Dormant)
+                                            .any(|s| super::updates::refresh_due(s.checked_at, now))
+                                })
+                            });
+                            match due {
+                                Ok(true) => {
+                                    let _ = engine
+                                        .client()
+                                        .call(
+                                            methods::CHECK_HARNESS_UPDATES,
+                                            serde_json::json!({ "targetDeviceId": device }),
+                                        )
+                                        .await;
+                                }
+                                Ok(false) => {}
+                                Err(_) => return,
+                            }
+                        }
+                    }
+                });
                 let mut retry = 1;
                 loop {
                     let result = engine
@@ -844,6 +1056,10 @@ impl Shell {
                                     };
                                     updates.statuses = rows;
                                     updates.connected = true;
+                                    // The device's own account supersedes ours.
+                                    shell.update_action_errors.retain(|(id, component), _| {
+                                        *id != device || !matches!(component, Component::Agent(_))
+                                    });
                                     cx.notify();
                                 })
                                 .is_err()
@@ -873,7 +1089,7 @@ impl Shell {
         }
     }
 
-    fn run_harness_update_action(
+    pub(super) fn run_harness_update_action(
         &mut self,
         device: String,
         method: &'static str,
@@ -893,6 +1109,8 @@ impl Shell {
         {
             return;
         }
+        let key = (device.clone(), Component::Agent(harness));
+        self.update_action_errors.remove(&key);
         let params = serde_json::json!({ "harness": harness, "targetDeviceId": device });
         // Each request owns its lifetime: acting on a second device must not
         // cancel the first device's RPC. Progress comes from independent watches.
@@ -903,7 +1121,7 @@ impl Shell {
                     && !matches!(&error, zeron_rpc::RpcError::Failed(message)
                         if method == methods::APPLY_HARNESS_UPDATE && message == "update cancelled")
                 {
-                    shell.sidebar_notice = Some(format!("Agent update ({device}): {error}").into());
+                    shell.update_action_errors.insert(key, error.to_string());
                 }
                 cx.notify();
             })
@@ -921,6 +1139,7 @@ mod tests {
     fn status(phase: Phase) -> HarnessUpdateStatus {
         HarnessUpdateStatus {
             harness: HarnessId::Codex,
+            installation: None,
             installed_version: Some("1.0".into()),
             latest_version: Some("2.0".into()),
             channel: None,
@@ -942,6 +1161,28 @@ mod tests {
             statuses: vec![status(phase)],
             watch: None,
         }
+    }
+
+    #[test]
+    fn failures_keep_diagnostics_out_of_the_compact_status() {
+        let mut failed = status(Phase::Failed);
+        failed.error = Some(zeron_proto::HarnessUpdateFailure {
+            message: "Homebrew metadata refresh failed: network unavailable".into(),
+            retryable: true,
+        });
+        let row = agent_row(
+            &UpdateRow {
+                device_id: "local".into(),
+                device_name: "This Mac".into(),
+                status: failed,
+                connected: true,
+            },
+            false,
+        );
+        assert_eq!(row.detail, "Needs attention");
+        assert!(row.explanation.unwrap().contains("network unavailable"));
+        assert_eq!(row.tone, Tone::Danger);
+        assert_eq!(row.action.unwrap().0, "Check again");
     }
 
     #[test]

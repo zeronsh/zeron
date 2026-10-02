@@ -93,6 +93,7 @@ impl LiveTerminal {
 
 struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
+    restart_gate: std::sync::OnceLock<crate::engine_updates::RestartGate>,
 }
 
 impl Drop for TerminalsInner {
@@ -157,10 +158,16 @@ impl Terminals {
         let terminals = Self {
             inner: Arc::new(TerminalsInner {
                 sessions: Mutex::new(HashMap::new()),
+                restart_gate: std::sync::OnceLock::new(),
             }),
         };
         tokio::spawn(reaper_task(Arc::downgrade(&terminals.inner)));
         terminals
+    }
+
+    /// Share the sessions' restart admission (first set wins).
+    pub fn set_restart_gate(&self, gate: crate::engine_updates::RestartGate) {
+        let _ = self.inner.restart_gate.set(gate);
     }
 
     /// Open a login shell in `cwd`. The PTY outlives every subscriber; it dies on
@@ -226,6 +233,14 @@ impl Terminals {
         environment: &HashMap<String, String>,
         command: Option<&str>,
     ) -> Result<TerminalSession, EngineError> {
+        // Held until the PTY is registered (see `SessionsEngine::dispatch`).
+        let _admission = self
+            .inner
+            .restart_gate
+            .get()
+            .map(|gate| gate.try_admit())
+            .transpose()
+            .map_err(EngineError::Other)?;
         if lock(&self.inner.sessions).len() >= MAX_TERMINALS {
             return Err(EngineError::Other(format!(
                 "Too many open terminals (maximum {MAX_TERMINALS})"

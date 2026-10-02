@@ -171,6 +171,8 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Refuses new runs while an engine update restarts this process.
+    restart_gate: crate::engine_updates::RestartGate,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -208,8 +210,15 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                restart_gate: Default::default(),
             }),
         }
+    }
+
+    /// Admission for everything a restart would interrupt. Shared with the
+    /// terminals and the engine updater at assembly.
+    pub fn restart_gate(&self) -> crate::engine_updates::RestartGate {
+        self.inner.restart_gate.clone()
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -419,6 +428,14 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        // Held until the run is registered, so an engine update deciding to
+        // restart either sees this run or refuses it — never neither.
+        let _admission = self
+            .inner
+            .restart_gate
+            .admit()
+            .await
+            .map_err(EngineError::Other)?;
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)

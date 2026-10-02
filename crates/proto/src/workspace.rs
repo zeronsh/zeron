@@ -15,6 +15,10 @@ pub mod capabilities {
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
+    /// Engine self-update operations: `WatchEngineUpdate`, `CheckEngineUpdate`,
+    /// `StartEngineUpdate` and `CancelEngineUpdate`. Independent of
+    /// [`HARNESS_UPDATES_V1`]; older engines only answer `UpdateStatus`.
+    pub const ENGINE_UPDATES_V1: &str = "engine-updates-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -24,6 +28,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         HARNESS_UPDATES_V1,
+        ENGINE_UPDATES_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -103,7 +108,8 @@ mod tests {
                     "message-queue-attachments-v1",
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
-                    "harness-updates-v1"
+                    "harness-updates-v1",
+                    "engine-updates-v1"
                 ],
             })
         );
