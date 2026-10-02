@@ -1,0 +1,14 @@
+# Kotlin-only renames (the Swift bindings are unaffected): Kotlin exceptions
+# already own `message`, and AutoCloseable already owns `close()`.
+[bindings.kotlin.rename]
+"TranscriptView.close" = "shutdown"
+"CoreError.NotFound.message" = "reason"
+"CoreError.InvalidArgument.message" = "reason"
+"CoreError.HostUnavailable.message" = "reason"
+"CoreError.Unsupported.message" = "reason"
+"CoreError.HostError.message" = "reason"
+"CoreError.Network.message" = "reason"
+"CoreError.Auth.message" = "reason"
+"CoreError.Storage.message" = "reason"
+"CoreError.NotImplemented.message" = "reason"
+"CoreError.Internal.message" = "reason"
