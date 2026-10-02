@@ -165,6 +165,9 @@ icon_assets![
     (FILE_IMAGE, "file-image"),
     (GLOBAL, "global"),
     (CHECKLIST, "checklist"),
+    // Goal mode: the objective target and the pause control.
+    (GOAL, "goal"),
+    (PAUSE, "pause"),
     (WIDGET, "widget"),
     (MAGIC_STICK_3, "magic-stick-3"),
     (WIFI_OFF, "wifi-off"),

@@ -1938,6 +1938,7 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
         Origin {
             chat_id: Some("coordinator".into()),
             device_id: Some("device-a".into()),
+            ask_id: None,
         },
     )));
     a.workspace

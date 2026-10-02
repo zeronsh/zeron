@@ -59,6 +59,13 @@ pub mod methods {
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
+    /// The child ask running in a chat: the schema its `submit_result` tool
+    /// must advertise. Params `{chatId, askId}`; IPC-only (the MCP server
+    /// inside the child's harness dials the local engine).
+    pub const GET_ASK_SPEC: &str = "GetAskSpec";
+    /// `submit_result`: validate and accept (or bounce with violations) a
+    /// child ask's typed result. Params `{chatId, askId, result}`; IPC-only.
+    pub const SUBMIT_ASK_RESULT: &str = "SubmitAskResult";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.

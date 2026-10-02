@@ -28,6 +28,14 @@ pub struct TranscriptUpdate {
     /// encoding. Omitted on ordinary live updates and by older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_baseline: Option<TranscriptBaseline>,
+    /// The chat's goal, sent on the opening frame and whenever it changed
+    /// since the subscription's previous frame (not on every streaming tick:
+    /// a goal with its verdict history is several KB). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<zeron_proto::Goal>,
+    /// The goal was removed since the previous frame.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub goal_cleared: bool,
 }
 
 /// Compact presentation watermark: stable part ids and text byte lengths.
@@ -350,6 +358,7 @@ mod tests {
 
     fn entry(id: &str, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {
+            origin: None,
             id: id.into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Text {
@@ -511,6 +520,8 @@ mod context_update_tests {
         assert_eq!(update.context_usage, None);
         assert!(update.replay_baseline.is_none());
         let value = serde_json::to_value(TranscriptUpdate {
+            goal: None,
+            goal_cleared: false,
             frame: TranscriptFrame::reset(&[]),
             replay_baseline: Some(TranscriptBaseline::default()),
             context_usage: Some(zeron_proto::ContextUsage {
@@ -534,6 +545,7 @@ mod context_update_tests {
     #[test]
     fn replay_cutoff_keeps_only_historical_parts_and_unicode_text_prefixes() {
         let mut entry = SessionMessageEntry {
+            origin: None,
             id: "message".into(),
             role: crate::MessageRole::Assistant,
             parts: vec![MessagePart::Text {

@@ -50,6 +50,7 @@ struct CachedTranscript {
     chat_id: String,
     entries: Vec<SessionMessageEntry>,
     context_usage: Option<zeron_proto::ContextUsage>,
+    goal: Option<zeron_proto::Goal>,
     bytes: usize,
 }
 
@@ -741,6 +742,9 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    /// The selected chat's goal (`/goal`): replicated with its doc, shown in
+    /// the composer dock's goal tray.
+    pub goal: Option<zeron_proto::Goal>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -846,6 +850,7 @@ impl AppState {
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
+            goal: None,
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -1072,6 +1077,7 @@ impl AppState {
             self.restore_canvas_target();
             self.transcript.clear();
             self.context_usage = None;
+            self.goal = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
@@ -1255,8 +1261,7 @@ impl AppState {
         if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
             return false;
         }
-        if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
+        if self.connectivity.state == S::Offline || !self.device_online(&chat.device_id, Utc::now())
         {
             return true;
         }
@@ -1480,6 +1485,7 @@ impl AppState {
         update: zeron_doc::TranscriptUpdate,
         cx: &mut Context<Self>,
     ) -> Result<(), TranscriptDesync> {
+        let is_reset = matches!(update.frame, TranscriptFrame::Reset { .. });
         self.receive_transcript_frame(update.frame, cx)?;
         if let (Some(doc_id), Some(baseline)) = (&self.selected_chat, update.replay_baseline) {
             self.transcript_baselines
@@ -1487,6 +1493,22 @@ impl AppState {
         }
         if self.context_usage != update.context_usage {
             self.context_usage = update.context_usage;
+            cx.notify();
+        }
+        // The goal rides only the frames where it changed (see
+        // `TranscriptUpdate::goal`) — and every reset, which replaces whatever
+        // a cached view of this chat remembered.
+        if is_reset {
+            if self.goal != update.goal {
+                self.goal = update.goal;
+                cx.notify();
+            }
+        } else if let Some(goal) = update.goal {
+            if self.goal.as_ref() != Some(&goal) {
+                self.goal = Some(goal);
+                cx.notify();
+            }
+        } else if update.goal_cleared && self.goal.take().is_some() {
             cx.notify();
         }
         Ok(())
@@ -2066,6 +2088,7 @@ impl AppState {
         self.transcript_cache.clear();
         self.prepared_transcripts.clear();
         self.context_usage = None;
+        self.goal = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         self.echoes.clear();
@@ -2454,6 +2477,7 @@ impl AppState {
                     chat_id: previous.clone(),
                     entries,
                     context_usage: self.context_usage,
+                    goal: self.goal.take(),
                     bytes,
                 });
                 while self.transcript_cache.len() > TRANSCRIPT_CACHE_CAP
@@ -2477,6 +2501,7 @@ impl AppState {
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
+        self.goal = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         if let Some(cached) = cached {
@@ -2495,6 +2520,7 @@ impl AppState {
             }
             self.transcript = cached.entries;
             self.context_usage = cached.context_usage;
+            self.goal = cached.goal;
             self.transcript_replayed = true;
         }
         self.transcript_task = None;
@@ -2622,7 +2648,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -3734,7 +3763,7 @@ mod tests {
     }
 
     fn user_entry(id: &str) -> SessionMessageEntry {
-        SessionMessageEntry {
+        SessionMessageEntry { origin: None,
             id: id.into(),
             role: zeron_doc::MessageRole::User,
             parts: Vec::new(),
@@ -3752,7 +3781,7 @@ mod tests {
     ) {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, cx| {
-            let update = |id: &str| zeron_doc::TranscriptUpdate {
+            let update = |id: &str| zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false,
                 frame: TranscriptFrame::reset(&[user_entry(id)]),
                 context_usage: None,
                 replay_baseline: None,
@@ -4789,7 +4818,7 @@ mod tests {
     fn a_send_held_in_the_queue_drops_its_echo_and_pending_overlay() {
         let mut state = AppState::new();
         state.selected_chat = Some("c1".into());
-        let echo = |id: &str| SessionMessageEntry {
+        let echo = |id: &str| SessionMessageEntry { origin: None,
             id: id.into(),
             role: zeron_doc::MessageRole::User,
             parts: vec![],
@@ -4799,7 +4828,7 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         };
-        let row = |id: &str| zeron_doc::QueuedMessage {
+        let row = |id: &str| zeron_doc::QueuedMessage { origin: None,
             id: id.into(),
             text: "held".into(),
             attachments: vec![],
@@ -4827,7 +4856,7 @@ mod tests {
     fn echoes_show_until_doc_frame_confirms() {
         let mut state = AppState::new();
         state.selected_chat = Some("c1".into());
-        let echo = SessionMessageEntry {
+        let echo = SessionMessageEntry { origin: None,
             id: "m1".into(),
             role: zeron_doc::MessageRole::User,
             parts: vec![],

@@ -1220,6 +1220,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
 
         let doc = SessionDoc::init(CHAT).unwrap();
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: "m-user".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -1322,6 +1323,7 @@ async fn recover_stale_journal_settles_chips_in_completed_local_entries() {
     let doc = SessionDoc::init(CHAT).unwrap();
     for (id, device) in [("local", device_id), ("remote", "other-device")] {
         doc.push_message(&SessionMessageEntry {
+            origin: None,
             id: id.into(),
             role: MessageRole::Assistant,
             parts: vec![
@@ -1393,6 +1395,7 @@ async fn subagent_done_without_a_live_sink_updates_a_persisted_chip() {
         .unwrap()
         .doc()
         .push_message(&SessionMessageEntry {
+            origin: None,
             id: "old-assistant".into(),
             role: MessageRole::Assistant,
             parts: vec![spawn_chip("old-spawn", SubagentStatus::Running)],

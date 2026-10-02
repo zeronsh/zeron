@@ -337,9 +337,10 @@ impl Composer {
             surface.child(
                 div()
                     .mt(px(2.0))
-                    // The tray's lowest strip hides behind the composer; keep
-                    // the last row clear of that edge.
-                    .pb(px(6.0))
+                    // The tray's lowest strip hides behind whatever follows
+                    // (the queue tray or the composer); keep the last row clear
+                    // of that edge.
+                    .pb(px(crate::goal_panel::BODY_BOTTOM_CLEARANCE))
                     .child(rows)
                     .with_animation(
                         SharedString::from(format!("todo-rows-{epoch}")),
@@ -703,7 +704,7 @@ mod tests {
     }
 
     fn entry(role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
-        SessionMessageEntry {
+        SessionMessageEntry { origin: None,
             id: "m".into(),
             role,
             parts,
@@ -969,7 +970,7 @@ mod composer_tests {
     use crate::state::AppState;
 
     fn assistant_with_todo(list: Vec<TodoItem>) -> SessionMessageEntry {
-        SessionMessageEntry {
+        SessionMessageEntry { origin: None,
             id: "m".into(),
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Tool {

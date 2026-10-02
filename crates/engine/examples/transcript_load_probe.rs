@@ -15,6 +15,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tail_materialize = t.elapsed();
         let t = Instant::now();
         let preview = zeron_doc::TranscriptUpdate {
+            goal: None,
+            goal_cleared: false,
             frame: zeron_doc::TranscriptFrame::reset(&tail),
             context_usage: doc.context_usage(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&tail)),
@@ -51,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let t = Instant::now();
         let update = zeron_doc::TranscriptUpdate {
+            goal: None,
+            goal_cleared: false,
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: doc.context_usage(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),

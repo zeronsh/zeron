@@ -39,10 +39,12 @@ pub struct ToolDef {
 }
 
 pub struct Tools {
-    zeron: Arc<Zeron>,
+    pub(crate) zeron: Arc<Zeron>,
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
+    /// The advertised `submit_result` (ask servers only), fetched once.
+    pub(crate) ask_tool: tokio::sync::OnceCell<crate::ask::AskTool>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -64,7 +66,7 @@ fn device_schema() -> Value {
     json!({ "type": "string", "description": "Host device id or exact name. Omit for the local engine." })
 }
 
-fn catalog() -> Vec<ToolDef> {
+pub(crate) fn catalog() -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
             name: "whoami",
@@ -225,6 +227,7 @@ fn catalog() -> Vec<ToolDef> {
             }),
         });
     }
+    tools.extend(crate::goals::catalog());
     tools
 }
 
@@ -432,21 +435,47 @@ impl Tools {
         Self {
             zeron,
             pending_turns: Default::default(),
+            ask_tool: tokio::sync::OnceCell::new(),
         }
     }
 
-    pub fn list(&self) -> Vec<ToolDef> {
+    /// The tools this server exposes: the full catalog normally; inside a
+    /// child ask only the read tools plus `submit_result` (an ask's chat can
+    /// look around but cannot message, spawn, or steer anything).
+    pub async fn list(&self) -> Vec<ToolDef> {
+        if self.zeron.origin().ask_id.is_some() {
+            let mut defs: Vec<ToolDef> = catalog()
+                .into_iter()
+                .filter(|t| crate::ask::ASK_READ_TOOLS.contains(&t.name))
+                .collect();
+            defs.push(self.ask_tool().await.def());
+            return defs;
+        }
         catalog()
     }
 
     pub fn has(&self, name: &str) -> bool {
+        if self.zeron.origin().ask_id.is_some() {
+            return name == crate::ask::SUBMIT_RESULT || crate::ask::ASK_READ_TOOLS.contains(&name);
+        }
         catalog().iter().any(|t| t.name == name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        if !self.has(name) {
+            return Err(format!("unknown tool: {name}"));
+        }
+        if name == crate::ask::SUBMIT_RESULT {
+            return self.submit_result(args).await;
+        }
         let result = match name {
+            "get_goal" => self.get_goal(parse(args)?).await,
+            "set_goal" => self.set_goal(parse(args)?).await,
+            "pause_goal" => self.pause_goal(parse(args)?).await,
+            "resume_goal" => self.resume_goal(parse(args)?).await,
+            "clear_goal" => self.clear_goal(parse(args)?).await,
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
             "list_projects" => self.list_projects(parse(args)?).await,
@@ -1250,6 +1279,13 @@ mod tests {
         beta_remote: bool,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// The goal every transcript watch reports (goal tools read it).
+        goal: Mutex<Option<Value>>,
+        /// Becomes the reported goal once any command is queued (the host
+        /// "applying" it).
+        goal_on_command: Mutex<Option<Value>>,
+        /// What `SubmitAskResult` answers.
+        submit_reply: Mutex<Option<Value>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1319,18 +1355,47 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
-                methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
-                    { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
-                      "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
-                    { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
-                      "status": "complete",
-                      "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
-                ]})),
+                methods::WATCH_DOC_MESSAGES => {
+                    let mut frame = json!({ "reset": [
+                        { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
+                          "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
+                        { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local",
+                          "status": "complete",
+                          "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
+                    ]});
+                    if let Some(goal) = self.goal.lock().unwrap().clone() {
+                        frame["goal"] = goal;
+                    }
+                    stream(frame)
+                }
+                methods::GET_ASK_SPEC => RpcReply::Value(json!({
+                    "askId": "ask-1",
+                    "resultSchema": {
+                        "type": "object",
+                        "properties": { "passed": { "type": "boolean" } },
+                        "required": ["passed"]
+                    },
+                    "resultDescription": "the verdict",
+                })),
+                methods::SUBMIT_ASK_RESULT => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(self.submit_reply.lock().unwrap().clone().unwrap_or(json!({
+                        "accepted": true, "message": "Result received.", "violations": [], "repairsLeft": 3
+                    })))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
                         .unwrap()
                         .push((method.to_owned(), params));
+                    if method == methods::QUEUE_COMMAND
+                        && let Some(goal) = self.goal_on_command.lock().unwrap().take()
+                    {
+                        *self.goal.lock().unwrap() = Some(goal);
+                    }
                     if method == methods::QUEUE_COMMAND
                         && let Some(barrier) = &self.dispatch_barrier
                     {
@@ -1398,6 +1463,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-beta-2".into()),
                 device_id: Some("dev-local".into()),
+                ..Origin::default()
             },
         );
         let err = tools
@@ -1505,6 +1571,7 @@ mod tests {
         let tools = tools(
             world.clone(),
             Origin {
+                ask_id: None,
                 chat_id: Some("chat-beta-2".into()),
                 device_id: None,
             },
@@ -1652,6 +1719,7 @@ mod tests {
         let side = tools(
             world.clone(),
             Origin {
+                ask_id: None,
                 chat_id: Some("chat-beta-2".into()),
                 device_id: None,
             },
@@ -1705,6 +1773,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: None,
+                ask_id: None,
             },
         );
         for (args, kind, parent) in [
@@ -1899,6 +1968,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: None,
+                ask_id: None,
             },
         );
         let result = tools
@@ -2195,6 +2265,212 @@ mod tests {
         assert_eq!(
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
+        );
+    }
+
+    fn ask_origin() -> Origin {
+        Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: Some("dev-local".into()),
+            ask_id: Some("ask-1".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ask_server_lists_only_read_tools_and_the_run_scoped_submit_result() {
+        let ask_tools = tools(Arc::new(World::default()), ask_origin());
+        let listed = ask_tools.list().await;
+        let mut names: Vec<&str> = listed.iter().map(|d| d.name).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["get_chat", "read_chat", "submit_result", "whoami"]);
+        let submit = listed.iter().find(|d| d.name == "submit_result").unwrap();
+        assert_eq!(
+            submit.input_schema["properties"]["passed"]["type"],
+            "boolean"
+        );
+        assert_eq!(submit.input_schema["description"], "the verdict");
+        // Everything that could message, spawn, steer or set goals is gone.
+        for gone in [
+            "send_message",
+            "create_chat",
+            "interrupt_chat",
+            "set_goal",
+            "archive_chat",
+        ] {
+            assert!(!ask_tools.has(gone), "{gone}");
+            assert!(ask_tools.call(gone, json!({})).await.is_err());
+        }
+        // …and the normal catalog never offers submit_result.
+        let normal = tools(Arc::new(World::default()), Origin::default());
+        assert!(!normal.has("submit_result"));
+        assert!(
+            normal
+                .list()
+                .await
+                .iter()
+                .all(|d| d.name != "submit_result")
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_result_forwards_the_arguments_and_returns_violations_as_an_error() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), ask_origin());
+        let ok = tools
+            .call("submit_result", json!({ "passed": true }))
+            .await
+            .unwrap();
+        assert_eq!(ok["accepted"], true);
+        {
+            let writes = world.writes.lock().unwrap();
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::SUBMIT_ASK_RESULT);
+            assert_eq!(params["chatId"], "chat-beta-2");
+            assert_eq!(params["askId"], "ask-1");
+            assert_eq!(params["result"], json!({ "passed": true }));
+        }
+        *world.submit_reply.lock().unwrap() = Some(json!({
+            "accepted": false,
+            "message": "Rejected: /passed: expected boolean",
+            "violations": [{ "path": "/passed", "message": "expected boolean" }],
+            "repairsLeft": 2
+        }));
+        let err = tools
+            .call("submit_result", json!({ "passed": "yes" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("/passed"), "{err}");
+    }
+
+    fn goal_json_value(id: &str, objective: &str, status: &str) -> Value {
+        json!({
+            "id": id, "objective": objective, "summaryTitle": objective, "status": status,
+            "iteration": 1, "maxRounds": 25, "tokensUsed": 40, "verifierTokensUsed": 2,
+            "timeUsedSeconds": 9, "createdAt": 1, "updatedAt": 2,
+            "verdicts": [], "pending": { "kind": "turn", "round": 1, "messageId": "m", "startedAt": 1 }
+        })
+    }
+
+    #[tokio::test]
+    async fn get_goal_reports_the_goal_without_the_ledger() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let none = tools
+            .call("get_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert!(none["goal"].is_null());
+        *world.goal.lock().unwrap() = Some(goal_json_value("g1", "Ship it", "active"));
+        let got = tools
+            .call("get_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(got["goal"]["objective"], "Ship it");
+        assert_eq!(got["goal"]["tokensTotal"], 42);
+        assert!(got["goal"].get("pending").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_goal_queues_a_goal_command_for_the_chat() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+                ask_id: None,
+            },
+        );
+        // The host applies it: the goal shows up in the next transcript watch.
+        *world.goal_on_command.lock().unwrap() =
+            Some(goal_json_value("g2", "Fix the build", "active"));
+        let result = tools
+            .call(
+                "set_goal",
+                json!({ "chat": "alpha", "objective": "Fix the build", "max_rounds": 5, "token_budget": 9000 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["goal"]["id"], "g2");
+        let writes = world.writes.lock().unwrap();
+        let (method, params) = writes.last().unwrap();
+        assert_eq!(method, methods::QUEUE_COMMAND);
+        assert_eq!(params["chatId"], "chat-alpha-1");
+        assert_eq!(params["command"]["kind"], "goal");
+        assert_eq!(params["command"]["command"]["action"], "set");
+        assert_eq!(params["command"]["command"]["objective"], "Fix the build");
+        assert_eq!(params["command"]["command"]["limits"]["maxRounds"], 5);
+        assert_eq!(params["command"]["command"]["limits"]["tokenBudget"], 9000);
+        assert_eq!(params["command"]["command"]["replace"], false);
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_pause_clear_resume_or_replace_its_own_goal() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+                ask_id: None,
+            },
+        );
+        // The user set this chat's goal: nothing the agent sends touches it.
+        *world.goal.lock().unwrap() = Some(goal_json_value("g", "x", "active"));
+        for tool in ["pause_goal", "resume_goal", "clear_goal"] {
+            let err = tools.call(tool, json!({})).await.unwrap_err();
+            assert!(err.contains("ask the user"), "{tool}: {err}");
+            let err = tools
+                .call(tool, json!({ "chat": "beta" }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("ask the user"), "{tool}: {err}");
+        }
+        for replace in [true, false] {
+            let err = tools
+                .call("set_goal", json!({ "objective": "x", "replace": replace }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("own chat"), "{err}");
+        }
+        assert!(
+            world.writes.lock().unwrap().is_empty(),
+            "nothing reached the command plane"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_chats_goal_can_be_paused_only_by_the_agent_that_set_it() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+                ask_id: None,
+            },
+        );
+        // A person's goal on another chat is out of reach...
+        *world.goal.lock().unwrap() = Some(goal_json_value("g", "x", "active"));
+        let err = tools
+            .call("pause_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("ask the user"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty());
+        // ...one this agent set, it manages.
+        let mut own_goal = goal_json_value("g", "x", "paused");
+        own_goal["setByAgent"] = "chat-beta-2".into();
+        *world.goal.lock().unwrap() = Some(own_goal);
+        let result = tools
+            .call("pause_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(result["applied"], true);
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(
+            writes.last().unwrap().1["command"]["command"]["action"],
+            "pause"
         );
     }
 }

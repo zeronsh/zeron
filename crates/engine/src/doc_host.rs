@@ -288,6 +288,19 @@ struct DocHostInner {
     /// Shared client for sidecar blob PUT/GET (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
+    /// Child-ask runner (engine assembly). Severed on shutdown like
+    /// `sessions`: it holds clones of the sessions and doc host.
+    asks: Mutex<Option<crate::ask::AskService>>,
+    /// A substitute backend for goal verification and other asks — tests and
+    /// schedulers that fake the child chats.
+    ask_override: Mutex<Option<Arc<dyn crate::ask::AskBackend>>>,
+    /// Goal verifications running in this process, by chat.
+    goal_runs: Mutex<HashMap<String, goal::GoalRun>>,
+    /// Chats with a running goal on this device (restart recovery).
+    goal_index: OnceLock<goal::GoalIndex>,
+    /// Host construction time — goal recovery gives crash recovery a head
+    /// start before judging an aborted turn stranded.
+    started: std::time::Instant,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -437,6 +450,8 @@ enum QueueSend {
 }
 
 const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
+mod goal;
+
 const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
 
 /// Queue rows keep the user's editable text separate from attachment paths.
@@ -566,6 +581,22 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     queue_paused: AtomicBool,
+    /// The queue is frozen because sending its head failed (not by a Stop or
+    /// restart recovery). Nothing automatic may thaw it — retrying a send that
+    /// keeps failing would loop doc writes with no backoff. A successful send
+    /// or a deliberate user action (send, goal resume) clears it.
+    queue_send_failed: AtomicBool,
+    /// Serializes goal-mode decisions and mutations for this chat (commands,
+    /// controller ticks, verdicts). Never held across a verifier run.
+    goal_lock: tokio::sync::Mutex<()>,
+    /// The chat may have a running goal: lets every doc-change tick skip the
+    /// goal read for the vast majority of chats that never had one.
+    goal_live: AtomicBool,
+    /// Tokens the agent's turns reported since the goal last folded them in.
+    goal_tokens: AtomicU64,
+    /// Origins of queue rows being delivered, consumed by the user-message
+    /// write that follows (see `write_user_message`).
+    pending_origins: Mutex<HashMap<String, zeron_proto::MessageOrigin>>,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -768,10 +799,12 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
+        let origin = lock(&self.pending_origins).remove(message_id);
         if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
             return Ok(());
         }
         self.doc.push_message(&SessionMessageEntry {
+            origin,
             id: message_id.to_string(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -923,6 +956,11 @@ impl DocHost {
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new()),
+                asks: Mutex::new(None),
+                ask_override: Mutex::new(None),
+                goal_runs: Mutex::new(HashMap::new()),
+                goal_index: OnceLock::new(),
+                started: std::time::Instant::now(),
             }),
         };
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -1003,6 +1041,8 @@ impl DocHost {
                 let handles: Vec<_> = lock(&host.inner.handles).values().cloned().collect();
                 for handle in handles {
                     host.drain_queue(&handle).await;
+                    // A turn ending is exactly when the goal controller acts.
+                    host.goal_tick(&handle).await;
                 }
             }
         });
@@ -1035,6 +1075,9 @@ impl DocHost {
         lock(&self.inner.seeding).clear();
         lock(&self.inner.seed_waiting).clear();
         lock(&self.inner.sessions).take();
+        lock(&self.inner.asks).take();
+        lock(&self.inner.ask_override).take();
+        lock(&self.inner.goal_runs).clear();
     }
 
     /// Freeze every open queue before settling live runs during shutdown.
@@ -1518,6 +1561,11 @@ impl DocHost {
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            queue_send_failed: AtomicBool::new(false),
+            goal_lock: tokio::sync::Mutex::new(()),
+            goal_live: AtomicBool::new(doc.goal().is_some_and(|g| g.status.is_running())),
+            goal_tokens: AtomicU64::new(0),
+            pending_origins: Mutex::new(HashMap::new()),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             last_focus: AtomicU64::new(0),
@@ -3420,6 +3468,7 @@ impl DocHost {
         let handle = self.open(chat_id)?;
         let id = new_id();
         handle.doc.push_queued(&QueuedMessage {
+            origin: None,
             id: id.clone(),
             text: text.to_string(),
             attachments,
@@ -4035,10 +4084,12 @@ impl DocHost {
             if let Err(err) = self.dispatch_queued(handle, &item, send).await {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "queued send failed");
                 handle.queue_paused.store(true, Ordering::Release);
+                handle.queue_send_failed.store(true, Ordering::Release);
                 let _ = handle.doc.insert_queued(0, &item);
                 handle.publish_queue();
                 return;
             }
+            handle.queue_send_failed.store(false, Ordering::Release);
         }
     }
 
@@ -4092,6 +4143,9 @@ impl DocHost {
         let mut attachments = item.attachments.clone();
         let mut prompt = queued_message_prompt(&item.text, &attachments);
         self.resolve_attachment_refs(&mut prompt, &mut attachments);
+        if let Some(origin) = &item.origin {
+            lock(&handle.pending_origins).insert(message_id.clone(), origin.clone());
+        }
         if send == QueueSend::Steer {
             match sessions
                 .steer(chat_id, &prompt, Some(message_id.clone()))
@@ -5280,8 +5334,14 @@ impl DocHost {
                 .await
             }
             SessionCommandPayload::Interrupt {} => {
+                // Stop is the user telling the goal to stand down.
+                self.goal_on_user_interrupt(handle).await;
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
+            }
+            SessionCommandPayload::Goal { command, issuer } => {
+                self.apply_goal_command(handle, command, issuer.as_deref())
+                    .await
             }
             SessionCommandPayload::RespondInput {
                 request_id,
@@ -5373,6 +5433,7 @@ impl DocHost {
             issued_at: issued_at.min(now_ms()),
             edited_at: None,
             delivery_gate: None,
+            origin: None,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
             return Ok(()); // a redelivered command: already held
@@ -5809,6 +5870,7 @@ mod transfer_progress_tests {
         for i in 0..2000 {
             source
                 .push_message(&zeron_doc::SessionMessageEntry {
+                    origin: None,
                     id: format!("row-{i}"),
                     role: zeron_doc::MessageRole::User,
                     parts: vec![zeron_doc::MessagePart::Text {
@@ -6158,6 +6220,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
         let Some(handle) = weak.upgrade() else { return };
         host.drain_commands(&handle).await;
         host.drain_queue(&handle).await;
+        host.goal_tick(&handle).await;
     }
     let mut save_deadline: Option<tokio::time::Instant> = None;
     loop {
@@ -6175,6 +6238,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 }).await;
                 host.drain_commands(&handle).await;
                 host.drain_queue(&handle).await;
+                host.goal_tick(&handle).await;
                 if save_deadline.is_none() {
                     save_deadline = Some(
                         tokio::time::Instant::now()

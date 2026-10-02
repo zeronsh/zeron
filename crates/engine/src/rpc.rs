@@ -149,6 +149,24 @@ struct QueueCommandParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AskRefParams {
+    chat_id: String,
+    ask_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubmitAskParams {
+    chat_id: String,
+    ask_id: String,
+    /// The ask's submission secret (`ZERON_ASK_TOKEN`); missing is refused.
+    #[serde(default)]
+    token: String,
+    result: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RelayCommandParams {
     chat_id: String,
     /// The full command entry, client-minted id included — the exactly-once
@@ -1333,6 +1351,29 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
+/// Methods only a process on this machine may call. They are never served to
+/// relay clients (other devices on the account): a child ask's verdict comes
+/// from its own chat's MCP server, never from across the relay.
+pub(crate) fn local_only(method: &str) -> bool {
+    matches!(method, methods::GET_ASK_SPEC | methods::SUBMIT_ASK_RESULT)
+}
+
+/// The engine's RPC surface as served to relay clients: everything but the
+/// [`local_only`] methods.
+pub struct RelayRpc(pub std::sync::Arc<EngineRpc>);
+
+#[async_trait]
+impl RpcService for RelayRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if local_only(method) {
+            return Err(RpcError::Failed(format!(
+                "{method} is only available on the chat's own machine"
+            )));
+        }
+        self.0.handle(method, params).await
+    }
+}
+
 fn forwardable(method: &str) -> bool {
     matches!(
         method,
@@ -1479,8 +1520,9 @@ fn doc_messages_stream(
             doc,
             None,
             zeron_doc::TranscriptBaseline::default(),
+            None::<Option<zeron_proto::Goal>>,
         ),
-        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
+        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline, mut sent_goal)| async move {
             loop {
                 if prev.is_some() {
                     rx.changed().await.ok()?;
@@ -1524,17 +1566,44 @@ fn doc_messages_stream(
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
                 let usage = doc.context_usage();
-                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
+                // The goal rides only the frames where it changed (see
+                // `TranscriptUpdate::goal`); the opening frame always sends it.
+                let goal = doc.goal();
+                // A reset frame (the opening one, or a diff that grew to
+                // transcript size) replaces the viewer's whole view of the
+                // chat, so it restates the goal.
+                let goal_changed = sent_goal.as_ref() != Some(&goal)
+                    || matches!(frame, TranscriptFrame::Reset { .. });
+                if frame.is_empty_delta()
+                    && usage == previous_usage
+                    && replay_baseline.is_none()
+                    && !goal_changed
+                {
                     continue;
                 }
                 previous_usage = usage;
+                let (goal_update, goal_cleared) = match (&goal, goal_changed) {
+                    (Some(goal), true) => (Some(goal.clone()), false),
+                    (None, true) => (
+                        None,
+                        sent_goal.as_ref().is_some_and(Option::is_some)
+                            && !matches!(frame, TranscriptFrame::Reset { .. }),
+                    ),
+                    _ => (None, false),
+                };
+                sent_goal = Some(goal);
                 let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage,
                     replay_baseline,
+                    goal: goal_update,
+                    goal_cleared,
                 })
                 .ok()?;
-                return Some((value, (rx, prev, doc, previous_usage, opening_baseline)));
+                return Some((
+                    value,
+                    (rx, prev, doc, previous_usage, opening_baseline, sent_goal),
+                ));
             }
         },
     )
@@ -1554,6 +1623,8 @@ async fn opening_doc_messages_stream(
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: handle.doc().context_usage(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+            goal: handle.doc().goal(),
+            goal_cleared: false,
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
         preview["historyPending"] = serde_json::Value::Bool(true);
@@ -1854,6 +1925,23 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }
+            methods::GET_ASK_SPEC => {
+                let p: AskRefParams = parse_params(params)?;
+                let spec = self
+                    .doc_host
+                    .asks()
+                    .and_then(|asks| asks.spec_for(&p.chat_id, &p.ask_id))
+                    .ok_or_else(|| RpcError::Failed("no such ask in this chat".into()))?;
+                RpcReply::value(&spec)
+            }
+            methods::SUBMIT_ASK_RESULT => {
+                let p: SubmitAskParams = parse_params(params)?;
+                let asks = self
+                    .doc_host
+                    .asks()
+                    .ok_or_else(|| RpcError::Failed("asks are not available".into()))?;
+                RpcReply::value(&asks.submit(&p.chat_id, &p.ask_id, &p.token, p.result))
+            }
             methods::FORK_SIDE_CHAT => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -1954,6 +2042,7 @@ impl RpcService for EngineRpc {
                     target
                         .doc()
                         .push_message(&zeron_doc::SessionMessageEntry {
+                            origin: None,
                             duration_ms: None,
                             id: marker_id.clone(),
                             role: zeron_doc::MessageRole::System,
@@ -3687,6 +3776,7 @@ mod tests {
         handle
             .doc()
             .push_message(&zeron_doc::SessionMessageEntry {
+                origin: None,
                 id: "turn".into(),
                 role: zeron_doc::MessageRole::Assistant,
                 parts: (0..500)
@@ -3975,6 +4065,7 @@ mod context_usage_tests {
         let append = |id: &str| {
             source
                 .push_message(&zeron_doc::SessionMessageEntry {
+                    origin: None,
                     id: id.into(),
                     role: zeron_doc::MessageRole::Assistant,
                     parts: vec![zeron_doc::MessagePart::Text {
@@ -4096,6 +4187,7 @@ mod context_usage_tests {
         sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
             .unwrap();
         let entry = |id: &str| zeron_doc::SessionMessageEntry {
+            origin: None,
             id: id.into(),
             role: zeron_doc::MessageRole::Assistant,
             parts: vec![zeron_doc::MessagePart::Text {
