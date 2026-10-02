@@ -288,7 +288,8 @@ fn main() -> anyhow::Result<()> {
                     // the page; the passive overlay must leave native input alone.
                     pause(cx, 1000).await;
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_visible()), "toolbar tooltip did not paint on the overlay plane");
-                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused() && !b.fixture_overlay_at((left+100.) as f64,(top+100.) as f64)), "tooltip stole native focus or page hit testing");
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused()), "tooltip stole native focus");
+                    anyhow::ensure!(!first.read_with(cx, |b,_| b.fixture_overlay_at((left+100.) as f64,(top+100.) as f64)), "tooltip stole page hit testing");
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_visibility_changes() == before), "tooltip hid the page");
                     capture(&output, "browser-tooltip-dark")?;
                     // Also dwell on the tab itself: its URL tooltip is the
@@ -401,8 +402,12 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("Browser fixture: resize drag and CSS viewport passed");
                     // Left sidebar does not occlude the browser at any point.
                     for _ in 0..4 {
+                        first.read_with(cx, |b, _| b.fixture_focus());
                         window.update(cx,|s,_,cx|s.fixture_toggle_sidebar(false,cx))?;
                         for _ in 0..20 {pause(cx,16).await;anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_native_visible() && b.fixture_visibility_changes()==before),"left sidebar toggle hid the browser");}
+                        let (x, y) = first.read_with(cx, |b, _| b.fixture_origin());
+                        anyhow::ensure!(first.read_with(cx, |b, _| b.fixture_focused()), "left sidebar toggle stole native focus");
+                        anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_overlay_at((x+100.) as f64, (y+100.) as f64)), "idle sidebar controls blocked native page input");
                     }
                     eprintln!("Browser fixture: left sidebar transitions passed");
                     // Reverse the right sidebar mid-animation. It must remain
