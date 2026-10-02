@@ -787,6 +787,9 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    pub remote_desktop_profiles: Vec<crate::remote_desktop::profiles::Profile>,
+    /// Retryable keyring deletions; contains identifiers, never passwords.
+    pub remote_desktop_credential_cleanup: Vec<String>,
     pub dictation_enabled: bool,
     /// Dictation microphone as a `zeron_voice::InputDevice` id; `None`
     /// follows the system default.
@@ -974,6 +977,8 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            remote_desktop_profiles: Vec::new(),
+            remote_desktop_credential_cleanup: Vec::new(),
             dictation_enabled: false,
             dictation_input: None,
             window_geometry: None,
@@ -1613,6 +1618,8 @@ impl UiSettings {
             }};
         }
         merge!(
+            remote_desktop_profiles,
+            remote_desktop_credential_cleanup,
             dictation_enabled,
             dictation_input,
             window_geometry,
@@ -1843,7 +1850,12 @@ impl UiSettings {
                     }
                     serde_json::from_value::<UiSettings>(value)
                 }) {
-                    Ok(settings) => settings.migrated().clamped(),
+                    Ok(mut settings) => {
+                        crate::remote_desktop::profiles::repair_duplicate_ids(
+                            &mut settings.remote_desktop_profiles,
+                        );
+                        settings.migrated().clamped()
+                    }
                     Err(err) => {
                         tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
                         Self::default()
@@ -2615,6 +2627,8 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
+            remote_desktop_profiles: Vec::new(),
+            remote_desktop_credential_cleanup: Vec::new(),
             dictation_enabled: false,
             dictation_input: Some("coreaudio:usb-mic".into()),
             window_geometry: None,

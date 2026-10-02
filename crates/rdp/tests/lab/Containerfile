@@ -1,0 +1,5 @@
+FROM docker.io/library/ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xrdp xorgxrdp xserver-xorg-core openbox xterm xclip dbus-x11 locales && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/bash rdptest && echo 'rdptest:rdptest' | chpasswd && adduser xrdp ssl-cert && locale-gen en_US.UTF-8
+RUN printf '#!/bin/sh\nexport LANG=en_US.UTF-8\nunset DBUS_SESSION_BUS_ADDRESS\nxterm -geometry 90x24+40+40 -title "Zeron RDP integration fixture" &\nexec dbus-run-session openbox-session\n' > /etc/xrdp/startwm.sh && chmod +x /etc/xrdp/startwm.sh
+CMD ["/bin/sh", "-c", "mkdir -p /run/xrdp && rm -f /run/xrdp/*.pid /tmp/.X10-lock && /usr/sbin/xrdp-sesman && exec /usr/sbin/xrdp --nodaemon"]

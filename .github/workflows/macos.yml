@@ -7,7 +7,10 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'vendor/ironrdp-*/**'
       - 'edge/**'
+      - 'scripts/test-remote-desktop.sh'
+      - 'scripts/collect-rdp-licenses.py'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/ci/run-macos-fixture.sh'
       - 'dist/macos/Info.plist'
@@ -20,7 +23,10 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'vendor/ironrdp-*/**'
       - 'edge/**'
+      - 'scripts/test-remote-desktop.sh'
+      - 'scripts/collect-rdp-licenses.py'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'scripts/ci/run-macos-fixture.sh'
       - 'dist/macos/Info.plist'
@@ -77,7 +83,7 @@ jobs:
             return files.some(file => affectsIOS(file.filename)
               || affectsIOS(file.previous_filename));
 
-  # Updater and preview tests, native UI regressions and the two native WebKit fixtures. Everything is
+  # Updater and preview tests, native UI regressions and the WebKit and RDP fixtures. Everything is
   # compiled once (one cargo invocation, so dependencies are built once) and then run.
   macos-native:
     runs-on: macos-latest
@@ -106,9 +112,10 @@ jobs:
         run: |
           cargo nextest run --no-run --locked \
             -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text \
-            --features zeron-ui/browser-fixture --lib --tests
+            --features zeron-ui/browser-fixture,zeron-ui/remote-desktop-fixture --lib --tests
           cargo build --locked -p zeron-update -p zeron-preview -p zeron-ui \
-            --features zeron-ui/browser-fixture --example browser-fixture --example preview-fixture
+            --features zeron-ui/browser-fixture,zeron-ui/remote-desktop-fixture \
+            --example browser-fixture --example preview-fixture --example remote-desktop-fixture
       - name: Check macOS application
         env:
           # Match the old `cargo check --release`: no debug assertions.
@@ -120,8 +127,19 @@ jobs:
           # tests run on Linux in ios-core.
           cargo nextest run --no-fail-fast --locked \
             -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text \
-            --features zeron-ui/browser-fixture --lib --tests \
-            -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/)))'
+            --features zeron-ui/browser-fixture,zeron-ui/remote-desktop-fixture --lib --tests \
+            -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/) | test(remote_desktop)))'
+      - name: Native Remote Desktop rendering
+        env:
+          RDP_FIXTURE_BINARY: target/debug/examples/remote-desktop-fixture
+        run: scripts/test-remote-desktop.sh "$RUNNER_TEMP/rdp-native"
+      - name: Upload macOS Remote Desktop rendering evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-native-macos
+          path: ${{ runner.temp }}/rdp-native
+          if-no-files-found: warn
       - name: Native browser regression and screenshots
         timeout-minutes: 7
         env:
