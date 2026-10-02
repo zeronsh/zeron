@@ -9374,6 +9374,9 @@ impl Composer {
             || (!active && frame.is_some_and(|f| f.mode != Mode::Live));
         let tooltip = label.clone();
         let composer = cx.entity().downgrade();
+        // Per-composer key: the main and sidechat composers share this
+        // render, and the hover fade store is keyed by string.
+        let hover_key: SharedString = format!("composer-dictation-{}", cx.entity_id()).into();
         let centered = || {
             div()
                 .absolute()
@@ -9400,10 +9403,10 @@ impl Composer {
             .cursor_pointer()
             // At rest it is a sibling of the paperclip: the same eased ink
             // wash. Live, it is the accent plate and dims like Send.
-            .on_hover(motion::hover_listener("composer-dictation"))
+            .on_hover(motion::hover_listener(hover_key.clone()))
             .when(t <= 0.0, |el| {
                 el.bg(motion::hover_blend(
-                    "composer-dictation",
+                    &hover_key,
                     gpui::transparent_black(),
                     crate::theme::ink(0.10),
                 ))
@@ -10318,6 +10321,7 @@ impl Render for Composer {
         let dictating = self.input.read(cx).dictation.phase.active();
         let microphone = self.render_dictation_button(voice_t, voice_frame.as_ref(), cx);
         let attach_action = cx.entity().downgrade();
+        let attach_hover_key: SharedString = format!("composer-attach-{}", cx.entity_id()).into();
         // Attach button — opens the native image picker (the original's hidden
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. The leading utility group owns the spacing between
@@ -10333,11 +10337,11 @@ impl Render for Composer {
             .cursor_pointer()
             // zeron composer-actions.tsx attach: `transition-colors`.
             .bg(motion::hover_blend(
-                "composer-attach",
+                &attach_hover_key,
                 gpui::transparent_black(),
                 crate::theme::ink(0.10),
             ))
-            .on_hover(motion::hover_listener("composer-attach"))
+            .on_hover(motion::hover_listener(attach_hover_key))
             .relative()
             // While dictating, the attachment slot becomes Cancel: the
             // paperclip and the cross swap with a scale and fade. The action
