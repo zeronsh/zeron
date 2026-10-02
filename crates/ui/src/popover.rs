@@ -1816,7 +1816,7 @@ pub fn schedule_scrollbar_hide<T: 'static>(bar: &mut MenuScrollbarState, cx: &mu
 /// the list, and [`rail`] folds the whole treatment — activity note, hide
 /// scheduling, metrics, visuals, and all six pointer listeners — into one
 /// call.
-pub trait ScrollRailHost: 'static {
+pub trait ScrollRailHost: Sized + 'static {
     /// The rail's hover/drag interaction state.
     fn rail_bar(&mut self) -> &mut MenuScrollbarState;
 
@@ -1833,7 +1833,7 @@ pub trait ScrollRailHost: 'static {
     /// [`Self::rail_scroll`]; handle-less owners override to build
     /// [`MenuScrollbarMetrics`] from their own geometry and report their
     /// position proxy via [`MenuScrollbarState::note_scroll_offset`].
-    fn rail_metrics(&mut self) -> Option<MenuScrollbarMetrics> {
+    fn rail_metrics(&mut self, _cx: &mut Context<Self>) -> Option<MenuScrollbarMetrics> {
         let scroll = self.rail_scroll()?;
         self.rail_bar().note_scroll(&scroll);
         self.rail_bar().metrics(&scroll)
@@ -1844,7 +1844,7 @@ pub trait ScrollRailHost: 'static {
     /// [`Self::rail_scroll`]'s handle; handle-less owners engage via
     /// [`MenuScrollbarState::begin_press_in`] and apply the initial
     /// [`MenuScrollbarState::drag_target_in`] target themselves.
-    fn rail_press(&mut self, pointer_y: Pixels) -> bool {
+    fn rail_press(&mut self, pointer_y: Pixels, _cx: &mut Context<Self>) -> bool {
         self.rail_scroll()
             .is_some_and(|scroll| self.rail_bar().begin_press(&scroll, pointer_y))
     }
@@ -1853,7 +1853,7 @@ pub trait ScrollRailHost: 'static {
     /// the scroll position. The default drags [`Self::rail_scroll`]'s handle;
     /// handle-less owners apply [`MenuScrollbarState::drag_target_in`]
     /// themselves.
-    fn rail_drag_to(&mut self, pointer_y: Pixels) -> bool {
+    fn rail_drag_to(&mut self, pointer_y: Pixels, _cx: &mut Context<Self>) -> bool {
         self.rail_scroll()
             .is_some_and(|scroll| self.rail_bar().drag_to(&scroll, pointer_y))
     }
@@ -1874,7 +1874,7 @@ pub fn rail<V: ScrollRailHost>(
     theme: &Theme,
     cx: &mut Context<V>,
 ) -> Option<AnyElement> {
-    let metrics = host.rail_metrics()?;
+    let metrics = host.rail_metrics(cx)?;
     schedule_scrollbar_hide(host.rail_bar(), cx);
     let strip = host.rail_bar().render_rail(theme, metrics)?;
     Some(
@@ -1888,7 +1888,7 @@ pub fn rail<V: ScrollRailHost>(
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    if this.rail_press(event.position.y) {
+                    if this.rail_press(event.position.y, cx) {
                         cx.stop_propagation();
                         cx.notify();
                     }
@@ -1900,7 +1900,7 @@ pub fn rail<V: ScrollRailHost>(
             })
             .on_drag_move(cx.listener(
                 |this, event: &gpui::DragMoveEvent<MenuScrollbarDrag>, _, cx| {
-                    if this.rail_drag_to(event.event.position.y) {
+                    if this.rail_drag_to(event.event.position.y, cx) {
                         cx.notify();
                     }
                 },

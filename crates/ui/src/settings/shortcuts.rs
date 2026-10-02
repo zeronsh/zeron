@@ -328,7 +328,7 @@ impl ShortcutsPage {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.rail_drag_to(event.event.position.y) {
+        if self.rail_drag_to(event.event.position.y, cx) {
             cx.notify();
         }
     }
