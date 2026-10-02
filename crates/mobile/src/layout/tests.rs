@@ -561,3 +561,75 @@ fn links_get_hit_regions() {
         assert!(!links.is_empty(), "no link hits for {md:?}");
     }
 }
+
+/// Forwards revisions so a test can wait on the worker thread.
+struct Revisions(Mutex<mpsc::Sender<u64>>);
+impl LayoutListener for Revisions {
+    fn frame_ready(&self, revision: u64) {
+        let _ = lock(&self.0).send(revision);
+    }
+}
+
+#[test]
+fn a_panicking_pass_keeps_the_worker_and_the_last_frame() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let wait = Duration::from_secs(20);
+    let ts = text_system();
+    let shared = Arc::new(Shared { frame: Mutex::new(Arc::new(LayoutFrame::empty())) });
+    let (ready_tx, ready) = mpsc::channel();
+    let mut w = Worker::new(&ts, shared.clone(), Arc::new(Revisions(Mutex::new(ready_tx))));
+    w.width = 390.0;
+    let panic_next_pass = w.panic_next_pass.clone();
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || w.run(rx));
+
+    tx.send(Msg::Input(transcript(1))).unwrap();
+    assert_eq!(ready.recv_timeout(wait).unwrap(), 1);
+    let good = lock(&shared.frame).clone();
+
+    // Wait for the pass to start (the flag is taken on entry) before queueing
+    // more, so the next input is not coalesced into the one that panics.
+    panic_next_pass.store(true, Ordering::SeqCst);
+    tx.send(Msg::Input(transcript_one("replacement"))).unwrap();
+    let deadline = Instant::now() + wait;
+    while panic_next_pass.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the injected pass never ran");
+        thread::yield_now();
+    }
+
+    tx.send(Msg::Input(transcript(2))).unwrap();
+    // The panicked pass published nothing and did not consume a revision.
+    let revision = ready.recv_timeout(wait).expect("the worker survives a panicking pass");
+    assert_eq!(revision, 2);
+    assert!(lock(&shared.frame).row_count() > good.row_count(), "the next input is laid out");
+
+    tx.send(Msg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn a_poisoned_lock_does_not_panic_ffi_calls() {
+    let view = TranscriptView::new(text_system(), Arc::new(Quiet));
+    let poison = |f: &dyn Fn()| {
+        let _ = catch_unwind(AssertUnwindSafe(f));
+    };
+    poison(&|| {
+        let _guard = view.shared.frame.lock().unwrap();
+        panic!("poison the frame");
+    });
+    poison(&|| {
+        let _guard = view.tx.lock().unwrap();
+        panic!("poison the sender");
+    });
+    poison(&|| {
+        let _guard = view.watch.lock().unwrap();
+        panic!("poison the watch");
+    });
+    assert!(view.shared.frame.is_poisoned() && view.tx.is_poisoned() && view.watch.is_poisoned());
+
+    assert_eq!(view.frame().revision(), 0);
+    view.set_viewport(390.0, 1.0);
+    view.close();
+}

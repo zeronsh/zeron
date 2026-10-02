@@ -224,7 +224,7 @@ impl Typography {
                 size,
                 ligatures,
             };
-            self.registry.lock().unwrap().insert(id.0, desc.clone());
+            super::lock(&self.registry).insert(id.0, desc.clone());
             self.table.push(desc);
         }
         resolved
