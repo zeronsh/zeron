@@ -243,8 +243,82 @@ pub fn offered_options(
 // Pure: folder-browser navigation (used by the shell's add-space flow)
 // ---------------------------------------------------------------------------
 
+/// A Windows-shaped path: a drive (`C:`, `C:\…`, `C:/…`) or a UNC share
+/// (`\\server\share`). Listings come from whichever device is browsed — a Mac
+/// can browse a Windows host — so the path's shape, not the UI's own OS,
+/// decides the separator.
+pub fn is_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || path.starts_with(r"\\")
+}
+
+/// A Windows path's root (`C:\`, `\\server\share\`) and folder segments.
+/// Either separator splits: spaces saved before separators were normalized
+/// mix them (`C:\Users\w/dev`).
+fn windows_parts(path: &str) -> (String, Vec<&str>) {
+    let separator = |c: char| c == '\\' || c == '/';
+    if let Some(unc) = path.strip_prefix(r"\\") {
+        let mut parts = unc.split(separator).filter(|s| !s.is_empty());
+        let server = parts.next().unwrap_or_default();
+        let root = match parts.next() {
+            Some(share) => format!(r"\\{server}\{share}\"),
+            None => format!(r"\\{server}\"),
+        };
+        return (root, parts.collect());
+    }
+    // `is_windows_path` guarantees an ASCII `X:` prefix, so byte 2 is a
+    // char boundary.
+    let (drive, rest) = path.split_at(2);
+    let segments = rest.split(separator).filter(|s| !s.is_empty()).collect();
+    (format!("{}\\", drive.to_ascii_uppercase()), segments)
+}
+
+fn windows_join(root: &str, segments: &[&str]) -> String {
+    format!("{root}{}", segments.join("\\"))
+}
+
+/// Comparison form of a path: Windows paths ignore separator style and case
+/// (`C:\Users\w/dev` names the same folder as `c:\users\w\dev`); others only
+/// drop a trailing `/`.
+fn path_key(path: &str) -> String {
+    if is_windows_path(path) {
+        let (root, segments) = windows_parts(path);
+        return windows_join(&root, &segments).to_lowercase();
+    }
+    match path.trim_end_matches('/') {
+        "" if path.starts_with('/') => "/".to_string(),
+        trimmed => trimmed.to_string(),
+    }
+}
+
+/// Whether two paths name the same folder.
+pub fn same_path(a: &str, b: &str) -> bool {
+    path_key(a) == path_key(b)
+}
+
+/// Segment-aware "is `path` at or under `base`" (`/media/a` is not under
+/// `/media/ab`); a root base covers everything.
+pub fn path_under(path: &str, base: &str) -> bool {
+    let separator = if is_windows_path(base) { '\\' } else { '/' };
+    let (path, base) = (path_key(path), path_key(base));
+    let base = base.trim_end_matches(separator);
+    base.is_empty() || path == base || path.starts_with(&format!("{base}{separator}"))
+}
+
+/// Whether a palette query reads as a path to jump to (`/mnt`, `~/code`,
+/// `C:\code`, `\\server\share`) rather than a folder-name search.
+pub fn is_path_query(query: &str) -> bool {
+    query.starts_with(['/', '~']) || is_windows_path(query)
+}
+
 /// Parent of an absolute path; `None` at the filesystem root.
 pub fn parent_path(path: &str) -> Option<String> {
+    if is_windows_path(path) {
+        let (root, segments) = windows_parts(path);
+        let (_, parents) = segments.split_last()?;
+        return Some(windows_join(&root, parents));
+    }
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         return None; // was "/" (or empty)
@@ -258,6 +332,11 @@ pub fn parent_path(path: &str) -> Option<String> {
 
 /// Join a listing path and an entry name.
 pub fn child_path(base: &str, name: &str) -> String {
+    if is_windows_path(base) {
+        let (root, mut segments) = windows_parts(base);
+        segments.push(name);
+        return windows_join(&root, &segments);
+    }
     if base.ends_with('/') {
         format!("{base}{name}")
     } else {
@@ -304,13 +383,28 @@ pub fn segment_target(names: &[&str], query: &str) -> Option<usize> {
     hits.next().is_none().then_some(ix)
 }
 
-/// Interpret a palette query as a typed path jump: absolute (`/disk2/projects`)
-/// or home-relative (`~`, `~/github`). Returns the absolute path to browse,
-/// trailing slash trimmed. `home` is the device's resolved home — `None`
-/// until the first listing lands, when `~` can't expand yet. A query like
-/// `~foo` is a folder name, not a path.
+/// Interpret a palette query as a typed path jump: absolute (`/disk2/projects`,
+/// `D:\projects`) or home-relative (`~`, `~/github`, `~\github` on a Windows
+/// device). Returns the absolute path to browse, trailing separator trimmed.
+/// `home` is the device's resolved home — `None` until the first listing
+/// lands, when `~` can't expand yet. A query like `~foo` is a folder name,
+/// not a path.
 pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
     let query = query.trim();
+    if is_windows_path(query) {
+        let (root, segments) = windows_parts(query);
+        return Some(windows_join(&root, &segments));
+    }
+    if let Some(rest) = query.strip_prefix('~')
+        && let Some(home) = home.filter(|home| is_windows_path(home))
+    {
+        if !rest.is_empty() && !rest.starts_with(['\\', '/']) {
+            return None;
+        }
+        let (root, mut segments) = windows_parts(home);
+        segments.extend(rest.split(['\\', '/']).filter(|s| !s.is_empty()));
+        return Some(windows_join(&root, &segments));
+    }
     if let Some(rest) = query.strip_prefix('~') {
         let home = home?.trim_end_matches('/');
         if rest.is_empty() {
@@ -336,6 +430,18 @@ pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
 
 /// Breadcrumb segments for a path: `(label, full path)`, root first.
 pub fn breadcrumbs(path: &str) -> Vec<(String, String)> {
+    if is_windows_path(path) {
+        let (root, segments) = windows_parts(path);
+        let label = root.trim_end_matches('\\').to_string();
+        let mut out = vec![(label, root.clone())];
+        for depth in 1..=segments.len() {
+            out.push((
+                segments[depth - 1].to_string(),
+                windows_join(&root, &segments[..depth]),
+            ));
+        }
+        return out;
+    }
     let mut out: Vec<(String, String)> = vec![("/".to_string(), "/".to_string())];
     let mut acc = String::new();
     for segment in path.split('/').filter(|s| !s.is_empty()) {
@@ -8678,6 +8784,61 @@ mod tests {
     }
 
     #[test]
+    fn windows_folder_paths_and_breadcrumbs() {
+        // Windows listings join with `\`, never `/` — a drive root included.
+        assert_eq!(child_path(r"C:\Users\w", "dev"), r"C:\Users\w\dev");
+        assert_eq!(child_path(r"D:\", "games"), r"D:\games");
+        // Spaces saved by older builds mix separators; they normalize.
+        assert_eq!(
+            child_path(r"C:\Users\w/Documents", "x"),
+            r"C:\Users\w\Documents\x"
+        );
+        assert_eq!(parent_path(r"C:\Users\w"), Some(r"C:\Users".to_string()));
+        assert_eq!(parent_path(r"C:\Users"), Some(r"C:\".to_string()));
+        assert_eq!(
+            parent_path(r"C:\Users\w/Documents"),
+            Some(r"C:\Users\w".to_string())
+        );
+        assert_eq!(parent_path(r"C:\"), None);
+        assert_eq!(child_path(r"\\nas\share", "dev"), r"\\nas\share\dev");
+        assert_eq!(
+            parent_path(r"\\nas\share\dev"),
+            Some(r"\\nas\share\".to_string())
+        );
+        assert_eq!(parent_path(r"\\nas\share"), None);
+
+        // Every crumb is a browsable path: no leading `/` before the drive.
+        let crumbs = breadcrumbs(r"C:\Users\w/Documents");
+        let labels: Vec<&str> = crumbs.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["C:", "Users", "w", "Documents"]);
+        assert_eq!(crumbs[0].1, r"C:\");
+        assert_eq!(crumbs[2].1, r"C:\Users\w");
+        assert_eq!(crumbs[3].1, r"C:\Users\w\Documents");
+        assert_eq!(breadcrumbs(r"D:\").len(), 1);
+    }
+
+    #[test]
+    fn paths_compare_by_shape() {
+        // A space saved as `C:\Users\w/dev` is the folder a native `\` path
+        // names, whatever the case; POSIX paths stay case-sensitive.
+        assert!(same_path(r"C:\Users\w/dev", r"C:\Users\w\dev"));
+        assert!(same_path(r"c:\users\w\dev\", r"C:\Users\w\dev"));
+        assert!(!same_path(r"C:\Users\w\dev", r"C:\Users\w\devel"));
+        assert!(same_path("/home/w/dev/", "/home/w/dev"));
+        assert!(!same_path("/home/w/Dev", "/home/w/dev"));
+        assert!(same_path("/", "/"));
+
+        assert!(path_under(r"C:\Users\w\dev", r"C:\Users\w"));
+        assert!(path_under(r"C:\Users\w", r"C:\Users\w/"));
+        assert!(path_under(r"C:\Users\w", r"C:\"));
+        assert!(!path_under(r"C:\Users\wx", r"C:\Users\w"));
+        assert!(!path_under(r"D:\games", r"C:\"));
+        assert!(path_under("/media/a", "/media/a"));
+        assert!(!path_under("/media/ab", "/media/a"));
+        assert!(path_under("/media/a", "/"));
+    }
+
+    #[test]
     fn completion_prefix_lengths() {
         // Case-insensitive; the length indexes into the NAME's bytes.
         assert_eq!(completion_prefix_len("Documents", "doc"), Some(3));
@@ -8727,6 +8888,38 @@ mod tests {
         // `~` can't expand before the device's home is known.
         assert_eq!(typed_path_target("~/github", None), None);
         assert_eq!(typed_path_target("/disk2", None), Some("/disk2".into()));
+    }
+
+    #[test]
+    fn typed_path_target_expands_windows_paths() {
+        let home = Some(r"C:\Users\wing");
+        assert_eq!(
+            typed_path_target(r"D:\projects\", home),
+            Some(r"D:\projects".into())
+        );
+        assert_eq!(
+            typed_path_target("d:/projects", home),
+            Some(r"D:\projects".into())
+        );
+        assert_eq!(typed_path_target("D:", None), Some(r"D:\".into()));
+        assert_eq!(
+            typed_path_target(r"\\nas\share\", None),
+            Some(r"\\nas\share\".into())
+        );
+        assert_eq!(typed_path_target("~", home), Some(r"C:\Users\wing".into()));
+        assert_eq!(
+            typed_path_target(r"~\github\", home),
+            Some(r"C:\Users\wing\github".into())
+        );
+        assert_eq!(
+            typed_path_target("~/github", home),
+            Some(r"C:\Users\wing\github".into())
+        );
+        assert_eq!(typed_path_target("~x", home), None);
+        assert!(is_path_query(r"C:\code"));
+        assert!(is_path_query(r"\\nas\share"));
+        assert!(is_path_query("~/code"));
+        assert!(!is_path_query("code"));
     }
 
     #[test]
