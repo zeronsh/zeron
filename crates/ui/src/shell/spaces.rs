@@ -5192,10 +5192,9 @@ impl Shell {
             cx.new(|cx| ComposerInput::with_context("Search devices…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
-                // Typing `/` after a query that names a folder descends into
-                // it — the query reads as a path segment, so the slash IS the
-                // pick (shell-style). Otherwise the slash stays in the query
-                // (it matches nothing, which is honest feedback).
+                // Typed paths keep the browser on the query's directory.
+                // A folder name followed by `/` descends as though picked;
+                // an ambiguous or unmatched name leaves the slash in place.
                 if this.add_space_slash_descend(cx) {
                     return;
                 }
@@ -5392,7 +5391,8 @@ impl Shell {
         }));
     }
 
-    /// The current listing's folder rows filtered by the search query
+    /// The current listing's folder rows filtered by the search query's last
+    /// segment for typed paths, or the whole query for folder names
     /// (prefix matches first — `popover::filter_indices`).
     fn add_space_filtered(&self, cx: &App) -> Vec<zeron_proto::FolderEntry> {
         let Some(flow) = self.add_space.as_ref() else {
@@ -5406,8 +5406,11 @@ impl Shell {
         };
         let dirs = browser_rows(listing);
         let query = flow.search.read(cx).text().to_string();
+        let query = crate::pickers::typed_path_query(&query, flow.home.as_deref())
+            .map(|(_, segment)| segment)
+            .unwrap_or(&query);
         let names: Vec<&str> = dirs.iter().map(|e| e.name.as_str()).collect();
-        popover::filter_indices(&query, &names)
+        popover::filter_indices(query, &names)
             .into_iter()
             .map(|ix| dirs[ix].clone())
             .collect()
@@ -5415,8 +5418,8 @@ impl Shell {
 
     /// Descend into the highlighted (filtered) folder; clears the query.
     /// A path-shaped query with no matching rows browses the typed path
-    /// instead — `/disk2⏎` must work, not sit on "No folders match" (an
-    /// absolute query can never match a folder name anyway).
+    /// instead, preserving the query — `/disk2⏎` must work, not sit on
+    /// "No folders match".
     fn add_space_open_active(&mut self, cx: &mut Context<Self>) {
         let Some(flow) = self.add_space.as_ref() else {
             return;
@@ -5437,7 +5440,7 @@ impl Shell {
             ProjectStep::Folders => {}
         }
         let rows = self.add_space_filtered(cx);
-        let Some(flow) = self.add_space.as_ref() else {
+        let Some(flow) = self.add_space.as_mut() else {
             return;
         };
         if rows.is_empty() {
@@ -5445,7 +5448,8 @@ impl Shell {
             if text.starts_with('/') || text.starts_with('~') {
                 if let Some(target) = crate::pickers::typed_path_target(&text, flow.home.as_deref())
                 {
-                    self.add_space_descend(target, false, cx);
+                    flow.browser_repo = false;
+                    self.load_space_folders(Some(target), cx);
                 }
             }
             return;
@@ -5466,12 +5470,10 @@ impl Shell {
         self.load_space_folders(Some(full), cx);
     }
 
-    /// Slash-descend: when the query ends in `/` and the part before it names
-    /// a folder of the current listing (exact name — matching casing wins
-    /// over a case-colliding sibling — else a unique prefix), descend into it
-    /// as though it were picked. Returns whether it fired —
-    /// descending clears the query, so the caller must not keep acting on the
-    /// old text.
+    /// Browse a typed path's directory on every edit, preserving the query.
+    /// For folder names, a trailing `/` descends into an exact match (matching
+    /// casing wins) or a unique prefix and clears the query as though picked.
+    /// Returns whether navigation fired.
     fn add_space_slash_descend(&mut self, cx: &mut Context<Self>) -> bool {
         if self
             .add_space
@@ -5480,23 +5482,26 @@ impl Shell {
         {
             return false;
         }
-        // A typed PATH jump: an absolute (`/disk2/`) or home-relative (`~/x/`)
-        // query browses that path directly — mounts at unconventional roots
-        // (and anywhere else) are reachable without a Locations row. Same
-        // trailing-`/` trigger as the folder-name descend below.
         {
-            let Some(flow) = self.add_space.as_ref() else {
+            let Some(flow) = self.add_space.as_mut() else {
                 return false;
             };
             let text = flow.search.read(cx).text().to_string();
-            if text.ends_with('/') && (text.starts_with('/') || text.starts_with('~')) {
-                let target = crate::pickers::typed_path_target(&text, flow.home.as_deref());
-                let Some(target) = target else {
-                    // Path-shaped but unresolvable (`~/…` before home is
-                    // known) — leave the query alone.
+            if text.starts_with('/') || text.starts_with('~') {
+                let Some((target, _)) =
+                    crate::pickers::typed_path_query(&text, flow.home.as_deref())
+                else {
                     return false;
                 };
-                self.add_space_descend(target, false, cx);
+                let current = flow
+                    .browser_path
+                    .as_deref()
+                    .or_else(|| flow.browser.ready().map(|listing| listing.path.as_str()));
+                if current == Some(target.as_str()) {
+                    return false;
+                }
+                flow.browser_repo = false;
+                self.load_space_folders(Some(target), cx);
                 return true;
             }
         }
@@ -5530,33 +5535,40 @@ impl Shell {
         true
     }
 
-    /// The tab-completion target: the highlighted row when the query prefixes
+    /// The tab-completion target: the highlighted row when the last segment prefixes
     /// its name, else the first prefix match (filtering ranks those first).
-    /// `(full name, remaining suffix)`; `None` on an empty query or when the
-    /// match is already complete.
+    /// `(completed query, remaining suffix)`, keeping any typed directory;
+    /// `None` on an empty segment or when the match is already complete.
     fn add_space_completion(&self, cx: &App) -> Option<(String, String)> {
         let flow = self.add_space.as_ref()?;
-        let query = flow.search.read(cx).text().to_string();
+        let text = flow.search.read(cx).text().to_string();
+        let query = crate::pickers::typed_path_query(&text, flow.home.as_deref())
+            .map(|(_, segment)| segment)
+            .unwrap_or(&text);
         if query.is_empty() {
             return None;
         }
         let rows = self.add_space_filtered(cx);
         let entry = rows
             .get(flow.active)
-            .filter(|e| completion_prefix_len(&e.name, &query).is_some())
+            .filter(|e| completion_prefix_len(&e.name, query).is_some())
             .or_else(|| {
                 rows.iter()
-                    .find(|e| completion_prefix_len(&e.name, &query).is_some())
+                    .find(|e| completion_prefix_len(&e.name, query).is_some())
             })?;
-        let len = completion_prefix_len(&entry.name, &query)?;
+        let len = completion_prefix_len(&entry.name, query)?;
         if len >= entry.name.len() {
             return None;
         }
-        Some((entry.name.clone(), entry.name[len..].to_string()))
+        let directory = &text[..text.len() - query.len()];
+        Some((
+            format!("{directory}{}", entry.name),
+            entry.name[len..].to_string(),
+        ))
     }
 
-    /// ⇥: accept the completion — the query becomes the full folder name
-    /// (the ghost the input was previewing). Descending stays on `/`/⏎.
+    /// ⇥: accept the completion (the ghost the input was previewing), keeping
+    /// any typed directory prefix. Descending stays on `/`/⏎.
     fn add_space_accept_completion(&mut self, cx: &mut Context<Self>) {
         let Some((name, _)) = self.add_space_completion(cx) else {
             return;
@@ -5920,6 +5932,13 @@ impl Shell {
             input.set_ghost(ghost, cx);
         });
         let query = search.read(cx).text().to_string();
+        let query = if step == ProjectStep::Folders {
+            crate::pickers::typed_path_query(&query, home.as_deref())
+                .map(|(_, segment)| segment)
+                .unwrap_or(&query)
+        } else {
+            &query
+        };
         // Cmd+K's row rhythm: 30px rows, 16px muted glyphs, 8px list gutters.
         let row = |ix: usize| {
             popover::menu_row(&theme, ix == active, format!("project-result-{ix}"))
@@ -5948,7 +5967,7 @@ impl Shell {
         let label_el = |label: String| {
             div().flex_1().min_w_0().child(popover::search_highlight(
                 label.into(),
-                Some(&query),
+                Some(query),
                 &theme,
             ))
         };
@@ -6801,6 +6820,140 @@ mod project_flow_tests {
         let mut deep = vec!["a", "b", "c", "d", "e"];
         assert_eq!(fold_crumb_folders(&mut deep), ["a", "b", "c"]);
         assert_eq!(deep, ["d", "e"]);
+    }
+
+    #[gpui::test]
+    fn typed_path_slash_keeps_search_query(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let shell = cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let search = shell.update(cx, |shell, cx| {
+            shell.open_add_space(cx);
+            let flow = shell.add_space.as_mut().unwrap();
+            flow.step = ProjectStep::Folders;
+            flow.home = Some("/home/wing".into());
+            flow.search.clone()
+        });
+        search.update(cx, |input, cx| input.set_text("~", cx));
+        search.update(cx, |input, cx| input.set_text("~/", cx));
+        shell.update(cx, |shell, cx| {
+            let flow = shell.add_space.as_ref().unwrap();
+            assert_eq!(flow.browser_path.as_deref(), Some("/home/wing"));
+            assert_eq!(flow.search.read(cx).text(), "~/");
+        });
+        let listing = |path: &str| FolderListing {
+            path: path.into(),
+            entries: ["Personal", "Downloads"]
+                .into_iter()
+                .map(|name| zeron_proto::FolderEntry {
+                    name: name.into(),
+                    is_dir: true,
+                    is_repo: false,
+                })
+                .collect(),
+            truncated: false,
+        };
+        for (prefix, directory) in [("~/", "/home/wing"), ("/disk2/", "/disk2")] {
+            search.update(cx, |input, cx| input.set_text(prefix, cx));
+            shell.update(cx, |shell, cx| {
+                let flow = shell.add_space.as_mut().unwrap();
+                assert_eq!(flow.browser_path.as_deref(), Some(directory));
+                assert_eq!(flow.search.read(cx).text(), prefix);
+                flow.browser = Loadable::Ready(listing(directory));
+                assert_eq!(shell.add_space_filtered(cx).len(), 2);
+                assert!(shell.add_space_completion(cx).is_none());
+            });
+            search.update(cx, |input, cx| input.set_text(format!("{prefix}pe"), cx));
+            shell.update(cx, |shell, cx| {
+                let rows = shell.add_space_filtered(cx);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].name, "Personal");
+                assert_eq!(
+                    shell.add_space_completion(cx),
+                    Some((format!("{prefix}Personal"), "rsonal".into()))
+                );
+                shell.add_space_accept_completion(cx);
+            });
+            search.update(cx, |input, cx| {
+                assert_eq!(input.text(), format!("{prefix}Personal"));
+                input.set_text(format!("{prefix}Personal/"), cx);
+            });
+            shell.update(cx, |shell, cx| {
+                let flow = shell.add_space.as_ref().unwrap();
+                assert_eq!(flow.browser_path, Some(format!("{directory}/Personal")));
+                assert_eq!(flow.search.read(cx).text(), format!("{prefix}Personal/"));
+            });
+            search.update(cx, |input, cx| input.set_text(format!("{prefix}Pers"), cx));
+            shell.update(cx, |shell, cx| {
+                let flow = shell.add_space.as_mut().unwrap();
+                assert_eq!(flow.browser_path.as_deref(), Some(directory));
+                flow.browser = Loadable::Ready(listing(directory));
+                assert_eq!(shell.add_space_filtered(cx)[0].name, "Personal");
+                shell.add_space_open_active(cx);
+                let flow = shell.add_space.as_ref().unwrap();
+                assert_eq!(flow.browser_path, Some(format!("{directory}/Personal")));
+                assert!(flow.search.read(cx).is_empty());
+            });
+        }
+        for (query, directory, target) in [
+            ("~/missing", "/home/wing", "/home/wing/missing"),
+            ("/missing", "/", "/missing"),
+        ] {
+            search.update(cx, |input, cx| input.set_text(query, cx));
+            shell.update(cx, |shell, cx| {
+                shell.add_space.as_mut().unwrap().browser = Loadable::Ready(listing(directory));
+                assert!(shell.add_space_filtered(cx).is_empty());
+                shell.add_space_open_active(cx);
+                let flow = shell.add_space.as_ref().unwrap();
+                assert_eq!(flow.browser_path.as_deref(), Some(target));
+                assert_eq!(flow.search.read(cx).text(), query);
+            });
+        }
+        shell.update(cx, |shell, _| {
+            let flow = shell.add_space.as_mut().unwrap();
+            flow.browser = Loadable::Ready(listing("/home/wing"));
+        });
+        search.update(cx, |input, cx| input.set_text("Personal/", cx));
+        shell.update(cx, |shell, cx| {
+            let flow = shell.add_space.as_ref().unwrap();
+            assert_eq!(flow.browser_path.as_deref(), Some("/home/wing/Personal"));
+            assert!(flow.search.read(cx).is_empty());
+        });
+        search.update(cx, |input, cx| input.set_text("~/Pe", cx));
+        shell.update(cx, |shell, cx| {
+            shell.add_space_descend("/home/wing/Personal".into(), false, cx);
+            let flow = shell.add_space.as_mut().unwrap();
+            assert!(flow.search.read(cx).is_empty());
+            flow.home = None;
+        });
+        for query in ["~", "~/"] {
+            search.update(cx, |input, cx| input.set_text(query, cx));
+            shell.update(cx, |shell, cx| {
+                shell.add_space_open_active(cx);
+                let flow = shell.add_space.as_ref().unwrap();
+                assert_eq!(flow.browser_path.as_deref(), Some("/home/wing/Personal"));
+                assert_eq!(flow.search.read(cx).text(), query);
+            });
+        }
     }
 
     #[gpui::test]

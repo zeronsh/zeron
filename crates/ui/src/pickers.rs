@@ -334,6 +334,21 @@ pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
     None
 }
 
+/// Split a typed path query into the directory to browse and the last segment
+/// to filter or complete. A trailing `/` leaves the segment empty; `~foo`,
+/// relative queries, and home-relative paths without a known home return `None`.
+pub fn typed_path_query<'a>(query: &'a str, home: Option<&str>) -> Option<(String, &'a str)> {
+    if !query.starts_with('/') && !query.starts_with('~') {
+        return None;
+    }
+    if query == "~" {
+        return typed_path_target(query, home).map(|target| (target, ""));
+    }
+    let slash = query.rfind('/')?;
+    let (directory, segment) = query.split_at(slash + 1);
+    typed_path_target(directory, home).map(|target| (target, segment))
+}
+
 /// Breadcrumb segments for a path: `(label, full path)`, root first.
 pub fn breadcrumbs(path: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = vec![("/".to_string(), "/".to_string())];
@@ -8695,6 +8710,40 @@ mod tests {
         // `~` can't expand before the device's home is known.
         assert_eq!(typed_path_target("~/github", None), None);
         assert_eq!(typed_path_target("/disk2", None), Some("/disk2".into()));
+    }
+
+    #[test]
+    fn typed_path_query_splits_directory_and_last_segment() {
+        let home = Some("/home/wing");
+        for (query, directory, segment) in [
+            ("~", "/home/wing", ""),
+            ("~/", "/home/wing", ""),
+            ("~/Per", "/home/wing", "Per"),
+            ("~/Personal/", "/home/wing/Personal", ""),
+            ("~/Pers", "/home/wing", "Pers"),
+            ("/disk2/", "/disk2", ""),
+            ("/disk2/Pro", "/disk2", "Pro"),
+            ("/disk2", "/", "disk2"),
+            ("/", "/", ""),
+            ("~/项目/资", "/home/wing/项目", "资"),
+            ("~/My Projects/New ", "/home/wing/My Projects", "New "),
+        ] {
+            assert_eq!(
+                typed_path_query(query, home),
+                Some((directory.into(), segment)),
+                "{query}"
+            );
+        }
+        for query in ["", "Personal", "Personal/", "~other", "~other/", " /disk2/"] {
+            assert_eq!(typed_path_query(query, home), None, "{query}");
+        }
+        for query in ["~", "~/", "~/Per"] {
+            assert_eq!(typed_path_query(query, None), None, "{query}");
+        }
+        assert_eq!(
+            typed_path_query("/disk2", None),
+            Some(("/".into(), "disk2"))
+        );
     }
 
     #[test]
