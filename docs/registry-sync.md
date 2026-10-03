@@ -131,6 +131,14 @@ confirmed state. Later pin toggles from older apps still take effect through the
 existing `pinned` field clocks. Section syncing itself requires an updated app.
 
 Legacy per-profile UI sections import after an authoritative registry snapshot.
+Device deletion is a registry mutation exposed through `Mutate` as
+`{"op":"deleteDevice","deviceId":"..."}`. It tombstones the device row and, in
+the same batch, its spaces, chats, and session index rows. Projectless chats
+hosted directly by the device are included. The per-chat transcript documents
+are not deleted. Deletion is idempotent, works while the target device is
+offline, and cannot target the engine's current device. Tombstones prevent stale
+registry updates from making removed rows visible again.
+
 Import skips existing section IDs (including deleted ones) and existing explicit
 placements, so replay does not overwrite newer edits. The engine persists the
 registry snapshot and outbox before acknowledging migration; only then does the
