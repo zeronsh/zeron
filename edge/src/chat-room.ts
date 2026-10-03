@@ -478,11 +478,11 @@ export class ChatRoom implements DurableObject {
   private handlePresence(
     ws: WebSocket,
     state: SocketState,
-    header: Record<string, unknown>,
+    _header: Record<string, unknown>,
     payload: Uint8Array
   ): void {
     if (!state.ready || state.device === "") return;
-    const at = typeof header.at === "number" ? header.at : Date.now();
+    const at = Date.now();
     this.presence.set(state.device, at);
     this.sweepPresence();
     // Broadcast-only relay of the opaque payload — no EphemeralStore, no

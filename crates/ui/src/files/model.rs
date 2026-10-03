@@ -695,7 +695,6 @@ fn synthetic_path(directory: &str, kind: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
 
     use super::*;
 
@@ -706,7 +705,7 @@ mod tests {
             name: path.rsplit('/').next().unwrap_or(path).into(),
             kind,
             size: (kind == WorkspaceEntryKind::File).then_some(12),
-            modified_at: Some(Utc::now()),
+            modified_at: Some(zeron_proto::time::now()),
             ignored: false,
             read_only: kind == WorkspaceEntryKind::Symlink,
         }

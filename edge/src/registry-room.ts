@@ -96,6 +96,10 @@ export class RegistryRoom implements DurableObject {
       "CREATE TABLE IF NOT EXISTS rows (kind TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL, deleted INTEGER NOT NULL, del_hlc TEXT, fields TEXT NOT NULL, clocks TEXT NOT NULL, PRIMARY KEY (kind, id))"
     );
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS rows_seq ON rows (seq)");
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS tombstone_receipts (kind TEXT NOT NULL, id TEXT NOT NULL, received_at INTEGER NOT NULL, PRIMARY KEY(kind, id))");
+    // Conservatively start retention now for legacy deletions. Their HLCs
+    // reflect arbitrary client clocks, not how long the server retained them.
+    ctx.storage.sql.exec("INSERT INTO tombstone_receipts SELECT kind, id, ? FROM rows WHERE deleted = 1 ON CONFLICT(kind, id) DO NOTHING", Date.now());
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
@@ -108,6 +112,13 @@ export class RegistryRoom implements DurableObject {
     // pong is runtime-answered and proves nothing about this DO's health.
     // Clients judge liveness by probe frames (crates/sync/src/registry.rs).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    // Older rooms may have stopped their alarm chain after the first backup.
+    // Backfilled tombstones still need an eventual GC even without new writes.
+    ctx.blockConcurrencyWhile(async () => {
+      if (this.hasTombstones() && await ctx.storage.getAlarm() === null) {
+        await ctx.storage.setAlarm(Date.now() + DAY_MS);
+      }
+    });
   }
 
   // ── meta helpers ──────────────────────────────────────────────────────────
@@ -157,6 +168,11 @@ export class RegistryRoom implements DurableObject {
   }
 
   private saveRow(row: Row): void {
+    if (row.deleted) {
+      this.ctx.storage.sql.exec("INSERT INTO tombstone_receipts VALUES (?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET received_at = excluded.received_at", row.kind, row.id, Date.now());
+    } else {
+      this.ctx.storage.sql.exec("DELETE FROM tombstone_receipts WHERE kind = ? AND id = ?", row.kind, row.id);
+    }
     this.ctx.storage.sql.exec(
       "INSERT INTO rows (kind, id, seq, deleted, del_hlc, fields, clocks) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET seq = excluded.seq, deleted = excluded.deleted, del_hlc = excluded.del_hlc, fields = excluded.fields, clocks = excluded.clocks",
       row.kind,
@@ -287,7 +303,8 @@ export class RegistryRoom implements DurableObject {
         full,
         gcFloor,
         rows: full ? this.rowsSince(0) : this.rowsSince(cursor),
-        presence: Object.fromEntries(this.presence)
+        presence: this.presenceSnapshot(),
+        presenceNow: Date.now()
       });
     }
 
@@ -320,6 +337,7 @@ export class RegistryRoom implements DurableObject {
       // from its local rows with their ORIGINAL clocks (registry-core
       // rowToSeedOp) — the ws4 repair recipe, built in.
       this.ctx.storage.sql.exec("DELETE FROM rows");
+      this.ctx.storage.sql.exec("DELETE FROM tombstone_receipts");
       this.ctx.storage.sql.exec("DELETE FROM meta");
       for (const ws of this.ctx.getWebSockets()) {
         try {
@@ -400,7 +418,8 @@ export class RegistryRoom implements DurableObject {
       full,
       gcFloor,
       rows,
-      presence: Object.fromEntries(this.presence)
+      presence: this.presenceSnapshot(),
+      presenceNow: Date.now()
     });
   }
 
@@ -566,9 +585,17 @@ export class RegistryRoom implements DurableObject {
     this.setMeta("pushLog", JSON.stringify(log));
   }
 
-  private handlePresence(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {
+  private presenceSnapshot(): Record<string, number> {
+    const now = Date.now();
+    for (const [device, at] of this.presence) {
+      if (now - at >= 30_000 || at > now) this.presence.delete(device);
+    }
+    return Object.fromEntries(this.presence);
+  }
+
+  private handlePresence(ws: WebSocket, state: SocketState, _frame: Record<string, unknown>): void {
     if (!state.ready || state.device === "") return;
-    const at = typeof frame.at === "number" ? frame.at : Date.now();
+    const at = Date.now();
     this.presence.set(state.device, at);
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === ws) continue;
@@ -601,21 +628,21 @@ export class RegistryRoom implements DurableObject {
 
   /** Daily alarm: tombstone GC + nightly R2 backup of the full table. */
   async alarm(): Promise<void> {
-    if (this.getMeta("backupDirty") !== "1") return; // idle: stop the chain
+    if (this.getMeta("backupDirty") !== "1" && !this.hasTombstones()) return;
 
     // 1. Tombstone GC. Raising gcFloor to the purged rows' max seq forces a
     //    full resync for any cursor that might have missed a purged delete.
     const horizon = Date.now() - TOMBSTONE_RETAIN_MS;
-    const horizonHlc = `${String(horizon).padStart(13, "0")}-`;
     let purgedMaxSeq = 0;
     for (const raw of this.ctx.storage.sql.exec(
-      "SELECT seq FROM rows WHERE deleted = 1 AND del_hlc < ?",
-      horizonHlc
+      "SELECT rows.seq FROM rows JOIN tombstone_receipts USING (kind, id) WHERE rows.deleted = 1 AND received_at < ?",
+      horizon
     )) {
       purgedMaxSeq = Math.max(purgedMaxSeq, raw.seq as number);
     }
     if (purgedMaxSeq > 0) {
-      this.ctx.storage.sql.exec("DELETE FROM rows WHERE deleted = 1 AND del_hlc < ?", horizonHlc);
+      this.ctx.storage.sql.exec("DELETE FROM rows WHERE deleted = 1 AND EXISTS (SELECT 1 FROM tombstone_receipts t WHERE t.kind = rows.kind AND t.id = rows.id AND t.received_at < ?)", horizon);
+      this.ctx.storage.sql.exec("DELETE FROM tombstone_receipts WHERE NOT EXISTS (SELECT 1 FROM rows WHERE rows.kind = tombstone_receipts.kind AND rows.id = tombstone_receipts.id AND rows.deleted = 1)");
       this.setMeta("gcFloor", String(Math.max(this.gcFloor(), purgedMaxSeq)));
       this.setMeta("lastGcAt", String(Date.now()));
     }
@@ -632,6 +659,11 @@ export class RegistryRoom implements DurableObject {
       this.setMeta("backupSeq", String(seq));
     }
     this.setMeta("backupDirty", "0");
+    if (this.hasTombstones()) await this.ctx.storage.setAlarm(Date.now() + DAY_MS);
+  }
+
+  private hasTombstones(): boolean {
+    return [...this.ctx.storage.sql.exec("SELECT 1 FROM tombstone_receipts LIMIT 1")].length > 0;
   }
 }
 

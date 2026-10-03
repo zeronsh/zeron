@@ -1112,10 +1112,7 @@ impl Repos {
             .collect();
         let mut name = None;
         for attempt in 0..50u64 {
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64)
-                .unwrap_or(attempt)
+            let seed = (uuid::Uuid::new_v4().as_u128() as u64)
                 .wrapping_add(attempt.wrapping_mul(0x9E37_79B9));
             let candidate = format!(
                 "{}-{}",

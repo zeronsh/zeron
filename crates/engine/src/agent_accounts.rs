@@ -2012,7 +2012,7 @@ impl AgentAccounts {
         let mut oauth = serde_json::json!({
             "accessToken": access_token,
             "refreshToken": refresh_token,
-            "expiresAt": now_ms() + expires_in * 1000,
+            "expiresAt": now_ms().saturating_add(expires_in.max(0).saturating_mul(1000)),
             "scopes": scopes,
         });
         if let (Some(sub), Some(map)) = (subscription_type, oauth.as_object_mut()) {
@@ -2870,7 +2870,7 @@ impl AgentAccounts {
             );
             map.insert(
                 "expiresAt".into(),
-                serde_json::json!(now_ms() + expires_in * 1000),
+                serde_json::json!(now_ms().saturating_add(expires_in.max(0).saturating_mul(1000))),
             );
         }
         let mut refreshed = slot.clone();
@@ -3421,7 +3421,7 @@ async fn probe_json(
     };
     let status = response.status();
     if !status.is_success() {
-        let retry_after_secs = retry_after_secs(response.headers(), Utc::now());
+        let retry_after_secs = retry_after_secs(response.headers(), zeron_proto::time::now());
         let error = classify_status(status.as_u16(), retry_after_secs);
         tracing::warn!(
             provider,
@@ -3465,6 +3465,14 @@ fn retry_after_secs(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) ->
     if let Ok(secs) = value.parse::<u64>() {
         return Some(secs);
     }
+    // HTTP dates share the provider's clock domain. Use its Date header
+    // when available so a wrong device clock cannot erase or stretch backoff.
+    let now = headers
+        .get(reqwest::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| DateTime::parse_from_rfc2822(v).ok())
+        .map(|v| v.with_timezone(&Utc))
+        .unwrap_or(now);
     let at = DateTime::parse_from_rfc2822(value).ok()?;
     Some(
         at.with_timezone(&Utc)
@@ -4570,6 +4578,22 @@ mod probe_tests {
         headers.insert(reqwest::header::RETRY_AFTER, at.parse().unwrap());
         let parsed = retry_after_secs(&headers, now).unwrap();
         assert!((119..=120).contains(&parsed));
+    }
+
+    #[test]
+    fn retry_after_http_date_uses_provider_clock_under_extreme_local_skew() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::DATE,
+            "Thu, 01 Oct 2026 12:00:00 GMT".parse().unwrap(),
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Thu, 01 Oct 2026 12:01:30 GMT".parse().unwrap(),
+        );
+        for now in [DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC] {
+            assert_eq!(retry_after_secs(&headers, now), Some(90));
+        }
     }
 
     #[test]

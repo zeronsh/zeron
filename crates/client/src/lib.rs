@@ -67,7 +67,7 @@ pub use zeron_proto::{
 
 /// Wall clock in epoch millis.
 pub(crate) fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    zeron_proto::time::now_ms()
 }
 
 pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {

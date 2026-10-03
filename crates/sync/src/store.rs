@@ -5,7 +5,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -74,6 +73,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // Host-owned relative command leases. A process restart never renews a
+    // previously observed pending command whose monotonic deadline was lost.
+    "CREATE TABLE command_receipts (
+        command_id TEXT PRIMARY KEY,
+        generation TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+    ) STRICT;",
 ];
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
@@ -89,6 +96,31 @@ pub struct DocsStore {
 }
 
 impl DocsStore {
+    pub fn command_receipt(
+        &self,
+        id: &str,
+        generation: &str,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<(i64, i64), StoreError> {
+        store_blocking(|| {
+            let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+            conn.execute(
+                "INSERT INTO command_receipts VALUES (?, ?, ?, ?) ON CONFLICT(command_id) DO NOTHING",
+                params![id, generation, now_ms, now_ms.saturating_add(ttl_ms.max(0))],
+            )?;
+            let (owner, received, expiry): (String, i64, i64) = conn.query_row(
+                "SELECT generation, received_at, expires_at FROM command_receipts WHERE command_id = ?",
+                [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if owner == generation {
+                Ok((received, expiry))
+            } else {
+                Ok((now_ms, now_ms))
+            }
+        })
+    }
+
     /// Open (creating directory, database, and schema as needed).
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
         let data_dir = data_dir.as_ref();
@@ -598,10 +630,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    zeron_proto::time::now_ms()
 }
 
 #[cfg(test)]
@@ -845,5 +874,37 @@ mod publication_failure_tests {
                 (b"after".to_vec(), if cursor_save { 43 } else { 42 }, 2)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod command_receipt_tests {
+    use super::*;
+    #[test]
+    fn command_replays_never_renew_and_restart_cannot_reuse_a_clock_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store.command_receipt("id", "first", -5000, 1000).unwrap(),
+            (-5000, -4000)
+        );
+        assert_eq!(
+            store.command_receipt("id", "first", 8000, 1000).unwrap(),
+            (-5000, -4000)
+        );
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store
+                .command_receipt("id", "restart", i64::MIN, 1000)
+                .unwrap(),
+            (i64::MIN, i64::MIN)
+        );
+        assert_eq!(
+            store
+                .command_receipt("new", "restart", i64::MAX, 1000)
+                .unwrap(),
+            (i64::MAX, i64::MAX)
+        );
     }
 }

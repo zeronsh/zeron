@@ -141,7 +141,7 @@ final class FixtureSessionSource: SessionSource {
         entries.append(DebugEntry(id: "a\(n)", user: false, text: "", streaming: true))
         update {
             $0.running = true
-            $0.banner = .working(since: Date(), word: "Thinking")
+            $0.banner = .working(since: Date(timeIntervalSince1970: Double(runtimeNowMs()) / 1000), word: "Thinking")
         }
         let words = fixture.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
         var i = 0

@@ -12740,6 +12740,17 @@ public func coreVersion() -> String  {
 })
 }
 /**
+ * Process clock for platform countdowns and durations sharing Rust deadlines.
+ * This is an epoch label plus monotonic elapsed time, not trusted civil UTC.
+ */
+public func runtimeNowMs() -> Int64  {
+    return try!  FfiConverterInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_runtime_now_ms(uniffiCallStatus
+    )
+})
+}
+/**
  * OAuth callback scheme (`zeron`).
  */
 public func authCallbackScheme() -> String  {
@@ -13037,6 +13048,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_core_version() != 46096) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_runtime_now_ms() != 65274) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_auth_callback_scheme() != 8202) {

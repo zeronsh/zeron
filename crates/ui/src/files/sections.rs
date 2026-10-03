@@ -258,8 +258,8 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
     }
     let mut rows: Vec<SubagentRow> = Vec::new();
     for entry in &state.transcript {
-        let spawned_at =
-            DateTime::<Utc>::from_timestamp_millis(entry.created_at).unwrap_or_else(Utc::now);
+        let spawned_at = DateTime::<Utc>::from_timestamp_millis(entry.created_at)
+            .unwrap_or_else(zeron_proto::time::now);
         for part in &entry.parts {
             let MessagePart::Tool {
                 call,
@@ -443,7 +443,7 @@ impl FilesSurface {
     /// Open the Chats section, page it, and scroll its list so `chat_id`'s
     /// row shows — the inline rename's field must never sit on a hidden row.
     fn reveal_chat_row(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        let rows = child_chat_rows(self.state.read(cx), &self.chat_id, Utc::now());
+        let rows = child_chat_rows(self.state.read(cx), &self.chat_id, zeron_proto::time::now());
         let Some(index) = rows.iter().position(|row| row.chat_id == chat_id) else {
             return;
         };
@@ -463,7 +463,7 @@ impl FilesSurface {
 
     /// Re-render only when the footer's contents changed.
     pub(super) fn refresh_sections(&mut self, cx: &mut Context<Self>) {
-        let fingerprint = fingerprint(self.state.read(cx), &self.chat_id, Utc::now());
+        let fingerprint = fingerprint(self.state.read(cx), &self.chat_id, zeron_proto::time::now());
         if fingerprint != self.sections.fingerprint {
             self.sections.fingerprint = fingerprint;
             cx.notify();
@@ -471,7 +471,7 @@ impl FilesSurface {
     }
 
     pub(super) fn render_sections(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let (subagents, chats) = {
             let state = self.state.read(cx);
             (
@@ -776,7 +776,7 @@ impl FilesSurface {
                 theme,
             );
         }
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let shown = self.sections.shown(Section::Subagents);
         let scroll = self.sections.scroll(Section::Subagents);
         let mut list = row_list("files-subagent-rows", &scroll);
@@ -1145,7 +1145,7 @@ mod tests {
             "id": id,
             "deviceId": "dev",
             "archived": false,
-            "createdAt": Utc::now() - chrono::Duration::minutes(minutes_ago),
+            "createdAt": zeron_proto::time::now() - chrono::Duration::minutes(minutes_ago),
             "parentChatId": parent,
         }))
         .unwrap()
@@ -1183,7 +1183,8 @@ mod tests {
             id: "e1".into(),
             role: MessageRole::Assistant,
             parts,
-            created_at: (Utc::now() - chrono::Duration::minutes(3)).timestamp_millis(),
+            created_at: (zeron_proto::time::now() - chrono::Duration::minutes(3))
+                .timestamp_millis(),
             device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
@@ -1227,7 +1228,7 @@ mod tests {
         assert!(rows[1].frozen());
         assert!(!rows[0].frozen());
         // Spawn time comes from the turn that carried the chip.
-        assert!((Utc::now() - rows[0].spawned_at).num_minutes() >= 2);
+        assert!((zeron_proto::time::now() - rows[0].spawned_at).num_minutes() >= 2);
         // Another chat's explorer sees nothing of this transcript.
         assert!(subagent_rows(&state, "other").is_empty());
     }
@@ -1236,7 +1237,8 @@ mod tests {
     fn subagent_rows_are_most_recently_updated_first() {
         let at = |id: &str, minutes_ago: i64, parts| SessionMessageEntry {
             id: id.into(),
-            created_at: (Utc::now() - chrono::Duration::minutes(minutes_ago)).timestamp_millis(),
+            created_at: (zeron_proto::time::now() - chrono::Duration::minutes(minutes_ago))
+                .timestamp_millis(),
             ..entry(parts)
         };
         let mut state = AppState::new();
@@ -1294,7 +1296,8 @@ mod tests {
     fn running_subagents_lead_longest_running_first() {
         let at = |id: &str, minutes_ago: i64, parts| SessionMessageEntry {
             id: id.into(),
-            created_at: (Utc::now() - chrono::Duration::minutes(minutes_ago)).timestamp_millis(),
+            created_at: (zeron_proto::time::now() - chrono::Duration::minutes(minutes_ago))
+                .timestamp_millis(),
             ..entry(parts)
         };
         let sub = |id: &str, status| {
@@ -1348,7 +1351,7 @@ mod tests {
             chat("unrelated", Some("elsewhere"), 2),
             archived,
         ]);
-        let rows = child_chat_rows(&state, "main", Utc::now());
+        let rows = child_chat_rows(&state, "main", zeron_proto::time::now());
         assert_eq!(
             rows.iter().map(|r| r.chat_id.as_str()).collect::<Vec<_>>(),
             ["a", "b"]
@@ -1463,7 +1466,7 @@ mod tests {
     #[test]
     fn fingerprint_tracks_membership_and_status() {
         let mut state = AppState::new();
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         state.apply_chats(vec![chat("main", None, 60)]);
         let empty = fingerprint(&state, "main", now);
         state.apply_chats(vec![chat("main", None, 60), chat("a", Some("main"), 5)]);

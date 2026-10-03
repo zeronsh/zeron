@@ -99,6 +99,7 @@ struct UploadsInner {
     dir: PathBuf,
     /// Chunk staging (`{uploads_root}/tmp/{uploadId}/`).
     tmp: PathBuf,
+    staging_seen: std::sync::Mutex<std::collections::HashMap<PathBuf, std::time::Instant>>,
     /// Historical roots accepted for reads only. Writes and staging never use
     /// them. RwLock: a local-profile import adds its source root at runtime so
     /// imported transcripts resolve without an engine restart.
@@ -126,6 +127,7 @@ impl Uploads {
         Self {
             inner: Arc::new(UploadsInner {
                 tmp: dir.join("tmp"),
+                staging_seen: Default::default(),
                 dir: dir.to_path_buf(),
                 read_only_roots: std::sync::RwLock::new(
                     legacy_read_root
@@ -161,6 +163,11 @@ impl Uploads {
     /// double-appending. Callers without `seq` get append-only behavior.
     pub fn append(&self, upload_id: &str, data: &str, seq: Option<u64>) -> Result<(), EngineError> {
         let dir = self.staging_dir(upload_id)?;
+        self.inner
+            .staging_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(dir.clone(), std::time::Instant::now());
         self.sweep();
         std::fs::create_dir_all(&dir)?;
         let at = match seq {
@@ -215,6 +222,11 @@ impl Uploads {
         let path = self.inner.dir.join(format!("{id8}-{name}"));
         std::fs::write(&path, &bytes)?;
         let _ = std::fs::remove_dir_all(&dir);
+        self.inner
+            .staging_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&dir);
         Ok(path.to_string_lossy().to_string())
     }
 
@@ -290,34 +302,32 @@ impl Uploads {
         Ok(self.inner.tmp.join(upload_id))
     }
 
-    /// Reclaim staging dirs whose newest chunk is older than the TTL (an upload
+    /// Reclaim staging dirs with no locally observed activity within the TTL (an upload
     /// abandoned mid-stream must not hold up to 32MB forever).
     fn sweep(&self) {
         let Ok(entries) = std::fs::read_dir(&self.inner.tmp) else {
             return;
         };
+        let mut seen = self
+            .inner
+            .staging_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
         for entry in entries.flatten() {
-            let newest = std::fs::read_dir(entry.path())
-                .ok()
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|f| f.metadata().ok()?.modified().ok())
-                .max();
-            // An empty dir is NOT free to reclaim: `append` creates the dir
-            // before writing the first chunk, and parallel chunk uploads run
-            // 3-wide — a sibling's sweep landing in that window deleted the
-            // dir out from under the first write (v0.2.12 "Couldn't stage the
-            // attachment locally"). Judge an empty dir by its own age.
-            let newest = newest.or_else(|| entry.metadata().ok()?.modified().ok());
-            let expired = match newest {
-                Some(at) => at.elapsed().map(|age| age > STAGING_TTL).unwrap_or(false),
-                None => false,
-            };
-            if expired {
-                let _ = std::fs::remove_dir_all(entry.path());
+            let path = entry.path();
+            // Unknown directories get a local receipt grace period. Filesystem
+            // mtimes cannot prove age after an arbitrary clock correction.
+            // Hold the receipt lock through deletion so append cannot race it.
+            let touched = seen.entry(path.clone()).or_insert(now);
+            if now.saturating_duration_since(*touched) > STAGING_TTL {
+                let _ = std::fs::remove_dir_all(&path);
+                seen.remove(&path);
             }
         }
+        seen.retain(|path, touched| {
+            path.exists() || now.saturating_duration_since(*touched) <= STAGING_TTL
+        });
     }
 
     fn inspect(&self, path: &str, extra_roots: &[PathBuf]) -> Result<InspectedFile, EngineError> {
@@ -483,6 +493,15 @@ mod tests {
             options.custom_flags(0x02000000).access_mode(0x100);
         }
         options.open(&racing).unwrap().set_modified(stale).unwrap();
+        uploads.append("upload-other", "aGk=", Some(0)).unwrap();
+        assert!(
+            racing.exists(),
+            "wrong filesystem time must not destroy a live upload"
+        );
+        uploads.inner.staging_seen.lock().unwrap().insert(
+            racing.clone(),
+            std::time::Instant::now() - STAGING_TTL - Duration::from_secs(1),
+        );
         uploads.append("upload-other", "aGk=", Some(0)).unwrap();
         assert!(
             !racing.exists(),

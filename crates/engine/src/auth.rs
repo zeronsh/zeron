@@ -211,9 +211,9 @@ impl AccessEntry {
     fn fresh(token: String) -> Self {
         let ttl = jwt_claims(&token)
             .and_then(|c| match (c.exp, c.iat) {
-                (Some(exp), Some(iat)) if exp > iat => {
-                    Some(Duration::from_secs((exp - iat) as u64))
-                }
+                (Some(exp), Some(iat)) if exp > iat => Some(Duration::from_secs(
+                    exp.saturating_sub(iat).clamp(0, 86400) as u64,
+                )),
                 _ => None,
             })
             .unwrap_or(Duration::from_secs(240));

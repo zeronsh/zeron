@@ -120,6 +120,9 @@ mod tests {
 
     fn harness_chat(harness: HarnessId) -> Chat {
         Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: "chat".into(),
             device_id: "device".into(),
             title: None,

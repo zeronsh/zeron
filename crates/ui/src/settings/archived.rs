@@ -95,7 +95,7 @@ impl popover::ScrollRailHost for ArchivedPage {
 impl Render for ArchivedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let now = chrono::Utc::now();
+        let now = zeron_proto::time::now();
         let (rows, device_names, count): (
             Vec<Chat>,
             std::collections::HashMap<String, String>,
@@ -414,10 +414,12 @@ impl Render for ArchivedPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     fn chat(id: &str, archived: bool) -> Chat {
         Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: id.into(),
             device_id: "d".into(),
             title: None,
@@ -429,7 +431,7 @@ mod tests {
             config: None,
             last_message_preview: None,
             last_message_at: None,
-            created_at: Utc::now(),
+            created_at: zeron_proto::time::now(),
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,

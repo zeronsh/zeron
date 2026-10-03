@@ -51,6 +51,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
             .collect(),
     };
     let space = Space {
+        creation_clock: None,
         id: SPACE.into(),
         device_id: HOST.into(),
         path: "/Users/dev/live".into(),
@@ -61,6 +62,9 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         created_at: now,
     };
     let chat = Chat {
+        creation_clock: None,
+        activity_clock: None,
+        seen_activity_clock: None,
         id: CHAT.into(),
         device_id: HOST.into(),
         title: Some("Live chat".into()),

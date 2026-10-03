@@ -2371,7 +2371,7 @@ impl Pickers {
     /// tag, check on the canvas's effective device).
     fn render_device_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let now = chrono::Utc::now();
+        let now = zeron_proto::time::now();
         let rows = self.filtered_device_rows(cx);
         let (effective, local, online): (Option<String>, Option<String>, Vec<bool>) = {
             let state = self.state.read(cx);
@@ -3147,7 +3147,7 @@ impl Pickers {
                 .into();
             let offline = device_id
                 .as_deref()
-                .is_some_and(|id| !state.device_online(id, chrono::Utc::now()));
+                .is_some_and(|id| !state.device_online(id, zeron_proto::time::now()));
             let project_label: SharedString = state
                 .selected_space_row()
                 .map(|s| s.display_name().to_string())
@@ -6075,7 +6075,7 @@ mod tests {
         let chat = serde_json::from_value(serde_json::json!({
             "id": "side", "parentChatId": "main", "deviceId": "local",
             "cwd": "/tmp/main", "branch": "main", "archived": false,
-            "createdAt": chrono::Utc::now(),
+            "createdAt": zeron_proto::time::now(),
             "config": {
                 "harness": "claude-code", "model": "parent-model", "reasoning": "high",
                 "modelOptions": { "context": "1m" }, "sandbox": "read-only"
@@ -6191,7 +6191,7 @@ mod tests {
             });
             let (state, pickers) = side_chat_picker(true, cx);
             state.update(cx, |state, _| {
-                state.begin_pending_send("side", "first", chrono::Utc::now());
+                state.begin_pending_send("side", "first", zeron_proto::time::now());
             });
             pickers.update(cx, |pickers, cx| {
                 assert!(
@@ -6834,6 +6834,7 @@ mod tests {
             let mut state = AppState::new();
             state.local_device_id = Some("local".into());
             state.apply_spaces(vec![Space {
+                creation_clock: None,
                 id: "repo".into(),
                 device_id: "local".into(),
                 path: "/repo".into(),
@@ -6841,7 +6842,7 @@ mod tests {
                 git_detected: true,
                 git_checked_at: None,
                 checkout_id: None,
-                created_at: chrono::Utc::now(),
+                created_at: zeron_proto::time::now(),
             }]);
             state
         });
@@ -8149,7 +8150,10 @@ mod tests {
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude"));
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.model_rows(cx)[picker.active].harness, HarnessId::ClaudeCode);
+                assert_eq!(
+                    picker.model_rows(cx)[picker.active].harness,
+                    HarnessId::ClaudeCode
+                );
             })
             .unwrap();
     }
@@ -8323,7 +8327,9 @@ mod tests {
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
                 assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
                 // Searching must also find another provider's model.
-                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
                 picker.activate_model_index(0, cx);
@@ -8357,7 +8363,9 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
-                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 0);
                 picker.search.update(cx, |input, cx| input.set_text("", cx));
                 // A chat's provider is fixed: the provider page stays shut.

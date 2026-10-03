@@ -1881,7 +1881,7 @@ impl AccountsPage {
 impl Render for AccountsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
         if let Some(harness) = self.embedded_harness {
             return self.render_embedded_provider(harness, &theme, now, dialog, cx);
@@ -2278,7 +2278,7 @@ mod tests {
     #[test]
     fn reset_formatting_is_absolute() {
         use chrono::Local;
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         assert_eq!(format_reset(None, now), None);
         // Within ~22h: a local clock time ("resets 3:45 PM").
         let soon = now + TimeDelta::minutes(125);

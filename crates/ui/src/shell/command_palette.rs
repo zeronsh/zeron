@@ -325,13 +325,16 @@ impl Shell {
                 self.render_chat_row(
                     id.clone(),
                     transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now())
-                        .into(),
+                    format_time_ago(
+                        chat.last_message_at.unwrap_or(chat.created_at),
+                        zeron_proto::time::now(),
+                    )
+                    .into(),
                     folder.into(),
                     branch,
                     pr,
                     harness,
-                    state.display_status_for(chat, Utc::now()),
+                    state.display_status_for(chat, zeron_proto::time::now()),
                     ix == active,
                     chat.archived,
                     false,

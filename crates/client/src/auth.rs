@@ -263,7 +263,7 @@ pub fn jwt_expiry(jwt: &str) -> Option<i64> {
 /// Expired (or inside the early-refresh margin). Unparseable tokens read as
 /// NOT expired — the server is the arbiter.
 pub fn jwt_expired(jwt: &str, now_secs: i64) -> bool {
-    jwt_expiry(jwt).is_some_and(|exp| now_secs > exp - EARLY_REFRESH_SECS)
+    jwt_expiry(jwt).is_some_and(|exp| now_secs > exp.saturating_sub(EARLY_REFRESH_SECS))
 }
 
 fn base64url_decode(input: &str) -> Option<Vec<u8>> {
@@ -295,6 +295,50 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Only a just-received token has a process-local freshness lease. Cached
+/// tokens are refreshed on startup; arbitrary local UTC cannot validate exp.
+struct TokenLease {
+    token: String,
+    received: std::time::Instant,
+    wall: std::time::SystemTime,
+    ttl: Duration,
+}
+
+impl TokenLease {
+    fn new(token: &str) -> Self {
+        let ttl_secs = token
+            .split('.')
+            .nth(1)
+            .and_then(base64url_decode)
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|claims| {
+                Some(
+                    claims
+                        .get("exp")?
+                        .as_i64()?
+                        .saturating_sub(claims.get("iat")?.as_i64()?),
+                )
+            })
+            .unwrap_or(240)
+            .saturating_sub(EARLY_REFRESH_SECS)
+            .clamp(0, 86400);
+        Self {
+            token: token.to_owned(),
+            received: std::time::Instant::now(),
+            wall: std::time::SystemTime::now(),
+            ttl: Duration::from_secs(ttl_secs as u64),
+        }
+    }
+
+    fn fresh(&self, token: &str) -> bool {
+        self.token == token
+            && self
+                .wall
+                .elapsed()
+                .is_ok_and(|wall| wall.max(self.received.elapsed()) < self.ttl)
+    }
+}
+
 enum Mode {
     Demo,
     Dev {
@@ -304,6 +348,7 @@ enum Mode {
         edge_url: String,
         org_id: String,
         tokens: Arc<Mutex<AuthTokens>>,
+        lease: Arc<Mutex<Option<TokenLease>>>,
         refresh_gate: Arc<tokio::sync::Mutex<()>>,
     },
 }
@@ -336,6 +381,7 @@ impl TokenProvider {
                 edge_url: edge_url.to_owned(),
                 org_id: org_id.clone(),
                 tokens: Arc::new(Mutex::new(tokens.clone())),
+                lease: Arc::new(Mutex::new(None)),
                 refresh_gate: Arc::new(tokio::sync::Mutex::new(())),
             },
         };
@@ -348,7 +394,8 @@ impl TokenProvider {
 
     /// Replace the pair (the platform re-signed-in or restored newer tokens).
     pub(crate) fn update_tokens(&self, next: AuthTokens) {
-        if let Mode::WorkOs { tokens, .. } = &self.mode {
+        if let Mode::WorkOs { tokens, lease, .. } = &self.mode {
+            *lock(lease) = Some(TokenLease::new(&next.access_token));
             *lock(tokens) = next;
             self.expired.store(false, Ordering::Release);
         }
@@ -367,11 +414,14 @@ impl TokenProvider {
                 edge_url,
                 org_id,
                 tokens,
+                lease,
                 refresh_gate,
             } => {
-                let now = chrono::Utc::now().timestamp();
                 let current = lock(tokens).clone();
-                if !jwt_expired(&current.access_token, now) {
+                if lock(lease)
+                    .as_ref()
+                    .is_some_and(|lease| lease.fresh(&current.access_token))
+                {
                     return Ok(current.access_token);
                 }
                 if self.expired.load(Ordering::Acquire) {
@@ -385,6 +435,7 @@ impl TokenProvider {
                     edge_url.clone(),
                     org_id.clone(),
                     tokens.clone(),
+                    lease.clone(),
                     refresh_gate.clone(),
                     self.events.clone(),
                     self.expired.clone(),
@@ -404,6 +455,7 @@ async fn refresh_task(
     edge_url: String,
     org_id: String,
     tokens: Arc<Mutex<AuthTokens>>,
+    lease: Arc<Mutex<Option<TokenLease>>>,
     gate: Arc<tokio::sync::Mutex<()>>,
     events: Arc<EventPump>,
     expired: Arc<AtomicBool>,
@@ -411,7 +463,10 @@ async fn refresh_task(
     let _gate = gate.lock_owned().await;
     // Joined an in-flight refresh: it already rotated the pair.
     let current = lock(&tokens).clone();
-    if !jwt_expired(&current.access_token, chrono::Utc::now().timestamp()) {
+    if lock(&lease)
+        .as_ref()
+        .is_some_and(|lease| lease.fresh(&current.access_token))
+    {
         return Ok(current.access_token);
     }
     if expired.load(Ordering::Acquire) {
@@ -420,6 +475,7 @@ async fn refresh_task(
     match refresh(&edge_url, &current.refresh_token, Some(&org_id)).await {
         Ok(next) => {
             *lock(&tokens) = next.clone();
+            *lock(&lease) = Some(TokenLease::new(&next.access_token));
             events.ordered(ClientEvent::AuthRefreshed(next.clone()));
             Ok(next.access_token)
         }
@@ -573,6 +629,26 @@ mod tests {
             refresh_token: "r9".into(),
         });
         assert_eq!(tokens.bearer().await.unwrap(), "x.y.z");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_future_dated_access_token_cannot_skip_refresh() {
+        let (edge, hits) = serve_http(
+            200,
+            r#"{"accessToken":"fresh-access","refreshToken":"rotated"}"#,
+        )
+        .await;
+        let (provider, _) = provider(&edge);
+        if let Mode::WorkOs { tokens, .. } = &provider.mode {
+            // {"exp":9223372036854775807}; valid-looking under any local clock.
+            lock(tokens).access_token = "e30.eyJleHAiOjkyMjMzNzIwMzY4NTQ3NzU4MDd9.sig".into();
+        }
+        assert_eq!(provider.bearer().await.unwrap(), "fresh-access");
+        assert_eq!(provider.bearer().await.unwrap(), "fresh-access");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let mut lease = TokenLease::new("fresh-access");
+        lease.received -= Duration::from_secs(300);
+        assert!(!lease.fresh("fresh-access"));
     }
 
     #[tokio::test]

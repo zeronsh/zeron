@@ -686,6 +686,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
             .unwrap();
         legacy
             .upsert_space(&Space {
+                creation_clock: None,
                 id: "space-legacy".into(),
                 device_id: "dev-a".into(),
                 path: "/tmp/legacy".into(),
@@ -698,6 +699,9 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
             .unwrap();
         legacy
             .upsert_chat(&Chat {
+                creation_clock: None,
+                activity_clock: None,
+                seen_activity_clock: None,
                 id: "chat-legacy".into(),
                 device_id: "dev-a".into(),
                 title: Some("Migrated chat".into()),

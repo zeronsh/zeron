@@ -363,6 +363,9 @@ mod tests {
 
     fn chat(id: &str, device: &str, cwd: Option<&str>, checkout: Option<&str>) -> Chat {
         Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: id.into(),
             device_id: device.into(),
             title: None,
@@ -386,6 +389,7 @@ mod tests {
 
     fn space(device: &str) -> Space {
         Space {
+            creation_clock: None,
             id: "space".into(),
             device_id: device.into(),
             path: "/project".into(),

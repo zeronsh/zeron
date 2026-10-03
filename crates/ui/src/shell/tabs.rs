@@ -191,7 +191,7 @@ impl Shell {
                 return;
             }
             state
-                .overview_chats(Utc::now())
+                .overview_chats(zeron_proto::time::now())
                 .first()
                 .map(|(_, c)| c.id.clone())
         };

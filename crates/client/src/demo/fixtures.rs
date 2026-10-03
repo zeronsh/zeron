@@ -1,7 +1,6 @@
 //! The demo workspace: devices, projects, chats (pinned, sectioned,
 //! projectless, child, archived), live statuses, and PRs in every state.
 
-use chrono::Utc;
 use zeron_doc::RegistryDoc;
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatConfig, CheckoutChangeRequestStatus,
@@ -239,6 +238,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
 pub(crate) fn spaces(now: i64) -> Vec<Space> {
     let space =
         |id: &str, device: &str, path: &str, name: Option<&str>, git: bool, ago: i64| Space {
+            creation_clock: None,
             id: id.into(),
             device_id: device.into(),
             path: path.into(),
@@ -367,6 +367,13 @@ pub(crate) fn seed(
     for space in &spaces {
         doc.upsert_space(space)?;
     }
+    // Seed historical activity with migration clocks, preserving fixture chronology.
+    let mut historical = zeron_doc::workspace::WorkspaceState {
+        devices: Vec::new(),
+        spaces: Vec::new(),
+        chats: Vec::new(),
+        sessions: Vec::new(),
+    };
     for demo in chats() {
         let space = demo.space.and_then(|id| spaces.iter().find(|s| s.id == id));
         let last = now - demo.last_ago_ms;
@@ -382,6 +389,9 @@ pub(crate) fn seed(
             _ => None,
         };
         let chat = Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: demo.id.into(),
             device_id: demo.device.into(),
             title: Some(demo.title.into()),
@@ -410,7 +420,7 @@ pub(crate) fn seed(
             room_gen: Some(2),
             parent_chat_id: demo.parent.map(str::to_owned),
         };
-        doc.upsert_chat(&chat)?;
+        historical.chats.push(chat);
         if let Some(status) = demo.status {
             doc.upsert_session(&Session {
                 last_completed_turn: None,
@@ -418,7 +428,7 @@ pub(crate) fn seed(
                 device_id: demo.device.into(),
                 status,
                 started_at: Some(ms(now - 95_000)),
-                updated_at: Utc::now(),
+                updated_at: zeron_proto::time::now(),
             })?;
         }
         if let (Some((number, state, title)), Some(source)) = (demo.pr, &source_context) {
@@ -436,10 +446,11 @@ pub(crate) fn seed(
                     base_ref: "main".into(),
                     head_ref: source.branch.clone(),
                 }),
-                updated_at: Utc::now(),
+                updated_at: zeron_proto::time::now(),
             });
         }
     }
+    doc.seed_from_workspace(&historical)?;
     doc.reconcile_sidebar_pins(true)?;
     let mut after: Option<String> = None;
     for id in ["chat-veil", "chat-picker"] {

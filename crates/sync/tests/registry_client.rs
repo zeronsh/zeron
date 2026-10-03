@@ -31,6 +31,9 @@ fn device(id: &str) -> Device {
 
 fn chat(id: &str, device_id: &str) -> Chat {
     Chat {
+        creation_clock: None,
+        activity_clock: None,
+        seen_activity_clock: None,
         id: id.into(),
         device_id: device_id.into(),
         title: Some("chat".into()),
@@ -318,14 +321,19 @@ async fn presence_beats_reach_peers() {
     let client_b = RegistryClient::connect(&server.url(), doc_b, "dev-b")
         .await
         .expect("b connects");
-    client_a.set_presence(123_456);
-    wait_until(|| client_b.presence().get("dev-a") == Some(&123_456)).await;
+    let before = zeron_proto::time::now_ms();
+    client_a.set_presence(i64::MAX);
+    wait_until(|| client_b.presence().contains_key("dev-a")).await;
+    assert!(client_b.presence()["dev-a"] >= before);
+    assert!(client_b.presence()["dev-a"] <= zeron_proto::time::now_ms());
     // And the hello reply carries existing presence to late joiners.
     let doc_c = new_doc("dev-c");
     let client_c = RegistryClient::connect(&server.url(), doc_c, "dev-c")
         .await
         .expect("c connects");
-    wait_until(|| client_c.presence().get("dev-a") == Some(&123_456)).await;
+    wait_until(|| client_c.presence().contains_key("dev-a")).await;
+    assert!(client_c.presence()["dev-a"] >= before - 1000);
+    assert!(client_c.presence()["dev-a"] <= zeron_proto::time::now_ms());
     client_a.shutdown().await;
     client_b.shutdown().await;
     client_c.shutdown().await;

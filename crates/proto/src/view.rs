@@ -52,7 +52,7 @@ pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Ind
             let age_ms = now
                 .signed_duration_since(session.updated_at)
                 .num_milliseconds();
-            if age_ms > SESSION_STALE_MS {
+            if !(0..=SESSION_STALE_MS).contains(&age_ms) {
                 Indicator::None
             } else if session.status == SessionStatus::Working {
                 Indicator::Working
@@ -95,31 +95,51 @@ pub fn attention_rank(status: ChatIndicator) -> u8 {
 /// recency order and let the dots carry urgency; [`attention_rank`] still
 /// aggregates the space rows' urgency dot.
 pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
-    rows.sort_by(|(_, a), (_, b)| {
-        let ka = a.last_message_at.unwrap_or(a.created_at);
-        let kb = b.last_message_at.unwrap_or(b.created_at);
-        kb.cmp(&ka).then_with(|| a.id.cmp(&b.id))
-    });
+    rows.sort_by(|(_, a), (_, b)| activity_cmp(b, a).then_with(|| a.id.cmp(&b.id)));
+}
+
+/// Causally observed activity beats arbitrary device time. Legacy rows keep
+/// their previous ordering until a registry capable of exposing clocks is used.
+pub fn activity_cmp(a: &Chat, b: &Chat) -> std::cmp::Ordering {
+    match (&a.activity_clock, &b.activity_clock) {
+        (Some(a), Some(b)) => a.cmp(b),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        _ => a
+            .last_message_at
+            .unwrap_or(a.created_at)
+            .cmp(&b.last_message_at.unwrap_or(b.created_at)),
+    }
+}
+
+pub fn creation_cmp(a: &Chat, b: &Chat) -> std::cmp::Ordering {
+    match (&a.creation_clock, &b.creation_clock) {
+        (Some(a), Some(b)) => a.cmp(b),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        _ => a.created_at.cmp(&b.created_at),
+    }
 }
 
 /// Session-tab order for a space: creation order (activity never reorders
 /// tabs), id tiebreak. Pure.
 pub fn sort_tabs(chats: &mut [&Chat]) {
-    chats.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    chats.sort_by(|a, b| creation_cmp(a, b).then_with(|| a.id.cmp(&b.id)));
+}
+
+pub fn space_creation_cmp(a: &Space, b: &Space) -> std::cmp::Ordering {
+    match (&a.creation_clock, &b.creation_clock) {
+        (Some(a), Some(b)) => a.cmp(b),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        _ => a.created_at.cmp(&b.created_at),
+    }
 }
 
 /// Spaces list order: creation order, id tiebreak — total and stable across
 /// devices. Pure.
 pub fn sort_spaces(spaces: &mut [Space]) {
-    spaces.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    spaces.sort_by(|a, b| space_creation_cmp(a, b).then_with(|| a.id.cmp(&b.id)));
 }
 
 /// Sidebar order: `last_message_at` desc, falling back to `created_at`; ties
@@ -127,10 +147,8 @@ pub fn sort_spaces(spaces: &mut [Space]) {
 /// devices. Pure.
 pub fn sort_chats(chats: &mut [Chat]) {
     chats.sort_by(|a, b| {
-        let ka = a.last_message_at.unwrap_or(a.created_at);
-        let kb = b.last_message_at.unwrap_or(b.created_at);
-        kb.cmp(&ka)
-            .then_with(|| b.created_at.cmp(&a.created_at))
+        activity_cmp(b, a)
+            .then_with(|| creation_cmp(b, a))
             .then_with(|| a.id.cmp(&b.id))
     });
 }

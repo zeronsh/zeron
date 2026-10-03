@@ -134,7 +134,8 @@ impl AgentAccounts {
             entry.insert(
                 "expires_at".into(),
                 serde_json::json!(
-                    (Utc::now() + chrono::TimeDelta::seconds(expires_in)).to_rfc3339()
+                    (zeron_proto::time::now() + chrono::TimeDelta::seconds(expires_in))
+                        .to_rfc3339()
                 ),
             );
         }

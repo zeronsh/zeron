@@ -116,7 +116,7 @@ impl Shell {
         chat.parent_chat_id = Some(parent.id.clone());
         chat.title = None;
         chat.archived = false;
-        chat.created_at = Utc::now();
+        chat.created_at = zeron_proto::time::now();
         chat.last_message_at = None;
         chat.last_message_preview = None;
         chat.last_seen_at = None;
@@ -398,7 +398,7 @@ mod tests {
                 shell.toggle_right_pane(cx);
                 let chat = serde_json::from_value(serde_json::json!({
                     "id": "side", "parentChatId": "main", "deviceId": "local",
-                    "archived": false, "createdAt": Utc::now(),
+                    "archived": false, "createdAt": zeron_proto::time::now(),
                 }))
                 .unwrap();
                 shell.open_side_chat(chat, shell.panel_key(cx), cx);
@@ -460,7 +460,7 @@ mod tests {
                 let recent = RightSurface::Browser(shell.browser_seq);
                 let chat = serde_json::from_value(serde_json::json!({
                     "id": "side", "parentChatId": "main", "deviceId": "local",
-                    "archived": false, "createdAt": Utc::now(),
+                    "archived": false, "createdAt": zeron_proto::time::now(),
                 }))
                 .unwrap();
                 shell.open_side_chat(chat, shell.panel_key(cx), cx);
@@ -505,7 +505,7 @@ mod tests {
                 shell.active_chat = "main".into();
                 let main: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
                     "id": "main", "deviceId": "local", "cwd": "/tmp/main",
-                    "archived": false, "createdAt": Utc::now(),
+                    "archived": false, "createdAt": zeron_proto::time::now(),
                 }))
                 .unwrap();
                 shell.state.update(cx, |state, _| {
@@ -569,7 +569,7 @@ mod tests {
             .unwrap();
         let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
             "id": "side", "parentChatId": "main", "deviceId": "local", "cwd": "/tmp/other",
-            "archived": false, "createdAt": Utc::now(),
+            "archived": false, "createdAt": zeron_proto::time::now(),
         }))
         .unwrap();
         window
@@ -577,7 +577,7 @@ mod tests {
                 shell.active_chat = "main".into();
                 let main: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
                     "id": "main", "deviceId": "local", "cwd": "/tmp/main",
-                    "archived": false, "createdAt": Utc::now(),
+                    "archived": false, "createdAt": zeron_proto::time::now(),
                 }))
                 .unwrap();
                 shell.state.update(cx, |state, _| {

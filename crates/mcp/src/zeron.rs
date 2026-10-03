@@ -720,6 +720,9 @@ mod tests {
 
     fn chat(id: &str, title: Option<&str>) -> Chat {
         Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: id.into(),
             device_id: "dev".into(),
             title: title.map(str::to_owned),
@@ -765,6 +768,7 @@ mod tests {
 
     fn space(id: &str, path: &str, name: Option<&str>) -> Space {
         Space {
+            creation_clock: None,
             id: id.into(),
             device_id: "dev".into(),
             path: path.into(),

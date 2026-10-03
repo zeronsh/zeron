@@ -10,6 +10,7 @@ pub mod invocation;
 pub mod motion;
 pub mod preview;
 pub mod sidebar_pins;
+pub mod time;
 pub mod view;
 pub mod workspace;
 

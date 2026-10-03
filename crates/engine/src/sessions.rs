@@ -20,7 +20,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -1089,7 +1088,7 @@ impl Inner {
     /// workspace-doc mirror per delta would be far too chatty.
     fn touch_session(&self, chat_id: &str) {
         const TOUCH_THROTTLE_MS: i64 = 10_000;
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
@@ -1133,7 +1132,7 @@ impl Inner {
         fresh_start: bool,
         completed_turn: Option<String>,
     ) {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses

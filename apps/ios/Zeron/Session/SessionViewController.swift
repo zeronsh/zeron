@@ -609,7 +609,7 @@ final class StatusPill: UIControl {
         case let .working(since, word):
             grid.kind = .trailer
             let render = { [weak self] in
-                let secs = since.map { Int(Date().timeIntervalSince($0)) } ?? 0
+                let secs = since.map { Int(Date(timeIntervalSince1970: Double(runtimeNowMs()) / 1000).timeIntervalSince($0)) } ?? 0
                 self?.label.text = secs > 0 ? "\(word) · \(Self.elapsed(secs))" : "\(word)…"
             }
             render()

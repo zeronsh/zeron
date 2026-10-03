@@ -110,6 +110,8 @@ enum ServerFrame {
         rows: Vec<RegistryRow>,
         #[serde(default)]
         presence: HashMap<String, i64>,
+        #[serde(rename = "presenceNow", default)]
+        presence_now: Option<i64>,
     },
     Rows {
         seq: u64,
@@ -123,7 +125,6 @@ enum ServerFrame {
     },
     Presence {
         device: String,
-        at: i64,
     },
     #[serde(rename = "probe-ok")]
     ProbeOk {
@@ -242,10 +243,37 @@ impl Stats {
 }
 
 fn epoch_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    zeron_proto::time::now_ms()
+}
+
+// Receiver-local label, monotonic receipt instant, and snapshot source token.
+type PresenceMap = HashMap<String, (i64, tokio::time::Instant, Option<i64>)>;
+
+/// Snapshot sightings use server-relative age, then become local receipt times.
+/// Old servers without a time anchor cannot establish freshness from a snapshot.
+fn apply_presence_snapshot(
+    map: &mut PresenceMap,
+    presence: HashMap<String, i64>,
+    server_now: Option<i64>,
+    tick: tokio::time::Instant,
+) {
+    let Some(server_now) = server_now else { return };
+    let local_now = epoch_ms();
+    for (device, at) in presence {
+        let age = server_now.saturating_sub(at);
+        if !(0..PRESENCE_TTL.as_millis() as i64).contains(&age) {
+            continue;
+        }
+        let Some(seen) = tick.checked_sub(Duration::from_millis(age as u64)) else {
+            continue;
+        };
+        // Repeated pulls of the same server sighting must not refresh it.
+        if map.get(&device).is_none_or(|(_, previous, source)| {
+            source.is_none_or(|source| at > source) && seen > *previous
+        }) {
+            map.insert(device, (local_now.saturating_sub(age), seen, Some(at)));
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -267,7 +295,7 @@ pub struct RegistryClient {
     probe: mpsc::Sender<()>,
     redial: mpsc::Sender<()>,
     presence_out: mpsc::Sender<i64>,
-    presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
+    presence: Arc<Mutex<PresenceMap>>,
     stats: Arc<Stats>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -406,13 +434,13 @@ impl RegistryClient {
     }
 
     /// Remote devices' live presence beats (entries within the 30s TTL),
-    /// device → beat epoch ms.
+    /// device → receiver-local receipt label (epoch-shaped milliseconds).
     pub fn presence(&self) -> HashMap<String, i64> {
         let now = tokio::time::Instant::now();
         lock(&self.presence)
             .iter()
-            .filter(|(_, (_, seen))| now.duration_since(*seen) < PRESENCE_TTL)
-            .map(|(device, (at, _))| (device.clone(), *at))
+            .filter(|(_, (_, seen, _))| now.duration_since(*seen) < PRESENCE_TTL)
+            .map(|(device, (at, _, _))| (device.clone(), *at))
             .collect()
     }
 
@@ -472,7 +500,7 @@ struct Actor {
     probe_rx: mpsc::Receiver<()>,
     redial_rx: mpsc::Receiver<()>,
     presence_rx: mpsc::Receiver<i64>,
-    presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
+    presence: Arc<Mutex<PresenceMap>>,
     stats: Arc<Stats>,
     /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
     transport: Option<Arc<dyn RegistryTransport>>,
@@ -699,6 +727,7 @@ impl Actor {
             gc_floor,
             rows,
             presence,
+            presence_now,
         })) = state
         else {
             tracing::warn!("registry: no state frame within deadline");
@@ -717,9 +746,7 @@ impl Actor {
         {
             let now = tokio::time::Instant::now();
             let mut map = lock(&self.presence);
-            for (device, at) in presence {
-                map.insert(device, (at, now));
-            }
+            apply_presence_snapshot(&mut map, presence, presence_now, now);
         }
         self.stats.connected.store(true, Relaxed);
         self.stats.synced.store(true, Relaxed);
@@ -892,6 +919,8 @@ impl Actor {
                         rows: Vec<RegistryRow>,
                         #[serde(default)]
                         presence: HashMap<String, i64>,
+                        #[serde(default)]
+                        presence_now: Option<i64>,
                     }
                     match serde_json::from_str::<PullBody>(&body) {
                         Ok(pull) => {
@@ -900,9 +929,12 @@ impl Actor {
                             drop(d);
                             let now = tokio::time::Instant::now();
                             let mut map = lock(&presence);
-                            for (device, at) in pull.presence {
-                                map.insert(device, (at, now));
-                            }
+                            apply_presence_snapshot(
+                                &mut map,
+                                pull.presence,
+                                pull.presence_now,
+                                now,
+                            );
                             drop(map);
                             stats.synced.store(true, Relaxed);
                             stats.last_pushed_ms.store(epoch_ms(), Relaxed);
@@ -964,8 +996,10 @@ impl Actor {
                 self.stats.last_ack_ms.store(epoch_ms(), Relaxed);
                 let _ = self.events.send(RegistryEvent::Applied);
             }
-            ServerFrame::Presence { device, at } => {
-                lock(&self.presence).insert(device, (at, tokio::time::Instant::now()));
+            ServerFrame::Presence { device } => {
+                // A delivered beat proves receipt now; the sender's epoch is untrusted.
+                lock(&self.presence)
+                    .insert(device, (epoch_ms(), tokio::time::Instant::now(), None));
                 let _ = self.events.send(RegistryEvent::Presence);
             }
             ServerFrame::ProbeOk { .. } => {
@@ -977,6 +1011,7 @@ impl Actor {
                 gc_floor,
                 rows,
                 presence,
+                presence_now,
             } => {
                 // Servers only send state as a hello answer, but applying a
                 // late duplicate is harmless and simpler than special-casing.
@@ -985,9 +1020,7 @@ impl Actor {
                 drop(doc);
                 let now = tokio::time::Instant::now();
                 let mut map = lock(&self.presence);
-                for (device, at) in presence {
-                    map.insert(device, (at, now));
-                }
+                apply_presence_snapshot(&mut map, presence, presence_now, now);
                 let _ = self.events.send(RegistryEvent::Applied);
             }
             ServerFrame::Error { code, message } => {
@@ -1001,3 +1034,47 @@ impl Actor {
 
 #[cfg(any(test, feature = "mock-server"))]
 pub mod mock_server;
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    #[test]
+    fn presence_snapshots_ignore_offsets_replays_and_missing_anchor() {
+        let tick = tokio::time::Instant::now();
+        for anchor in [i64::MIN + 60000, 0, i64::MAX] {
+            let mut map = HashMap::new();
+            apply_presence_snapshot(
+                &mut map,
+                HashMap::from([("peer".into(), anchor - 1000)]),
+                Some(anchor),
+                tick,
+            );
+            let first = map["peer"];
+            assert_eq!(first.1, tick - Duration::from_secs(1));
+            apply_presence_snapshot(
+                &mut map,
+                HashMap::from([("peer".into(), anchor - 1000)]),
+                Some(anchor),
+                tick + Duration::from_secs(40),
+            );
+            assert_eq!(
+                map["peer"], first,
+                "replayed anchor cannot renew a sighting"
+            );
+        }
+        let mut map = HashMap::new();
+        apply_presence_snapshot(
+            &mut map,
+            HashMap::from([("future".into(), 1), ("old".into(), -60000)]),
+            Some(0),
+            tick,
+        );
+        apply_presence_snapshot(
+            &mut map,
+            HashMap::from([("legacy".into(), i64::MAX)]),
+            None,
+            tick,
+        );
+        assert!(map.is_empty());
+    }
+}

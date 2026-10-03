@@ -99,7 +99,17 @@ impl SessionCommandEntry {
 
     pub fn effective_expiry(&self) -> i64 {
         self.expires_at
-            .unwrap_or(self.issued_at + COMMAND_DEFAULT_TTL_MS)
+            .unwrap_or(self.issued_at.saturating_add(COMMAND_DEFAULT_TTL_MS))
+    }
+
+    /// A sender's clock only supplies a duration, never the host's deadline.
+    /// Bound even explicit leases so corrupt/extreme timestamps cannot keep
+    /// a pending command eligible forever.
+    pub fn ttl_ms(&self) -> i64 {
+        self.expires_at
+            .map(|at| at.saturating_sub(self.issued_at))
+            .unwrap_or(COMMAND_DEFAULT_TTL_MS)
+            .clamp(0, COMMAND_DEFAULT_TTL_MS)
     }
 }
 
@@ -124,7 +134,7 @@ pub enum CommandDisposition {
 pub struct EvaluationContext<'a> {
     /// Processed-command ledger membership test.
     pub is_processed: &'a dyn Fn(&str) -> bool,
-    /// Current wall clock, epoch millis.
+    /// Host-local runtime clock, after normalizing the entry to receipt time.
     pub now_ms: i64,
     /// All command entries in doc order (used to find newer same-kind entries).
     pub entries: &'a [SessionCommandEntry],
@@ -149,12 +159,16 @@ pub fn evaluate_command(
     // Coalescing steers loses prompts when remote sync delivers a batch.
     let kind = entry.kind();
     if kind == SessionCommandKind::Interrupt {
-        let has_newer_same_kind = cx.entries.iter().any(|other| {
-            other.id != entry.id
-                && other.kind() == kind
-                && other.status == SessionCommandStatus::Pending
-                && other.issued_at > entry.issued_at
-        });
+        let has_newer_same_kind = cx
+            .entries
+            .iter()
+            .skip_while(|other| other.id != entry.id)
+            .skip(1)
+            .any(|other| {
+                other.id != entry.id
+                    && other.kind() == kind
+                    && other.status == SessionCommandStatus::Pending
+            });
         if has_newer_same_kind {
             return CommandDisposition::Superseded;
         }
@@ -345,6 +359,32 @@ mod tests {
         let mut applied = e.clone();
         applied.status = SessionCommandStatus::Applied;
         assert!(!can_composer_cancel(&applied, "device-a"));
+    }
+
+    #[test]
+    fn ttl_is_bounded_and_interrupt_order_ignores_sender_clock() {
+        let mut old = entry("old", SessionCommandPayload::Interrupt {}, i64::MAX);
+        let mut new = entry("new", SessionCommandPayload::Interrupt {}, i64::MIN);
+        assert_eq!(old.effective_expiry(), i64::MAX);
+        assert_eq!(new.ttl_ms(), COMMAND_DEFAULT_TTL_MS);
+        new.expires_at = Some(i64::MAX);
+        assert_eq!(new.ttl_ms(), COMMAND_DEFAULT_TTL_MS);
+        old.issued_at = 0;
+        new.issued_at = 0;
+        old.expires_at = Some(10000);
+        new.expires_at = Some(10000);
+        let mut entries = vec![old.clone(), new.clone()];
+        entries[0].issued_at = 9000;
+        entries[1].issued_at = -9000;
+        let context = cx(&entries, &NEVER, &NEVER, 1, None);
+        assert_eq!(
+            evaluate_command(&entries[0], &context),
+            CommandDisposition::Superseded
+        );
+        assert_eq!(
+            evaluate_command(&entries[1], &context),
+            CommandDisposition::Execute
+        );
     }
 
     fn run_request() -> RunRequest {

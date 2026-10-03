@@ -262,7 +262,7 @@ mod pinned_session_tests {
     fn pin_test_chat(id: &str) -> zeron_proto::Chat {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "local", "archived": false,
-            "createdAt": chrono::Utc::now(),
+            "createdAt": zeron_proto::time::now(),
         }))
         .unwrap()
     }
@@ -894,7 +894,7 @@ mod pinned_session_tests {
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
                     state.spaces = ["a", "b"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
-                        "id": id, "deviceId": "local", "path": format!("/project/{id}"), "createdAt": Utc::now()
+                        "id": id, "deviceId": "local", "path": format!("/project/{id}"), "createdAt": zeron_proto::time::now()
                     })).unwrap()).collect();
                     state.chats = [("pin", "a"), ("b-new", "b"), ("a-new", "a"), ("b-old", "b")]
                         .into_iter()
@@ -902,7 +902,7 @@ mod pinned_session_tests {
                         .map(|(ix, (id, project))| {
                             let mut chat = pin_test_chat(id);
                             chat.space_id = Some(project.into());
-                            chat.created_at = Utc::now() - chrono::Duration::minutes(ix as i64);
+                            chat.created_at = zeron_proto::time::now() - chrono::Duration::minutes(ix as i64);
                             chat
                         })
                         .collect();
@@ -1053,7 +1053,7 @@ mod pinned_session_tests {
                         .map(|id| {
                             serde_json::from_value(serde_json::json!({
                                 "id": id, "deviceId": "local", "archived": false,
-                                "createdAt": Utc::now(),
+                                "createdAt": zeron_proto::time::now(),
                             }))
                             .unwrap()
                         })
@@ -1180,9 +1180,9 @@ mod pinned_session_tests {
                                 "id": id, "title": id, "deviceId": "local", "archived": false,
                                 "sourceContext": {
                                     "checkoutId": "checkout", "repoRoot": "/project", "cwd": "/project",
-                                    "branch": "feature/sidebar-drag", "observedAt": Utc::now(),
+                                    "branch": "feature/sidebar-drag", "observedAt": zeron_proto::time::now(),
                                 },
-                                "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                                "createdAt": zeron_proto::time::now() - chrono::Duration::minutes(10 - ix as i64),
                             }))
                             .unwrap()
                         })
@@ -1387,7 +1387,7 @@ mod pinned_session_tests {
                     .iter_mut()
                     .find(|chat| chat.id == "older")
                     .unwrap()
-                    .last_message_at = Some(Utc::now());
+                    .last_message_at = Some(zeron_proto::time::now());
             });
             cx.notify();
         });
@@ -1582,7 +1582,8 @@ mod pinned_session_tests {
                     .iter_mut()
                     .find(|chat| chat.id == "newer")
                     .unwrap()
-                    .last_message_at = Some(Utc::now() + chrono::Duration::seconds(1));
+                    .last_message_at =
+                    Some(zeron_proto::time::now() + chrono::Duration::seconds(1));
             });
             cx.notify();
         });
@@ -1679,7 +1680,7 @@ mod pinned_session_tests {
                         .map(|(ix, id)| {
                             serde_json::from_value(serde_json::json!({
                                 "id": id, "title": id, "deviceId": "local", "archived": false,
-                                "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
+                                "createdAt": zeron_proto::time::now() - chrono::Duration::minutes(ix as i64),
                             }))
                             .unwrap()
                         })
@@ -1964,11 +1965,8 @@ pub(super) fn compare_sidebar_chats(
     right: &zeron_proto::Chat,
 ) -> std::cmp::Ordering {
     let primary = match sort {
-        SidebarSort::Created => right.created_at.cmp(&left.created_at),
-        SidebarSort::LastUpdated => right
-            .last_message_at
-            .unwrap_or(right.created_at)
-            .cmp(&left.last_message_at.unwrap_or(left.created_at)),
+        SidebarSort::Created => zeron_proto::view::creation_cmp(right, left),
+        SidebarSort::LastUpdated => zeron_proto::view::activity_cmp(right, left),
     };
     primary.then_with(|| left.id.cmp(&right.id))
 }
@@ -2639,7 +2637,7 @@ impl Shell {
         }
         let state = self.state.read(cx);
         let visible: HashSet<String> = state
-            .sidebar_chats(Utc::now(), payload.filter.as_deref())
+            .sidebar_chats(zeron_proto::time::now(), payload.filter.as_deref())
             .into_iter()
             .map(|(_, chat)| chat.id.clone())
             .collect();
@@ -3086,7 +3084,7 @@ impl Shell {
         let visible_ids: HashSet<String> = self
             .state
             .read(cx)
-            .overview_chats(Utc::now())
+            .overview_chats(zeron_proto::time::now())
             .into_iter()
             .filter(|(_, chat)| match &drag.filter {
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
@@ -3810,7 +3808,7 @@ impl Shell {
             let state = self.state.read(cx);
             match filter.as_deref().and_then(|id| state.space_row(id)) {
                 Some(space) => {
-                    let (tag, offline) = state.space_device_tag(space, Utc::now());
+                    let (tag, offline) = state.space_device_tag(space, zeron_proto::time::now());
                     (
                         space.display_name().to_string().into(),
                         Some((tag.into(), offline)),
@@ -4050,7 +4048,8 @@ impl Shell {
                         let selected = filter.as_deref() == Some(id.as_str());
                         match state.space_row(&id) {
                             Some(space) => {
-                                let (tag, offline) = state.space_device_tag(space, Utc::now());
+                                let (tag, offline) =
+                                    state.space_device_tag(space, zeron_proto::time::now());
                                 (
                                     SpacesMenuRow::Space(id),
                                     space.display_name().to_string().into(),
@@ -4225,7 +4224,7 @@ impl Shell {
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
         let mut chats: Vec<zeron_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+            .sidebar_chats(zeron_proto::time::now(), filter.as_deref())
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
@@ -4337,7 +4336,10 @@ impl Shell {
         let (active, archived) = {
             let state = self.state.read(cx);
             let active = state
-                .sidebar_chats(Utc::now(), self.settings.space_filter.as_deref())
+                .sidebar_chats(
+                    zeron_proto::time::now(),
+                    self.settings.space_filter.as_deref(),
+                )
                 .into_iter()
                 .find(|(_, chat)| chat.id == chat_id)
                 .map(|(_, chat)| chat.clone());
@@ -4480,7 +4482,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
@@ -5156,7 +5158,7 @@ impl Shell {
     ) -> Option<AnyElement> {
         const INITIAL: usize = ARCHIVED_INITIAL_ROWS;
         const PAGE: usize = ARCHIVED_PAGE_ROWS;
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let rows = self.archived_sidebar_chats(cx);
         if rows.is_empty() {
             return None;
@@ -5805,6 +5807,7 @@ impl Shell {
         // Optimistic echo: the watch frame carrying the real row replaces it
         // by id (apply_spaces re-sorts; same-id upsert is idempotent).
         let space = Space {
+            creation_clock: None,
             id: space_id.clone(),
             device_id: device.id.clone(),
             path: path.clone(),
@@ -5812,7 +5815,7 @@ impl Shell {
             git_detected,
             git_checked_at: None,
             checkout_id: None,
-            created_at: Utc::now(),
+            created_at: zeron_proto::time::now(),
         };
         self.state.update(cx, |s, cx| {
             if !s.spaces.iter().any(|existing| existing.id == space.id) {
@@ -6079,7 +6082,10 @@ impl Shell {
         match step {
             ProjectStep::Devices => {
                 for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
-                    let online = self.state.read(cx).device_online(&device.id, Utc::now());
+                    let online = self
+                        .state
+                        .read(cx)
+                        .device_online(&device.id, zeron_proto::time::now());
                     let name = device.name.clone();
                     rows.push(
                         row(ix)
@@ -6791,6 +6797,9 @@ mod tests {
 
     fn chat(id: &str) -> zeron_proto::Chat {
         zeron_proto::Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: id.into(),
             device_id: "device".into(),
             title: None,

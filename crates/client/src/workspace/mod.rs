@@ -33,6 +33,7 @@ struct StateCache {
 pub(crate) struct WorkspaceStore {
     doc: Arc<Mutex<RegistryDoc>>,
     presence: Mutex<HashMap<String, i64>>,
+    session_freshness: Mutex<zeron_proto::time::SessionFreshness>,
     change_requests: Mutex<Vec<CheckoutChangeRequestStatus>>,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
@@ -45,6 +46,7 @@ impl WorkspaceStore {
         Self {
             doc: Arc::new(Mutex::new(doc)),
             presence: Mutex::new(HashMap::new()),
+            session_freshness: Mutex::default(),
             change_requests: Mutex::new(Vec::new()),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
@@ -139,6 +141,12 @@ impl WorkspaceStore {
     ) -> Option<u64> {
         let _serial = lock(&self.recompute);
         let (state, prefs) = self.state();
+        let mut state = (*state).clone();
+        lock(&self.session_freshness).project(
+            &mut state.sessions,
+            zeron_proto::time::now(),
+            std::time::Instant::now(),
+        );
         let presence = self.presence();
         let change_requests = lock(&self.change_requests).clone();
         let previous = self.snapshot();
@@ -147,7 +155,7 @@ impl WorkspaceStore {
             prefs.as_ref(),
             &DeriveContext {
                 self_device_id,
-                now: chrono::Utc::now(),
+                now: zeron_proto::time::now(),
                 presence: &presence,
                 change_requests: &change_requests,
                 send_states,

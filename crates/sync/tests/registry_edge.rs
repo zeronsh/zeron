@@ -24,6 +24,9 @@ fn ts(ms: i64) -> DateTime<Utc> {
 
 fn chat(id: &str, device_id: &str) -> Chat {
     Chat {
+        creation_clock: None,
+        activity_clock: None,
+        seen_activity_clock: None,
         id: id.into(),
         device_id: device_id.into(),
         title: Some("live chat".into()),

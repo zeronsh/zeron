@@ -2207,10 +2207,10 @@ impl Shell {
         // Working-indicator heartbeat: notify once a second while a session is
         // live so elapsed time and the flavour word stay fresh.
         let ticker = cx.spawn(async move |this, cx| {
-            let mut displayed_minute = Utc::now().timestamp().div_euclid(60);
+            let mut displayed_minute = zeron_proto::time::now().timestamp().div_euclid(60);
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let minute = Utc::now().timestamp().div_euclid(60);
+                let minute = zeron_proto::time::now().timestamp().div_euclid(60);
                 let minute_changed = minute != displayed_minute;
                 displayed_minute = minute;
                 let alive = this.update(cx, |shell: &mut Shell, cx| {
@@ -2218,7 +2218,7 @@ impl Shell {
                         let s = shell.state.read(cx);
                         s.selected_chat
                             .as_deref()
-                            .is_some_and(|id| s.indicator_for(id, Utc::now()) != Indicator::None)
+                            .is_some_and(|id| s.indicator_for(id, zeron_proto::time::now()) != Indicator::None)
                             // The connection pill's retry countdown needs the
                             // same per-second refresh while degraded.
                             || matches!(
@@ -2644,7 +2644,7 @@ impl Shell {
                         id: "t0".into(),
                         text,
                     }],
-                    created_at: chrono::Utc::now().timestamp_millis(),
+                    created_at: zeron_proto::time::now().timestamp_millis(),
                     device_id: "local".into(),
                     status: None,
                     continuation_of: None,
@@ -2666,7 +2666,7 @@ impl Shell {
         // Pending sends consume completion changes silently, while questions
         // still ring immediately. Output settings do not affect the baseline.
         {
-            let now = Utc::now();
+            let now = zeron_proto::time::now();
             type Ping = (
                 String,
                 crate::sound::SessionNotificationState,
@@ -4109,7 +4109,8 @@ impl Shell {
     ) {
         let was_active = self.resolved_right_active(cx) == surface;
         let restore_focus = was_active && self.navigation_focus.in_right(window, cx);
-        self.navigation_focus.remember(&self.shortcut_focus, window, cx);
+        self.navigation_focus
+            .remember(&self.shortcut_focus, window, cx);
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
@@ -7222,7 +7223,7 @@ impl Shell {
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
         let (queued, undelivered) = {
-            let now = Utc::now();
+            let now = zeron_proto::time::now();
             let state = self.state.read(cx);
             (
                 state.send_queued(&id, now),
@@ -7937,13 +7938,19 @@ impl Shell {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
         let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn.chats.iter()
+        let chat = conn
+            .chats
+            .iter()
             .find(|c| Some(c.chat_id.as_str()) == selected);
         let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
                 "Changes could not be saved".into(),
-                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
             ),
             S::Disabled => return None,
             S::Connected => {
@@ -7951,9 +7958,13 @@ impl Shell {
                 (
                     caption.into(),
                     loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
+                        "chat-sync-spinner",
+                        2.0,
+                        theme.text_muted,
+                        self.sidebar_pane.entity_id(),
+                        cx,
+                    )
+                    .into_any_element(),
                 )
             }
             S::Offline => (
@@ -8205,7 +8216,6 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
-
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -9563,7 +9573,11 @@ impl Shell {
         let selected_chat = state.read(cx).selected_chat.clone();
         let indicator = selected_chat
             .as_deref()
-            .map(|chat_id| state.read(cx).indicator_for(chat_id, Utc::now()))
+            .map(|chat_id| {
+                state
+                    .read(cx)
+                    .indicator_for(chat_id, zeron_proto::time::now())
+            })
             .unwrap_or(Indicator::None);
         let interrupting = selected_chat
             .as_deref()
@@ -10687,7 +10701,7 @@ impl Shell {
     /// to a "Sending…" bridge and then the engine mode line.
     fn render_status_strip(&mut self, composer_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let state = self.state.read(cx);
 
         // Keep notices aligned with the current composer width, including
@@ -11201,10 +11215,9 @@ impl Shell {
             let subagent_running = match surface {
                 RightSurface::SideChat(id) => self.side_chats.get(&id).is_some_and(|tab| {
                     let state = tab.state.read(cx);
-                    state
-                        .selected_chat
-                        .as_deref()
-                        .is_some_and(|id| state.indicator_for(id, Utc::now()) == Indicator::Working)
+                    state.selected_chat.as_deref().is_some_and(|id| {
+                        state.indicator_for(id, zeron_proto::time::now()) == Indicator::Working
+                    })
                 }),
                 RightSurface::Browser(id) => self
                     .browsers
@@ -11323,22 +11336,20 @@ impl Shell {
                 // up the carve-out. The bubble dispatch reaches the chip
                 // before the strip, and the handler consumes the drag, so
                 // the two never double-apply.
-                .on_drop::<RightTabDrag>(cx.listener(
-                    move |this, payload: &RightTabDrag, _, cx| {
-                        if payload.panel_key != this.panel_key(cx) {
-                            this.right_tab_drag = None;
-                            cx.notify();
-                            return;
-                        }
-                        let to = this
-                            .right_tab_drag
-                            .as_ref()
-                            .map(|d| d.over)
-                            .unwrap_or(payload.from);
+                .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
+                    if payload.panel_key != this.panel_key(cx) {
                         this.right_tab_drag = None;
-                        this.reorder_right_tabs(payload.from, to, cx);
-                    },
-                ))
+                        cx.notify();
+                        return;
+                    }
+                    let to = this
+                        .right_tab_drag
+                        .as_ref()
+                        .map(|d| d.over)
+                        .unwrap_or(payload.from);
+                    this.right_tab_drag = None;
+                    this.reorder_right_tabs(payload.from, to, cx);
+                }))
                 .child(
                     // Leading slot: the surface's icon.
                     div()
@@ -13110,6 +13121,9 @@ mod tests {
         source: Option<(&str, &str)>,
     ) -> zeron_proto::Chat {
         zeron_proto::Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: "chat".into(),
             device_id: "remote-device".into(),
             title: None,
@@ -13124,13 +13138,13 @@ mod tests {
                     cwd: source_cwd.into(),
                     branch: "main".into(),
                     head_sha: None,
-                    observed_at: chrono::Utc::now(),
+                    observed_at: zeron_proto::time::now(),
                 }
             }),
             config: None,
             last_message_preview: None,
             last_message_at: None,
-            created_at: chrono::Utc::now(),
+            created_at: zeron_proto::time::now(),
             harness_session_id: None,
             harness_session_cwd: None,
             space_id: None,
@@ -13205,17 +13219,26 @@ mod tests {
 
         chat.sync_state = S::Waiting;
         chat.connected = false;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
         chat.sync_state = S::Offline;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Offline — changes are saved")
+        );
 
         // Real pending pushes remain visible even with a live room.
         chat.connected = true;
         chat.pending_pushes = 1;
         chat.sync_state = S::Waiting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
     }
@@ -14510,7 +14533,7 @@ mod exit_regressions {
                         .map(|id| {
                             serde_json::from_value(serde_json::json!({
                                 "id": id, "deviceId": "local", "path": "/tmp", "gitDetected": false,
-                                "createdAt": Utc::now(),
+                                "createdAt": zeron_proto::time::now(),
                             }))
                             .unwrap()
                         })
@@ -14518,7 +14541,7 @@ mod exit_regressions {
                     state.chats =
                         vec![serde_json::from_value(serde_json::json!({
                     "id": "last", "deviceId": "local", "spaceId": "a", "archived": false,
-                    "createdAt": Utc::now(),
+                    "createdAt": zeron_proto::time::now(),
                 })).unwrap()];
                     state.select_chat(Some("last".into()), cx);
                 });
@@ -14713,7 +14736,8 @@ mod exit_regressions {
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.wallpaper_folder = Some(dir.path().join("wallpapers"));
                         settings.wallpaper_source = Some(dir.path().join("wallpapers/current.png"));
-                        settings.wallpaper_history = vec![dir.path().join("wallpapers/current.png")];
+                        settings.wallpaper_history =
+                            vec![dir.path().join("wallpapers/current.png")];
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.terminal_font_family = terminal_family.clone();
@@ -14735,8 +14759,14 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
-                        assert_eq!(current.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
-                        assert_eq!(current.wallpaper_folder, Some(dir.path().join("wallpapers")));
+                        assert_eq!(
+                            current.wallpaper_history,
+                            vec![dir.path().join("wallpapers/current.png")]
+                        );
+                        assert_eq!(
+                            current.wallpaper_folder,
+                            Some(dir.path().join("wallpapers"))
+                        );
                         assert_eq!(
                             current.wallpaper_source,
                             Some(dir.path().join("wallpapers/current.png"))
@@ -14764,7 +14794,10 @@ mod exit_regressions {
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.window_geometry, geometry);
-                    assert_eq!(loaded.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                    assert_eq!(
+                        loaded.wallpaper_history,
+                        vec![dir.path().join("wallpapers/current.png")]
+                    );
                     assert_eq!(loaded.wallpaper_folder, Some(dir.path().join("wallpapers")));
                     assert_eq!(
                         loaded.wallpaper_source,
@@ -15310,6 +15343,7 @@ mod exit_regressions {
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, _| {
                     state.apply_spaces(vec![zeron_proto::Space {
+                        creation_clock: None,
                         id: "repo".into(),
                         device_id: "local".into(),
                         path: "/repo".into(),
@@ -15317,7 +15351,7 @@ mod exit_regressions {
                         git_detected: false,
                         git_checked_at: None,
                         checkout_id: None,
-                        created_at: Utc::now(),
+                        created_at: zeron_proto::time::now(),
                     }]);
                     // Boot opened an existing project session after loading defaults.
                     state.selected_chat = Some("existing-project-chat".into());
@@ -15378,6 +15412,7 @@ mod exit_regressions {
             )
         });
         let space = |id: &str, device: &str| zeron_proto::Space {
+            creation_clock: None,
             id: id.into(),
             device_id: device.into(),
             path: format!("/{id}"),
@@ -15385,13 +15420,16 @@ mod exit_regressions {
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,
-            created_at: Utc::now(),
+            created_at: zeron_proto::time::now(),
         };
         window
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, cx| {
                     state.apply_spaces(vec![space("mine", "local"), space("other", "remote")]);
                     state.apply_chats(vec![zeron_proto::Chat {
+                        creation_clock: None,
+                        activity_clock: None,
+                        seen_activity_clock: None,
                         id: "elsewhere".into(),
                         device_id: "remote".into(),
                         title: None,
@@ -15403,7 +15441,7 @@ mod exit_regressions {
                         config: None,
                         last_message_preview: None,
                         last_message_at: None,
-                        created_at: Utc::now(),
+                        created_at: zeron_proto::time::now(),
                         harness_session_id: None,
                         harness_session_cwd: None,
                         parent_chat_id: None,
@@ -15415,7 +15453,10 @@ mod exit_regressions {
                 });
                 shell.settings.space_filter = None;
                 shell.open_chat("elsewhere".into(), cx);
-                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("other"));
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("other")
+                );
                 shell.open_new_session(cx);
                 let state = shell.state.read(cx);
                 assert!(state.selected_chat.is_none());
@@ -15666,6 +15707,7 @@ mod exit_regressions {
                 let project = dir.path().join("other-project");
                 shell.state.update(cx, |state, _| {
                     state.apply_spaces(vec![zeron_proto::Space {
+                        creation_clock: None,
                         id: "other".into(),
                         device_id: "local".into(),
                         path: project.to_string_lossy().into_owned(),
@@ -15673,7 +15715,7 @@ mod exit_regressions {
                         git_detected: false,
                         git_checked_at: None,
                         checkout_id: None,
-                        created_at: Utc::now(),
+                        created_at: zeron_proto::time::now(),
                     }]);
                 });
                 let project_target = project.join("notes.md").to_string_lossy().into_owned();
@@ -16820,7 +16862,7 @@ mod settings_modal_regressions {
                     .map(|(ix, id)| {
                         serde_json::from_value(serde_json::json!({
                             "id": id, "title": id, "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                            "createdAt": zeron_proto::time::now() - chrono::Duration::minutes(10 - ix as i64),
                         }))
                         .unwrap()
                     })

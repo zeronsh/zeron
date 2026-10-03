@@ -376,7 +376,7 @@ impl HarnessesPage {
             && self.target_device.as_ref().is_none_or(|device| {
                 self.state
                     .read(cx)
-                    .device_online(device, chrono::Utc::now())
+                    .device_online(device, zeron_proto::time::now())
             })
     }
 

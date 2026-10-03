@@ -110,6 +110,9 @@ impl Device {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Space {
+    /// Registry creation event; independent of device civil time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_clock: Option<String>,
     pub id: String,
     /// Owning device — fixed at create, immutable.
     pub device_id: String,
@@ -180,6 +183,15 @@ pub struct ConversationSourceContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
+    /// Registry creation event; independent of device civil time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_clock: Option<String>,
+    /// Causal activity/seen tokens supplied by the registry. Civil timestamps
+    /// remain display metadata and a fallback for legacy peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_clock: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_activity_clock: Option<String>,
     pub id: String,
     /// Owning (host) device.
     pub device_id: String,
@@ -244,6 +256,11 @@ impl Chat {
 impl Chat {
     /// True when the chat has activity the user hasn't seen on any device.
     pub fn unseen(&self) -> bool {
+        if self.last_message_at.is_some()
+            && let (Some(activity), Some(seen)) = (&self.activity_clock, &self.seen_activity_clock)
+        {
+            return activity > seen;
+        }
         match (self.last_message_at, self.last_seen_at) {
             (Some(msg), Some(seen)) => msg > seen,
             (Some(_), None) => true,

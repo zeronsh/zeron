@@ -81,7 +81,7 @@ final class CoreSessionSource: SessionSource {
         } else if app?.connectivity?.state == .offline {
             next.banner = .offline
         } else if !c.room.connected, let retry = c.room.retryAtMs {
-            next.banner = .reconnecting(in: max(1, Int((retry - Int64(Date().timeIntervalSince1970 * 1000)) / 1000)))
+            next.banner = .reconnecting(in: Int(max(1, min(3600, (Double(retry) - Double(runtimeNowMs())) / 1000))))
         }
         next.uploadProgress = c.transferProgress
         // Working state is shown at the transcript tail (layout engine), not here.

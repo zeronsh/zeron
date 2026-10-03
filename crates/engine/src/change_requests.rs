@@ -284,7 +284,7 @@ impl CheckoutChangeRequests {
                     cwd: source.checkout_root.to_string_lossy().into_owned(),
                     branch: source.branch.local_branch.clone(),
                     change_request,
-                    updated_at: chrono::Utc::now(),
+                    updated_at: zeron_proto::time::now(),
                 };
                 state.last_success = Some(snapshot.clone());
                 state.next_refresh = Instant::now() + ttl;

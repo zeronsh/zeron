@@ -1205,7 +1205,7 @@ impl EngineRpc {
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
-                    .unwrap_or_else(chrono::Utc::now);
+                    .unwrap_or_else(zeron_proto::time::now);
                 self.workspace
                     .mark_chat_seen(&chat_id, at)
                     .map_err(failed)
@@ -1910,7 +1910,7 @@ impl RpcService for EngineRpc {
                 chat.parent_chat_id = Some(parent_chat_id);
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
-                chat.created_at = chrono::Utc::now();
+                chat.created_at = zeron_proto::time::now();
                 chat.last_message_at = None;
                 chat.last_message_preview = None;
                 chat.last_seen_at = None;
@@ -1962,7 +1962,7 @@ impl RpcService for EngineRpc {
                                 source_chat_id: source.id.clone(),
                                 source_title,
                             }],
-                            created_at: chrono::Utc::now().timestamp_millis(),
+                            created_at: zeron_proto::time::now().timestamp_millis(),
                             device_id: self.doc_host.device_id().to_owned(),
                             status: Some(zeron_doc::MessageStatus::Complete),
                             continuation_of: None,
@@ -2521,7 +2521,7 @@ impl RpcService for EngineRpc {
                         deletions: snapshot.deletions,
                         truncated: snapshot.truncated,
                         checksum: snapshot.checksum,
-                        updated_at: chrono::Utc::now(),
+                        updated_at: zeron_proto::time::now(),
                     })
                 })
                 .await

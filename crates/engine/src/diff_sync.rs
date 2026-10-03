@@ -303,7 +303,7 @@ impl CheckoutDiffSync {
                         TurnSnapshot {
                             root: identity.root,
                             tree,
-                            at: chrono::Utc::now(),
+                            at: zeron_proto::time::now(),
                         },
                     );
                 }
@@ -701,7 +701,7 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
         deletions: snapshot.deletions,
         truncated: snapshot.truncated,
         checksum: snapshot.checksum.clone(),
-        updated_at: chrono::Utc::now(),
+        updated_at: zeron_proto::time::now(),
     };
     {
         let entries = lock(&inner.entries);
@@ -726,7 +726,7 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
                 additions: snapshot.additions,
                 deletions: snapshot.deletions,
                 truncated: snapshot.truncated,
-                published_at: chrono::Utc::now().timestamp_millis(),
+                published_at: zeron_proto::time::now().timestamp_millis(),
             };
             let url = format!("{}/diff/{}", edge.url.trim_end_matches('/'), chat.id);
             // Fresh bearer per request — never the boot-time snapshot.
@@ -1732,7 +1732,7 @@ pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
     let index = std::env::temp_dir().join(format!(
         "zeron-turn-index-{}-{}",
         std::process::id(),
-        chrono::Utc::now().timestamp_micros()
+        crate::new_id()
     ));
     let run = |args: &[&str]| {
         let mut cmd = tokio::process::Command::new("git");

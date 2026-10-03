@@ -6,6 +6,18 @@
 use super::*;
 use zeron_proto::{HarnessId, SandboxLevel, SessionStatus};
 
+fn without_clock_metadata(mut chat: Chat) -> Chat {
+    chat.creation_clock = None;
+    chat.activity_clock = None;
+    chat.seen_activity_clock = None;
+    chat
+}
+
+fn without_space_clock(mut space: Space) -> Space {
+    space.creation_clock = None;
+    space
+}
+
 fn ts(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
 }
@@ -83,6 +95,19 @@ fn hlc_clock_is_monotonic_across_regressions() {
     let c = clock.next(1_000, "d"); // and stalled
     assert!(b > a);
     assert!(c > b);
+}
+
+#[test]
+fn hlc_clock_observes_remote_time_and_counter_without_regressing() {
+    let mut clock = HlcClock::default();
+    let remote = encode_hlc(2_000, 999_999, "remote");
+    clock.observe(&remote);
+    clock.observe(&encode_hlc(1_000, 0, "older"));
+    let next = clock.next(500, "local");
+    assert_eq!(next, encode_hlc(2_001, 0, "local"));
+    assert!(next > remote);
+    clock.observe(&encode_hlc(2_001, 9, "remote"));
+    assert_eq!(clock.next(500, "local"), encode_hlc(2_001, 10, "local"));
 }
 
 #[test]
@@ -252,6 +277,9 @@ fn device(id: &str, name: &str) -> Device {
 
 fn chat(id: &str, device_id: &str) -> Chat {
     Chat {
+        creation_clock: None,
+        activity_clock: None,
+        seen_activity_clock: None,
         id: id.into(),
         device_id: device_id.into(),
         title: Some("First chat".into()),
@@ -281,6 +309,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
 
 fn space(id: &str, device_id: &str, path: &str) -> Space {
     Space {
+        creation_clock: None,
         id: id.into(),
         device_id: device_id.into(),
         path: path.into(),
@@ -357,7 +386,14 @@ fn rows_round_trip_and_upsert_refreshes() {
 
     let state = doc.read_all().unwrap();
     assert_eq!(state.devices, vec![device]);
-    assert_eq!(state.chats, vec![chat("chat-1", "dev-a")]);
+    assert_eq!(
+        state
+            .chats
+            .into_iter()
+            .map(without_clock_metadata)
+            .collect::<Vec<_>>(),
+        vec![chat("chat-1", "dev-a")]
+    );
     assert_eq!(
         state.sessions,
         vec![session("chat-1", "dev-a", SessionStatus::Working)]
@@ -534,6 +570,68 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.cursor_sdk_version.as_deref(), Some("1.0.31"));
     assert_eq!(dev.name, "workstation");
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
+}
+
+#[test]
+fn device_rename_follows_a_remote_clock_ahead_of_local_time() {
+    let remote_clock = encode_hlc(Utc::now().timestamp_millis() + 14_400_000, 7, "windows");
+    let mut remote = RegistryDoc::new("windows");
+    remote
+        .upsert_device(&device("windows", "Original name"))
+        .unwrap();
+    let mut row = remote.overlay_row(KIND_DEVICES, "windows").unwrap();
+    row.seq = 1;
+    row.clocks
+        .values_mut()
+        .for_each(|clock| *clock = remote_clock.clone());
+
+    // All delivery paths, including an old snapshot whose local HLC never
+    // observed the remote clock, must let the user's next edit take effect.
+    for delivery in ["full", "delta", "broadcast", "snapshot"] {
+        let mut local = RegistryDoc::new("linux");
+        match delivery {
+            "full" => {
+                local.apply_state(1, true, 0, vec![row.clone()]);
+            }
+            "delta" => {
+                local.apply_state(1, false, 0, vec![row.clone()]);
+            }
+            "broadcast" => {
+                assert!(local.apply_rows(1, vec![row.clone()]));
+            }
+            "snapshot" => {
+                local.server_seq = 1;
+                local
+                    .authoritative
+                    .entry(KIND_DEVICES.into())
+                    .or_default()
+                    .insert(row.id.clone(), row.clone());
+                local = RegistryDoc::from_bytes(&local.to_bytes().unwrap(), "linux").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            local
+                .rename_device("windows", "Renamed from Linux")
+                .unwrap()
+        );
+        assert_eq!(
+            local.read_devices().unwrap()[0].name,
+            "Renamed from Linux",
+            "{delivery}"
+        );
+        let batch = local.take_pushable().pop().unwrap();
+        assert!(batch.ops[0].hlc > remote_clock, "{delivery}");
+        let merged = apply_op(Some(&row), &batch.ops[0]).0.unwrap();
+        assert!(local.apply_rows(2, vec![merged]));
+        local.ack_batch(&batch.batch, 2);
+        let reopened = RegistryDoc::from_bytes(&local.to_bytes().unwrap(), "linux").unwrap();
+        assert_eq!(
+            reopened.read_devices().unwrap()[0].name,
+            "Renamed from Linux",
+            "{delivery}"
+        );
+    }
 }
 
 #[test]
@@ -1196,7 +1294,18 @@ fn migration_seeds_pending_upserts_that_lose_to_live_writes() {
     assert_eq!(seeded, 4);
     // Instant: the overlay serves the full state before any server contact.
     let state = doc.read_all().unwrap();
-    assert_eq!(state, legacy.read_all().unwrap());
+    let mut legacy_state = state.clone();
+    legacy_state.chats = legacy_state
+        .chats
+        .into_iter()
+        .map(without_clock_metadata)
+        .collect();
+    legacy_state.spaces = legacy_state
+        .spaces
+        .into_iter()
+        .map(without_space_clock)
+        .collect();
+    assert_eq!(legacy_state, legacy.read_all().unwrap());
 
     // Two devices seeding the same converged doc = identical result.
     let mut other = RegistryDoc::new("dev-b");
@@ -1207,7 +1316,18 @@ fn migration_seeds_pending_upserts_that_lose_to_live_writes() {
     let mut seq = 0u64;
     server_round(&mut server, &mut seq, &mut [&mut doc, &mut other]);
     assert_eq!(doc.read_all().unwrap(), other.read_all().unwrap());
-    assert_eq!(doc.read_all().unwrap(), legacy.read_all().unwrap());
+    let mut migrated = doc.read_all().unwrap();
+    migrated.chats = migrated
+        .chats
+        .into_iter()
+        .map(without_clock_metadata)
+        .collect();
+    migrated.spaces = migrated
+        .spaces
+        .into_iter()
+        .map(without_space_clock)
+        .collect();
+    assert_eq!(migrated, legacy.read_all().unwrap());
 
     // A live rename (now-clock) beats the migrated title everywhere.
     other.rename_chat("chat-1", "live rename").unwrap();
@@ -1497,7 +1617,10 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
     let mut server = HashMap::new();
     let mut seq = 0;
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
-    assert_eq!(b.chat("side").unwrap(), Some(side.clone()));
+    assert_eq!(
+        b.chat("side").unwrap().map(without_clock_metadata),
+        Some(side.clone())
+    );
     b.rename_chat("side", "Investigate caching").unwrap();
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
     assert_eq!(
@@ -1515,4 +1638,119 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
             .as_deref(),
         Some("main")
     );
+}
+
+#[test]
+fn extreme_wall_clocks_keep_hlc_wire_order_and_restart_monotonicity() {
+    let mut clock = HlcClock::default();
+    let mut previous = String::new();
+    for wall in [i64::MIN, -1, 0, i64::MAX, 1, i64::MIN] {
+        let next = clock.next(wall, "device");
+        assert!(next > previous);
+        assert_eq!(next.split('-').next().unwrap().len(), 13);
+        previous = next;
+        clock = serde_json::from_slice(&serde_json::to_vec(&clock).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn stale_boot_metadata_does_not_overwrite_an_unseen_remote_rename() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    a.upsert_device(&device("a", "Original")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    b.rename_device("a", "Renamed remotely").unwrap();
+    let mut boot = a.read_devices().unwrap().remove(0);
+    boot.last_seen_at = Some(ts(9000));
+    boot.version = Some("new build".into());
+    a.upsert_device(&boot).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    assert_eq!(a.read_devices().unwrap()[0].name, "Renamed remotely");
+    assert_eq!(
+        a.read_devices().unwrap()[0].version.as_deref(),
+        Some("new build")
+    );
+}
+
+#[test]
+fn unread_and_activity_order_follow_causality_despite_wrong_dates() {
+    let mut doc = RegistryDoc::new("reader");
+    let mut older = chat("older", "remote");
+    older.created_at = DateTime::<Utc>::MAX_UTC;
+    older.last_message_at = Some(DateTime::<Utc>::MAX_UTC);
+    doc.upsert_chat(&older).unwrap();
+    let mut newer = chat("newer", "remote");
+    newer.created_at = DateTime::<Utc>::MIN_UTC;
+    newer.last_message_at = Some(DateTime::<Utc>::MIN_UTC);
+    doc.upsert_chat(&newer).unwrap();
+    let mut chats = doc.read_chats().unwrap();
+    zeron_proto::view::sort_chats(&mut chats);
+    assert_eq!(chats[0].id, "newer");
+    let mut tabs: Vec<_> = chats.iter().collect();
+    zeron_proto::view::sort_tabs(&mut tabs);
+    assert_eq!(tabs[0].id, "older");
+    assert!(doc.chat("older").unwrap().unwrap().unseen());
+    doc.set_chat_seen("older", DateTime::<Utc>::MIN_UTC)
+        .unwrap();
+    assert!(!doc.chat("older").unwrap().unwrap().unseen());
+    doc.set_chat_last_message("older", "later event", DateTime::<Utc>::MIN_UTC)
+        .unwrap();
+    assert!(doc.chat("older").unwrap().unwrap().unseen());
+    let before = doc.chat("older").unwrap().unwrap().activity_clock;
+    doc.rename_chat("older", "Metadata only").unwrap();
+    assert_eq!(doc.chat("older").unwrap().unwrap().activity_clock, before);
+}
+
+#[test]
+fn space_creation_order_and_metadata_clocks_ignore_civil_dates() {
+    let mut doc = RegistryDoc::new("writer");
+    let mut first = space("first", "writer", "/first");
+    first.created_at = DateTime::<Utc>::MAX_UTC;
+    doc.upsert_space(&first).unwrap();
+    let initial_clock = doc.space("first").unwrap().unwrap().creation_clock;
+    let mut second = space("second", "writer", "/second");
+    second.created_at = DateTime::<Utc>::MIN_UTC;
+    doc.upsert_space(&second).unwrap();
+    first.name = Some("New title".into());
+    doc.upsert_space(&first).unwrap();
+    assert_eq!(
+        doc.space("first").unwrap().unwrap().creation_clock,
+        initial_clock
+    );
+    let mut spaces = doc.read_spaces().unwrap();
+    zeron_proto::view::sort_spaces(&mut spaces);
+    assert_eq!(
+        spaces.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}
+
+#[test]
+fn restore_repairs_extreme_legacy_pending_clocks_without_losing_intent() {
+    let mut doc = RegistryDoc::new("linux");
+    doc.upsert_device(&device("linux", "Pending rename"))
+        .unwrap();
+    let clock = encode_hlc(i64::MAX, 0, "linux");
+    doc.pending[0].ops[0].hlc = clock.clone();
+    doc.pending[0].ops[0].clocks = Some(BTreeMap::from([("name".into(), clock)]));
+    let bytes = doc.to_bytes().unwrap();
+    let mut restored = RegistryDoc::from_bytes(&bytes, "linux").unwrap();
+    assert_eq!(restored.read_devices().unwrap()[0].name, "Pending rename");
+    let batch = restored.take_pushable().pop().unwrap();
+    assert!(valid_hlc(&batch.ops[0].hlc));
+    assert!(
+        batch.ops[0]
+            .clocks
+            .as_ref()
+            .unwrap()
+            .values()
+            .all(|clock| valid_hlc(clock))
+    );
+    let row = apply_op(None, &batch.ops[0]).0.unwrap();
+    restored.apply_rows(1, vec![row]);
+    restored.ack_batch(&batch.batch, 1);
+    assert_eq!(restored.pending_len(), 0);
+    assert_eq!(restored.read_devices().unwrap()[0].name, "Pending rename");
 }

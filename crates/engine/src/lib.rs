@@ -96,7 +96,7 @@ pub enum EngineError {
 
 /// Epoch millis now — the doc/journal timestamp base.
 pub(crate) fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    zeron_proto::time::now_ms()
 }
 
 pub(crate) fn new_id() -> String {

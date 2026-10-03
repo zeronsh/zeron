@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, RegistryDoc, RegistryRow, RowOp,
@@ -212,7 +211,7 @@ impl DemoHost {
                 if !live.is_empty() {
                     let _ = client.registry_write(|doc| {
                         for mut session in live {
-                            session.updated_at = Utc::now();
+                            session.updated_at = zeron_proto::time::now();
                             doc.upsert_session(&session)?;
                         }
                         Ok(())
@@ -484,7 +483,7 @@ impl DemoHost {
         completed: Option<&str>,
     ) {
         let host = self.host_of(client, chat_id);
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let started = client
             .workspace
             .state()
@@ -608,7 +607,7 @@ impl DemoHost {
                 doc.set_chat_last_message(
                     chat_id,
                     &zeron_proto::view::single_line(&preview),
-                    Utc::now(),
+                    zeron_proto::time::now(),
                 )?;
                 if untitled {
                     let title: String = zeron_proto::view::single_line(&preview)
@@ -769,10 +768,13 @@ impl DemoHost {
         let viewing = core.snapshot().revision > 0 && self.is_viewing(&core);
         let _ = client.registry_write(|doc| {
             if !preview.is_empty() {
-                doc.set_chat_last_message(chat_id, &preview, Utc::now())?;
+                doc.set_chat_last_message(chat_id, &preview, zeron_proto::time::now())?;
             }
             if viewing {
-                doc.set_chat_seen(chat_id, Utc::now() + chrono::Duration::milliseconds(1))?;
+                doc.set_chat_seen(
+                    chat_id,
+                    zeron_proto::time::now() + chrono::Duration::milliseconds(1),
+                )?;
             }
             Ok(())
         });

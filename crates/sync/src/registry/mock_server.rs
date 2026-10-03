@@ -158,7 +158,7 @@ async fn serve(
                                 "full": full,
                                 "gcFloor": state.gc_floor,
                                 "rows": rows,
-                                "presence": state.presence,
+                                "presence": state.presence, "presenceNow": zeron_proto::time::now_ms(),
                             })
                             .to_string()
                         };
@@ -238,7 +238,7 @@ async fn serve(
                         }
                     }
                     Some("presence") if ready => {
-                        let at = frame.get("at").and_then(Value::as_i64).unwrap_or(0);
+                        let at = zeron_proto::time::now_ms();
                         lock(&state).presence.insert(device.clone(), at);
                         let _ = bcast.send(
                             json!({"t":"presence","device":device,"at":at}).to_string(),

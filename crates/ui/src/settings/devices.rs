@@ -22,10 +22,12 @@ use crate::theme::Theme;
 /// heartbeat every 15s; 70s tolerates a couple of missed beats).
 pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
 
-/// Presence: last-seen within the online window (future timestamps count). Pure.
+/// Presence: locally projected receipt time within the online window. Pure.
 pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    last_seen
-        .is_some_and(|at| now.signed_duration_since(at).num_seconds() <= DEVICE_ONLINE_WINDOW_SECS)
+    last_seen.is_some_and(|at| {
+        (0..=DEVICE_ONLINE_WINDOW_SECS * 1000)
+            .contains(&now.signed_duration_since(at).num_milliseconds())
+    })
 }
 
 /// Compact last-seen line. Pure.
@@ -263,7 +265,7 @@ pub fn short_id(id: &str) -> String {
 impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let (devices, local_id, workspace_scope) = {
             let state = self.state.read(cx);
             (
@@ -456,18 +458,18 @@ mod tests {
 
     #[test]
     fn presence_window() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         assert!(device_online(Some(now - TimeDelta::seconds(10)), now));
         assert!(device_online(Some(now - TimeDelta::seconds(70)), now));
         assert!(!device_online(Some(now - TimeDelta::seconds(71)), now));
         assert!(!device_online(None, now));
-        // Clock skew (future) counts as online.
-        assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
+        // Unprojected future timestamps are not evidence of receipt.
+        assert!(!device_online(Some(now + TimeDelta::seconds(30)), now));
     }
 
     #[test]
     fn last_seen_formatting() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         assert_eq!(format_last_seen(None, now), "never seen");
         assert_eq!(
             format_last_seen(Some(now - TimeDelta::seconds(30)), now),

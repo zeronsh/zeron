@@ -6807,7 +6807,7 @@ impl Composer {
             .or_else(|| state.effective_device_id());
         let online = target
             .as_deref()
-            .is_none_or(|device| state.device_online(device, chrono::Utc::now()));
+            .is_none_or(|device| state.device_online(device, zeron_proto::time::now()));
         format!(
             "{engine:?}:{:?}:{:?}:{online}",
             state.connection, state.connectivity.state
@@ -7666,7 +7666,7 @@ impl Composer {
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         {
             let state = self.state.read(cx);
-            let now = chrono::Utc::now();
+            let now = zeron_proto::time::now();
             retain_live_interrupts(&mut self.interrupting, |chat_id| {
                 matches!(
                     state.indicator_for(chat_id, now),
@@ -7865,7 +7865,7 @@ impl Composer {
             return false;
         };
         matches!(
-            s.indicator_for(chat_id, chrono::Utc::now()),
+            s.indicator_for(chat_id, zeron_proto::time::now()),
             Indicator::Working | Indicator::AwaitingInput
         )
     }
@@ -8139,7 +8139,7 @@ impl Composer {
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
-        let created_at = chrono::Utc::now().timestamp_millis();
+        let created_at = zeron_proto::time::now().timestamp_millis();
         // Existing busy chats always queue; compatibility was checked before
         // taking the draft, attachments, or review comments.
         let queue = queue && !is_new;
@@ -8279,7 +8279,7 @@ impl Composer {
                 // Working overlay until the host executes the queued command —
                 // without it a remote send flashed Completed (and could ring
                 // the done-chime) in the queue→drain→sync gap.
-                s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
+                s.begin_pending_send(&chat_id, &message_id, zeron_proto::time::now());
             }
             cx.notify();
         });
@@ -10038,9 +10038,9 @@ impl Render for Composer {
                         .is_some_and(|id| state.local_device_id.as_deref() != Some(id.as_str()));
                     remote_target
                         && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
-                            || state
-                                .effective_device_id()
-                                .is_some_and(|id| !state.device_online(&id, chrono::Utc::now())))
+                            || state.effective_device_id().is_some_and(|id| {
+                                !state.device_online(&id, zeron_proto::time::now())
+                            }))
                 }
             };
             let offline = state.connectivity.state == S::Offline;
@@ -11743,7 +11743,7 @@ mod tests {
             ));
             state.selected_chat = Some("c".into());
             // A send in flight reads as Working — the double-Enter window.
-            state.begin_pending_send("c", "m1", chrono::Utc::now());
+            state.begin_pending_send("c", "m1", zeron_proto::time::now());
         });
         let composer = cx.new(|cx| Composer::new(state, cx));
         composer.update(cx, |composer, cx| {
@@ -12236,7 +12236,7 @@ mod tests {
             state.chats = vec![
                 serde_json::from_value(serde_json::json!({
                     "id": "main", "deviceId": "local", "cwd": "/tmp/main",
-                    "archived": false, "createdAt": chrono::Utc::now(),
+                    "archived": false, "createdAt": zeron_proto::time::now(),
                     "config": { "harness": "codex", "sandbox": "workspace-write" },
                 }))
                 .unwrap(),
@@ -12247,7 +12247,7 @@ mod tests {
         });
         let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
             "id": "side", "parentChatId": "main", "deviceId": "local", "cwd": "/tmp/main",
-            "archived": false, "createdAt": chrono::Utc::now(),
+            "archived": false, "createdAt": zeron_proto::time::now(),
             "config": { "harness": "codex", "model": "child-model", "reasoning": "low",
                 "sandbox": "workspace-write" },
         }))
@@ -13090,7 +13090,7 @@ mod tests {
                 .map(|(index, (harness, _))| {
                     serde_json::from_value(serde_json::json!({
                         "id": format!("chat-{index}"), "deviceId": "host", "archived": false,
-                        "cwd": format!("/worktree-{index}"), "createdAt": chrono::Utc::now(),
+                        "cwd": format!("/worktree-{index}"), "createdAt": zeron_proto::time::now(),
                         "config": { "harness": harness, "sandbox": "workspace-write" }
                     }))
                     .unwrap()

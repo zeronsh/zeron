@@ -707,6 +707,8 @@ pub struct AppState {
     /// this and continue reading their device-local settings entry.
     pub sidebar_preferences: SidebarPreferencesState,
     session_presentation: Option<Vec<Session>>,
+    session_freshness: zeron_proto::time::SessionFreshness,
+    device_freshness: zeron_proto::time::DeviceFreshness,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
     /// its project.
@@ -838,6 +840,8 @@ impl AppState {
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
+            session_freshness: Default::default(),
+            device_freshness: Default::default(),
             selected_space: None,
             no_project: false,
             selected_device: None,
@@ -1080,8 +1084,11 @@ impl AppState {
         }
     }
 
-    pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
-        self.apply_sessions_at(sessions, Utc::now())
+    pub fn apply_sessions(&mut self, mut sessions: Vec<Session>) -> bool {
+        let now = zeron_proto::time::now();
+        self.session_freshness
+            .project(&mut sessions, now, std::time::Instant::now());
+        self.apply_sessions_at(sessions, now)
     }
 
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
@@ -1256,7 +1263,7 @@ impl AppState {
             return false;
         }
         if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
+            || !self.device_online(&chat.device_id, zeron_proto::time::now())
         {
             return true;
         }
@@ -1283,8 +1290,10 @@ impl AppState {
         self.send_pending(chat_id, now) && self.chat_delivery_degraded(chat_id)
     }
 
-    pub fn apply_devices(&mut self, devices: Vec<Device>) -> bool {
-        self.apply_devices_at(devices, Utc::now())
+    pub fn apply_devices(&mut self, mut devices: Vec<Device>) -> bool {
+        let now = zeron_proto::time::now();
+        self.device_freshness.project(&mut devices, now);
+        self.apply_devices_at(devices, now)
     }
 
     fn apply_devices_at(&mut self, mut devices: Vec<Device>, now: DateTime<Utc>) -> bool {
@@ -2053,6 +2062,8 @@ impl AppState {
         self.sessions.clear();
         self.sidebar_preferences = SidebarPreferencesState::default();
         self.session_presentation = None;
+        self.session_freshness = Default::default();
+        self.device_freshness = Default::default();
         self.selected_space = None;
         self.no_project = false;
         self.selected_device = None;
@@ -2597,7 +2608,8 @@ impl AppState {
         if !chat.unseen() {
             return;
         }
-        chat.last_seen_at = Some(Utc::now());
+        chat.last_seen_at = Some(zeron_proto::time::now());
+        chat.seen_activity_clock = chat.activity_clock.clone();
         cx.notify();
         let Some(handle) = self.engine.clone() else {
             return;
@@ -2622,7 +2634,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -3680,6 +3695,9 @@ mod tests {
             .unwrap()
             .to_utc();
         Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: id.into(),
             device_id: "dev".into(),
             title: None,
@@ -3706,6 +3724,7 @@ mod tests {
             .unwrap()
             .to_utc();
         Space {
+            creation_clock: None,
             id: id.into(),
             device_id: device_id.into(),
             path: path.into(),
@@ -3966,7 +3985,7 @@ mod tests {
     #[test]
     fn session_heartbeats_preserve_freshness_without_redrawing_unchanged_status() {
         let mut state = AppState::new();
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut row = Session {
             last_completed_turn: None,
             chat_id: "chat".into(),
@@ -3997,7 +4016,7 @@ mod tests {
     #[test]
     fn unchanged_device_heartbeat_still_retires_stale_session_indicators() {
         let mut state = AppState::new();
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         state.sessions = vec![Session {
             last_completed_turn: None,
             chat_id: "chat".into(),
@@ -4028,7 +4047,7 @@ mod tests {
     #[test]
     fn device_heartbeats_keep_freshness_without_repainting_unchanged_presentation() {
         let mut state = AppState::new();
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut row = device("host", "Host");
         row.last_seen_at = Some(now);
         assert!(state.apply_devices_at(vec![row.clone()], now));
@@ -4144,7 +4163,7 @@ mod tests {
 
     #[test]
     fn send_pending_overlays_working_until_the_grace_window() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let s_chat = chat("c", 0, Some(10)); // unseen, no session row
         let mut s = AppState::new();
         assert_eq!(s.display_status_for(&s_chat, now), ChatIndicator::Completed);
@@ -4166,7 +4185,7 @@ mod tests {
 
     #[test]
     fn send_pending_acked_when_the_host_writes_the_message_back() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut s = AppState::new();
         s.selected_chat = Some("c".into());
         s.begin_pending_send("c", "m1", now);
@@ -4180,7 +4199,7 @@ mod tests {
 
     #[test]
     fn send_failure_cleanup_only_ends_its_own_overlay() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut s = AppState::new();
         s.begin_pending_send("c", "m1", now);
         s.begin_pending_send("c", "m2", now); // quick resend superseded m1
@@ -4212,7 +4231,7 @@ mod tests {
 
     #[test]
     fn working_indicator_staleness() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         // Fresh working session shows.
         let fresh = session("c", SessionStatus::Working, 10, now);
         assert_eq!(effective_indicator(Some(&fresh), now), Indicator::Working);
@@ -4222,14 +4241,14 @@ mod tests {
         // Exactly at the boundary still shows (strictly-older-than semantics).
         let edge = session("c", SessionStatus::Working, 45, now);
         assert_eq!(effective_indicator(Some(&edge), now), Indicator::Working);
-        // Future timestamps (clock skew) count as fresh.
+        // Unprojected future timestamps cannot establish freshness.
         let skewed = session("c", SessionStatus::Working, -30, now);
-        assert_eq!(effective_indicator(Some(&skewed), now), Indicator::Working);
+        assert_eq!(effective_indicator(Some(&skewed), now), Indicator::None);
     }
 
     #[test]
     fn indicator_kinds() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         assert_eq!(effective_indicator(None, now), Indicator::None);
         let idle = session("c", SessionStatus::Idle, 0, now);
         assert_eq!(effective_indicator(Some(&idle), now), Indicator::None);
@@ -4250,7 +4269,7 @@ mod tests {
 
     #[test]
     fn display_status_derivation() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut c = chat("c", 0, Some(10));
         // Live states win regardless of seen.
         let working = session("c", SessionStatus::Working, 5, now);
@@ -4607,7 +4626,7 @@ mod tests {
         // project-less chats (first-class since the project selectors);
         // chats of unknown spaces stay hidden. Completed ("old") outranks
         // idle ("new"/"dangling").
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let overview: Vec<&str> = state
             .overview_chats(now)
             .iter()
@@ -4680,7 +4699,7 @@ mod tests {
 
     #[test]
     fn visible_chats_hide_spawned_children() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut state = AppState::new();
         let mut child = chat("child", 0, Some(1));
         child.parent_chat_id = Some("parent".into());
@@ -4736,7 +4755,7 @@ mod tests {
 
     #[test]
     fn jump_slots_count_the_rows_the_sidebar_draws() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut state = AppState::new();
         let mut in_space = chat("a", 0, Some(3));
         in_space.space_id = Some("s1".into());
@@ -4811,7 +4830,7 @@ mod tests {
         };
         state.push_echo("c1", echo("held"));
         state.push_echo("c1", echo("sent"));
-        state.begin_pending_send("c1", "held", Utc::now());
+        state.begin_pending_send("c1", "held", zeron_proto::time::now());
         state.apply_queue(vec![row("held")]);
         let ids: Vec<_> = state
             .pending_echoes()
@@ -5042,7 +5061,7 @@ mod tests {
 
     #[test]
     fn relative_times_match_zeron_format() {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let ago = |secs: i64| now - chrono::Duration::seconds(secs);
         assert_eq!(format_time_ago(ago(0), now), "now");
         assert_eq!(format_time_ago(ago(59), now), "now");
@@ -5216,7 +5235,7 @@ mod tests {
     #[test]
     fn delivery_degradation_and_queued_sends_tell_the_truth() {
         use zeron_proto::{ChatConnectivity, ConnectivityState};
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let mut s = AppState::default();
         s.local_device_id = Some("local".into());
         let mut remote = chat("c-remote", 0, None);

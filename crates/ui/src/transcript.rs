@@ -6210,7 +6210,7 @@ impl Transcript {
         };
         let engine = self.state.read(cx).engine().cloned();
         self.state.update(cx, |s, cx| {
-            s.retry_pending_send(&chat_id, chrono::Utc::now());
+            s.retry_pending_send(&chat_id, zeron_proto::time::now());
             cx.notify();
         });
         if let Some(engine) = engine {
@@ -6229,7 +6229,7 @@ impl Transcript {
     }
 
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let now = chrono::Utc::now();
+        let now = zeron_proto::time::now();
         let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
             // the PARENT chat's live state into this tab. Liveness rides the
@@ -12349,8 +12349,8 @@ mod tests {
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,
-                            started_at: Some(chrono::Utc::now()),
-                            updated_at: chrono::Utc::now(),
+                            started_at: Some(zeron_proto::time::now()),
+                            updated_at: zeron_proto::time::now(),
                         })
                     });
                     this.on_own_send("chat".into(), "prompt".into(), cx);

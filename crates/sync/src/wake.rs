@@ -27,6 +27,13 @@ const TICK: Duration = Duration::from_secs(1);
 /// a suspend — far above scheduler jitter, far below any real sleep.
 const JUMP_THRESHOLD: Duration = Duration::from_secs(5);
 
+fn clock_changed_or_woke(before: SystemTime, after: SystemTime, monotonic: Duration) -> bool {
+    match after.duration_since(before) {
+        Ok(wall) => wall > monotonic.saturating_add(JUMP_THRESHOLD),
+        Err(_) => true,
+    }
+}
+
 static CHANNEL: OnceLock<broadcast::Sender<()>> = OnceLock::new();
 static ONLINE: OnceLock<broadcast::Sender<()>> = OnceLock::new();
 /// OS-reported network path status. `false` (the default, and the permanent
@@ -49,18 +56,13 @@ pub fn subscribe() -> broadcast::Receiver<()> {
                 let mut mono = Instant::now();
                 loop {
                     interval.tick().await;
-                    let wall_elapsed = SystemTime::now()
-                        .duration_since(wall)
-                        .unwrap_or(Duration::ZERO);
+                    let current_wall = SystemTime::now();
                     let mono_elapsed = mono.elapsed();
-                    if wall_elapsed > mono_elapsed + JUMP_THRESHOLD {
-                        tracing::info!(
-                            slept_s = wall_elapsed.as_secs(),
-                            "wake: system resumed from suspend"
-                        );
+                    if clock_changed_or_woke(wall, current_wall, mono_elapsed) {
+                        tracing::info!("wake: system resumed or civil clock changed");
                         let _ = detector.send(());
                     }
-                    wall = SystemTime::now();
+                    wall = current_wall;
                     mono = Instant::now();
                 }
             });
@@ -113,4 +115,29 @@ pub fn set_path_online(online: bool) {
 /// absent or wrong, so parked waits keep a coarse safety timer.
 pub fn path_is_offline() -> bool {
     PATH_OFFLINE.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn clock_steps_in_either_direction_trigger_recovery() {
+        let before = SystemTime::UNIX_EPOCH + Duration::from_secs(100000);
+        assert!(!clock_changed_or_woke(before, before + TICK, TICK));
+        assert!(clock_changed_or_woke(
+            before,
+            before + Duration::from_secs(3600),
+            TICK
+        ));
+        assert!(clock_changed_or_woke(
+            before,
+            before - Duration::from_secs(3600),
+            TICK
+        ));
+        assert!(!clock_changed_or_woke(
+            before,
+            before + Duration::from_secs(3600),
+            Duration::from_secs(3600)
+        ));
+    }
 }

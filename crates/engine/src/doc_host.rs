@@ -282,6 +282,7 @@ struct DocHostInner {
     /// terminalizes the latter as Rejected instead of leaving a forever-
     /// Pending entry no retry could ever reach (2026-08-19 swallowed-send).
     executing: Mutex<HashSet<String>>,
+    receipt_generation: String,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -409,9 +410,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -889,6 +888,21 @@ impl ChatDocHandle {
 }
 
 impl DocHost {
+    fn command_at_receipt(
+        &self,
+        mut entry: SessionCommandEntry,
+    ) -> Result<SessionCommandEntry, EngineError> {
+        let (received, expiry) = self.inner.store.command_receipt(
+            &entry.id,
+            &self.inner.receipt_generation,
+            now_ms(),
+            entry.ttl_ms(),
+        )?;
+        entry.issued_at = received;
+        entry.expires_at = Some(expiry);
+        Ok(entry)
+    }
+
     pub fn new(store: Arc<DocsStore>, config: DocHostConfig) -> Self {
         let host = Self {
             inner: Arc::new(DocHostInner {
@@ -914,6 +928,7 @@ impl DocHost {
                 transfers: watch::channel(Vec::new()).0,
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
+                receipt_generation: new_id(),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .pool_max_idle_per_host(2)
@@ -3746,17 +3761,37 @@ impl DocHost {
     }
 
     fn arm_existing_queue_edit_expiries(&self, handle: &Arc<ChatDocHandle>) {
+        if !self.is_host(&handle.chat_id) {
+            return;
+        }
         let Ok(queue) = handle.doc.read_queue() else {
             return;
         };
         for item in queue {
             if let Some(QueueDeliveryGate::Editing {
                 lease_id,
-                expires_at_ms,
+                owner_device_id,
+                base_text_hash,
                 ..
             }) = item.delivery_gate
             {
-                self.arm_queue_edit_expiry(handle, &item.id, &lease_id, expires_at_ms);
+                // Persisted epoch deadlines cannot be interpreted after a
+                // restart/clock correction. Require review instead of granting
+                // a potentially eternal lock or automatically sending a draft.
+                let review = QueueDeliveryGate::ReviewRequired {
+                    previous_lease_id: lease_id,
+                    owner_device_id,
+                    since_ms: now_ms(),
+                    base_text_hash,
+                };
+                if handle
+                    .doc
+                    .set_queued_delivery_gate(&item.id, Some(&review))
+                    .unwrap_or(false)
+                {
+                    handle.publish_queue();
+                    self.save_snapshot(handle);
+                }
             }
         }
     }
@@ -4482,16 +4517,8 @@ impl DocHost {
             if live_attempt {
                 continue;
             }
-            match latest_dead.entry(mid.to_string()) {
-                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    if c.issued_at > slot.get().issued_at {
-                        slot.insert(c);
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(c);
-                }
-            }
+            // The last document entry is the latest attempt, regardless of its clock.
+            latest_dead.insert(mid.to_string(), c);
         }
         for old in latest_dead.values() {
             if old.status == SessionCommandStatus::Pending {
@@ -4544,6 +4571,7 @@ impl DocHost {
         chat_id: &str,
         entry: SessionCommandEntry,
     ) -> Result<&'static str, EngineError> {
+        let entry = self.command_at_receipt(entry)?;
         let handle = self.open(chat_id)?;
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
@@ -4871,6 +4899,17 @@ impl DocHost {
                 }
             };
             let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
+            // Start leases at first observation, including prompts blocked
+            // behind a busy drain. Selection/execution must not renew a TTL.
+            for command in &commands {
+                if command.status == SessionCommandStatus::Pending
+                    && !is_processed(&command.id)
+                    && let Err(error) = self.command_at_receipt(command.clone())
+                {
+                    tracing::error!(%error, "command receipt persistence failed; halting drain");
+                    return;
+                }
+            }
             // Dead-command sweep: Pending in the doc, consumed by the ledger,
             // and NOT mid-execution in this process — the crash window
             // between mark-processed and the outcome write. Left alone it is
@@ -4916,6 +4955,13 @@ impl DocHost {
                     continue;
                 }
                 return;
+            };
+            let entry = match self.command_at_receipt(entry) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::error!(%error, "command receipt persistence failed; halting drain");
+                    return;
+                }
             };
             let messages = handle.doc.read_entries().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -5498,7 +5544,7 @@ impl DocHost {
             cwd: cwd.to_string(),
             branch,
             head_sha,
-            observed_at: chrono::Utc::now(),
+            observed_at: zeron_proto::time::now(),
         })
     }
 

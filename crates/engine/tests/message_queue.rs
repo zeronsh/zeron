@@ -1973,3 +1973,50 @@ async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
     let _ = harness.finish.send(());
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reopening_edit_leases_with_arbitrary_epochs_requires_review() {
+    for expiry in [i64::MIN, i64::MAX] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("data");
+        let (harness, _) = HeldHarness::new(SteeringMode::TurnBoundary);
+        let before = assemble_at(&path, harness);
+        create_chat(&before).await;
+        let handle = before.doc_host.open(CHAT).unwrap();
+        let id = "restored-edit";
+        handle
+            .doc()
+            .push_queued(&zeron_doc::QueuedMessage {
+                id: id.into(),
+                text: "unsent draft".into(),
+                issued_at: 0,
+                attachments: Vec::new(),
+                hold_for_turn_end: true,
+                issued_by: before.doc_host.device_id().into(),
+                edited_at: None,
+                delivery_gate: Some(QueueDeliveryGate::Editing {
+                    lease_id: "old-lease".into(),
+                    owner_device_id: before.doc_host.device_id().into(),
+                    owner_instance_id: "old-process".into(),
+                    acquired_at_ms: expiry,
+                    expires_at_ms: expiry,
+                    base_text_hash: "hash".into(),
+                }),
+            })
+            .unwrap();
+        // Closing the engine persists the row, without interpreting the old deadline.
+        before.shutdown().await;
+        drop(handle);
+        drop(before);
+        let (harness, prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
+        let after = assemble_at(&path, harness);
+        let handle = after.doc_host.open(CHAT).unwrap();
+        assert!(matches!(
+            handle.doc().read_queue().unwrap()[0].delivery_gate,
+            Some(QueueDeliveryGate::ReviewRequired { .. })
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(prompts.lock().unwrap().is_empty());
+        after.shutdown().await;
+    }
+}

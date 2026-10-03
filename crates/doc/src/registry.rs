@@ -58,6 +58,23 @@ fn hlc_newer(a: &str, b: Option<&str>) -> bool {
     }
 }
 
+fn valid_hlc(clock: &str) -> bool {
+    let mut parts = clock.splitn(3, '-');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(ms), Some(counter), Some(device)) => {
+            ms.len() == 13
+                && ms.bytes().all(|b| b.is_ascii_digit())
+                && counter.len() == 6
+                && counter.bytes().all(|b| b.is_ascii_digit())
+                && (1..=128).contains(&device.len())
+                && device
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }
+        _ => false,
+    }
+}
+
 /// Monotonic HLC source: never emits the same or an earlier clock twice, even
 /// across a wall-clock regression or restart (state persists with the doc).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -67,7 +84,33 @@ pub struct HlcClock {
 }
 
 impl HlcClock {
+    /// A local write after reading a remote value must sort after that value,
+    /// even when the remote device's wall clock runs ahead of this one.
+    fn observe(&mut self, clock: &str) {
+        if !valid_hlc(clock) {
+            return;
+        }
+        let mut parts = clock.splitn(3, '-');
+        if let (Some(ms), Some(counter)) = (
+            parts.next().and_then(|value| value.parse::<i64>().ok()),
+            parts.next().and_then(|value| value.parse::<u32>().ok()),
+        ) && (0..=9_999_999_999_999).contains(&ms)
+            && counter <= 999_999
+            && (ms, counter) > (self.last_ms, self.counter)
+        {
+            self.last_ms = ms;
+            self.counter = counter;
+        }
+    }
+
     fn next(&mut self, now_ms: i64, device: &str) -> String {
+        // Keep arbitrary OS clocks inside the unsigned 13-digit wire format,
+        // with logical headroom reserved above the wall-clock input ceiling.
+        let now_ms = now_ms.clamp(0, 8_000_000_000_000);
+        if !(0..=9_999_999_999_999).contains(&self.last_ms) {
+            self.last_ms = now_ms;
+        }
+        self.counter = self.counter.min(999_999);
         if now_ms > self.last_ms {
             self.last_ms = now_ms;
             self.counter = 0;
@@ -433,11 +476,54 @@ impl RegistryDoc {
         doc.gc_floor = state.gc_floor;
         doc.clock = state.clock;
         doc.pending = state.pending;
+        for batch in &doc.pending {
+            for op in &batch.ops {
+                doc.clock.observe(&op.hlc);
+                for clock in op.clocks.iter().flat_map(|clocks| clocks.values()) {
+                    doc.clock.observe(clock);
+                }
+            }
+        }
         for row in state.rows {
-            doc.authoritative
-                .entry(row.kind.clone())
-                .or_default()
-                .insert(row.id.clone(), row);
+            // Older snapshots may contain remote clocks the local HLC never
+            // observed. Repair it while loading, before boot upserts or edits.
+            doc.put_authoritative(row);
+        }
+        // Old builds could persist out-of-format clocks after an extreme OS
+        // date. The edge rejects those ops, wedging every later batch. Preserve
+        // their authored intent, but stamp only malformed clocks after all
+        // valid observed clocks so the pending queue can converge again.
+        let repairs: Vec<_> = doc
+            .pending
+            .iter()
+            .enumerate()
+            .flat_map(|(batch, pending)| {
+                pending
+                    .ops
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, op)| {
+                        !valid_hlc(&op.hlc)
+                            || op
+                                .clocks
+                                .iter()
+                                .flat_map(|clocks| clocks.values())
+                                .any(|clock| !valid_hlc(clock))
+                    })
+                    .map(move |(op, _)| (batch, op))
+            })
+            .collect();
+        for (batch, op) in repairs {
+            let fresh = doc.next_hlc();
+            let op = &mut doc.pending[batch].ops[op];
+            if !valid_hlc(&op.hlc) {
+                op.hlc = fresh.clone();
+            }
+            for clock in op.clocks.iter_mut().flat_map(|clocks| clocks.values_mut()) {
+                if !valid_hlc(clock) {
+                    *clock = fresh.clone();
+                }
+            }
         }
         Ok(doc)
     }
@@ -484,6 +570,7 @@ impl RegistryDoc {
         // GC-jumped our cursor while we held unseeded rows) re-seed too.
         let mut incoming: HashMap<String, HashMap<String, RegistryRow>> = HashMap::new();
         for row in rows {
+            self.observe_row_clock(&row);
             incoming
                 .entry(row.kind.clone())
                 .or_default()
@@ -572,7 +659,14 @@ impl RegistryDoc {
         }
     }
 
+    fn observe_row_clock(&mut self, row: &RegistryRow) {
+        if let Some(clock) = row.max_clock() {
+            self.clock.observe(clock);
+        }
+    }
+
     fn put_authoritative(&mut self, row: RegistryRow) {
+        self.observe_row_clock(&row);
         self.authoritative
             .entry(row.kind.clone())
             .or_default()
@@ -582,7 +676,7 @@ impl RegistryDoc {
     // ── local writes ────────────────────────────────────────────────────────
 
     fn now_ms() -> i64 {
-        Utc::now().timestamp_millis()
+        zeron_proto::time::now_ms()
     }
 
     fn next_hlc(&mut self) -> String {
@@ -593,6 +687,12 @@ impl RegistryDoc {
     fn enqueue_ops(&mut self, mut ops: Vec<RowOp>) {
         if ops.is_empty() {
             return;
+        }
+        for op in &ops {
+            self.clock.observe(&op.hlc);
+            for clock in op.clocks.iter().flat_map(|clocks| clocks.values()) {
+                self.clock.observe(clock);
+            }
         }
         // The registry room rejects any batch over its op cap (500), and a
         // rejected batch is a PERMANENT wedge: error frames carry no batch
@@ -632,6 +732,22 @@ impl RegistryDoc {
             hlc,
             clocks: None,
         }]);
+    }
+
+    /// Full-row snapshots must not restamp unchanged metadata. In particular,
+    /// booting from a stale snapshot must not compete with an unseen rename,
+    /// and refreshing host metadata must not invent new chat activity.
+    fn write_full_row(&mut self, kind: &str, id: &str, mut set: BTreeMap<String, Value>) {
+        if let Some(row) = self.overlay_row(kind, id) {
+            set.retain(|key, value| {
+                row.fields.get(key) != Some(value)
+                    && !(value.is_null() && !row.fields.contains_key(key))
+            });
+            if set.is_empty() {
+                return;
+            }
+        }
+        self.write(kind, id, OpKind::Upsert, set);
     }
 
     fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
@@ -727,7 +843,7 @@ impl RegistryDoc {
             ("cursorSdkEngineVersion", opt_str(device.version.as_deref())),
             ("capabilities", json!(device.capabilities)),
         ]);
-        self.write(KIND_DEVICES, &device.id.clone(), OpKind::Upsert, set);
+        self.write_full_row(KIND_DEVICES, &device.id, set);
         Ok(())
     }
 
@@ -787,22 +903,28 @@ impl RegistryDoc {
             ("checkoutId", opt_str(space.checkout_id.as_deref())),
             ("createdAt", json!(space.created_at.timestamp_millis())),
         ]);
-        self.write(KIND_SPACES, &space.id.clone(), OpKind::Upsert, set);
+        self.write_full_row(KIND_SPACES, &space.id, set);
         Ok(())
+    }
+
+    fn space_from_row(row: &RegistryRow) -> Option<Space> {
+        let mut space: Space = row_to::<crate::workspace::RawSpace>(row)?.into();
+        space.creation_clock = row.clocks.get("createdAt").cloned();
+        Some(space)
     }
 
     pub fn space(&self, space_id: &str) -> Result<Option<Space>, DocError> {
         Ok(self
             .overlay_row(KIND_SPACES, space_id)
-            .and_then(|row| row_to::<crate::workspace::RawSpace>(&row))
-            .map(Space::from))
+            .as_ref()
+            .and_then(Self::space_from_row))
     }
 
     pub fn read_spaces(&self) -> Result<Vec<Space>, DocError> {
-        let mut spaces: Vec<Space> = self
-            .read_kind::<crate::workspace::RawSpace>(KIND_SPACES)
-            .into_iter()
-            .map(Space::from)
+        let mut spaces: Vec<_> = self
+            .overlay_rows(KIND_SPACES)
+            .iter()
+            .filter_map(Self::space_from_row)
             .collect();
         spaces.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(spaces)
@@ -877,7 +999,7 @@ impl RegistryDoc {
             Some(config) => serde_json::to_value(config)?,
             None => Value::Null,
         };
-        let set = fields([
+        let mut set = fields([
             ("id", json!(chat.id)),
             ("deviceId", json!(chat.device_id)),
             ("title", opt_str(chat.title.as_deref())),
@@ -917,7 +1039,10 @@ impl RegistryDoc {
             ),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
         ]);
-        self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
+        if let Some(seen) = &chat.seen_activity_clock {
+            set.insert("seenActivityHlc".into(), json!(seen));
+        }
+        self.write_full_row(KIND_CHATS, &chat.id, set);
         Ok(())
     }
 
@@ -947,21 +1072,33 @@ impl RegistryDoc {
         self.write(KIND_CHATS, chat_id, OpKind::Upsert, set);
     }
 
-    /// Synced seen marker (LWW) with a monotonic guard: no write when the
-    /// stored stamp is already >= `at`.
+    /// Mark the activity actually observed, not the reader's wall-clock time.
     pub fn set_chat_seen(&mut self, chat_id: &str, at: DateTime<Utc>) -> Result<bool, DocError> {
         let Some(row) = self.overlay_row(KIND_CHATS, chat_id) else {
             return Ok(false);
         };
         let current = row.fields.get("lastSeenAt").and_then(Value::as_i64);
-        if current.is_some_and(|ms| ms >= at.timestamp_millis()) {
+        let activity = row
+            .clocks
+            .get("lastMessageAt")
+            .or_else(|| row.clocks.get("createdAt"));
+        if current.is_some_and(|ms| ms >= at.timestamp_millis())
+            && row.fields.get("seenActivityHlc").and_then(Value::as_str)
+                == activity.map(String::as_str)
+        {
             return Ok(true);
         }
         self.write(
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("lastSeenAt", json!(at.timestamp_millis()))]),
+            fields([
+                (
+                    "lastSeenAt",
+                    json!(current.unwrap_or(i64::MIN).max(at.timestamp_millis())),
+                ),
+                ("seenActivityHlc", json!(activity)),
+            ]),
         );
         Ok(true)
     }
@@ -969,15 +1106,30 @@ impl RegistryDoc {
     pub fn chat(&self, chat_id: &str) -> Result<Option<Chat>, DocError> {
         Ok(self
             .overlay_row(KIND_CHATS, chat_id)
-            .and_then(|row| row_to::<crate::workspace::RawChat>(&row))
-            .map(Chat::from))
+            .and_then(|row| Self::chat_from_row(&row)))
+    }
+
+    fn chat_from_row(row: &RegistryRow) -> Option<Chat> {
+        let mut chat = Chat::from(row_to::<crate::workspace::RawChat>(row)?);
+        chat.creation_clock = row.clocks.get("createdAt").cloned();
+        chat.activity_clock = row
+            .clocks
+            .get("lastMessageAt")
+            .or_else(|| row.clocks.get("createdAt"))
+            .cloned();
+        chat.seen_activity_clock = row
+            .fields
+            .get("seenActivityHlc")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        Some(chat)
     }
 
     pub fn read_chats(&self) -> Result<Vec<Chat>, DocError> {
         let mut chats: Vec<Chat> = self
-            .read_kind::<crate::workspace::RawChat>(KIND_CHATS)
+            .overlay_rows(KIND_CHATS)
             .into_iter()
-            .map(Chat::from)
+            .filter_map(|row| Self::chat_from_row(&row))
             .collect();
         chats.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(chats)
@@ -1177,7 +1329,7 @@ impl RegistryDoc {
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
         ]);
-        self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
+        self.write_full_row(KIND_SESSIONS, &session.chat_id, set);
         Ok(())
     }
 
@@ -1246,13 +1398,27 @@ impl RegistryDoc {
     pub fn seed_from_workspace(&mut self, state: &WorkspaceState) -> Result<usize, DocError> {
         let mut ops: Vec<RowOp> = Vec::new();
         let mut seed = |kind: &str, id: &str, ms: i64, set: BTreeMap<String, Value>| {
+            let hlc = encode_hlc(ms.clamp(1, 8_000_000_000_000), 0, "migration");
+            let clocks = if kind == KIND_CHATS || kind == KIND_SPACES {
+                let mut clocks: BTreeMap<_, _> =
+                    set.keys().map(|key| (key.clone(), hlc.clone())).collect();
+                if let Some(created) = set.get("createdAt").and_then(Value::as_i64) {
+                    clocks.insert(
+                        "createdAt".into(),
+                        encode_hlc(created.clamp(1, 8_000_000_000_000), 0, "migration"),
+                    );
+                }
+                Some(clocks)
+            } else {
+                None
+            };
             ops.push(RowOp {
                 kind: kind.to_string(),
                 id: id.to_string(),
                 op: OpKind::Upsert,
                 set: Some(set),
-                hlc: encode_hlc(ms.max(1), 0, "migration"),
-                clocks: None,
+                hlc,
+                clocks,
             });
         };
         for device in &state.devices {
@@ -1317,6 +1483,18 @@ impl RegistryDoc {
                     ("cwd", opt_str(chat.cwd.as_deref())),
                     ("branch", opt_str(chat.branch.as_deref())),
                     ("checkoutId", opt_str(chat.checkout_id.as_deref())),
+                    (
+                        "sourceContext",
+                        chat.source_context
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()?
+                            .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "roomGen",
+                        chat.room_gen.map(|g| json!(g)).unwrap_or(Value::Null),
+                    ),
                     ("config", config),
                     (
                         "lastMessagePreview",

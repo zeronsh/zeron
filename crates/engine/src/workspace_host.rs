@@ -126,14 +126,9 @@ struct PresenceWatch {
     probed: bool,
 }
 
-/// Cheap decorrelation jitter (0–500ms) without pulling in a rng — derived from
-/// the sub-nanosecond wall clock. Mirrors the device relay's `jitter()`.
+/// Clock-independent decorrelation (0–500ms), including pre-epoch OS dates.
 pub(crate) fn join_retry_jitter() -> std::time::Duration {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    std::time::Duration::from_millis(u64::from(nanos) % 500)
+    std::time::Duration::from_millis((uuid::Uuid::new_v4().as_u128() % 500) as u64)
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +172,7 @@ struct WorkspaceHostInner {
     peer_alive: Mutex<Option<PeerAliveHook>>,
     /// Deaf-socket tripwire state — see `check_presence_deafness`.
     presence_watch: Mutex<PresenceWatch>,
+    session_freshness: Mutex<zeron_proto::time::SessionFreshness>,
     /// Epoch ms of the registry room's most recent (re)join — the dial gate's
     /// warm-up clock (`peer_liveness`): a just-joined room hasn't heard
     /// anyone's heartbeat yet, and that silence must not read as "offline".
@@ -252,7 +248,7 @@ impl WorkspaceHost {
         // Boot: upsert our own device row. A user-set name (RenameDevice is LWW from
         // any device) survives restarts. The old fallback sentinel is repaired with
         // the platform-resolved name because it was never a user-selected name.
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let existing = doc
             .read_devices()?
             .into_iter()
@@ -310,6 +306,7 @@ impl WorkspaceHost {
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 peer_alive: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
+                session_freshness: Mutex::default(),
                 room_joined_at: std::sync::atomic::AtomicI64::new(0),
             }),
         };
@@ -317,6 +314,7 @@ impl WorkspaceHost {
         // read again, so the registry snapshot must exist even if the process
         // dies before the first debounced save.
         host.inner.save_snapshot();
+        host.inner.publish();
         host.join_room();
         tokio::spawn(workspace_task(Arc::downgrade(&host.inner), changed_rx));
         if host.inner.config.edge.is_some() {
@@ -540,19 +538,18 @@ impl WorkspaceHost {
                 if joined_at == 0 || now.saturating_sub(joined_at) < DIAL_GATE_WARMUP_MS {
                     return Unknown;
                 }
-                // Fall back to the durable row: a device whose last stamped
-                // sighting is ancient AND which isn't beating now is dark.
-                let row_seen = self
+                // Only local silence can establish darkness. A durable boot
+                // timestamp can be centuries ahead/behind and proves no age.
+                let known = self
                     .read(|doc| doc.read_devices())
                     .ok()
                     .into_iter()
                     .flatten()
-                    .find(|d| d.id == device_id)
-                    .and_then(|d| d.last_seen_at)
-                    .map(|at| at.timestamp_millis());
-                match row_seen {
-                    Some(ms) if now.saturating_sub(ms) >= DIAL_GATE_DARK_MS => Dark,
-                    _ => Unknown,
+                    .any(|d| d.id == device_id);
+                if known && now.saturating_sub(joined_at) >= DIAL_GATE_DARK_MS {
+                    Dark
+                } else {
+                    Unknown
                 }
             }
         }
@@ -772,7 +769,9 @@ impl WorkspaceHost {
             Some(cwd) => Some(self.space_for_path(cwd)?),
             None => None,
         };
-        self.mutate(|doc| doc.claim_chat(chat_id, cwd, space_id.as_deref(), Utc::now()));
+        self.mutate(|doc| {
+            doc.claim_chat(chat_id, cwd, space_id.as_deref(), zeron_proto::time::now())
+        });
         Ok(())
     }
 
@@ -800,6 +799,7 @@ impl WorkspaceHost {
             return Ok(space.id.clone());
         }
         let space = Space {
+            creation_clock: None,
             id: crate::new_id(),
             device_id: device_id.clone(),
             path: root.unwrap_or_else(|| path.to_string()),
@@ -807,7 +807,7 @@ impl WorkspaceHost {
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,
-            created_at: Utc::now(),
+            created_at: zeron_proto::time::now(),
         };
         self.mutate(|doc| doc.upsert_space(&space))?;
         Ok(space.id)
@@ -832,8 +832,10 @@ impl WorkspaceHost {
     pub fn note_message(&self, chat_id: &str, text: &str) {
         let preview: String = text.chars().take(120).collect();
         let result = self.claim_chat(chat_id, None).and_then(|_| {
-            self.mutate(|doc| doc.set_chat_last_message(chat_id, &preview, Utc::now()))
-                .map_err(EngineError::from)
+            self.mutate(|doc| {
+                doc.set_chat_last_message(chat_id, &preview, zeron_proto::time::now())
+            })
+            .map_err(EngineError::from)
         });
         if let Err(err) = result {
             tracing::warn!(chat = %chat_id, error = %err, "registry last-message write failed");
@@ -927,6 +929,9 @@ impl WorkspaceHost {
         };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
+                creation_clock: None,
+                activity_clock: None,
+                seen_activity_clock: None,
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
@@ -943,7 +948,7 @@ impl WorkspaceHost {
                 config,
                 last_message_preview: None,
                 last_message_at: None,
-                created_at: Utc::now(),
+                created_at: zeron_proto::time::now(),
                 harness_session_id: None,
                 // Born on chat2: a brand-new chat has an empty doc — nothing
                 // to seed, no migration race to lose. Only pre-existing chats
@@ -981,6 +986,7 @@ impl WorkspaceHost {
         }
         self.mutate(|doc| {
             doc.upsert_space(&Space {
+                creation_clock: None,
                 id: space_id.to_string(),
                 device_id: device_id.to_string(),
                 path: path.to_string(),
@@ -988,7 +994,7 @@ impl WorkspaceHost {
                 git_detected,
                 git_checked_at: None,
                 checkout_id: None,
-                created_at: Utc::now(),
+                created_at: zeron_proto::time::now(),
             })
         })?;
         Ok(())
@@ -1023,8 +1029,9 @@ impl WorkspaceHost {
     ) -> Result<bool, EngineError> {
         match self.read(|doc| doc.space(space_id))? {
             Some(space) if space.device_id == self.inner.config.device_id => {
-                Ok(self
-                    .mutate(|doc| doc.set_space_git(space_id, detected, checkout_id, Utc::now()))?)
+                Ok(self.mutate(|doc| {
+                    doc.set_space_git(space_id, detected, checkout_id, zeron_proto::time::now())
+                })?)
             }
             Some(space) => {
                 tracing::warn!(
@@ -1156,7 +1163,7 @@ impl WorkspaceHost {
     /// Shutdown: stamp our `lastSeenAt` (the only periodic-ish row write besides
     /// boot) and flush the snapshot.
     pub fn shutdown(&self) {
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let device_id = self.inner.config.device_id.clone();
         if let Err(err) = self.mutate(|doc| doc.set_device_last_seen(&device_id, now)) {
             tracing::warn!(error = %err, "device lastSeenAt stamp failed");
@@ -1197,6 +1204,11 @@ impl WorkspaceHostInner {
         match snapshot {
             Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
+                lock(&self.session_freshness).project(
+                    &mut state.sessions,
+                    zeron_proto::time::now(),
+                    std::time::Instant::now(),
+                );
                 // Retain the latest value even with no subscribers, but don't
                 // wake every list for unrelated registry/presence changes.
                 publish_if_changed(&self.chats_tx, state.chats);
@@ -1283,15 +1295,18 @@ impl WorkspaceHostInner {
                     live_fresh_peers += 1;
                 }
                 let cached = seen.get(&device.id).copied();
+                if device.id == self.config.device_id {
+                    device.last_seen_at = Some(zeron_proto::time::now());
+                    continue;
+                }
                 let Some(ms) = live.into_iter().chain(cached).max() else {
+                    // A boot/shutdown timestamp is history, not evidence that
+                    // this device is online in this process.
+                    device.last_seen_at = None;
                     continue;
                 };
                 seen.insert(device.id.clone(), ms);
-                if let Some(at) = chrono::DateTime::<Utc>::from_timestamp_millis(ms)
-                    && device.last_seen_at.is_none_or(|prev| prev < at)
-                {
-                    device.last_seen_at = Some(at);
-                }
+                device.last_seen_at = chrono::DateTime::<Utc>::from_timestamp_millis(ms);
                 if device.id != self.config.device_id && now.saturating_sub(ms) < PRESENCE_FRESH_MS
                 {
                     alive_peers.push(device.id.clone());

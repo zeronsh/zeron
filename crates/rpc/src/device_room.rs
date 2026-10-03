@@ -422,12 +422,8 @@ const DIAL_RETRY_SPACING: Duration = Duration::from_millis(1500);
 const HOST_HEALTHY_SESSION: Duration = Duration::from_secs(30);
 
 fn jitter() -> Duration {
-    // Cheap decorrelation without a rand dependency.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    Duration::from_millis(u64::from(nanos) % 2_000)
+    // UUID randomness does not collapse when the civil clock is stalled/bad.
+    Duration::from_millis((uuid::Uuid::new_v4().as_u128() % 2_000) as u64)
 }
 
 /// One per-client virtual connection: `in_tx` feeds the ndjson dispatch loop

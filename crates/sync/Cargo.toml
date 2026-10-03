@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+zeron-proto.workspace = true
 zeron-doc.workspace = true
 loro.workspace = true
 loro-protocol.workspace = true
@@ -32,7 +33,6 @@ mock-server = []
 chrono.workspace = true
 # chat2_live example only (live checkpoint fetch against a deployed worker).
 reqwest.workspace = true
-zeron-proto.workspace = true
 tempfile.workspace = true
 # `start_paused` virtual-clock tests (the 2026-07-30 sync-stall regressions).
 tokio = { workspace = true, features = ["test-util"] }

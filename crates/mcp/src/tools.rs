@@ -378,7 +378,7 @@ fn status_of(session: Option<&Session>) -> (String, Option<i64>) {
     let Some(session) = session else {
         return ("idle".into(), None);
     };
-    let age = chrono::Utc::now() - session.updated_at;
+    let age = zeron_proto::time::now() - session.updated_at;
     let stale = age > SESSION_STALE;
     let label = match session.status {
         SessionStatus::Working if stale => "working (stale — host may be offline)",
@@ -793,6 +793,9 @@ impl Tools {
             // The row may not have folded into WatchChats yet; build the
             // chat locally from what we just wrote rather than re-reading.
             let chat = Chat {
+                creation_clock: None,
+                activity_clock: None,
+                seen_activity_clock: None,
                 id: chat_id.clone(),
                 device_id: device_id.clone(),
                 title: args.title.clone(),

@@ -728,9 +728,8 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
         if st.tracker.contains_id(message_id) {
             continue;
         }
-        let expired = now >= command.effective_expiry();
         let (live, dead) = match command.status {
-            SessionCommandStatus::Pending => (!expired, expired),
+            SessionCommandStatus::Pending => (true, false),
             SessionCommandStatus::Applied => (true, false),
             SessionCommandStatus::Rejected
             | SessionCommandStatus::Expired
@@ -753,11 +752,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     let mut next = Vec::with_capacity(order.len());
     for message_id in order {
         let attempt = &attempts[&message_id];
-        let started = st
-            .grace_started
-            .get(&message_id)
-            .copied()
-            .unwrap_or(attempt.first_issued);
+        let started = *st.grace_started.entry(message_id.clone()).or_insert(now);
         let parsed = attachments::parse_user_message(&attempt.text);
         next.push(PendingSend {
             state: send_state(started, degraded, attempt.dead && !attempt.live, now),
@@ -1412,23 +1407,16 @@ impl SessionHandle {
             if landed(&message_id) {
                 continue;
             }
-            let expired = now >= command.effective_expiry();
             match command.status {
-                SessionCommandStatus::Pending if !expired => {
+                SessionCommandStatus::Pending => {
                     live.insert(message_id);
                 }
                 SessionCommandStatus::Applied => {
                     live.insert(message_id);
                 }
-                SessionCommandStatus::Rejected
-                | SessionCommandStatus::Expired
-                | SessionCommandStatus::Pending => {
-                    let newer = latest_dead
-                        .get(&message_id)
-                        .is_none_or(|existing| existing.issued_at < command.issued_at);
-                    if newer {
-                        latest_dead.insert(message_id, command.clone());
-                    }
+                SessionCommandStatus::Rejected | SessionCommandStatus::Expired => {
+                    // Commands are append ordered; civil clocks do not order retries.
+                    latest_dead.insert(message_id, command.clone());
                 }
                 _ => {}
             }

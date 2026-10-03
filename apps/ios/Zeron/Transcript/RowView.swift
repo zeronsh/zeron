@@ -422,7 +422,7 @@ final class WorkingIndicatorView: UIView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func tick() {
-        let secs = since.map { max(0, Int(Date().timeIntervalSince($0))) } ?? 0
+        let secs = since.map { max(0, Int(Date(timeIntervalSince1970: Double(runtimeNowMs()) / 1000).timeIntervalSince($0))) } ?? 0
         let text = NSMutableAttributedString(string: "\(word)…", attributes: [.font: label.font as Any, .foregroundColor: Palette.secondary])
         if secs > 0 {
             text.append(NSAttributedString(string: "  \(StatusPill.elapsed(secs))", attributes: [.font: label.font as Any, .foregroundColor: Palette.tertiary]))

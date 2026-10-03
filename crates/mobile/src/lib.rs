@@ -15,3 +15,10 @@ pub mod wallpaper;
 pub fn core_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
 }
+
+/// Process clock for platform countdowns and durations sharing Rust deadlines.
+/// This is an epoch label plus monotonic elapsed time, not trusted civil UTC.
+#[uniffi::export]
+pub fn runtime_now_ms() -> i64 {
+    zeron_proto::time::now_ms()
+}

@@ -1277,13 +1277,10 @@ impl<'a> SegmentWriter<'a> {
         self.sync(folded)?;
         let map = self.entry_map()?;
         map.insert("status", status_str(status))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(self.created_at);
-        if self.created_at > 0 {
-            map.insert("durationMs", (now - self.created_at).max(0))?;
-        }
+        let duration = zeron_proto::time::now_ms()
+            .saturating_sub(self.created_at)
+            .max(0);
+        map.insert("durationMs", duration)?;
         self.doc.doc.commit();
         Ok(())
     }

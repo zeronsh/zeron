@@ -32,16 +32,16 @@ pub const PROJECT_COLOR_COUNT: u32 = 8;
 /// monogram tone: 32-bit FNV-1a of the project's path (`"home"` without a
 /// project), so a project has the same color on every device.
 pub fn project_color_index(space_path: &str) -> u32 {
-    let hash = space_path
-        .bytes()
-        .fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hash = space_path.bytes().fold(2_166_136_261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
     hash % PROJECT_COLOR_COUNT
 }
 
 /// Compact age label for list rows: `now`, `34m`, `4h`, `2d` (legacy
 /// `relativeTime`). Future timestamps read as `now`.
 pub fn relative_time_label(at_ms: i64, now_ms: i64) -> String {
-    let secs = (now_ms - at_ms).max(0) / 1000;
+    let secs = now_ms.saturating_sub(at_ms).max(0) / 1000;
     match secs {
         0..60 => "now".to_owned(),
         60..3_600 => format!("{}m", secs / 60),
@@ -88,6 +88,8 @@ pub struct SessionRow {
     pub working_since_ms: Option<i64>,
     /// `last_message_at`, falling back to `created_at` (the sort key).
     pub last_activity_ms: i64,
+    /// Causal activity used to order search ties independently of civil time.
+    pub last_activity_clock: Option<String>,
     /// [`relative_time_label`] of `last_activity_ms` at derive time (the 1 Hz
     /// re-derive refreshes it; it changes at most once a minute).
     pub time_label: String,
@@ -256,7 +258,17 @@ impl WorkspaceSnapshot {
         hits.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
-                .then(b.session.last_activity_ms.cmp(&a.session.last_activity_ms))
+                .then_with(|| {
+                    match (
+                        &b.session.last_activity_clock,
+                        &a.session.last_activity_clock,
+                    ) {
+                        (Some(b), Some(a)) => b.cmp(a),
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        _ => b.session.last_activity_ms.cmp(&a.session.last_activity_ms),
+                    }
+                })
                 .then(a.session.id.cmp(&b.session.id))
         });
         hits.truncate(limit);
@@ -339,7 +351,7 @@ pub(crate) fn device_online(
     device_id == self_device_id
         || presence
             .get(device_id)
-            .is_some_and(|at| now_ms - at < PRESENCE_FRESH_MS)
+            .is_some_and(|at| (0..PRESENCE_FRESH_MS).contains(&now_ms.saturating_sub(*at)))
 }
 
 fn sort_key(chat: &Chat) -> DateTime<Utc> {
@@ -347,7 +359,7 @@ fn sort_key(chat: &Chat) -> DateTime<Utc> {
 }
 
 fn sort_recency(rows: &mut [&Chat]) {
-    rows.sort_by(|a, b| sort_key(b).cmp(&sort_key(a)).then_with(|| a.id.cmp(&b.id)));
+    rows.sort_by(|a, b| zeron_proto::view::activity_cmp(b, a).then_with(|| a.id.cmp(&b.id)));
 }
 
 /// desktop `change_request_for_chat`: the latest resolution for the chat's
@@ -392,6 +404,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     attention_rank(row.host_indicator).hash(&mut h);
     row.working_since_ms.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
+    row.last_activity_clock.hash(&mut h);
     row.time_label.hash(&mut h);
     row.created_at_ms.hash(&mut h);
     row.unseen.hash(&mut h);
@@ -498,6 +511,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         host_indicator,
         working_since_ms,
         last_activity_ms: sort_key(chat).timestamp_millis(),
+        last_activity_clock: chat.activity_clock.clone(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
         created_at_ms: chat.created_at.timestamp_millis(),
         unseen: chat.unseen(),
@@ -599,11 +613,8 @@ pub(crate) fn derive(
 
     // Projects (creation order), sessions by recency.
     let mut spaces: Vec<&Space> = state.spaces.iter().collect();
-    spaces.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    spaces
+        .sort_by(|a, b| zeron_proto::view::space_creation_cmp(a, b).then_with(|| a.id.cmp(&b.id)));
     let projects: Vec<ProjectView> = spaces
         .iter()
         .map(|space| {

@@ -239,14 +239,14 @@ final class AppModel {
     /// workspace has updated — at least `minimum` so the spinner doesn't
     /// flicker, at most `maximum` if nothing changes.
     func refresh(minimum: TimeInterval = 0.6, maximum: TimeInterval = 3, completion: @escaping () -> Void) {
-        let started = Date()
+        let started = ProcessInfo.processInfo.systemUptime
         var finished = false
         var token: AnyObject?
         let finish = {
             guard !finished else { return }
             finished = true
             token = nil
-            let wait = max(0, minimum - Date().timeIntervalSince(started))
+            let wait = max(0, minimum - (ProcessInfo.processInfo.systemUptime - started))
             DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: completion)
         }
         // A reconnecting/offline blip from the redial isn't the resync landing.

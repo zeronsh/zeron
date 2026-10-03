@@ -813,7 +813,7 @@ impl Shell {
             .chain(std::iter::once(engine.engine_info().device_id.clone()))
             .filter(|id| state.device_supports(id, zeron_proto::capabilities::HARNESS_UPDATES_V1))
             .map(|id| {
-                let online = state.device_online(&id, Utc::now());
+                let online = state.device_online(&id, zeron_proto::time::now());
                 (id, online)
             })
             .collect();
@@ -888,7 +888,7 @@ impl Shell {
             .harness_update_devices
             .get(&device)
             .is_some_and(|updates| updates.online && updates.connected)
-            || !state.device_online(&device, Utc::now())
+            || !state.device_online(&device, zeron_proto::time::now())
             || !state.device_supports(&device, zeron_proto::capabilities::HARNESS_UPDATES_V1)
         {
             return;

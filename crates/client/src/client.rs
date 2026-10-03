@@ -288,7 +288,7 @@ impl ClientInner {
     }
 
     pub(crate) fn mark_seen(self: &Arc<Self>, chat_id: &str) {
-        let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
+        let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, zeron_proto::time::now()));
     }
 
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
@@ -739,8 +739,11 @@ impl Client {
                 (device_id.clone(), None, "~".to_owned())
             }
         };
-        let now = Utc::now();
+        let now = zeron_proto::time::now();
         let chat = Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: crate::new_id(),
             device_id,
             title: new.title.filter(|t| !t.trim().is_empty()),
@@ -946,6 +949,7 @@ impl Client {
             return Ok(existing.id.clone());
         }
         let space = zeron_proto::Space {
+            creation_clock: None,
             id: crate::new_id(),
             device_id: device_id.to_owned(),
             path: path.to_owned(),
@@ -953,7 +957,7 @@ impl Client {
             git_detected,
             git_checked_at: None,
             checkout_id: None,
-            created_at: Utc::now(),
+            created_at: zeron_proto::time::now(),
         };
         let id = space.id.clone();
         // The owning host writes the row itself (it knows git state and runs
@@ -1178,7 +1182,9 @@ impl Client {
         environment: &str,
         prefs: PushPrefs,
     ) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1198,14 +1204,19 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push registration http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push registration http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
 
     /// Stop notifications to this device (sign-out, turned off).
     pub async fn unregister_push_target(&self) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1219,7 +1230,10 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push removal http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push removal http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
@@ -1489,7 +1503,7 @@ impl Client {
 pub(crate) fn ms(at: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_millis_opt(at)
         .single()
-        .unwrap_or_else(Utc::now)
+        .unwrap_or_else(zeron_proto::time::now)
 }
 
 /// Which session notifications a device wants (the desktop's three).

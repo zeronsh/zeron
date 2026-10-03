@@ -5119,7 +5119,6 @@ impl Render for Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(
@@ -6014,12 +6013,15 @@ rename to new_name.rs
             deletions: 0,
             truncated: false,
             checksum: format!("sum-{}", patch.len()),
-            updated_at: Utc::now(),
+            updated_at: zeron_proto::time::now(),
         }
     }
 
     fn chat(checkout: Option<&str>, device: &str, cwd: Option<&str>) -> Chat {
         Chat {
+            creation_clock: None,
+            activity_clock: None,
+            seen_activity_clock: None,
             id: "c1".into(),
             device_id: device.into(),
             title: None,
@@ -6031,7 +6033,7 @@ rename to new_name.rs
             config: None,
             last_message_preview: None,
             last_message_at: None,
-            created_at: Utc::now(),
+            created_at: zeron_proto::time::now(),
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
