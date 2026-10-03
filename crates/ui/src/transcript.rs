@@ -6850,7 +6850,11 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ErrorChip { message } => error_chip(
+                SharedString::from(format!("transcript-error-{}-{}", cx.entity_id(), row.id)),
+                message.clone(),
+                &theme,
+            ),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
         // Diagram fences this row just requested start rendering after layout.
@@ -8052,12 +8056,12 @@ fn user_bubble_text(
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
+fn error_chip(key: SharedString, message: SharedString, theme: &Theme) -> AnyElement {
     div()
         .py(px(4.0))
         .w_full()
         .child(
-            notice_chip(theme, false, "Error", message, Tile)
+            notice_chip(theme, key, false, "Error", message, Tile)
                 .overflow_hidden()
                 .w_full(),
         )
