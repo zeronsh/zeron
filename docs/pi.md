@@ -24,6 +24,23 @@ Pi only materializes it after its first assistant response, so if that file
 never existed the chat continues in a new session with the same notice. Session changes made by extensions
 refresh the UUID and file mapping before turn completion.
 
+Completed replies can fork into a side chat or a main conversation. Native forks
+are verified for Pi 0.85.1 and require Node >=22.19.0. Zeron prepares the pinned
+`@earendil-works/pi-coding-agent@0.85.1` storage helper in its managed package
+directory; npm is needed on first use. A small embedded extension records the
+exact persisted assistant entry, without matching text or timestamps. Historical
+replies without that entry have no fork action. The helper uses the official
+`SessionManager.createBranchedSession` API, includes the selected reply and
+excludes later entries without sending a prompt or switching the parent's
+session. It verifies the native branch and reconstructed context before returning.
+
+Forked chats keep the same device, provider and checkout and resume their saved
+native child. The normal missing-session recovery described above does not apply:
+missing or incompatible native children fail explicitly, before inference, and
+cannot silently start fresh. New replies record points from the child's session;
+inherited replies retain their canonical source. See [side chats](side-chats.md)
+and [native fork regression evidence](regressions/native-message-forks.md).
+
 Models and supported thinking levels come from native RPC discovery. The
 Thinking option can disable reasoning. Unsupported saved effort levels are
 clamped to a supported lower level. Discovery uses a temporary no-session
@@ -62,6 +79,7 @@ Validation:
 cargo test -p zeron-harness --features native-fixture
 cargo test -p zeron-engine --lib --test pi_resume --test acp_lifecycle --test message_queue --test e2e
 cargo test -p zeron-harness --test pi_live -- --ignored --nocapture
+node --test crates/harness/src/pi/fork.test.mjs
 cargo check -p zeron-ui --tests
 cargo build -p zeron-mobile --features bindgen
 ```
@@ -69,3 +87,8 @@ cargo build -p zeron-mobile --features bindgen
 The ignored Pi test requires an installed CLI and uses isolated settings and a
 local provider; it makes no model API requests. Native iOS UI compilation still
 requires Xcode on macOS.
+
+Run the official SDK storage tests without inference by setting
+`PI_FORK_SDK_MODULE` to the absolute `dist/core/session-manager.js` inside the
+pinned 0.85.1 installation and running the Node command above. Without this
+variable the offline contract tests run and the two SDK storage tests are skipped.

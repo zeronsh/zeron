@@ -22,6 +22,7 @@ fn request(cwd: &std::path::Path, prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         resume: None,
+        resume_policy: Default::default(),
         attachments: vec![],
         worktree: None,
         mcp: None,
@@ -57,6 +58,80 @@ async fn collect(prompt: &str) -> Vec<AgentEvent> {
     tokio::time::timeout(Duration::from_secs(5), stream.map(Result::unwrap).collect())
         .await
         .unwrap()
+}
+#[tokio::test]
+async fn native_fork_points_are_final_explicit_and_never_visible_notifications() {
+    for (prompt, count) in [
+        ("hello", 1),
+        ("retry", 1),
+        ("compact", 1),
+        ("error", 0),
+        ("reject", 0),
+        ("/noop", 0),
+        ("handled", 0),
+        ("crash", 0),
+    ] {
+        let events = collect(prompt).await;
+        let started = events.iter().find_map(|e| match e {
+            AgentEvent::SessionStarted {
+                assistant_message_id,
+                session_id,
+                ..
+            } => Some((assistant_message_id, session_id)),
+            _ => None,
+        });
+        let points: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::NativeForkReady {
+                    assistant_message_id,
+                    point,
+                } => Some((assistant_message_id, point)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(points.len(), count, "{prompt}: {events:?}");
+        if let Some((assistant, point)) = points.first() {
+            let (expected, session) = started.unwrap();
+            assert_eq!(*assistant, expected);
+            assert_eq!(&point.source_session_id, session);
+            assert_eq!(point.harness, zeron_proto::HarnessId::Pi);
+            assert!(
+                matches!(&point.boundary,zeron_proto::NativeForkBoundary::PiEntry {entry_id} if !entry_id.is_empty())
+            );
+            assert!(matches!(
+                events[events.len() - 2],
+                AgentEvent::NativeForkReady { .. }
+            ));
+        }
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
+        assert!(!events.iter().any(
+            |e| matches!(e,AgentEvent::TextDelta {text} if text.contains("zeron-native-fork"))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn native_fork_strict_resume_without_identity_or_storage_never_starts_a_run() {
+    let dir = tempfile::tempdir().unwrap();
+    for resume in [None, Some("missing-native-child".into())] {
+        let (c, tx, _) = controls();
+        drop(tx);
+        let mut req = request(dir.path(), "must never execute");
+        req.resume = resume;
+        req.resume_policy = zeron_proto::ResumePolicy::RequireExisting;
+        assert!(
+            harness()
+                .with_session_store(dir.path().join("index"))
+                .run(req, c)
+                .await
+                .is_err()
+        );
+        assert!(
+            !dir.path().join("pi.pid").exists(),
+            "no RPC run or fresh start"
+        );
+    }
 }
 #[tokio::test]
 async fn terminal_contract_handles_normal_errors_retries_compaction_and_consumed_prompts() {

@@ -409,9 +409,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -783,6 +781,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
     }
 
@@ -5678,6 +5677,7 @@ impl DocHost {
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,
+            resume_policy: Default::default(),
             worktree: None,
         })
     }
@@ -5820,6 +5820,7 @@ mod transfer_progress_tests {
                     status: None,
                     continuation_of: None,
                     duration_ms: None,
+                    native_fork_point: None,
                 })
                 .unwrap();
         }

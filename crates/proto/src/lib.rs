@@ -8,6 +8,8 @@ pub mod entities;
 pub mod file_mentions;
 pub mod invocation;
 pub mod motion;
+pub mod native_forks;
+pub use native_forks::*;
 pub mod preview;
 pub mod sidebar_pins;
 pub mod view;

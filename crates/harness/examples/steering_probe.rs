@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         attachments: vec![],
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
     };
     let controls = RunControls {
         execution_lease: None,

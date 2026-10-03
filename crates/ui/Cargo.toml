@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+native-forks-fixture = ["gpui_platform/test-support", "gpui/bench"]
 project-palette-fixture = []
 compact-picker-fixture = ["gpui_platform/test-support"]
 
@@ -119,3 +120,7 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[[example]]
+name = "native-forks-fixture"
+required-features = ["native-forks-fixture"]

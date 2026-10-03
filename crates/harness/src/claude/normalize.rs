@@ -187,6 +187,8 @@ fn is_synthetic_user_text(text: &str) -> bool {
 /// resume turns them into the done→Working→done wake.
 pub(crate) struct Normalizer {
     saw_init: bool,
+    native_cwd: String,
+    last_native: Option<(String, String)>,
     last_model: Option<String>,
     /// Background-agent ids (`task_started.task_id`) → the spawning Agent
     /// tool_use id. `SendMessage` steers address the AGENT id; this map
@@ -214,6 +216,8 @@ impl Normalizer {
     pub fn new() -> Self {
         Self {
             saw_init: false,
+            native_cwd: String::new(),
+            last_native: None,
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             agent_tool_spawns: std::collections::HashMap::new(),
@@ -329,6 +333,7 @@ impl Normalizer {
     /// Rotate the assistant message id for a steer boundary; returns
     /// (previous, next) for the `Steered` event.
     pub fn rotate_for_steer(&mut self) -> (String, String) {
+        self.last_native = None;
         let prev = std::mem::replace(&mut self.assistant_message_id, new_message_id());
         (prev, self.assistant_message_id.clone())
     }
@@ -411,7 +416,10 @@ impl Normalizer {
                     harness: HarnessId::ClaudeCode,
                     model: f.model,
                     tools: f.tools,
-                    cwd: f.cwd,
+                    cwd: {
+                        self.native_cwd = f.cwd.clone();
+                        f.cwd
+                    },
                     session_id: f.session_id,
                     assistant_message_id: self.assistant_message_id.clone(),
                 }]
@@ -597,7 +605,11 @@ impl Normalizer {
                 }
                 // The enclosing assistant frame closes the streamed message
                 // item; rotate so post-boundary deltas get a fresh id.
-                let (prev, _next) = self.rotate_for_steer();
+                let prev = std::mem::replace(&mut self.assistant_message_id, new_message_id());
+                self.last_native = f
+                    .uuid
+                    .filter(|id| !id.is_empty())
+                    .map(|uuid| (prev.clone(), uuid));
                 out.push(AgentEvent::AssistantMessageCompleted {
                     assistant_message_id: prev,
                 });
@@ -763,6 +775,28 @@ impl Normalizer {
                     out.push(AgentEvent::ContextUsage {
                         tokens: None,
                         window: Some(window),
+                    });
+                }
+                if matches!(
+                    &done,
+                    AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        ..
+                    }
+                ) && let Some((assistant_message_id, uuid)) = self.last_native.take()
+                    && let Some(session_id) = &self.session_id
+                    && !self.native_cwd.is_empty()
+                {
+                    out.push(AgentEvent::NativeForkReady {
+                        assistant_message_id,
+                        point: zeron_proto::NativeForkPoint {
+                            format_version: 1,
+                            harness: HarnessId::ClaudeCode,
+                            source_device_id: "host".into(),
+                            source_session_id: session_id.clone(),
+                            cwd: self.native_cwd.clone(),
+                            boundary: zeron_proto::NativeForkBoundary::ClaudeMessage { uuid },
+                        },
                     });
                 }
                 out.extend([usage, done]);
@@ -1448,5 +1482,31 @@ mod context_tests {
                 ..
             }
         )));
+    }
+}
+
+#[cfg(test)]
+mod native_fork_tests {
+    use super::*;
+    use crate::claude::wire::parse_frame;
+    #[test]
+    fn native_fork_uses_top_level_transcript_uuid_and_precedes_done() {
+        let mut normalizer = Normalizer::new();
+        for raw in [
+            r#"{"type":"system","subtype":"init","session_id":"s1","cwd":"/project"}"#,
+            r#"{"type":"assistant","uuid":"parent-uuid","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+            r#"{"type":"assistant","uuid":"child-uuid","parent_tool_use_id":"tool1","message":{"role":"assistant","content":[{"type":"text","text":"child"}]}}"#,
+        ] {
+            normalizer.normalize(parse_frame(raw).unwrap(), false);
+        }
+        let events = normalizer.normalize(
+            parse_frame(
+                r#"{"type":"result","subtype":"success","session_id":"s1","result":"hello"}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::NativeForkReady { point, .. } if matches!(&point.boundary, zeron_proto::NativeForkBoundary::ClaudeMessage { uuid } if uuid == "parent-uuid"))));
     }
 }

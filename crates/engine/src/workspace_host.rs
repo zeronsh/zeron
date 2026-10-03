@@ -1148,9 +1148,10 @@ impl WorkspaceHost {
 
     // ── persistence / teardown ──────────────────────────────────────────────
 
-    /// Persist the snapshot now (shutdown path; bypasses the debounce).
-    pub fn flush(&self) {
-        self.inner.save_snapshot();
+    /// Persist the snapshot now, bypassing the debounce. Callers that acknowledge
+    /// durable publication must propagate failures before confirming success.
+    pub fn flush(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot()
     }
 
     /// Shutdown: stamp our `lastSeenAt` (the only periodic-ish row write besides

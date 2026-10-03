@@ -8,6 +8,161 @@ pub(super) struct SideChatTab {
 }
 
 impl Shell {
+    pub(super) fn fork_message(
+        &mut self,
+        transcript: Entity<Transcript>,
+        source_id: String,
+        message_id: String,
+        destination: zeron_proto::NativeForkDestination,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|c| c.id == source_id)
+            .cloned()
+        else {
+            transcript.update(cx, |t, cx| {
+                t.native_fork_finished(
+                    &source_id,
+                    &message_id,
+                    Some("Source chat is unavailable".into()),
+                    cx,
+                )
+            });
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            transcript.update(cx, |t, cx| {
+                t.native_fork_finished(
+                    &source_id,
+                    &message_id,
+                    Some("Chat host is disconnected".into()),
+                    cx,
+                )
+            });
+            return;
+        };
+        // Capture the emitting surface's panel, including side-chat transcripts.
+        let side = self
+            .side_chats
+            .iter()
+            .find(|(_, tab)| tab.transcript == transcript)
+            .map(|(id, _)| *id);
+        let key = side
+            .and_then(|id| {
+                self.right_tabs
+                    .iter()
+                    .find(|(_, tabs)| tabs.contains(&RightSurface::SideChat(id)))
+                    .map(|(key, _)| key.clone())
+            })
+            .unwrap_or_else(|| self.panel_key(cx));
+        let origin_panel = self.panels.get(&key);
+        let request = self
+            .native_fork_operations
+            .entry((source_id.clone(), message_id.clone(), destination))
+            .or_insert_with(|| zeron_proto::ForkMessageSideChatRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                chat_id: uuid::Uuid::new_v4().to_string(),
+                source_chat_id: source.id.clone(),
+                source_message_id: message_id.clone(),
+                destination,
+                parent_chat_id: (destination == zeron_proto::NativeForkDestination::SideChat)
+                    .then(|| source.parent_chat_id.clone().unwrap_or(source.id.clone())),
+                target_device_id: source.device_id.clone(),
+            })
+            .clone();
+        if !self.native_fork_pending.insert(request.request_id.clone()) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<zeron_proto::Chat>(
+                    methods::FORK_MESSAGE_SIDE_CHAT,
+                    serde_json::to_value(&request).unwrap(),
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.native_fork_pending.remove(&request.request_id);
+                let error = result.as_ref().err().map(ToString::to_string);
+                transcript.update(cx, |t, cx| {
+                    t.native_fork_finished(&source_id, &message_id, error.clone(), cx)
+                });
+                match result {
+                    Ok(chat) => {
+                        // Retries share an identity until confirmation. A later
+                        // click on this reply must create an independent child.
+                        this.native_fork_operations.remove(&(
+                            source_id.clone(),
+                            message_id.clone(),
+                            destination,
+                        ));
+                        if destination == zeron_proto::NativeForkDestination::MainConversation {
+                            // Publication is already durable; expose the returned row
+                            // immediately, even if the workspace update is in flight.
+                            this.state.update(cx, |state, cx| {
+                                let mut chats = state.chats.clone();
+                                if !chats.iter().any(|row| row.id == chat.id) {
+                                    chats.push(chat.clone());
+                                }
+                                state.apply_chats(chats);
+                                cx.notify();
+                            });
+                            // A completed background fork must not steal navigation.
+                            let current = this.panels.get(&key);
+                            if key == this.panel_key(cx)
+                                && current.right_active == origin_panel.right_active
+                                && current.changes_open == origin_panel.changes_open
+                            {
+                                this.open_chat(chat.id, cx);
+                            }
+                            return;
+                        }
+                        let current_panel = this.panels.get(&key);
+                        let unchanged = current_panel.right_active == origin_panel.right_active
+                            && current_panel.changes_open == origin_panel.changes_open;
+                        let focus = key == this.panel_key(cx) && unchanged;
+                        let child_id = chat.id.clone();
+                        this.open_side_chat(chat, key.clone(), cx);
+                        if !unchanged {
+                            this.panels.update(&key, |p| {
+                                p.right_active = current_panel.right_active;
+                                p.changes_open = current_panel.changes_open;
+                            });
+                        }
+                        if focus
+                            && let Some(tab) = this.side_chats.values().find(|tab| {
+                                tab.state.read(cx).selected_chat.as_deref()
+                                    == Some(child_id.as_str())
+                            })
+                        {
+                            tab.composer.update(cx, |composer, cx| {
+                                composer.focus_pending = true;
+                                cx.notify();
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(tab) = side.and_then(|id| this.side_chats.get(&id)) {
+                            tab.composer.update(cx, |composer, cx| {
+                                composer.show_error(error.to_string(), cx)
+                            });
+                        } else if this.state.read(cx).selected_chat.as_deref()
+                            == Some(source_id.as_str())
+                        {
+                            this.show_side_chat_error(error.to_string(), cx);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn close_empty_right_pane(&mut self, key: &str, cx: &mut Context<Self>) {
         let empty = if key == self.panel_key(cx) {
             self.right_surface_rows(cx).is_empty()
@@ -446,6 +601,135 @@ mod tests {
                 cx,
             )
         })
+    }
+
+    #[gpui::test]
+    fn native_fork_same_reply_creates_new_children_after_confirmation(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let window = shell_window(dir.path(), cx);
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(256);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "main".into();
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "main", "deviceId": "host", "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap(),
+                    ];
+                    state.selected_chat = Some("main".into());
+                    state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                        zeron_rpc::RpcClient::new(out, inbound),
+                    ));
+                });
+            })
+            .unwrap();
+        let mut sent = Vec::<zeron_proto::ForkMessageSideChatRequest>::new();
+        // A lost result is retried with the same identity. Once confirmed,
+        // another click forks the same reply into a different saved side chat.
+        for attempt in 0..4 {
+            let destination = if attempt == 3 {
+                zeron_proto::NativeForkDestination::MainConversation
+            } else {
+                zeron_proto::NativeForkDestination::SideChat
+            };
+            window
+                .update(cx, |shell, _, cx| {
+                    for _ in 0..2 {
+                        shell.fork_message(
+                            shell.transcript.clone(),
+                            "main".into(),
+                            "a1".into(),
+                            destination,
+                            cx,
+                        );
+                    }
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let mut forks = Vec::new();
+            while let Ok(frame) = requests.try_recv() {
+                let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                if frame.method.as_deref() == Some(methods::FORK_MESSAGE_SIDE_CHAT) {
+                    forks.push(frame);
+                }
+            }
+            assert_eq!(forks.len(), 1, "Pending double clicks must share one RPC");
+            let frame = forks.pop().unwrap();
+            let request: zeron_proto::ForkMessageSideChatRequest =
+                serde_json::from_value(frame.params).unwrap();
+            assert_eq!(request.source_chat_id, "main");
+            assert_eq!(request.source_message_id, "a1");
+            assert_eq!(request.destination, destination);
+            assert_eq!(
+                request.parent_chat_id.as_deref(),
+                if attempt == 3 { None } else { Some("main") }
+            );
+            if attempt == 1 {
+                assert_eq!(request, sent[0], "An unconfirmed retry keeps its identity");
+            } else if attempt == 2 {
+                assert_ne!(request.request_id, sent[1].request_id);
+                assert_ne!(request.chat_id, sent[1].chat_id);
+            }
+            let response = if attempt == 0 {
+                zeron_rpc::ServerFrame {
+                    id: frame.id,
+                    err: Some("Provider result was not received".into()),
+                    ..Default::default()
+                }
+            } else {
+                zeron_rpc::ServerFrame {
+                    id: frame.id,
+                    ok: Some(serde_json::json!({
+                        "id": request.chat_id, "parentChatId": request.parent_chat_id, "deviceId": "host",
+                        "archived": false, "createdAt": Utc::now(),
+                    })),
+                    ..Default::default()
+                }
+            };
+            sent.push(request);
+            replies
+                .try_send(serde_json::to_string(&response).unwrap())
+                .unwrap();
+            runtime.block_on(async { tokio::task::yield_now().await });
+            cx.run_until_parked();
+        }
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(
+                    shell.state.read(cx).selected_chat.as_deref(),
+                    Some(sent[3].chat_id.as_str())
+                );
+                assert!(
+                    shell
+                        .state
+                        .read(cx)
+                        .chats
+                        .iter()
+                        .any(|chat| chat.id == sent[3].chat_id && chat.parent_chat_id.is_none())
+                );
+                let children: std::collections::HashSet<_> = shell
+                    .side_chats
+                    .values()
+                    .filter_map(|tab| tab.state.read(cx).selected_chat.clone())
+                    .collect();
+                assert_eq!(
+                    children,
+                    std::collections::HashSet::from([
+                        sent[1].chat_id.clone(),
+                        sent[2].chat_id.clone(),
+                    ])
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

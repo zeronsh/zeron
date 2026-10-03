@@ -33,6 +33,7 @@
 
 pub mod catalog;
 mod discovery;
+mod fork;
 mod normalize;
 mod wire;
 
@@ -494,6 +495,20 @@ impl Harness for ClaudeHarness {
             .await
     }
 
+    async fn native_fork_support(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> zeron_proto::NativeForkAvailability {
+        fork::support().await
+    }
+    async fn fork_native(
+        &self,
+        point: &zeron_proto::NativeForkPoint,
+        controls: crate::NativeForkControls,
+    ) -> Result<zeron_proto::NativeForkResult, crate::NativeForkError> {
+        fork::fork(point, controls).await
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -524,6 +539,29 @@ impl ClaudeHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting {
+            let session = request
+                .resume
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    HarnessError::Protocol(
+                        "Native fork requires its existing Claude session".into(),
+                    )
+                })?;
+            fork::helper(
+                serde_json::json!({"mode":"check","sourceSessionId":session,"dir":request.cwd}),
+                crate::NativeForkControls {
+                    execution_lease: controls.execution_lease.clone(),
+                    interrupt: controls.interrupt.clone(),
+                    timeout: Duration::from_secs(30),
+                    source_idle: true,
+                },
+            )
+            .await
+            .map_err(|e| HarnessError::Protocol(e.to_string()))?;
+        }
+
         let exe = self.resolve_executable()?;
         let mut cmd = self.build_command(&exe, &request);
         if title_only {
@@ -599,6 +637,9 @@ impl ClaudeHarness {
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
+            expected_resume: (request.resume_policy == zeron_proto::ResumePolicy::RequireExisting)
+                .then(|| request.resume.clone())
+                .flatten(),
             normalizer,
             title_only,
             child,
@@ -724,6 +765,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 }
 
 struct Session {
+    expected_resume: Option<String>,
     normalizer: Normalizer,
     title_only: bool,
     child: Child,
@@ -742,6 +784,7 @@ struct Session {
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        expected_resume,
         normalizer: mut norm,
         title_only,
         mut child,
@@ -831,7 +874,16 @@ async fn run_session(session: Session) {
                             }
                         }
                     }
+                    if let Frame::System(init) = &frame
+                        && init.subtype == "init"
+                        && expected_resume.as_ref().is_some_and(|id| id != &init.session_id)
+                    {
+                        interrupt.cancel();
+                        let _ = event_tx.send(Ok(AgentEvent::Error { message: "Claude resumed an unexpected native session".into() })).await;
+                        break 'main;
+                    }
                     for ev in norm.normalize(frame, interrupted) {
+                        if matches!(ev, AgentEvent::NativeForkReady { .. }) && !pending_steers.is_empty() { continue; }
                         match &ev {
                             AgentEvent::ToolCall { id, .. } => {
                                 open_tools.insert(id.clone());

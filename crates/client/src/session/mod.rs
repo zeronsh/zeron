@@ -800,6 +800,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                             status: Some(MessageStatus::Complete),
                             continuation_of: None,
                             duration_ms: None,
+                            native_fork_point: None,
                         }),
                         echo: Some(LocalEcho {
                             state: pending.state,
@@ -1053,6 +1054,7 @@ impl SessionHandle {
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
                     auto_approve: true,
                     resume: None,
+                    resume_policy: Default::default(),
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
                     mcp: None,

@@ -105,6 +105,7 @@ fn request(prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
     }
 }
 
@@ -1571,4 +1572,75 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
             "done"
         ]
     );
+}
+
+#[tokio::test]
+async fn native_fork_is_inclusive_verified_and_never_starts_a_turn() {
+    use zeron_proto::{NativeForkBoundary, NativeForkPoint};
+    let harness = CodexHarness::new().with_executable(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/native-fork-codex.py"),
+    );
+    for (source, expected) in [
+        ("source", true),
+        ("ignore-boundary", false),
+        ("active", false),
+        ("empty-id", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(harness.native_fork_support(dir.path()).await.available);
+        let point = NativeForkPoint {
+            format_version: 1,
+            harness: HarnessId::Codex,
+            source_device_id: "host".into(),
+            source_session_id: source.into(),
+            cwd: dir.path().to_str().unwrap().into(),
+            boundary: NativeForkBoundary::AppServerTurn {
+                turn_id: "t1".into(),
+            },
+        };
+        let result = harness
+            .fork_native(
+                &point,
+                zeron_harness::NativeForkControls {
+                    execution_lease: None,
+                    interrupt: CancellationToken::new(),
+                    timeout: Duration::from_secs(5),
+                    source_idle: true,
+                },
+            )
+            .await;
+        assert_eq!(result.is_ok(), expected, "{source}: {result:?}");
+        if let Ok(result) = result {
+            assert_eq!(result.session_id, "child");
+        }
+        let wire = std::fs::read_to_string(dir.path().join("fork-wire.jsonl")).unwrap();
+        assert!(!wire.contains("turn/start"));
+        assert!(!wire.contains("thread/start"));
+        if source == "active" {
+            assert!(!wire.contains("thread/fork"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_fork_resume_rejection_never_starts_fresh() {
+    let harness = CodexHarness::new().with_executable(fixture_path());
+    let mut req = request("scenario:resumed");
+    req.resume = Some("resume-fail".into());
+    req.resume_policy = zeron_proto::ResumePolicy::RequireExisting;
+    let (ctl, steer, _) = controls("Allow");
+    drop(steer);
+    let events = run_to_end(&harness, req, ctl).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        }
+    )));
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        AgentEvent::SessionStarted { .. } | AgentEvent::TextDelta { .. }
+    )));
 }

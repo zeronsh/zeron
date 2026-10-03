@@ -423,6 +423,41 @@ impl SessionsEngine {
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
             .map_err(|error| EngineError::Other(error.to_string()))?;
+        // Native continuity comes exclusively from the host-owned document. This
+        // check precedes warm routing, queued sends, and cold provider startup.
+        let native_doc = self.doc_handle(chat_id)?;
+        if let Some(lineage) = native_doc.doc().native_fork_lineage()? {
+            if lineage.point.harness != harness_id
+                || lineage.child.cwd != request.cwd
+                || lineage.child.session_id.is_empty()
+                || request.worktree.is_some()
+            {
+                return Err(EngineError::Other(
+                    "Native fork must resume its saved provider session in the original checkout"
+                        .into(),
+                ));
+            }
+            if let Some(chat) = self
+                .inner
+                .workspace()
+                .and_then(|w| w.chat(chat_id).ok().flatten())
+                && (chat
+                    .config
+                    .as_ref()
+                    .is_some_and(|c| c.harness != harness_id)
+                    || chat
+                        .harness_session_id
+                        .as_deref()
+                        .is_some_and(|id| id != lineage.child.session_id))
+            {
+                return Err(EngineError::Other(
+                    "Native fork session configuration no longer matches its saved identity".into(),
+                ));
+            }
+            request.resume = Some(lineage.child.session_id);
+            request.resume_policy = zeron_proto::ResumePolicy::RequireExisting;
+            request.mcp = self.inner.zeron_mcp(chat_id);
+        }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -699,6 +734,19 @@ impl SessionsEngine {
         let Some((run_id, harness_id, steer_tx, ledger, history_sent)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        if let Some(lineage) = self.doc_handle(chat_id)?.doc().native_fork_lineage()? {
+            if lineage.point.harness != harness_id
+                || self
+                    .inner
+                    .resume_for(chat_id, &lineage.child.cwd)
+                    .as_deref()
+                    != Some(lineage.child.session_id.as_str())
+            {
+                return Err(EngineError::Other(
+                    "Native fork runtime no longer matches its saved session".into(),
+                ));
+            }
+        }
         zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
             .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
@@ -927,6 +975,7 @@ impl SessionsEngine {
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
+                            resume_policy: Default::default(),
                             worktree: None,
                         })
                     });
@@ -1357,6 +1406,10 @@ impl Inner {
         current: Option<&str>,
         provider: ProviderSession<'_>,
     ) -> Option<String> {
+        if doc.native_fork_lineage().is_err() || doc.native_fork_lineage().ok().flatten().is_some()
+        {
+            return None;
+        }
         if native_command(prompt, harness_id)
             || !self
                 .workspace()
@@ -1565,6 +1618,7 @@ impl SubagentSink {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         if let Err(err) = self.doc.push_message(&entry) {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");
@@ -1811,7 +1865,11 @@ async fn drive_run(
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
     // the event loop) can take ownership.
-    let mut retry_request = Some(RunRequest {
+    let required_session = (request.resume_policy == zeron_proto::ResumePolicy::RequireExisting)
+        .then(|| request.resume.clone())
+        .flatten();
+    let native_interrupt = controls.interrupt.clone();
+    let mut retry_request = required_session.is_none().then(|| RunRequest {
         resume: None,
         ..request.clone()
     });
@@ -1953,6 +2011,7 @@ async fn drive_run(
         }
     }
     let mut prepared_events = std::collections::VecDeque::new();
+    let mut response_aliases = std::collections::HashMap::<String, String>::new();
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
@@ -2066,7 +2125,7 @@ async fn drive_run(
 
     let mut final_completed_turn = None;
     let final_status = loop {
-        let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
+        let mut event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
         } else {
             let raw_event = tokio::select! {
@@ -2669,6 +2728,10 @@ async fn drive_run(
             folded.clear();
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
+            response_aliases.clear();
+            if let Some(id) = next_assistant_message_id {
+                response_aliases.insert(id.clone(), entry_id.clone());
+            }
             segment_started = now_ms();
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
@@ -2690,6 +2753,67 @@ async fn drive_run(
             {
                 let _ = doc.set_fork_history_session(&session);
             }
+            continue;
+        }
+
+        if let Some(expected) = &required_session {
+            let actual = match &event {
+                AgentEvent::SessionStarted { session_id, .. } => Some(session_id),
+                AgentEvent::Done { session_id, .. } => session_id.as_ref(),
+                _ => None,
+            };
+            if actual.is_some_and(|id| id != expected) {
+                native_interrupt.cancel();
+                event = AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some("Provider returned an unexpected native session identity".into()),
+                    session_id: None,
+                };
+            }
+        }
+        // Explicit lifecycle IDs bind adapter replies to storage entries. Never infer
+        // this relationship from text, time, or transcript position.
+        match &event {
+            AgentEvent::SessionStarted {
+                assistant_message_id,
+                ..
+            }
+            | AgentEvent::AssistantMessageCompleted {
+                assistant_message_id,
+            } => {
+                response_aliases.insert(assistant_message_id.clone(), entry_id.clone());
+            }
+            _ => {}
+        }
+        if let AgentEvent::NativeForkReady {
+            assistant_message_id,
+            point,
+        } = &mut event
+        {
+            if response_aliases.get(assistant_message_id) != Some(&entry_id)
+                || point.harness != harness_id
+                || point.cwd != run_cwd
+                || point.validate().is_err()
+            {
+                continue;
+            }
+            point.source_device_id = device_id.clone();
+            *assistant_message_id = entry_id.clone();
+            let stored = sync_segment(
+                doc_ref,
+                &mut writer,
+                &entry_id,
+                &device_id,
+                segment_started,
+                &folded,
+            )
+            .and_then(|()| doc_ref.set_native_fork_point(&entry_id, point));
+            if let Err(err) = stored {
+                tracing::warn!(chat = %chat_id, error = %err, "native fork point persistence failed");
+                continue;
+            }
+            inner.publish(&chat_id, &event);
             continue;
         }
 
@@ -2949,6 +3073,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
         let current = format!("Current {skill}\nKeep **Markdown**");
@@ -2990,6 +3115,7 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             })
             .unwrap();
         }
@@ -3094,6 +3220,7 @@ mod tests {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
             resume: None,
+            resume_policy: Default::default(),
             attachments: Vec::new(),
             worktree: None,
         }

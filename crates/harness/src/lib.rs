@@ -65,6 +65,24 @@ pub struct RunControls {
     pub interrupt: CancellationToken,
 }
 
+/// Administrative operations use the same update lease and cancellation lifecycle as runs.
+pub struct NativeForkControls {
+    pub execution_lease: Option<std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    pub interrupt: CancellationToken,
+    pub timeout: std::time::Duration,
+    /// Host idle snapshot; adapters must also serialize native prompt admission.
+    pub source_idle: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NativeForkError {
+    #[error("{0}")]
+    Rejected(String),
+    /// Creation may have succeeded. Never automatically repeat the external call.
+    #[error("Native fork outcome is indeterminate: {0}")]
+    Indeterminate(String),
+}
+
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
 #[derive(Clone, Debug)]
 pub struct ModelCatalog {
@@ -112,6 +130,24 @@ pub trait Harness: Send + Sync {
     fn authoritative_prompt_end(&self) -> bool {
         self.deterministic_turn_end()
     }
+    async fn native_fork_support(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> zeron_proto::NativeForkAvailability {
+        zeron_proto::NativeForkAvailability::unavailable(
+            "Native forks are not supported by this provider",
+        )
+    }
+    async fn fork_native(
+        &self,
+        _point: &zeron_proto::NativeForkPoint,
+        _controls: NativeForkControls,
+    ) -> Result<zeron_proto::NativeForkResult, NativeForkError> {
+        Err(NativeForkError::Rejected(
+            "Native forks are not supported by this provider".into(),
+        ))
+    }
+
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
         Ok(None)

@@ -8263,6 +8263,7 @@ impl Composer {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         self.launching_new_chat = is_new;
         if is_new {
@@ -8429,6 +8430,7 @@ impl Composer {
                             status: None,
                             continuation_of: None,
                             duration_ms: None,
+                            native_fork_point: None,
                         };
                         let echo_chat_id = chat_id.clone();
                         this.update(cx, |composer, cx| {
@@ -8637,6 +8639,7 @@ impl Composer {
                         sandbox: SandboxLevel::WorkspaceWrite,
                         auto_approve: false,
                         resume: None,
+                        resume_policy: Default::default(),
                         attachments: attachment_paths,
                         worktree: run_worktree,
                     },
@@ -15028,6 +15031,7 @@ mod tests {
                 status: Some(zeron_doc::MessageStatus::Streaming),
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             }]
         };
         state.update(cx, |s, _| s.selected_chat = Some("a".into()));
@@ -15094,6 +15098,7 @@ mod tests {
             status,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         // Streaming entry with unresolved input → panel.
         let t = vec![entry(
@@ -15131,6 +15136,7 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             },
         ];
         assert!(pending_input_request(&t).is_none());
@@ -15164,6 +15170,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         let t = vec![
             entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),

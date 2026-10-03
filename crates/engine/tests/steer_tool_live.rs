@@ -156,6 +156,7 @@ async fn steering_never_aborts_a_running_tool() {
                     attachments: vec![],
                     worktree: None,
                     resume: None,
+                    resume_policy: Default::default(),
                 },
             },
         )

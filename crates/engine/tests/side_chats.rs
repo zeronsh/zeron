@@ -54,6 +54,7 @@ impl Harness for Capture {
 fn message(id: &str, role: MessageRole, text: &str, status: MessageStatus) -> SessionMessageEntry {
     SessionMessageEntry {
         duration_ms: None,
+        native_fork_point: None,
         id: id.into(),
         role,
         parts: vec![MessagePart::Text {
@@ -168,6 +169,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 sandbox: SandboxLevel::WorkspaceWrite,
                 auto_approve: true,
                 resume: None,
+                resume_policy: Default::default(),
                 attachments: vec![],
                 worktree: None,
             },
@@ -417,6 +419,7 @@ async fn side_turn(
                 sandbox: SandboxLevel::WorkspaceWrite,
                 auto_approve: true,
                 resume,
+                resume_policy: Default::default(),
                 attachments: vec![],
                 worktree: None,
             },
@@ -625,6 +628,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         resume: None,
+        resume_policy: Default::default(),
         attachments: vec![],
         worktree: None,
     };
@@ -810,6 +814,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         resume: None,
+        resume_policy: Default::default(),
         attachments: vec![],
         worktree: None,
     };

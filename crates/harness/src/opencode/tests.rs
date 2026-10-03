@@ -629,13 +629,23 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
         json!({"sessionID": "fixture"}),
     );
 
-    let (status, text, usage, context_usage) =
+    let (status, text, usage, context_usage, fork_points) =
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut text = String::new();
             let mut usage = None;
             let mut context_usage = Vec::new();
+            let mut fork_points = 0;
             loop {
                 match wire.events.recv().await.unwrap().unwrap() {
+                    AgentEvent::NativeForkReady { point, .. } => {
+                        assert_eq!(
+                            point.boundary,
+                            zeron_proto::NativeForkBoundary::OpenCodeReply {
+                                assistant_message_id: "msg_d".into()
+                            }
+                        );
+                        fork_points += 1;
+                    }
                     AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
                     AgentEvent::Usage {
                         input_tokens,
@@ -647,7 +657,7 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
                         context_usage.push((tokens, window));
                     }
                     AgentEvent::Done { status, .. } => {
-                        return (status, text, usage, context_usage);
+                        return (status, text, usage, context_usage, fork_points);
                     }
                     _ => {}
                 }
@@ -655,6 +665,7 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
         })
         .await
         .unwrap();
+    assert_eq!(fork_points, 1);
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "PONG");
     assert_eq!(usage, Some((4, 1)));
@@ -1520,7 +1531,7 @@ fn v2_frames_normalize_to_v1_payloads() {
     assert_eq!(
         out,
         vec![json!({"type":"message.updated","properties":{
-            "info":{"sessionID":"ses_1","id":"usage","role":"assistant",
+            "info":{"sessionID":"ses_1","id":"usage","role":"assistant","_zeronSyntheticUsage":true,
                     "tokens":{"input":10,"output":2,"reasoning":0,
                               "cache":{"read":0,"write":0}}}}})]
     );
@@ -1557,7 +1568,7 @@ fn v2_frames_normalize_to_v1_payloads() {
     assert_eq!(
         out,
         vec![json!({"type":"message.updated","properties":{
-            "info":{"sessionID":"ses_2","id":"usage","role":"assistant",
+            "info":{"sessionID":"ses_2","id":"usage","role":"assistant","_zeronSyntheticUsage":true,
                     "tokens":{"input":1,"output":2},
                     "providerID":"opencode","modelID":"long-context"}}})]
     );

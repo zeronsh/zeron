@@ -55,6 +55,24 @@ impl Store {
         }
         self.write(id, &json!({"sessionId":id,"sessionFile":file}))
     }
+    /// The native child must remain addressable after publication and restart,
+    /// including sessions stored outside Pi's standard search directories.
+    pub fn remember_fork(&self, id: &str, file: &Path) -> Result<(), HarnessError> {
+        self.remember(id, file)?;
+        // Windows FlushFileBuffers requires a writable handle.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.key(id))?
+            .sync_all()?;
+        #[cfg(unix)]
+        {
+            std::fs::File::open(&self.root)?.sync_all()?;
+            if let Some(parent) = self.root.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
     fn write(&self, id: &str, value: &Value) -> Result<(), HarnessError> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.key(id);
@@ -214,6 +232,24 @@ fn matches_id(path: &Path, id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_fork_mapping_is_durable_and_reopens_custom_session_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("child with spaces.jsonl");
+        std::fs::write(&file, "{\"type\":\"session\",\"id\":\"native-child\"}\n").unwrap();
+        let index = dir.path().join("index");
+        let agent = dir.path().join("isolated-agent");
+        Store::new(Some(index.clone()), Some(agent.clone()))
+            .remember_fork("native-child", &file)
+            .unwrap();
+        let reopened = Store::new(Some(index), Some(agent));
+        assert_eq!(
+            reopened.resolve("native-child", dir.path()).unwrap(),
+            file.canonicalize().unwrap()
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert!(reopened.resolve("native-child", dir.path()).is_err());
+    }
     #[test]
     fn only_proven_empty_local_sessions_can_be_recreated_and_submission_revokes_it() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,5 +1,6 @@
 //! Native Pi JSONL RPC driver. See PROTOCOL.md for the legacy ACK barrier.
 mod catalog;
+mod fork;
 mod mcp;
 mod normalize;
 mod rpc;
@@ -145,6 +146,7 @@ impl PiHarness {
         let scratch = mcp
             .map(|config| self::mcp::configure(&mut cmd, config))
             .transpose()?;
+        let native_point = fork::configure(&mut cmd)?;
         let mut child = Child::new(cmd.spawn()?);
         let tail = crate::StderrTail::default();
         let mut lines = BufReader::new(child.stderr.take().expect("piped stderr")).lines();
@@ -162,6 +164,7 @@ impl PiHarness {
         Ok(Process {
             child,
             _scratch: scratch,
+            _native_point: native_point,
             transport,
             tail,
             stderr_task,
@@ -173,6 +176,7 @@ impl PiHarness {
 struct Process {
     child: Child,
     _scratch: Option<crate::scratch::ScratchDir>,
+    _native_point: crate::scratch::ScratchDir,
     transport: rpc::Transport,
     tail: crate::StderrTail,
     stderr_task: tokio::task::JoinHandle<()>,
@@ -321,17 +325,51 @@ impl Harness for PiHarness {
             options: vec![],
         }]
     }
+    async fn native_fork_support(&self, _cwd: &Path) -> zeron_proto::NativeForkAvailability {
+        self.fork_support().await
+    }
+    async fn fork_native(
+        &self,
+        point: &zeron_proto::NativeForkPoint,
+        controls: crate::NativeForkControls,
+    ) -> Result<zeron_proto::NativeForkResult, crate::NativeForkError> {
+        self.create_native_fork(point, controls).await
+    }
     async fn run(
         &self,
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let mut request = request;
+        let strict = request.resume_policy == zeron_proto::ResumePolicy::RequireExisting;
+        if strict {
+            let session = request
+                .resume
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    HarnessError::Protocol("Native fork requires its existing Pi session".into())
+                })?;
+            self.fork_helper(
+                session,
+                Path::new(&request.cwd),
+                None,
+                crate::NativeForkControls {
+                    execution_lease: controls.execution_lease.clone(),
+                    interrupt: controls.interrupt.clone(),
+                    timeout: Duration::from_secs(30),
+                    source_idle: true,
+                },
+            )
+            .await
+            .map_err(|e| HarnessError::Protocol(e.to_string()))?;
+        }
         let store = sessions::Store::new(self.session_store.clone(), self.agent_dir.clone());
         let mut lost_context = None;
         let args = match &request.resume {
             Some(id) => match store.resume_args(id, Path::new(&request.cwd)) {
                 Ok(args) => args,
+                Err(error) if strict => return Err(error),
                 // Like every other harness, a session that can no longer be
                 // reopened starts fresh with a visible notice. Failing instead
                 // would strand the chat: the engine resumes the same id forever.
@@ -371,6 +409,7 @@ impl Harness for PiHarness {
                 session: String::new(),
                 assistant: uuid::Uuid::new_v4().to_string(),
                 lost_context,
+                native_reply: None,
             };
             // The lease lives through shutdown even if the consumer drops its stream.
             let RunControls {
@@ -435,6 +474,8 @@ struct Runner {
     session: String,
     assistant: String,
     lost_context: Option<String>,
+    // Bound to the logical Zeron response while consuming the ordered wire.
+    native_reply: Option<(String, String)>,
 }
 impl Runner {
     async fn emit(&self, event: AgentEvent) -> Result<(), HarnessError> {
@@ -460,6 +501,7 @@ impl Runner {
         }
         self.active = false;
         self.process.dialogs.cancel();
+        self.publish_native_reply().await?;
         self.emit(AgentEvent::Done {
             status: if self.interrupted {
                 zeron_proto::DoneStatus::Interrupted
@@ -471,6 +513,27 @@ impl Runner {
             session_id: (!self.session.is_empty()).then(|| self.session.clone()),
         })
         .await
+    }
+    async fn publish_native_reply(&mut self) -> Result<(), HarnessError> {
+        if let Some((session, entry_id)) = self.native_reply.take()
+            && !self.interrupted
+            && self.norm.status() == zeron_proto::DoneStatus::Completed
+            && session == self.session
+        {
+            self.emit(AgentEvent::NativeForkReady {
+                assistant_message_id: self.assistant.clone(),
+                point: zeron_proto::NativeForkPoint {
+                    format_version: 1,
+                    harness: HarnessId::Pi,
+                    source_device_id: "host".into(),
+                    source_session_id: session,
+                    cwd: self.request.cwd.clone(),
+                    boundary: zeron_proto::NativeForkBoundary::PiEntry { entry_id },
+                },
+            })
+            .await?;
+        }
+        Ok(())
     }
     fn control_command(&self, text: &str) -> Option<Value> {
         let name = text
@@ -504,6 +567,7 @@ impl Runner {
         self.epoch += 1;
         self.active = true;
         self.norm.reset();
+        self.native_reply = None;
         self.submit(text, images, false)
     }
     async fn bootstrap(&mut self, backlog: &mut Vec<Value>) -> Result<Value, HarnessError> {
@@ -699,6 +763,7 @@ impl Runner {
     }
     async fn confirm_delivery(&mut self) -> Result<(), HarnessError> {
         if self.deliveries.pop_front().is_some() {
+            self.publish_native_reply().await?;
             let old = std::mem::replace(&mut self.assistant, uuid::Uuid::new_v4().to_string());
             self.emit(AgentEvent::Steered {
                 assistant_message_id: Some(old),
@@ -747,6 +812,16 @@ impl Runner {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| HarnessError::Protocol("Pi get_state omitted sessionId".into()))?;
         let changed = self.session != session;
+        if self.request.resume_policy == zeron_proto::ResumePolicy::RequireExisting
+            && self.request.resume.as_deref() != Some(session)
+        {
+            return Err(HarnessError::Protocol(
+                "Pi changed the required native session".into(),
+            ));
+        }
+        if changed {
+            self.native_reply = None;
+        }
         self.session = session.into();
         let file = data["sessionFile"].as_str().map(Path::new);
         if let Some(file) = file {
@@ -835,6 +910,22 @@ impl Runner {
             return Ok(());
         }
         if frame["type"] == "extension_ui_request" {
+            if frame["method"] == "notify"
+                && let Some(notice) = frame["message"]
+                    .as_str()
+                    .and_then(|s| s.strip_prefix(fork::NOTICE))
+            {
+                if self.active
+                    && let Ok(point) = serde_json::from_str::<Value>(notice)
+                    && let (Some(session), Some(entry)) =
+                        (point["sessionId"].as_str(), point["entryId"].as_str())
+                    && !session.is_empty()
+                    && !entry.is_empty()
+                {
+                    self.native_reply = Some((session.into(), entry.into()));
+                }
+                return Ok(());
+            }
             if !self.active {
                 // A background notification must not reopen a completed engine turn.
                 // No foreground run can own a dialog here, so cancel it explicitly.
@@ -938,6 +1029,9 @@ impl Runner {
             } else {
                 self.confirm_delivery().await?;
             }
+        }
+        if frame["type"] == "message_start" && frame["message"]["role"] == "assistant" {
+            self.native_reply = None;
         }
         for event in self.norm.map(&frame) {
             self.emit(event).await?;

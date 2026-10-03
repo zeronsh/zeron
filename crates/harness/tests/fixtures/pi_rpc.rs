@@ -16,10 +16,31 @@ fn emit(v: Value) {
 fn response(v: &Value, data: Value) {
     emit(json!({"type":"response","id":v["id"],"command":v["type"],"success":true,"data":data}));
 }
-fn message(text: &str, stop: &str) {
-    emit(
-        json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":text}],"stopReason":stop,"errorMessage":"mock provider failure","usage":{"input":12,"output":3}}}),
-    );
+fn append_message(file: &str, message: Value) -> String {
+    let parent = std::fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .last()
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .and_then(|v| {
+            (v["type"] != "session")
+                .then(|| v["id"].as_str().map(str::to_owned))
+                .flatten()
+        });
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut native = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+    writeln!(native,"{}",json!({"type":"message","id":id,"parentId":parent,"timestamp":"2026-10-01T00:00:00Z","message":message})).unwrap();
+    id
+}
+fn message(file: &str, session: &str, text: &str, stop: &str) {
+    let message = json!({"role":"assistant","content":[{"type":"text","text":text}],"stopReason":stop,"errorMessage":"mock provider failure","usage":{"input":12,"output":3}});
+    emit(json!({"type":"message_end","message":message}));
+    let entry = append_message(file, message);
+    if stop == "stop" {
+        emit(
+            json!({"type":"extension_ui_request","method":"notify","message":format!("zeron-native-fork-v1:{}",json!({"sessionId":session,"entryId":entry}))}),
+        );
+    }
 }
 fn queue_update(queue: &std::collections::VecDeque<String>) {
     emit(json!({"type":"queue_update","steering":queue,"followUp":[]}));
@@ -55,7 +76,7 @@ fn main() {
             &file,
             format!(
                 "{}\n",
-                json!({"type":"session","id":session,"cwd":std::env::current_dir().unwrap()})
+                json!({"type":"session","version":3,"id":session,"cwd":std::env::current_dir().unwrap()})
             ),
         )
         .unwrap();
@@ -157,10 +178,13 @@ fn main() {
                 emit(
                     json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":text}]}}),
                 );
+                append_message(&file, json!({"role":"user","content":text,"timestamp":1}));
                 let active = active.clone();
                 let abort = abort.clone();
                 let queue = queue.clone();
                 let steering_all = steering_all.clone();
+                let file = file.clone();
+                let session = session.clone();
                 std::thread::spawn(move || {
                     let mut text = text;
                     loop {
@@ -189,7 +213,7 @@ fn main() {
                             }
                         }
                         if text == "retry" {
-                            message("", "error");
+                            message(&file, &session, "", "error");
                             emit(json!({"type":"agent_end","willRetry":true}));
                             std::thread::sleep(Duration::from_millis(150));
                             emit(json!({"type":"agent_start"}));
@@ -203,15 +227,15 @@ fn main() {
                             );
                         }
                         if abort.load(Ordering::SeqCst) {
-                            message("", "aborted");
+                            message(&file, &session, "", "aborted");
                         } else if text == "error" {
-                            message("", "error");
+                            message(&file, &session, "", "error");
                         } else {
                             emit(json!({"type":"message_start","message":{"role":"assistant"}}));
                             emit(
                                 json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"reply:"}}),
                             );
-                            message(&format!("reply:{text}"), "stop");
+                            message(&file, &session, &format!("reply:{text}"), "stop");
                         }
                         emit(json!({"type":"agent_end"}));
                         let mut queued = queue.lock().unwrap();
@@ -227,6 +251,10 @@ fn main() {
                                 queue_update(&queued);
                                 emit(
                                     json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":next}]}}),
+                                );
+                                append_message(
+                                    &file,
+                                    json!({"role":"user","content":next,"timestamp":1}),
                                 );
                                 batch.push(next);
                             }
