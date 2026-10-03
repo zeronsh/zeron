@@ -47,6 +47,10 @@ const FILE_INDEX_MAX_ENTRIES: usize = 250_000;
 const RANK_BUFFER: usize = 1_024;
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
+/// Key in a branch's `branch.<name>` config section holding the name Zeron
+/// last gave the branch. `git branch -m` carries the section along and
+/// `git branch -D` drops it, so ownership doesn't depend on the branch prefix.
+const ZERON_BRANCH_NAME_KEY: &str = "zeronName";
 
 const ADJECTIVES: &[&str] = &[
     "swift", "calm", "bright", "bold", "keen", "brave", "clever", "lucky", "quiet", "warm", "cool",
@@ -1144,6 +1148,7 @@ impl Repos {
             Some(repo_path),
         )
         .await?;
+        self.mark_zeron_branch(repo_path, &branch_name).await;
         let checkout = self.checkout_identity(&path).await?;
         Ok(Worktree {
             repo_path: repo_path.to_string_lossy().to_string(),
@@ -1168,6 +1173,27 @@ impl Repos {
         .is_ok()
     }
 
+    /// Record `branch` as created by Zeron under its current name. Best effort:
+    /// an unmarked `zeron/…` branch still reads as Zeron's.
+    async fn mark_zeron_branch(&self, path: &Path, branch: &str) {
+        let key = format!("branch.{branch}.{ZERON_BRANCH_NAME_KEY}");
+        if let Err(err) = self.git(&["config", &key, branch], Some(path)).await {
+            tracing::warn!(%branch, error = %err, "worktree branch ownership marker not written");
+        }
+    }
+
+    /// Whether Zeron created `branch` and it still has the name Zeron gave it.
+    /// A user rename carries the marker along but not its value, so a renamed
+    /// branch reads as the user's. Branches from engines that predate the
+    /// marker fall back to the `zeron/` prefix.
+    async fn is_zeron_branch(&self, path: &Path, branch: &str) -> bool {
+        let key = format!("branch.{branch}.{ZERON_BRANCH_NAME_KEY}");
+        match self.git(&["config", "--get", &key], Some(path)).await {
+            Ok(name) => name == branch,
+            Err(_) => branch.starts_with("zeron/"),
+        }
+    }
+
     /// Rename a zeron-created worktree branch after its chat's generated title
     /// (port of zeron's `renameWorktreeBranch`). Guards:
     /// - respect an external checkout/rename: only act while the worktree is still
@@ -1188,7 +1214,10 @@ impl Repos {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if current != expected_branch || expected_branch != format!("zeron/{folder}") {
+        if current != expected_branch
+            || expected_branch != format!("zeron/{folder}")
+            || !self.is_zeron_branch(worktree_path, &current).await
+        {
             return Ok(current);
         }
         let preferred = worktree_branch_from_title(title);
@@ -1213,12 +1242,14 @@ impl Repos {
             Some(worktree_path),
         )
         .await?;
+        self.mark_zeron_branch(worktree_path, &target).await;
         self.current_branch(worktree_path).await
     }
 
     /// Best-effort worktree removal (if it still exists), then prune stale refs.
-    /// Deletes the worktree's branch ONLY when zeron created it (`zeron/…`) — the
-    /// user may have checked out their own branch inside the worktree.
+    /// Deletes the worktree's branch ONLY when zeron created it and it still has
+    /// zeron's name — the user may have checked out their own branch inside the
+    /// worktree, or renamed zeron's to keep it.
     pub async fn delete_worktree(
         &self,
         repo_path: &Path,
@@ -1247,7 +1278,7 @@ impl Repos {
             }
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
-        if branch.starts_with("zeron/") {
+        if !branch.is_empty() && self.is_zeron_branch(repo_path, &branch).await {
             let _ = self.git(&["branch", "-D", &branch], Some(repo_path)).await;
         }
         Ok(())

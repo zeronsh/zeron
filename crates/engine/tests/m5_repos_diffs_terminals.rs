@@ -239,6 +239,116 @@ async fn repos_round_trip_add_branches_worktrees() {
 }
 
 #[tokio::test]
+async fn delete_worktree_removes_only_branches_still_named_by_zeron() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    let repos = test_repos(&tmp.path().join("data"));
+    let branch_exists = |branch: String| {
+        let repo_dir = repo_dir.clone();
+        async move {
+            tokio::process::Command::new("git")
+                .args(["show-ref", "--verify", "--quiet"])
+                .arg(format!("refs/heads/{branch}"))
+                .current_dir(&repo_dir)
+                .status()
+                .await
+                .expect("git spawns")
+                .success()
+        }
+    };
+
+    // Creation records the branch's name as Zeron's.
+    let created = repos
+        .create_worktree(&repo_dir, "main")
+        .await
+        .expect("worktree");
+    let key = format!("branch.{}.zeronName", created.branch);
+    assert_eq!(
+        git_stdout(&repo_dir, &["config", "--get", &key]).await,
+        created.branch
+    );
+
+    // The title rename moves the marker with the branch, so cleanup still
+    // removes it.
+    let titled = repos
+        .rename_worktree_branch(Path::new(&created.path), &created.branch, "Add Dark Mode")
+        .await
+        .expect("title rename");
+    assert_eq!(titled, "zeron/add-dark-mode");
+    repos
+        .delete_worktree(&repo_dir, Path::new(&created.path))
+        .await
+        .expect("delete titled");
+    assert!(!branch_exists(titled).await, "titled zeron branch deleted");
+
+    // A branch the user renamed to keep survives, even inside `zeron/`.
+    let kept = repos
+        .create_worktree(&repo_dir, "main")
+        .await
+        .expect("worktree to keep");
+    git(Path::new(&kept.path), &["branch", "-m", "zeron/keep-this"]).await;
+    repos
+        .delete_worktree(&repo_dir, Path::new(&kept.path))
+        .await
+        .expect("delete kept");
+    assert!(
+        branch_exists("zeron/keep-this".into()).await,
+        "user-renamed branch kept"
+    );
+
+    // Ownership comes from the marker, not the prefix: a Zeron branch named
+    // outside `zeron/` is still cleaned up.
+    let prefixed = repos
+        .create_worktree(&repo_dir, "main")
+        .await
+        .expect("worktree with custom prefix");
+    let wt = Path::new(&prefixed.path);
+    git(wt, &["branch", "-m", "feat/custom"]).await;
+    git(
+        wt,
+        &["config", "branch.feat/custom.zeronName", "feat/custom"],
+    )
+    .await;
+    repos
+        .delete_worktree(&repo_dir, wt)
+        .await
+        .expect("delete custom prefix");
+    assert!(
+        !branch_exists("feat/custom".into()).await,
+        "marked branch deleted regardless of prefix"
+    );
+
+    // Branches from engines that predate the marker keep the prefix rule.
+    let legacy = repos
+        .create_worktree(&repo_dir, "main")
+        .await
+        .expect("legacy worktree");
+    let key = format!("branch.{}.zeronName", legacy.branch);
+    git(&repo_dir, &["config", "--unset", &key]).await;
+    repos
+        .delete_worktree(&repo_dir, Path::new(&legacy.path))
+        .await
+        .expect("delete legacy");
+    assert!(
+        !branch_exists(legacy.branch).await,
+        "unmarked zeron branch deleted"
+    );
+
+    // The user's own branch checked out inside the worktree is never deleted.
+    let own = repos
+        .create_worktree(&repo_dir, "main")
+        .await
+        .expect("worktree for own branch");
+    git(Path::new(&own.path), &["checkout", "-b", "mine"]).await;
+    repos
+        .delete_worktree(&repo_dir, Path::new(&own.path))
+        .await
+        .expect("delete own");
+    assert!(branch_exists("mine".into()).await, "user branch kept");
+}
+
+#[tokio::test]
 async fn git_history_is_topological_paged_and_carries_public_refs() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("history-repo");
