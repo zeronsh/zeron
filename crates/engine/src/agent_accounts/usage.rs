@@ -371,6 +371,7 @@ pub(super) fn grok_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
         _ => "Period",
     };
     Some(UsageSnapshot {
+        available_resets: None,
         windows: vec![AgentUsageWindow {
             label: label.to_string(),
             used_fraction: (used_percent / 100.0) as f32,
@@ -431,6 +432,7 @@ pub(super) fn devin_usage_snapshot(
         UsageSnapshot {
             windows,
             plan_label,
+            available_resets: None,
         },
         identity,
     ))
@@ -543,6 +545,7 @@ pub(super) fn copilot_usage_snapshot(body: &serde_json::Value) -> Option<UsageSn
     (!windows.is_empty() || plan_label.is_some()).then_some(UsageSnapshot {
         windows,
         plan_label,
+        available_resets: None,
     })
 }
 
@@ -572,6 +575,7 @@ pub(super) fn nous_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
     (body.get("user").is_some() || subscription.is_some()).then_some(UsageSnapshot {
         windows,
         plan_label,
+        available_resets: None,
     })
 }
 

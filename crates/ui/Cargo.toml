@@ -11,6 +11,7 @@ compact-picker-fixture = ["gpui_platform/test-support"]
 
 browser-fixture = []
 windows-render-fixture = []
+account-usage-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
@@ -25,6 +26,10 @@ required-features = ["browser-fixture"]
 [[example]]
 name = "browser-fixture"
 required-features = ["browser-fixture"]
+
+[[example]]
+name = "account-usage-fixture"
+required-features = ["account-usage-fixture"]
 
 [[example]]
 name = "windows-render-fixture"

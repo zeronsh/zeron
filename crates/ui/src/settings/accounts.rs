@@ -350,6 +350,16 @@ pub(crate) fn render_usage_meter(
     window: &zeron_proto::AgentUsageWindow,
     theme: &Theme,
 ) -> AnyElement {
+    render_usage_meter_with_label(window, theme, window.label.clone(), USAGE_LABEL_WIDTH)
+}
+
+/// Keep the meter's total width fixed when the composer adds an inline countdown.
+pub(crate) fn render_usage_meter_with_label(
+    window: &zeron_proto::AgentUsageWindow,
+    theme: &Theme,
+    label: String,
+    label_width: f32,
+) -> AnyElement {
     let fraction = window.used_fraction.clamp(0.0, 1.0);
     let level = usage_level(fraction);
     let fill = usage_color(level, theme).opacity(match level {
@@ -365,15 +375,15 @@ pub(crate) fn render_usage_meter(
         .text_size(crate::typography::ui_rems(11.5))
         .child(
             div()
-                .w(px(USAGE_LABEL_WIDTH))
+                .w(px(label_width))
                 .flex_none()
                 .truncate()
                 .text_color(theme.text_muted)
-                .child(SharedString::from(window.label.clone())),
+                .child(SharedString::from(label)),
         )
         .child(
             div()
-                .w(px(USAGE_BAR_WIDTH))
+                .w(px(USAGE_LABEL_WIDTH + USAGE_BAR_WIDTH - label_width))
                 .flex_none()
                 .h(px(4.0))
                 .rounded_full()
@@ -2388,6 +2398,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            available_resets: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,
@@ -2540,6 +2551,7 @@ mod tests {
                 used_fraction: 0.4,
                 resets_at: None,
             }],
+            available_resets: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,
@@ -2630,6 +2642,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            available_resets: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,

@@ -905,6 +905,9 @@ pub struct AgentAccount {
     pub active: bool,
     #[serde(default)]
     pub usage_windows: Vec<AgentUsageWindow>,
+    /// Banked resets reported by the provider. Missing means unknown or unsupported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_resets: Option<u32>,
     /// Epoch millis the `usage_windows` were fetched. The engine serves the
     /// last good probe (persisted across restarts) while a refresh runs, so
     /// windows may be minutes old; `None` = never fetched.

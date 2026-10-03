@@ -13,6 +13,8 @@
 //! - [`loaders`] — zeron pulse loader, gradient spinner, boot splash.
 
 mod account_usage;
+#[cfg(feature = "account-usage-fixture")]
+pub use account_usage::AccountUsage;
 pub mod app_menus;
 pub mod app_update;
 pub mod appearance;
