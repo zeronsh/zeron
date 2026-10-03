@@ -48,7 +48,16 @@ export const setMeta = (sql: SqlStorage, key: string, value: string): void => {
   );
 };
 
-export const headSeq = (sql: SqlStorage): number => Number(getMeta(sql, "headSeq") ?? "0");
+/** The newest seq ever issued. Derived rather than stored — a stored copy
+ * cost a row write per append. `seq` is the rowid, so `MAX` is one b-tree
+ * probe; rows only ever leave through a checkpoint, which records the floor,
+ * so an empty log's head is `seqFloor`. Rooms written before this derivation
+ * keep their last stored `headSeq` as a lower bound: reissuing a seq a client
+ * already holds would make it skip the new row. */
+export const headSeq = (sql: SqlStorage): number => {
+  const max = [...sql.exec("SELECT MAX(seq) AS m FROM rows")][0]?.m as number | null;
+  return Math.max(max ?? 0, seqFloor(sql), Number(getMeta(sql, "headSeq") ?? "0"));
+};
 
 /** Rows with `seq <= seqFloor` are gone — covered by the checkpoint. A cursor
  * below the floor must load the checkpoint before requesting rows. */
@@ -84,7 +93,6 @@ export const appendRow = (
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     receivedAt
   );
-  setMeta(sql, "headSeq", String(seq));
   return { ok: true, seq, dup: false };
 };
 
