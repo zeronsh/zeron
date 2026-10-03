@@ -518,6 +518,251 @@ async fn error_codes_map_to_readable_messages() {
     );
 }
 
+fn auth_failure_request(scenario: &str) -> (tempfile::TempDir, ClaudeHarness, RunRequest) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-claude-auth.py");
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = ClaudeHarness::new().with_executable(fixture);
+    let mut req = request(scenario);
+    req.cwd = dir.path().to_string_lossy().into_owned();
+    req.resume = Some("existing-session".into());
+    (dir, harness, req)
+}
+
+async fn auth_failure_scenario(scenario: &str) -> (tempfile::TempDir, Vec<AgentEvent>) {
+    let (dir, harness, req) = auth_failure_request(scenario);
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness, req, controls).await;
+    (dir, events)
+}
+
+#[tokio::test]
+async fn initial_auth_failure_retries_with_same_prompt_and_resume() {
+    let (dir, events) = auth_failure_scenario("scenario:auth-recovery").await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+        "2"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("args-1.json")).unwrap(),
+        std::fs::read(dir.path().join("args-2.json")).unwrap(),
+    );
+    let args: Vec<String> =
+        serde_json::from_slice(&std::fs::read(dir.path().join("args-2.json")).unwrap()).unwrap();
+    assert!(args.iter().any(|arg| arg == "--resume=existing-session"));
+    assert_eq!(
+        std::fs::read(dir.path().join("prompt-1.json")).unwrap(),
+        std::fs::read(dir.path().join("prompt-2.json")).unwrap(),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextDelta { text } if text == "Recovered"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn persistent_auth_failure_stops_after_one_retry() {
+    let (dir, events) = auth_failure_scenario("scenario:auth-persistent").await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+        "2"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error { .. }))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn auth_failure_after_output_or_actions_never_replays_the_prompt() {
+    for scenario in [
+        "scenario:auth-after-text",
+        "scenario:auth-after-reasoning",
+        "scenario:auth-after-unknown-frame",
+        "scenario:auth-after-tool",
+        "scenario:auth-with-output-usage",
+    ] {
+        let (dir, events) = auth_failure_scenario(scenario).await;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+            "1",
+            "{scenario}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Errored,
+                ..
+            })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn initial_auth_failure_in_a_fresh_chat_recovers() {
+    let (dir, harness, mut req) = auth_failure_request("scenario:auth-recovery");
+    req.resume = None;
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness, req, controls).await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+        "2"
+    );
+    assert!(matches!(events.last(), Some(AgentEvent::Done {
+        status: DoneStatus::Completed, session_id: Some(id), ..
+    }) if id == "auth-session-2"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error { .. }))
+    );
+}
+
+#[tokio::test]
+async fn subagent_auth_failure_does_not_restart_the_parent() {
+    let (dir, events) = auth_failure_scenario("scenario:auth-subagent").await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+        "1"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Subagent { event, .. }
+        if matches!(event.as_ref(), AgentEvent::Error { .. })))
+    );
+}
+
+#[tokio::test]
+async fn auth_failure_in_a_later_turn_never_replays_the_initial_prompt() {
+    let (dir, harness, req) = auth_failure_request("scenario:auth-after-completed");
+    let (controls, steer, _token) = controls("A");
+    let mut stream = harness.run(req, controls).await.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(
+                event,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            ) {
+                steer
+                    .send(SteerMessage {
+                        prompt: "second turn".into(),
+                        message_id: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+        "1"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error { .. }))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn queued_steering_prevents_auth_retry() {
+    let (dir, harness, req) = auth_failure_request("scenario:auth-recovery");
+    let (controls, steer, _token) = controls("A");
+    steer
+        .send(SteerMessage {
+            prompt: "additional instruction".into(),
+            message_id: None,
+        })
+        .await
+        .unwrap();
+    let events = run_to_end(&harness, req, controls).await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+        "1"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Error { .. }))
+    );
+}
+
+#[tokio::test]
+async fn interrupt_during_auth_retry_cleanup_prevents_a_second_process() {
+    let (dir, harness, req) = auth_failure_request("scenario:auth-cancel-during-retry");
+    let harness = harness.with_graces(Duration::from_millis(10), Duration::from_millis(250));
+    let (controls, _steer, token) = controls("A");
+    let reaping = dir.path().join("reaping");
+    let cancel = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !reaping.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+    });
+    let events = run_to_end(&harness, req, controls).await;
+    cancel.await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("attempts")).unwrap(),
+        "1"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Interrupted,
+            ..
+        })
+    ));
+}
+
 #[tokio::test]
 async fn missing_binary_is_not_installed() {
     let harness = ClaudeHarness::new().with_executable("/nonexistent/claude-nowhere");

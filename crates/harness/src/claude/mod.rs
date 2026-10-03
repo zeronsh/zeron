@@ -544,46 +544,15 @@ impl ClaudeHarness {
             // config with settings-sourced ones.
             cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
         }
+        let config = crate::model_context::root(
+            "CLAUDE_CONFIG_DIR",
+            crate::executable::home_or_current_dir().join(".claude"),
+        );
         let normalizer = if let Some(session_id) = &request.resume {
-            let config = crate::model_context::root(
-                "CLAUDE_CONFIG_DIR",
-                crate::executable::home_or_current_dir().join(".claude"),
-            );
             Normalizer::for_resume(&config, session_id).await
         } else {
             Normalizer::new()
         };
-        let mut child = cmd.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
-            } else {
-                HarnessError::Io(e)
-            }
-        })?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| HarnessError::Protocol("claude child has no stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| HarnessError::Protocol("claude child has no stdout".into()))?;
-        let stderr_tail = crate::StderrTail::default();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = stderr_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::claude", "stderr: {line}");
-                    tail.push(&line);
-                }
-            });
-        }
-
-        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<StdinMsg>();
-        tokio::spawn(stdin_writer(stdin, stdin_rx));
-
         // The initial prompt as the first stdin user line (streaming-input
         // mode). Ultrathink rides every user message — steers included.
         // Staged image attachments are inlined as base64 image content blocks
@@ -595,21 +564,25 @@ impl ClaudeHarness {
             &apply_ultrathink(request.reasoning, &request.prompt),
             &images,
         );
-        let _ = stdin_tx.send(StdinMsg::Line(first));
+        let process = spawn_session_process(&mut cmd, &exe, &first)?;
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             normalizer,
             title_only,
-            child,
-            stdout_lines: BufReader::new(stdout).lines(),
-            stdin_tx,
+            process,
+            restart: Some(SessionRestart {
+                command: cmd,
+                executable: exe,
+                first_line: first,
+                config,
+                resume: request.resume,
+            }),
             event_tx,
             controls,
             reasoning: request.reasoning,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
-            stderr_tail,
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -723,19 +696,101 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
     }
 }
 
-struct Session {
-    normalizer: Normalizer,
-    title_only: bool,
+fn initial_auth_failure(frame: &Frame) -> bool {
+    matches!(frame, Frame::Assistant(message)
+        if message.parent_tool_use_id.is_none()
+            && message.error.as_deref() == Some("authentication_failed")
+            && message.message.usage.as_ref()
+                .and_then(|usage| usage.get("output_tokens"))
+                .and_then(Value::as_u64)
+                .is_none_or(|tokens| tokens == 0)
+            && message.message.blocks().all(|block| block.kind == "text"))
+}
+
+fn auth_retry_preamble(frame: &Frame) -> bool {
+    match frame {
+        Frame::System(system) => matches!(
+            system.subtype.as_str(),
+            "init" | "thinking_tokens" | "session_state_changed"
+        ),
+        Frame::User(message) => {
+            message.parent_tool_use_id.is_none()
+                && message
+                    .message
+                    .blocks()
+                    .all(|block| matches!(block.kind.as_str(), "text" | "image"))
+        }
+        _ => false,
+    }
+}
+
+struct SessionProcess {
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
+    stderr_tail: crate::StderrTail,
+}
+
+fn spawn_session_process(
+    command: &mut Command,
+    executable: &std::path::Path,
+    first_line: &str,
+) -> Result<SessionProcess, HarnessError> {
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            HarnessError::NotInstalled(crate::executable::binary_hint(executable))
+        } else {
+            HarnessError::Io(error)
+        }
+    })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| HarnessError::Protocol("claude child has no stdin".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| HarnessError::Protocol("claude child has no stdout".into()))?;
+    let stderr_tail = crate::StderrTail::default();
+    if let Some(stderr) = child.stderr.take() {
+        let tail = stderr_tail.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "zeron_harness::claude", "stderr: {line}");
+                tail.push(&line);
+            }
+        });
+    }
+    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<StdinMsg>();
+    tokio::spawn(stdin_writer(stdin, stdin_rx));
+    let _ = stdin_tx.send(StdinMsg::Line(first_line.to_owned()));
+    Ok(SessionProcess {
+        child,
+        stdout_lines: BufReader::new(stdout).lines(),
+        stdin_tx,
+        stderr_tail,
+    })
+}
+
+struct SessionRestart {
+    command: Command,
+    executable: PathBuf,
+    first_line: String,
+    config: PathBuf,
+    resume: Option<String>,
+}
+
+struct Session {
+    normalizer: Normalizer,
+    title_only: bool,
+    process: SessionProcess,
+    restart: Option<SessionRestart>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     reasoning: Option<ReasoningLevel>,
     interrupt_grace: Duration,
     kill_grace: Duration,
-    /// Rolling stderr tail for the crash message on an unexpected exit.
-    stderr_tail: crate::StderrTail,
 }
 
 /// The per-run event loop: one task multiplexing stdout frames, the steering
@@ -744,15 +799,19 @@ async fn run_session(session: Session) {
     let Session {
         normalizer: mut norm,
         title_only,
-        mut child,
-        mut stdout_lines,
-        stdin_tx,
+        process:
+            SessionProcess {
+                mut child,
+                mut stdout_lines,
+                mut stdin_tx,
+                mut stderr_tail,
+            },
+        mut restart,
         event_tx,
         controls,
         reasoning,
         interrupt_grace,
         kill_grace,
-        stderr_tail,
     } = session;
     let RunControls {
         execution_lease: _execution_lease,
@@ -800,6 +859,57 @@ async fn run_session(session: Session) {
                             continue;
                         }
                     };
+                    // One API rejection does not prove the native login is
+                    // gone. A fresh host-side CLI rereads file/Keychain auth.
+                    // Only the initial, unstarted prompt is safe to replay.
+                    if restart.is_some()
+                        && initial_auth_failure(&frame)
+                        && steering.is_empty()
+                        && !interrupt.is_cancelled()
+                        && !event_tx.is_closed()
+                    {
+                        let mut restart = restart.take().expect("guarded by is_some");
+                        tracing::warn!(target: "zeron_harness::claude", "initial authentication rejected; retrying once with a fresh Claude process");
+                        shutdown_child(&mut child, kill_grace).await;
+                        if interrupt.is_cancelled() || event_tx.is_closed() {
+                            interrupted = interrupt.is_cancelled();
+                            break 'main;
+                        }
+                        let retry_norm = if let Some(session_id) = &restart.resume {
+                            Normalizer::for_resume(&restart.config, session_id).await
+                        } else {
+                            Normalizer::new()
+                        };
+                        if interrupt.is_cancelled() || event_tx.is_closed() {
+                            interrupted = interrupt.is_cancelled();
+                            break 'main;
+                        }
+                        match spawn_session_process(
+                            &mut restart.command,
+                            &restart.executable,
+                            &restart.first_line,
+                        ) {
+                            Ok(process) => {
+                                norm = retry_norm;
+                                child = process.child;
+                                stdout_lines = process.stdout_lines;
+                                stdin_tx = process.stdin_tx;
+                                stderr_tail = process.stderr_tail;
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(Err(error)).await;
+                                break 'main;
+                            }
+                        }
+                        continue;
+                    }
+                    // Output, actions, a turn end or subagent activity closes
+                    // the replay window; only startup metadata/user echoes pass.
+                    if !auth_retry_preamble(&frame) {
+                        // Release the captured prompt (including inline images)
+                        // once this process can no longer be restarted safely.
+                        restart = None;
+                    }
                     if let Frame::ControlRequest(req) = frame {
                         if title_only {
                             let line = control_response_line(&req.request_id, serde_json::json!({
@@ -875,6 +985,7 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    restart = None;
                     let id = uuid::Uuid::new_v4().to_string();
                     let line = wire::steer_message_line(
                         &apply_ultrathink(reasoning, &msg.prompt),
