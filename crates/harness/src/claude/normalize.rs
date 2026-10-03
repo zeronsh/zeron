@@ -326,6 +326,12 @@ impl Normalizer {
         norm
     }
 
+    pub(super) fn task_for_spawn(&self, spawn: &str) -> Option<&str> {
+        self.agent_tasks
+            .iter()
+            .find_map(|(task, owner)| (owner == spawn).then_some(task.as_str()))
+    }
+
     /// Rotate the assistant message id for a steer boundary; returns
     /// (previous, next) for the `Steered` event.
     pub fn rotate_for_steer(&mut self) -> (String, String) {
@@ -642,16 +648,64 @@ impl Normalizer {
                     );
                     return out;
                 }
-                f.message
-                    .blocks()
-                    .filter(|b: &ContentBlock| b.kind == "tool_result")
-                    .map(|b| AgentEvent::ToolResult {
-                        id: b.tool_use_id.clone(),
-                        is_error: b.is_error.unwrap_or(false),
+                let mut out = Vec::new();
+                for block in f.message.blocks().filter(|b| b.kind == "tool_result") {
+                    let is_error = block.is_error.unwrap_or(false);
+                    out.push(AgentEvent::ToolResult {
+                        id: block.tool_use_id.clone(),
+                        is_error,
                         output: None,
                         diff: None,
-                    })
-                    .collect()
+                    });
+                    if !self.agent_spawn_tools.contains(&block.tool_use_id) {
+                        continue;
+                    }
+                    if let Some(task) = f
+                        .tool_use_result
+                        .as_ref()
+                        .and_then(|r| r.get("agentId"))
+                        .and_then(Value::as_str)
+                        .filter(|t| !t.is_empty())
+                    {
+                        self.agent_tasks
+                            .entry(task.to_owned())
+                            .or_insert_with(|| block.tool_use_id.clone());
+                    }
+                    // An eager async launch is only the spawn tool's result.
+                    // Explicit terminal metadata (or a failed spawn) is the
+                    // child's end even when no task_notification follows.
+                    let status = if is_error {
+                        Some(DoneStatus::Errored)
+                    } else {
+                        match f
+                            .tool_use_result
+                            .as_ref()
+                            .and_then(|r| r.get("status"))
+                            .and_then(Value::as_str)
+                        {
+                            Some("completed" | "complete" | "succeeded" | "success") => {
+                                Some(DoneStatus::Completed)
+                            }
+                            Some("failed" | "errored" | "error") => Some(DoneStatus::Errored),
+                            Some(
+                                "killed" | "cancelled" | "canceled" | "stopped" | "interrupted",
+                            ) => Some(DoneStatus::Interrupted),
+                            _ => None,
+                        }
+                    };
+                    if let Some(status) = status {
+                        out.push(tag(
+                            &block.tool_use_id,
+                            AgentEvent::Done {
+                                status,
+                                result: None,
+                                error: None,
+                                session_id: None,
+                            },
+                        ));
+                    }
+                }
+                out
             }
 
             // A claude.ai plan window was hit. A hard `rejected` blocks the
@@ -770,7 +824,7 @@ impl Normalizer {
             }
 
             // Control frames are handled by the run loop, not normalized.
-            Frame::ControlRequest(_) | Frame::Other => Vec::new(),
+            Frame::ControlRequest(_) | Frame::ControlResponse { .. } | Frame::Other => Vec::new(),
         }
     }
 }
@@ -1448,5 +1502,49 @@ mod context_tests {
                 ..
             }
         )));
+    }
+}
+
+#[cfg(test)]
+mod agent_result_tests {
+    use super::*;
+    use crate::claude::wire;
+
+    #[test]
+    fn structured_agent_results_restore_identity_and_only_terminal_results_settle() {
+        for (status, expected) in [
+            ("async_launched", None),
+            ("completed", Some(DoneStatus::Completed)),
+            ("failed", Some(DoneStatus::Errored)),
+            ("interrupted", Some(DoneStatus::Interrupted)),
+        ] {
+            let mut norm = Normalizer::new();
+            norm.normalize(wire::parse_frame(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"spawn","name":"Agent","input":{}}]}}"#).unwrap(), false);
+            let frame = serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"spawn"}]},"tool_use_result":{"agentId":"task","status":status}});
+            let events = norm.normalize(wire::parse_frame(&frame.to_string()).unwrap(), false);
+            assert_eq!(norm.task_for_spawn("spawn"), Some("task"));
+            assert_eq!(
+                events.iter().find_map(|event| match event {
+                    AgentEvent::Subagent { event, .. } => match event.as_ref() {
+                        AgentEvent::Done { status, .. } => Some(*status),
+                        _ => None,
+                    },
+                    _ => None,
+                }),
+                expected
+            );
+        }
+        let mut norm = Normalizer::new();
+        norm.normalize(wire::parse_frame(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"spawn","name":"Agent","input":{}}]}}"#).unwrap(), false);
+        let events = norm.normalize(wire::parse_frame(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"spawn","is_error":true}]}}"#).unwrap(), false);
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Subagent { event, .. }) if matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Errored, .. }))
+        );
+        let ordinary = norm.normalize(wire::parse_frame(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"shell","is_error":true}]},"tool_use_result":{"agentId":"unrelated","status":"completed"}}"#).unwrap(), false);
+        assert!(
+            ordinary
+                .iter()
+                .all(|event| !matches!(event, AgentEvent::Subagent { .. }))
+        );
     }
 }

@@ -60,6 +60,7 @@ fn controls(
     let (steer_tx, steer_rx) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        subagent_control: None,
         execution_lease: None,
         request_input: Box::new(move |questions| {
             let (tx, rx) = oneshot::channel();
@@ -291,6 +292,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
     let token = CancellationToken::new();
     let seen = asked.clone();
     let controls = RunControls {
+        subagent_control: None,
         execution_lease: None,
         request_input: Box::new(move |questions| {
             seen.lock().unwrap().extend(questions.iter().cloned());
@@ -930,4 +932,38 @@ async fn an_unreplayed_steer_releases_the_turn_end() {
     assert_eq!(done, DoneStatus::Completed);
     assert_eq!(steered, 1);
     assert!(started.elapsed() >= std::time::Duration::from_secs(4));
+}
+
+#[tokio::test]
+async fn child_stop_targets_native_child_and_preserves_parent_on_success_and_error() {
+    for reject in [false, true] {
+        let (mut controls, _steer, token) = controls("Yes");
+        let (tx, rx) = mpsc::channel(8);
+        controls.subagent_control = Some(rx);
+        let mut stream = harness()
+            .run(
+                request(if reject {
+                    "scenario:child-stop-reject"
+                } else {
+                    "scenario:child-stop"
+                }),
+                controls,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(stream.next().await.unwrap().unwrap(), AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == "spawn-alpha") { break; }
+            }
+            let (reply, answer) = oneshot::channel();
+            tx.send(zeron_harness::SubagentCommand { tool_use_id: "spawn-alpha".into(), reply }).await.unwrap();
+            let result = answer.await.unwrap();
+            assert_eq!(result.is_err(), reject, "{result:?}");
+            assert!(!token.is_cancelled(), "stopping a child cancelled its parent");
+            loop {
+                if matches!(stream.next().await.unwrap().unwrap(), AgentEvent::TextDelta { text } if text == "parent continues") { break; }
+            }
+        }).await.expect("child stop completes and parent still responds");
+        token.cancel();
+    }
 }

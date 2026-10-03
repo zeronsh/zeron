@@ -84,6 +84,13 @@ const FILE_SEARCH_FEATURED_PATHS: usize = 32;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StopSubagentParams {
+    chat_id: String,
+    tool_use_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChatParams {
     chat_id: String,
 }
@@ -1346,6 +1353,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
+            | methods::STOP_SUBAGENT
             | methods::QUEUE_COMMAND
             | methods::TAKE_PROJECT_ACTION_SETUP
             | methods::WATCH_DOC_MESSAGES
@@ -1815,6 +1823,14 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)
+            }
+            methods::STOP_SUBAGENT => {
+                let p: StopSubagentParams = parse_params(params)?;
+                self.sessions
+                    .stop_subagent(&p.chat_id, &p.tool_use_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "stopped": true }))
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
@@ -3816,6 +3832,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::STOP_SUBAGENT));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));

@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .run(
             request,
             RunControls {
+                subagent_control: None,
                 execution_lease: None,
                 steering,
                 interrupt: interrupt.clone(),

@@ -87,6 +87,9 @@ impl Harness for FeedHarness {
     fn display_name(&self) -> &str {
         "Feed"
     }
+    fn supports_subagent_stop(&self) -> bool {
+        true
+    }
     fn supports_steering(&self) -> bool {
         true
     }
@@ -116,10 +119,14 @@ impl Harness for FeedHarness {
             .expect("FeedHarness serves the main dispatch once per test");
         let (tx, rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
         let cancel = controls.interrupt.clone();
+        let mut child_controls = controls.subagent_control.unwrap();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
+                    Some(command) = child_controls.recv() => {
+                        let _ = command.reply.send(if command.tool_use_id == SPAWN { Ok(()) } else { Err("provider rejected stop".into()) });
+                    }
                     event = feed.recv() => match event {
                         Some(event) => {
                             if tx.send(Ok(event)).await.is_err() {
@@ -308,4 +315,138 @@ async fn reaper_still_ends_a_session_whose_subagent_went_silent() {
     .await;
 
     core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn runtime_death_settles_running_chips_without_sinks() {
+    let Parked { core, feed, _dir } = park_after_spawn().await;
+    // A resumed chip may be Running in a completed turn without this runtime
+    // having received child traffic (and hence without opening any sink).
+    core.doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .update_subagent_chip(SPAWN, None, Some("running"), None)
+        .unwrap();
+    assert_eq!(chip_status(&core), Some(SubagentStatus::Running));
+    drop(feed);
+    wait_for(
+        || chip_status(&core) == Some(SubagentStatus::Failed),
+        "orphaned chip settlement",
+    )
+    .await;
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_subagent_rpc_finalizes_only_target_and_parent_can_continue() {
+    let Parked { core, feed, _dir } = park_after_spawn().await;
+    feed.send(tagged(AgentEvent::TextDelta {
+        text: "scouting".into(),
+    }))
+    .unwrap();
+    wait_for(
+        || chip_status(&core) == Some(SubagentStatus::Running),
+        "running child",
+    )
+    .await;
+    feed.send(AgentEvent::Steered {
+        assistant_message_id: None,
+        next_assistant_message_id: None,
+    })
+    .unwrap();
+    feed.send(AgentEvent::ToolCall {
+        id: "sibling".into(),
+        call: ToolCall::Unknown {
+            name: "Agent: reviewer".into(),
+            input: None,
+        },
+    })
+    .unwrap();
+    feed.send(AgentEvent::Subagent {
+        parent_tool_use_id: "sibling".into(),
+        event: Box::new(AgentEvent::TextDelta {
+            text: "reviewing".into(),
+        }),
+    })
+    .unwrap();
+    let sibling_running = || {
+        entries(&core).iter().flat_map(|e| &e.parts).any(|p| matches!(p, MessagePart::Tool { id, subagent_status: Some(SubagentStatus::Running), .. } if id == "sibling"))
+    };
+    wait_for(sibling_running, "running sibling").await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    assert!(
+        client
+            .call(
+                zeron_rpc::methods::STOP_SUBAGENT,
+                serde_json::json!({"chatId":CHAT,"toolUseId":"sibling"})
+            )
+            .await
+            .is_err()
+    );
+    assert!(sibling_running(), "rejected stop mutated child status");
+    let result = client
+        .call(
+            zeron_rpc::methods::STOP_SUBAGENT,
+            serde_json::json!({"chatId":CHAT,"toolUseId":SPAWN}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["stopped"], true);
+    wait_for(
+        || chip_status(&core) == Some(SubagentStatus::Done),
+        "stopped child chip",
+    )
+    .await;
+    assert!(!feed.is_closed(), "parent runtime was killed");
+    assert!(sibling_running(), "stopping one child stopped its sibling");
+    let child = core
+        .doc_host
+        .open(&format!("{CHAT}--sub--{SPAWN}"))
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert!(
+        child
+            .iter()
+            .any(|entry| entry.status == Some(zeron_doc::MessageStatus::Aborted))
+    );
+    // A malformed/foreign id must not reach the provider or interrupt parent.
+    assert!(
+        client
+            .call(
+                zeron_rpc::methods::STOP_SUBAGENT,
+                serde_json::json!({"chatId":CHAT,"toolUseId":"unknown"})
+            )
+            .await
+            .is_err()
+    );
+    feed.send(AgentEvent::TextDelta {
+        text: "parent still works".into(),
+    })
+    .unwrap();
+    wait_for(|| entries(&core).iter().flat_map(|e| &e.parts).any(|p| matches!(p, MessagePart::Text { text, .. } if text.contains("parent still works"))), "parent continuation").await;
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_without_runtime_repairs_only_running_orphans() {
+    let Parked { core, feed, _dir } = park_after_spawn().await;
+    core.sessions.shutdown().await;
+    assert!(feed.is_closed());
+    let handle = core.doc_host.open(CHAT).unwrap();
+    handle
+        .writer()
+        .update_subagent_chip(SPAWN, None, Some("done"), None)
+        .unwrap();
+    core.sessions.stop_subagent(CHAT, SPAWN).await.unwrap();
+    assert_eq!(chip_status(&core), Some(SubagentStatus::Done));
+    handle
+        .writer()
+        .update_subagent_chip(SPAWN, None, Some("running"), None)
+        .unwrap();
+    core.sessions.stop_subagent(CHAT, SPAWN).await.unwrap();
+    assert_eq!(chip_status(&core), Some(SubagentStatus::Failed));
+    assert!(core.sessions.stop_subagent(CHAT, "unknown").await.is_err());
 }

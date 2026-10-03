@@ -17059,3 +17059,14 @@ mod settings_modal_regressions {
         });
     }
 }
+
+#[cfg(feature = "subagent-fixture")]
+impl Shell {
+    pub fn fixture_stop_subagent(&self, chat: &str, spawn: &str, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |t, cx| t.fixture_stop_subagent(chat, spawn, cx));
+    }
+    pub fn fixture_subagent_start(&self, cx: &mut Context<Self>) {
+        self.transcript.update(cx, |t, cx| t.fixture_subagent_start(cx));
+    }
+}

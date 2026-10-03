@@ -3061,6 +3061,8 @@ pub struct Transcript {
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
+    subagent_stops: HashMap<(String, String), Task<()>>,
+    subagent_stop_errors: HashMap<(String, String), String>,
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
     retain_on_deselect: bool,
@@ -3318,6 +3320,49 @@ pub enum TranscriptEvent {
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
+    #[cfg(feature = "subagent-fixture")]
+    pub fn fixture_subagent_start(&mut self, cx: &mut Context<Self>) {
+        self.list.scroll_to(gpui::ListOffset::default());
+        cx.notify();
+    }
+
+    #[cfg(feature = "subagent-fixture")]
+    pub fn fixture_stop_subagent(&mut self, chat: &str, spawn: &str, cx: &mut Context<Self>) {
+        self.stop_subagent(chat.to_owned(), spawn.to_owned(), cx);
+    }
+
+    fn stop_subagent(&mut self, chat_id: String, tool_use_id: String, cx: &mut Context<Self>) {
+        let key = (chat_id.clone(), tool_use_id.clone());
+        if self.subagent_stops.contains_key(&key) {
+            return;
+        }
+        let state = self.state.read(cx);
+        let Some(engine) = state.engine().cloned() else {
+            return;
+        };
+        let target = state.terminal_target_device(&chat_id);
+        let params = serde_json::json!({ "chatId": chat_id, "toolUseId": tool_use_id, "targetDeviceId": target });
+        self.subagent_stop_errors.remove(&key);
+        let task_key = key.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(zeron_rpc::methods::STOP_SUBAGENT, params)
+                .await;
+            this.update(cx, |this, cx| {
+                this.subagent_stops.remove(&task_key);
+                if let Err(error) = result {
+                    this.subagent_stop_errors
+                        .insert(task_key, format!("Stop failed: {error}"));
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.subagent_stops.insert(key, task);
+        cx.notify();
+    }
+
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
     }
@@ -3482,6 +3527,8 @@ impl Transcript {
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
+            subagent_stops: HashMap::new(),
+            subagent_stop_errors: HashMap::new(),
             retain_on_deselect: false,
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
@@ -7638,8 +7685,87 @@ impl Transcript {
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
-                if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
+                if is_agent_tool(tool)
+                    && (is_spawn_link(tool)
+                        || tool.subagent_status == Some(SubagentStatus::Running))
+                {
+                    let doc_id = tool.subagent_ref.clone();
                     let chat_id = self.chat_id.clone().unwrap_or_default();
+                    let key = (chat_id.clone(), tool.part_id.to_string());
+                    let stopping = self.subagent_stops.contains_key(&key);
+                    let error = self.subagent_stop_errors.get(&key).cloned();
+                    let running = tool.subagent_status == Some(SubagentStatus::Running);
+                    let retry = error.is_some();
+                    let supported = self.doc_override.is_none()
+                        && self
+                            .state
+                            .read(cx)
+                            .chats
+                            .iter()
+                            .find(|chat| chat.id == chat_id)
+                            .and_then(|chat| chat.config.as_ref())
+                            .is_some_and(|cfg| {
+                                matches!(
+                                    cfg.harness,
+                                    zeron_proto::HarnessId::ClaudeCode
+                                        | zeron_proto::HarnessId::Codex
+                                )
+                            });
+                    let stop_chat = chat_id.clone();
+                    let stop_id = tool.part_id.to_string();
+                    let stop = (running && supported).then(|| {
+                        div()
+                            .id(SharedString::from(format!(
+                                "stop-subagent-{}",
+                                tool.part_id
+                            )))
+                            .tab_group()
+                            .tab_index(0)
+                            .tab_stop(!stopping)
+                            .focus_visible(|s| s.bg(crate::theme::ink(0.10)))
+                            .h(px(28.0))
+                            .px(px(8.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.0))
+                            .text_size(px(11.0))
+                            .text_color(if error.is_some() {
+                                theme.danger
+                            } else {
+                                theme.text_muted
+                            })
+                            .when(!stopping, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(crate::theme::ink(0.07)))
+                            })
+                            .tooltip(crate::settings::widgets::text_tooltip(
+                                error.unwrap_or_else(|| "Stop this subagent".into()),
+                            ))
+                            .on_key_down({
+                                let chat = stop_chat.clone();
+                                let id = stop_id.clone();
+                                cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation();
+                                        this.stop_subagent(chat.clone(), id.clone(), cx);
+                                    }
+                                })
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.stop_subagent(stop_chat.clone(), stop_id.clone(), cx);
+                            }))
+                            .child(if stopping {
+                                "Stopping…"
+                            } else if retry {
+                                "Retry stop"
+                            } else {
+                                "Stop"
+                            })
+                            .into_any_element()
+                    });
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
                         tool.subagent_status,
@@ -7649,13 +7775,16 @@ impl Transcript {
                         tool,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenSubagent {
-                                chat_id: chat_id.clone(),
-                                doc_id: doc_id.to_string(),
-                                title: title.to_string(),
-                                frozen,
-                            });
+                            if let Some(doc_id) = &doc_id {
+                                cx.emit(TranscriptEvent::OpenSubagent {
+                                    chat_id: chat_id.clone(),
+                                    doc_id: doc_id.to_string(),
+                                    title: title.to_string(),
+                                    frozen,
+                                });
+                            }
                         }),
+                        stop,
                         collapses,
                         theme,
                         cx.entity_id(),
@@ -8426,11 +8555,10 @@ fn chip_header_row(
         | ToolCall::ApplyPatch { path: Some(path) } => Some(path.as_str()),
         _ => None,
     };
-    let running = tool.subagent_ref.is_some()
-        && matches!(tool.subagent_status, Some(SubagentStatus::Running));
+    let running =
+        is_agent_tool(tool) && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
-        || (tool.subagent_ref.is_some()
-            && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
+        || (is_agent_tool(tool) && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
     // Text resolves its color during layout, so group-hover text needs stable
     // child IDs under the keyed, expandable header to retain hover state.
     let hover_text = activity && trail.is_some() && !failed;
@@ -8931,6 +9059,7 @@ fn subagent_chip(
     tool: &ToolItem,
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    stop: Option<AnyElement>,
     rail: bool,
     theme: &Theme,
     view: gpui::EntityId,
@@ -8972,12 +9101,13 @@ fn subagent_chip(
                 .on_click(on_open)
                 .child(chip_header_row(
                     tool,
-                    Some(ChipTrail::OpenArrow),
+                    tool.subagent_ref.as_ref().map(|_| ChipTrail::OpenArrow),
                     theme,
                     view,
                     cx,
                 )),
         )
+        .when_some(stop, |row, stop| row.child(stop))
         .into_any_element()
 }
 

@@ -45,6 +45,9 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
+    /// Stop one spawned child, leaving the parent run alive.
+    /// `{chatId, toolUseId, targetDeviceId?}` → `{stopped: true}`.
+    pub const STOP_SUBAGENT: &str = "StopSubagent";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     pub const TAKE_PROJECT_ACTION_SETUP: &str = "TakeProjectActionSetup";
     /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued

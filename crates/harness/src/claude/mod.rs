@@ -383,6 +383,9 @@ impl Harness for ClaudeHarness {
     fn display_name(&self) -> &str {
         "Claude Code"
     }
+    fn supports_subagent_stop(&self) -> bool {
+        true
+    }
     fn supports_steering(&self) -> bool {
         true
     }
@@ -755,6 +758,7 @@ async fn run_session(session: Session) {
         stderr_tail,
     } = session;
     let RunControls {
+        mut subagent_control,
         execution_lease: _execution_lease,
         request_input,
         mut steering,
@@ -780,6 +784,10 @@ async fn run_session(session: Session) {
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
 
+    let mut child_stops: std::collections::HashMap<
+        String,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    > = std::collections::HashMap::new();
     'main: loop {
         tokio::select! {
             line = stdout_lines.next_line() => match line {
@@ -800,6 +808,12 @@ async fn run_session(session: Session) {
                             continue;
                         }
                     };
+                    if let Frame::ControlResponse { request_id, error } = frame {
+                        if let Some(reply) = child_stops.remove(&request_id) {
+                            let _ = reply.send(error.map_or(Ok(()), Err));
+                        }
+                        continue;
+                    }
                     if let Frame::ControlRequest(req) = frame {
                         if title_only {
                             let line = control_response_line(&req.request_id, serde_json::json!({
@@ -873,6 +887,29 @@ async fn run_session(session: Session) {
                 }
             },
 
+            Some(command) = async {
+                match subagent_control.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if !interrupted => {
+                if command.reply.is_closed() { continue; }
+                let Some(task) = norm.task_for_spawn(&command.tool_use_id) else {
+                    let _ = command.reply.send(Err("Claude has not registered this subagent task".into()));
+                    continue;
+                };
+                child_stops.retain(|_, reply| !reply.is_closed());
+                let request_id = format!("zeron-stop-{}", uuid::Uuid::new_v4());
+                let line = serde_json::json!({
+                    "type": "control_request", "request_id": request_id,
+                    "request": { "subtype": "stop_task", "task_id": task },
+                }).to_string();
+                if stdin_tx.send(StdinMsg::Line(line)).is_err() {
+                    let _ = command.reply.send(Err("Claude control channel closed".into()));
+                } else {
+                    child_stops.insert(request_id, command.reply);
+                }
+            }
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     let id = uuid::Uuid::new_v4().to_string();
