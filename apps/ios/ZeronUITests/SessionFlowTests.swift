@@ -376,9 +376,14 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
     }
 
-    /// Regression: "+" in the resting capsule did nothing (the focus tap
-    /// morphed the composer under the finger and cancelled the menu).
-    func testAttachMenuOpens() {
+    /// "+" opens without focusing or moving the resting composer, and stays
+    /// usable across card/capsule transitions and repeated menu dismissals.
+    func testAttachMenuOpens() throws {
+        let orientation = XCUIDevice.shared.orientation
+        defer { XCUIDevice.shared.orientation = orientation }
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCUIDevice.shared.orientation = .landscapeLeft
+        }
         for route in [["-route", "chat:chat-deploy"], ["-route", "new"]] {
             let app = launch(route)
             let attach = app.buttons["composer-attach"]
@@ -394,8 +399,40 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()
         input.typeText("Draft")
-        app.buttons["composer-attach"].tap()
-        XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens from the card")
+        let draft = try XCTUnwrap(input.value as? String)
+        let focusedFrame = input.frame
+        let attach = app.buttons["composer-attach"]
+        let photos = app.buttons["Photo Library"]
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5), "attach menu opens from the card")
+
+        // Dismiss the menu, then put the draft away without sending it.
+        let outside = app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.1))
+        outside.tap()
+        XCTAssertTrue(photos.waitForNonExistence(timeout: 5))
+        outside.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        let restingFrame = input.frame
+        XCTAssertLessThan(restingFrame.width, focusedFrame.width, "the draft returns to the resting capsule")
+        snapshot(app, "attach-resting-draft")
+
+        // The composer stays in place while the menu opens and closes, even
+        // when the wide iPad capsule holds an unfocused draft.
+        for attempt in 1...2 {
+            attach.tap()
+            XCTAssertTrue(photos.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Choose File"].exists)
+            XCTAssertTrue(input.exists, "the draft remains exposed beside the attachment menu")
+            XCTAssertEqual(input.value as? String, draft)
+            XCTAssertEqual(input.frame, restingFrame)
+            XCTAssertFalse(app.keyboards.firstMatch.exists, "opening the menu does not focus the composer")
+            snapshot(app, "attach-resting-menu-\(attempt)")
+            outside.tap()
+            XCTAssertTrue(photos.waitForNonExistence(timeout: 5))
+            XCTAssertTrue(attach.isHittable, "the attachment button is usable after dismissal")
+            XCTAssertEqual(input.value as? String, draft)
+            XCTAssertEqual(input.frame, restingFrame)
+        }
     }
 
     /// Regression: the model chip's menu completed off the main thread.

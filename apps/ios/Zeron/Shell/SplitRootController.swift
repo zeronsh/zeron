@@ -194,6 +194,10 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         self.list = SessionsViewController(app: app)
         self.nav = MainTabController.nav(list)
         super.init(nibName: nil, bundle: nil)
+        // The split inspects our first child when assigning its primary
+        // column. Register the navigation controller before then, or UIKit
+        // wraps the sidebar in another bar and pushes its header down.
+        addChild(nav)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -201,7 +205,6 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
-        addChild(nav)
         nav.view.frame = view.bounds
         nav.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(nav.view)

@@ -50,6 +50,12 @@ Zeron/
   Debug/       Transcript lab + hitch meter
 ```
 
+At regular iPad widths, the Sessions sidebar keeps its title and persistent
+search at the top beside the detail column. Its navigation controller is
+registered as the sidebar's first child before the split assigns the primary
+column, so UIKit does not add an extra navigation bar above it. Compact widths
+use the phone's tab shell.
+
 ### Transcript pipeline
 
 1. `zeron-client` applies session-doc updates incrementally (O(changed
@@ -83,6 +89,26 @@ Zeron/
 
 ## Tests
 
+The composer's attachment button sits above the shared glass as a sibling,
+with the same layout anchors in both capsule and card modes. Keeping the menu
+source out of the glass content prevents the whole resting composer from
+morphing into the Photos / Camera / Files / Paste menu.
+
+From the repository root, run the attachment-menu regression on both an
+iPhone and an iPad simulator (the test uses landscape on iPad):
+
+```sh
+xcodebuild -project apps/ios/Zeron.xcodeproj -scheme Zeron \
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' \
+  -parallel-testing-enabled NO \
+  -only-testing:ZeronUITests/SessionFlowTests/testAttachMenuOpens test
+```
+
+This covers the resting capsule, the new-session card, a focused draft, and
+repeated opening/dismissal with an unfocused draft. Inspect its
+`attach-resting-*` screenshots and the opening/closing animation: the composer
+should remain visible and stationary while the menu originates at `+`.
+
 ```sh
 # Rust
 cargo test -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
@@ -92,6 +118,12 @@ cargo test --release -p zeron-mobile --lib bench_layout -- --ignored --nocapture
 xcodebuild … -only-testing:ZeronTests/LineBreakAccuracyTests test
 xcodebuild … -only-testing:ZeronUITests/SessionFlowTests test
 xcodebuild … -only-testing:ZeronUITests/ScrollPerformanceTests test
+
+# iPad sidebar title/search placement in landscape and portrait
+xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+  -destination 'platform=iOS Simulator,name=<installed iPad simulator>' \
+  -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
+  -only-testing:ZeronUITests/IPadLayoutTests/testSidebarHeaderStaysAtTop test
 ```
 
 Live stack (real edge + headless engine; see `ZeronUITests/LiveStackTests.swift`):
