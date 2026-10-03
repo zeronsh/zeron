@@ -274,13 +274,16 @@ impl Shell {
         }
         let key = self.panel_key(cx);
         if !self.files.contains_key(&key) {
+            let collapsed = self.collapsed_explorer_sections();
             let files = cx.new(|cx| {
-                FilesSurface::new_explorer(
+                let mut explorer = FilesSurface::new_explorer(
                     self.state.clone(),
                     self.active_chat.clone(),
                     self.settings.files_show_all,
                     cx,
-                )
+                );
+                explorer.set_collapsed_sections(collapsed, cx);
+                explorer
             });
             let owner = key.clone();
             let sub = cx.subscribe_in(
@@ -361,6 +364,9 @@ impl Shell {
                     }
                     FilesEvent::NewChildChat => this.create_child_chat(None, cx),
                     FilesEvent::ForkChat => this.create_side_chat(cx),
+                    FilesEvent::SectionsCollapsedChanged(collapsed) => {
+                        this.set_collapsed_explorer_sections(*collapsed, cx)
+                    }
                     _ => cx.notify(),
                 },
             );

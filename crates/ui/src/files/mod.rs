@@ -36,6 +36,8 @@ mod sections;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tree;
+
+pub use sections::CollapsedSections;
 pub mod watch;
 
 use client::{FilesRequestContext, WorkspaceFilesClient};
@@ -221,6 +223,9 @@ pub enum FilesEvent {
     NewChildChat,
     /// The Chats header's fork: fork the active chat into a side chat.
     ForkChat,
+    /// The user collapsed or expanded a footer section; every explorer
+    /// shares the choice.
+    SectionsCollapsedChanged(CollapsedSections),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

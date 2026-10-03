@@ -3499,6 +3499,28 @@ impl Shell {
         cx.notify();
     }
 
+    fn collapsed_explorer_sections(&self) -> crate::files::CollapsedSections {
+        crate::files::CollapsedSections {
+            subagents: self.settings.files_subagents_collapsed,
+            chats: self.settings.files_chats_collapsed,
+        }
+    }
+
+    fn set_collapsed_explorer_sections(
+        &mut self,
+        collapsed: crate::files::CollapsedSections,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.files_subagents_collapsed = collapsed.subagents;
+        self.settings.files_chats_collapsed = collapsed.chats;
+        for explorer in self.files.values().cloned().collect::<Vec<_>>() {
+            explorer.update(cx, |explorer, cx| {
+                explorer.set_collapsed_sections(collapsed, cx)
+            });
+        }
+        self.schedule_save(cx);
+    }
+
     fn set_files_show_all(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         self.settings.files_show_all = show_all_files;
         if let Some(page) = self.files_settings_page.clone() {
@@ -3811,7 +3833,8 @@ impl Shell {
                     | FilesEvent::RenameChildChat(_)
                     | FilesEvent::ChildChatContextMenu { .. }
                     | FilesEvent::NewChildChat
-                    | FilesEvent::ForkChat => {}
+                    | FilesEvent::ForkChat
+                    | FilesEvent::SectionsCollapsedChanged(_) => {}
                     FilesEvent::CloseCancelled => {
                         this.cancel_file_close(RightSurface::File(id), cx)
                     }
