@@ -1142,8 +1142,8 @@ impl EngineRpc {
                 let chat_ids = deleted.chat_ids;
                 tokio::spawn(async move {
                     for chat_id in chat_ids {
-                        if let Err(err) = sessions.interrupt(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
+                        if let Err(err) = sessions.terminate(&chat_id).await {
+                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace teardown skipped");
                         }
                         doc_host.purge_chat(&chat_id);
                     }

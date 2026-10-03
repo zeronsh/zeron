@@ -45,6 +45,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,

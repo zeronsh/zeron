@@ -372,6 +372,11 @@ impl Harness for OpencodeHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// Aborting the session ends the turn; the server and the session take
+    /// the next prompt.
+    fn stops_turn_in_place(&self) -> bool {
+        true
+    }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its
     /// picker from). Account/config changes invalidate the last-good catalog;
@@ -1487,6 +1492,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        turn: turn_control,
     } = controls;
     let request_input = Arc::new(request_input);
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
@@ -1731,6 +1737,9 @@ async fn run_session(session: Session) {
     let mut queued_steers: VecDeque<(String, bool)> = VecDeque::new();
     let mut steering_open = true;
     let mut interrupt_requested = false;
+    // A turn stop (`TurnControl::stop_turn`) in flight: the session is
+    // aborted like an interrupt, but the server and session stay up.
+    let mut stopping = false;
     let mut pending_usage: Option<AgentEvent> = None;
     let mut done_sent = false;
 
@@ -1751,11 +1760,12 @@ async fn run_session(session: Session) {
             turn.active = false;
             if let Some(usage) = pending_usage.take()
                 && !interrupt_requested
+                && !stopping
                 && !send(&event_tx, usage).await
             {
                 break $label;
             }
-            if interrupt_requested {
+            if interrupt_requested || stopping {
                 settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                 let _ = send(&event_tx, AgentEvent::Done {
                     status: DoneStatus::Interrupted,
@@ -1764,7 +1774,13 @@ async fn run_session(session: Session) {
                     session_id: Some(session_id.clone()),
                 }).await;
                 done_sent = true;
-                break $label;
+                if interrupt_requested {
+                    break $label;
+                }
+                // A stopped turn: the server and session take the next prompt.
+                stopping = false;
+                abort_deadline = None;
+                continue $label;
             }
             if let Some((first, native_command_selected)) = queued_steers.pop_front() {
                 turn_generation = turn_generation.wrapping_add(1);
@@ -1861,6 +1877,7 @@ async fn run_session(session: Session) {
             if turn.active
                 && !turn.preempted
                 && !interrupt_requested
+                && !stopping
                 && !queued_steers.is_empty()
                 && turn.open_tools.is_empty()
             {
@@ -1904,6 +1921,38 @@ async fn run_session(session: Session) {
 
             _ = event_tx.closed() => break 'main,
 
+            // End the turn, not the server: abort the session's generation
+            // and keep both up for the next prompt. Steers still waiting for
+            // this turn's end go with it.
+            _ = turn_control.stop_requested(), if !interrupt_requested => {
+                queued_steers.clear();
+                if turn.active && !stopping {
+                    stopping = true;
+                    turn.idle_ready = true;
+                    let abort = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        server.abort_session(&session_id, dir),
+                    )
+                    .await;
+                    if matches!(abort, Ok(Ok(_))) {
+                        abort_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
+                    } else {
+                        // No acknowledgement is coming: settle the turn now.
+                        settle_idle!('main);
+                    }
+                } else if !turn.active {
+                    // Between turns: nothing to abort. Settle the stop so the
+                    // host sees the turn over.
+                    let _ = send(&event_tx, AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: Some(session_id.clone()),
+                    }).await;
+                    done_sent = true;
+                }
+            }
+
             _ = interrupt.cancelled(), if !interrupt_requested => {
                 interrupt_requested = true;
                 if turn.active {
@@ -1944,7 +1993,7 @@ async fn run_session(session: Session) {
 
             failure = command_failure_rx.recv() => {
                 let Some(failure) = failure else { continue 'main; };
-                if failure.generation != turn_generation || !turn.active || interrupt_requested {
+                if failure.generation != turn_generation || !turn.active || interrupt_requested || stopping {
                     tracing::debug!(
                         target: "zeron_harness::opencode",
                         failed_generation = failure.generation,
@@ -1988,8 +2037,8 @@ async fn run_session(session: Session) {
                             maybe_preempt!();
                         } else {
                             turn_generation = turn_generation.wrapping_add(1);
-                            // Between turns (shouldn't happen — the engine
-                            // steers live runs — but deliver, don't drop).
+                            // Between turns: the engine routes the next message
+                            // of a parked session here — images included.
                             let (prev, next) = rotate(&mut assistant_message_id);
                             let _ = send(&event_tx, AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
@@ -2008,7 +2057,7 @@ async fn run_session(session: Session) {
                                 TurnSpec {
                                     model: model.as_ref(),
                                     variant: variant.as_deref(),
-                                    attachments: &[],
+                                    attachments: &steer.attachments,
                                 },
                             )
                             .await
@@ -2047,6 +2096,11 @@ async fn run_session(session: Session) {
             }
 
             _ = stall_sleep => {
+                if abort_deadline.is_some() && stopping {
+                    // The stop's abort acknowledged nothing within the grace:
+                    // settle the turn and keep the session.
+                    settle_idle!('main);
+                }
                 if abort_deadline.is_some() {
                     // Abort acknowledged nothing within the grace: hard stop.
                     settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
@@ -2090,7 +2144,7 @@ async fn run_session(session: Session) {
             msg = bus_rx.recv() => {
                 let Some(msg) = msg else { break 'main };
                 match msg {
-                    BusMsg::CommandFailed(_) if interrupt_requested => {}
+                    BusMsg::CommandFailed(_) if interrupt_requested || stopping => {}
                     BusMsg::CommandFailed(message) => {
                         let _ = send(&event_tx, AgentEvent::Done {
                             status: DoneStatus::Errored, result: None,
@@ -2142,7 +2196,7 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     BusMsg::Event(event) => {
-                        if interrupt_requested {
+                        if interrupt_requested || stopping {
                             // Only the terminal idle/interrupt acknowledgement may
                             // affect an aborted turn; discard late content and usage.
                             let kind = event.get("type").and_then(Value::as_str);
@@ -2173,7 +2227,7 @@ async fn run_session(session: Session) {
                             BusOutcome::TurnIdle => settle_idle!('main),
                             // Our own steer preempt: a steer boundary.
                             BusOutcome::TurnInterrupted
-                                if turn.preempted && !interrupt_requested =>
+                                if turn.preempted && !interrupt_requested && !stopping =>
                             {
                                 settle_idle!('main)
                             }

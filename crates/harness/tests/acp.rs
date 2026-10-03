@@ -71,6 +71,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        turn: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -276,6 +277,8 @@ async fn steering_extension_injects_mid_turn() {
                     .send(SteerMessage {
                         prompt: "redirect please".into(),
                         message_id: None,
+                        attachments: Vec::new(),
+                        config: None,
                     })
                     .await
                     .expect("steer sent");
@@ -322,6 +325,8 @@ async fn steer_racing_the_turn_end_never_emits_steered_after_done() {
                     .send(SteerMessage {
                         prompt: "redirect please".into(),
                         message_id: None,
+                        attachments: Vec::new(),
+                        config: None,
                     })
                     .await
                     .expect("steer sent");
@@ -373,6 +378,8 @@ async fn rejected_steer_queues_and_delivers_at_the_turn_boundary() {
                     .send(SteerMessage {
                         prompt: "redirect please".into(),
                         message_id: None,
+                        attachments: Vec::new(),
+                        config: None,
                     })
                     .await
                     .expect("steer sent");
@@ -2009,6 +2016,8 @@ async fn acp_boundary_steer(scenario: &str, trigger_on_done: bool) {
                     .send(zeron_harness::SteerMessage {
                         prompt: "second".into(),
                         message_id: None,
+                        attachments: Vec::new(),
+                        config: None,
                     })
                     .await
                     .unwrap();
@@ -2273,4 +2282,69 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
             format!("Use the skill {} inspect tests", invocation.prompt_text())
         );
     }
+}
+
+#[tokio::test]
+async fn a_stopped_turn_keeps_the_agent_for_the_next_prompt() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls();
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    assert!(harness().stops_turn_in_place());
+    let mut stream = harness()
+        .run(request("scenario:stop-in-place"), controls)
+        .await
+        .expect("run starts");
+    async fn next_event(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    ) -> Option<AgentEvent> {
+        tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .map(|r| r.expect("stream event"))
+    }
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::TextDelta { text }) if text == "working" => break,
+            Some(_) => {}
+            None => panic!("stream ended before the turn streamed"),
+        }
+    }
+    turn.stop_turn();
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::Done { status, .. }) => {
+                assert_eq!(status, DoneStatus::Interrupted);
+                break;
+            }
+            Some(_) => {}
+            None => panic!("a stopped turn must not end the agent's stream"),
+        }
+    }
+    // Sent right after the stop: our own turn's tail is not an unowned
+    // turn, so no second `session/cancel` precedes this prompt.
+    steer.send(SteerMessage::text("carry on")).await.unwrap();
+    let mut resumed = Vec::new();
+    loop {
+        match next_event(&mut stream).await {
+            Some(done @ AgentEvent::Done { .. }) => {
+                resumed.push(done);
+                break;
+            }
+            Some(event) => resumed.push(event),
+            None => panic!("stream ended before the next turn finished"),
+        }
+    }
+    assert!(resumed.contains(&AgentEvent::TextDelta {
+        text: "resumed".into()
+    }));
+    assert!(matches!(
+        resumed.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    drop(steer);
+    assert!(next_event(&mut stream).await.is_none());
 }

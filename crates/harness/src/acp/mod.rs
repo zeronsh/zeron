@@ -24,6 +24,8 @@
 //!   others queue steers and deliver them as the next `session/prompt` at the
 //!   turn boundary. The session stays parked between turns while the
 //!   steering mailbox lives.
+//! - Turn stop ([`crate::TurnControl::stop_turn`]): `session/cancel` settles
+//!   the prompt `cancelled`; the agent and its session take the next prompt.
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
@@ -2144,6 +2146,11 @@ impl Harness for AcpHarness {
         // quiet watchdog must not park a still-pending model request either.
         true
     }
+    /// `session/cancel` settles the prompt `cancelled`; the agent process
+    /// and its session take the next `session/prompt`.
+    fn stops_turn_in_place(&self) -> bool {
+        true
+    }
 
     fn supports_steering(&self) -> bool {
         true
@@ -3509,6 +3516,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        turn: turn_control,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
 
@@ -3895,6 +3903,9 @@ async fn run_session(session: Session) {
     let mut progress_seq: u64 = 0;
     let mut interrupted = false;
     let mut interrupt_sent = false;
+    // A turn stop (`TurnControl::stop_turn`) in flight: `session/cancel`
+    // ends the prompt and the session stays up for the next one.
+    let mut stopping = false;
     let mut done_current = false;
     let mut done_after_interrupt = false;
     let mut escalation_target = None;
@@ -3932,6 +3943,14 @@ async fn run_session(session: Session) {
     const BUSY_RECENT: Duration = Duration::from_secs(3);
     const CANCEL_FLUSH: Duration = Duration::from_secs(2);
     let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
+    // When our last prompt settled. Only traffic arriving past it (and past
+    // the settled turn's own trailing frames) is an unowned turn: counting
+    // the tail of our own turn as "busy" cancelled an idle session for every
+    // prompt sent within BUSY_RECENT of the last one — and an idle-session
+    // cancel is not harmless (Hermes 0.20 fails the next prompt with an
+    // internal error).
+    const OWN_TAIL: Duration = Duration::from_millis(500);
+    let mut prompt_settled_at: Option<tokio::time::Instant> = None;
 
     let mut child_exit = None;
     let mut exit_drain_deadline = None;
@@ -3965,6 +3984,10 @@ async fn run_session(session: Session) {
                 if res.is_err() && client.is_closed() {
                     break 'main;
                 }
+                prompt_settled_at = Some(tokio::time::Instant::now());
+                // The settled prompt's tool calls are over with it; a tool
+                // still reported open would read as an unowned turn.
+                open_tools.clear();
                 starve_deadline = None;
                 prompt_stall_deadline = None;
                 if let Some(id) = current_prompt_id.take() {
@@ -3999,7 +4022,7 @@ async fn run_session(session: Session) {
                             .to_owned(),
                         Ok(Err(_)) | Err(_) => "promptRequired".to_owned(),
                     };
-                    if interrupted {
+                    if interrupted || stopping {
                         // Winding down; abandoned like any queued steer.
                     } else if outcome != "promptRequired" {
                         let (prev, next) = rotate(&mut assistant_message_id);
@@ -4081,13 +4104,15 @@ async fn run_session(session: Session) {
                 }
                 // A steer preempted this turn: the session lives on and the
                 // steers continue it below, so there is no turn end to report.
+                let stopped = std::mem::take(&mut stopping);
                 let preempted = std::mem::take(&mut preempt_sent)
                     && !interrupted
+                    && !stopped
                     && res.is_ok()
                     && !queued_steers.is_empty();
                 preempt_pending = false;
                 if !preempted {
-                    let (status, mut error) = stop_outcome(&res, interrupted);
+                    let (status, mut error) = stop_outcome(&res, interrupted || stopped);
                     if !interrupted
                         && auth_method.is_some()
                         && res.as_ref().is_err_and(is_auth_required)
@@ -4111,7 +4136,7 @@ async fn run_session(session: Session) {
                     {
                         break 'main;
                     }
-                    if interrupted || res.is_err() {
+                    if interrupted || (res.is_err() && !stopped) {
                         break 'main;
                     }
                 }
@@ -4550,7 +4575,11 @@ async fn run_session(session: Session) {
                 if !send(
                     &event_tx,
                     AgentEvent::Done {
-                        status: DoneStatus::Completed,
+                        status: if std::mem::take(&mut stopping) {
+                            DoneStatus::Interrupted
+                        } else {
+                            DoneStatus::Completed
+                        },
                         result: None,
                         error: None,
                         session_id: Some(session_id.clone()),
@@ -4606,7 +4635,9 @@ async fn run_session(session: Session) {
                         queued_steers.push_back(text);
                     } else if turn.is_none()
                         && (!open_tools.is_empty()
-                            || last_update_at.elapsed() < BUSY_RECENT)
+                            || (last_update_at.elapsed() < BUSY_RECENT
+                                && prompt_settled_at
+                                    .is_none_or(|settled| last_update_at > settled + OWN_TAIL)))
                     {
                         // Mid self-continued turn (see BUSY_RECENT above):
                         // cancel it rather than prompt into the starve.
@@ -4683,6 +4714,34 @@ async fn run_session(session: Session) {
                 None => {
                     steering_open = false;
                     if turn.is_none() && queued_steers.is_empty() {
+                        break 'main;
+                    }
+                }
+            },
+
+            // End the prompt in flight, not the agent: `session/cancel`
+            // settles it `cancelled` and the session takes the next prompt
+            // (background work the agent holds keeps running). Steers still
+            // waiting for this turn's end go with it.
+            _ = turn_control.stop_requested(), if !interrupted => {
+                queued_steers.clear();
+                steer_backlog.clear();
+                preempt_pending = false;
+                if turn.is_some() {
+                    stopping = true;
+                    if !preempt_sent {
+                        client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
+                    }
+                } else {
+                    // Between turns: nothing to cancel. Settle the stop so the
+                    // host sees the turn over.
+                    done_current = true;
+                    if !send(&event_tx, AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: Some(session_id.clone()),
+                    }).await {
                         break 'main;
                     }
                 }

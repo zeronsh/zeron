@@ -15,6 +15,7 @@
 //     {"op":"user","prompt"}                            explicit next turn
 //     {"op":"steer","prompt"}                           native mid-turn input
 //     {"op":"interrupt"}                                cancel the live run
+//     {"op":"stop"}                                     cancel this turn only; the agent stays up
 //   stdout (shim → engine):
 //     {"ev":"ready","agentId","model"?}
 //     {"ev":"steered"}                                   input consumed
@@ -330,6 +331,8 @@ if (process.argv[2] === "login") {
 let agent = null;
 let run = null;
 let interrupted = false;
+// A turn stop: this turn is cancelled, the agent takes the next prompt.
+let stopping = false;
 let closing = false;
 let cleanupPromise;
 beforeExit = () => cleanupPromise ??= (async () => {
@@ -461,7 +464,7 @@ let preemptedRun = null;
 const NATIVE_STEER_ONLY = process.env.ZERON_CURSOR_NATIVE_STEER_ONLY === "1";
 function preemptForSteer() {
   if (NATIVE_STEER_ONLY) return false;
-  if (!turnActive || !run || activeTools.size || preempting || interrupted || closing) return false;
+  if (!turnActive || !run || activeTools.size || preempting || interrupted || stopping || closing) return false;
   preempting = true;
   preemptedRun = run;
   run.cancel().catch(() => {});
@@ -549,7 +552,9 @@ async function runTurn(prompt, ready, accepted) {
   try {
     prompt = await preserveInterruptedContext(prompt);
     ready?.();
-    if (interrupted || closing) {
+    if (interrupted || stopping || closing) {
+      stopping = false;
+      turnActive = false;
       out({ev: "turn", status: "cancelled"});
       return;
     }
@@ -574,29 +579,39 @@ async function runTurn(prompt, ready, accepted) {
   // A steer that arrived while send() was creating the run preempts now.
   if (!pendingSteers.length || !preemptForSteer()) void pumpSteers().catch(fatal);
   // Interrupt may arrive while send() is still creating the run.
-  if (interrupted || closing) await run.cancel().catch(() => {});
+  if (interrupted || stopping || closing) await run.cancel().catch(() => {});
   let result;
   try {
     result = await run.wait();
   } catch (e) {
-    if (preempting && !interrupted && !closing) return continueAfterPreempt();
+    if (preempting && !interrupted && !stopping && !closing) return continueAfterPreempt();
+    const stopped = stopping;
+    stopping = false;
+    if (stopped) {
+      // The agent lives on; the next prompt starts a fresh run.
+      activeTools.clear();
+      run = null;
+      turnActive = false;
+    }
     out({
       ev: "turn",
-      status: interrupted ? "cancelled" : "error",
-      error: withAuthHint(formatError(e, run?.requestId)),
+      status: interrupted || stopped ? "cancelled" : "error",
+      ...(interrupted || stopped ? {} : { error: withAuthHint(formatError(e, run?.requestId)) }),
     });
     return;
   }
-  if (preempting && !interrupted && !closing) return continueAfterPreempt();
+  if (preempting && !interrupted && !stopping && !closing) return continueAfterPreempt();
   activeTools.clear();
   await pumpSteers();
   await Promise.all(steerDeliveries);
   run = null;
   turnActive = false;
+  const stopped = stopping;
+  stopping = false;
   out({
     ev: "turn",
-    status: result?.status ?? "finished",
-    ...(result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
+    status: stopped ? "cancelled" : result?.status ?? "finished",
+    ...(!stopped && result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
   });
   if (pendingSteers.length) chain = chain.then(followupSteers).catch(fatal);
 }
@@ -725,6 +740,16 @@ rl.on("line", (line) => {
     case "interrupt":
       interrupted = true;
       if (run) run.cancel().catch(() => {});
+      break;
+    case "stop":
+      // Undelivered steers go with the stopped turn.
+      pendingSteers.splice(0);
+      if (!turnActive) {
+        out({ev: "turn", status: "cancelled"});
+      } else {
+        stopping = true;
+        if (run) run.cancel().catch(() => {});
+      }
       break;
     default:
       break;

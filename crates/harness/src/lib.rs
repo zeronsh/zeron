@@ -44,6 +44,83 @@ pub enum HarnessError {
 pub struct SteerMessage {
     pub prompt: String,
     pub message_id: Option<String>,
+    /// Staged image paths sent with this prompt. Drivers that inline images
+    /// deliver them with the text; the rest rely on the path refs the prompt
+    /// text already carries.
+    pub attachments: Vec<String>,
+    /// The run configuration this prompt was sent with, when it differs
+    /// from the live runtime's and the driver adopts it in place
+    /// ([`Harness::reconfigures_in_place`]): apply it before the prompt.
+    pub config: Option<Box<RunRequest>>,
+}
+
+impl SteerMessage {
+    pub fn text(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            message_id: None,
+            attachments: Vec::new(),
+            config: None,
+        }
+    }
+}
+
+/// Host ↔ runtime signals that span a persistent runtime's turns.
+///
+/// Stopping a turn is not tearing down the runtime: a runtime holds work the
+/// user never asked to stop (background subagents, background shells). A
+/// driver that returns true from [`Harness::stops_turn_in_place`] answers
+/// [`Self::stop_turn`] by ending only the in-flight turn with
+/// `Done { status: Interrupted }` and staying alive for the next prompt; the
+/// `interrupt` token remains the runtime teardown.
+#[derive(Clone, Default)]
+pub struct TurnControl {
+    stop: std::sync::Arc<tokio::sync::Notify>,
+    background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl TurnControl {
+    /// Host: end the in-flight turn, keeping the runtime and its background work.
+    pub fn stop_turn(&self) {
+        self.stop.notify_one();
+    }
+
+    /// Driver: resolves once per [`Self::stop_turn`].
+    pub async fn stop_requested(&self) {
+        self.stop.notified().await;
+    }
+
+    /// Driver: how many background tasks the runtime currently holds.
+    pub fn set_background(&self, tasks: usize) {
+        self.background
+            .store(tasks, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Host: the runtime reports live background work, so retiring it now
+    /// would kill work nobody asked to stop.
+    pub fn background_live(&self) -> bool {
+        self.background.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+}
+
+/// Run-config values compared as their wire meaning, not their JSON type:
+/// clients disagree on spelling (the phone sends `"true"` where the desktop
+/// sends `true`), and neither spelling is a different configuration.
+pub fn same_model_options(
+    a: &serde_json::Map<String, serde_json::Value>,
+    b: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    fn canonical(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) if s.is_empty() => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        }
+    }
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    keys.into_iter()
+        .all(|key| a.get(key).and_then(canonical) == b.get(key).and_then(canonical))
 }
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
@@ -63,6 +140,8 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Turn-level stop and background-work reporting (see [`TurnControl`]).
+    pub turn: TurnControl,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -111,6 +190,33 @@ pub trait Harness: Send + Sync {
     /// Unlike deterministic_turn_end, this need not cover autonomous activity.
     fn authoritative_prompt_end(&self) -> bool {
         self.deterministic_turn_end()
+    }
+    /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
+    /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
+    /// with its background work. Otherwise stopping a turn tears the runtime
+    /// down through the `interrupt` token.
+    fn stops_turn_in_place(&self) -> bool {
+        false
+    }
+    /// Whether a live runtime started for `live` can take `next` as its
+    /// next prompt. Only a difference that changes how the runtime was
+    /// launched needs a fresh one — replacing a runtime kills its background
+    /// work. The default covers what every driver's launch reads (the
+    /// sandbox level and auto-approve are read only by drivers that
+    /// override this); drivers narrow it further to their own launch.
+    /// Whether a live runtime started for `live` adopts `next`'s differing
+    /// configuration in place, before `next`'s prompt, instead of being
+    /// replaced (which kills its background work). The prompt then arrives
+    /// with [`SteerMessage::config`] set. Consulted only when
+    /// [`Self::same_runtime`] is false.
+    fn reconfigures_in_place(&self, _live: &RunRequest, _next: &RunRequest) -> bool {
+        false
+    }
+    fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.model == next.model
+            && live.reasoning == next.reasoning
+            && same_model_options(&live.model_options, &next.model_options)
+            && live.cwd == next.cwd
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
@@ -396,6 +502,35 @@ pub use pi::PiHarness;
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)
 // ---------------------------------------------------------------------------
+
+/// End an agent runtime together with every process it started. `earlier`
+/// is a descendant snapshot taken when the teardown began, in case the
+/// agent exits before this one: its orphans can no longer be traced then.
+/// Windows' job object already owns the whole tree.
+pub(crate) async fn shutdown_agent(
+    child: &mut process::Child,
+    earlier: Vec<i32>,
+    kill_grace: std::time::Duration,
+) {
+    #[cfg(unix)]
+    {
+        let mut tree = earlier;
+        if let Some(pid) = child.id() {
+            for pid in process::descendants(pid).await {
+                if !tree.contains(&pid) {
+                    tree.push(pid);
+                }
+            }
+        }
+        shutdown_child(child, kill_grace).await;
+        process::terminate_tree(&tree, kill_grace).await;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = earlier;
+        shutdown_child(child, kill_grace).await;
+    }
+}
 
 /// Reap the child: Unix sends SIGTERM then SIGKILL after `kill_grace`;
 /// Windows terminates the owned job after protocol shutdown has finished.

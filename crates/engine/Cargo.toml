@@ -45,6 +45,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
+# Paused-clock tests (the 30-minute idle reaper).
+tokio = { workspace = true, features = ["test-util"] }
 zip.workspace = true
 tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.

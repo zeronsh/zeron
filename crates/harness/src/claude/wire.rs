@@ -17,8 +17,38 @@ pub(crate) enum Frame {
     RateLimit(RateLimitFrame),
     Result(ResultFrame),
     ControlRequest(ControlRequestFrame),
-    /// control_response / control_cancel_request / anything unknown.
+    /// The CLI's answer to one of our control requests.
+    ControlResponse(ControlResponseFrame),
+    /// Where the CLI has taken one of our stdin user messages.
+    CommandLifecycle(CommandLifecycleFrame),
+    /// control_cancel_request / anything unknown.
     Other,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ControlResponseFrame {
+    #[serde(default)]
+    pub response: ControlResponseBody,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ControlResponseBody {
+    #[serde(default)]
+    pub request_id: String,
+}
+
+/// `{"type":"command_lifecycle","command_uuid":…,"state":…}` — emitted for
+/// every stdin user message carrying a `uuid` (verified live against CLI
+/// 2.1.286): `queued` when read, `started` when a turn takes it up (a `next`
+/// steer starts mid-turn, at the step boundary it folds into), then
+/// `completed` or `cancelled` (its turn was aborted by a later `now` steer
+/// or an interrupt). Background-task wake turns carry no command at all.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct CommandLifecycleFrame {
+    #[serde(default)]
+    pub command_uuid: String,
+    #[serde(default)]
+    pub state: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -48,6 +78,10 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `background_tasks_changed`: every background task the session holds
+    /// now (agents and shells) — the authoritative set, not a delta.
+    #[serde(default)]
+    pub tasks: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -142,6 +176,28 @@ pub(crate) struct RateLimitInfo {
     pub status: String,
     #[serde(rename = "rateLimitType", default)]
     pub rate_limit_type: Option<String>,
+    /// `allowed`/`allowed_warning` when the account may spend provisioned
+    /// overage past a rejected window.
+    #[serde(rename = "overageStatus", default)]
+    pub overage_status: Option<String>,
+    #[serde(rename = "isUsingOverage", default)]
+    pub is_using_overage: bool,
+    #[serde(rename = "overageInUse", default)]
+    pub overage_in_use: bool,
+}
+
+impl RateLimitInfo {
+    /// A rejected window that actually blocks the turn: an account spending
+    /// provisioned overage keeps running despite the reject.
+    pub fn blocks(&self) -> bool {
+        self.status == "rejected"
+            && !matches!(
+                self.overage_status.as_deref(),
+                Some("allowed" | "allowed_warning")
+            )
+            && !self.is_using_overage
+            && !self.overage_in_use
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -199,6 +255,8 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
         "rate_limit_event" => Frame::RateLimit(serde_json::from_value(value)?),
         "result" => Frame::Result(serde_json::from_value(value)?),
         "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
+        "control_response" => Frame::ControlResponse(serde_json::from_value(value)?),
+        "command_lifecycle" => Frame::CommandLifecycle(serde_json::from_value(value)?),
         _ => Frame::Other,
     };
     Ok(frame)
@@ -206,6 +264,7 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
 
 /// A stdin user turn: `{"type":"user","message":{...},"parent_tool_use_id":null}`.
 /// Steering = another such line mid-run (consumed at a step boundary).
+#[cfg(test)]
 pub(crate) fn user_message_line(text: &str) -> String {
     json!({
         "type": "user",
@@ -222,9 +281,26 @@ pub(crate) fn user_message_line(text: &str) -> String {
 /// was interrupted before a result was received"), so while any tool is open
 /// the steer goes as `next`: the tool finishes and the steer lands right after
 /// its result, in the same turn. An interrupted turn still emits a `result`.
+#[cfg(test)]
 pub(crate) fn steer_message_line(text: &str, id: &str, immediate: bool) -> String {
+    steer_message_line_with_images(text, id, immediate, &[])
+}
+
+/// [`steer_message_line`] carrying inline images ahead of the text, in the
+/// same block shape as [`user_message_line_with_images`].
+pub(crate) fn steer_message_line_with_images(
+    text: &str,
+    id: &str,
+    immediate: bool,
+    images: &[ImageBlock],
+) -> String {
+    let content = if images.is_empty() {
+        Value::String(text.to_owned())
+    } else {
+        Value::Array(content_blocks(text, images))
+    };
     serde_json::json!({"type":"user", "uuid":id, "priority": if immediate { "now" } else { "next" },
-        "message":{"role":"user","content":text}, "parent_tool_use_id":null})
+        "message":{"role":"user","content":content}, "parent_tool_use_id":null})
     .to_string()
 }
 
@@ -240,10 +316,38 @@ pub(crate) struct ImageBlock {
 /// first, then the text — the standard Anthropic image+text message shape
 /// (verified against the real CLI: `--input-format stream-json` accepts image
 /// content blocks in user frames). Empty `images` degrades to the plain line.
+/// The run's opening prompt, tagged with `id` so its `command_lifecycle`
+/// frames can be told apart from a steer's. Images precede the text, as in
+/// [`user_message_line_with_images`].
+pub(crate) fn prompt_line(text: &str, id: &str, images: &[ImageBlock]) -> String {
+    let content = if images.is_empty() {
+        Value::String(text.to_owned())
+    } else {
+        Value::Array(content_blocks(text, images))
+    };
+    json!({
+        "type": "user",
+        "uuid": id,
+        "message": { "role": "user", "content": content },
+        "parent_tool_use_id": null,
+    })
+    .to_string()
+}
+
+#[cfg(test)]
 pub(crate) fn user_message_line_with_images(text: &str, images: &[ImageBlock]) -> String {
     if images.is_empty() {
         return user_message_line(text);
     }
+    json!({
+        "type": "user",
+        "message": { "role": "user", "content": content_blocks(text, images) },
+        "parent_tool_use_id": null,
+    })
+    .to_string()
+}
+
+fn content_blocks(text: &str, images: &[ImageBlock]) -> Vec<Value> {
     let mut blocks: Vec<Value> = images
         .iter()
         .map(|img| {
@@ -258,10 +362,50 @@ pub(crate) fn user_message_line_with_images(text: &str, images: &[ImageBlock]) -
         })
         .collect();
     blocks.push(json!({ "type": "text", "text": text }));
+    blocks
+}
+
+/// The run's opening control request. `perTaskStopAffordance` tells the CLI
+/// this host stops tasks individually, so an interrupt ends the turn and
+/// spares background agents — without it the CLI stops every background
+/// agent on interrupt (verified live against 2.1.285; background shells
+/// survive either way).
+pub(crate) fn initialize_request_line(request_id: &str) -> String {
     json!({
-        "type": "user",
-        "message": { "role": "user", "content": blocks },
-        "parent_tool_use_id": null,
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "initialize", "perTaskStopAffordance": true },
+    })
+    .to_string()
+}
+
+/// Switch the live process's model (`None` = the user's default model).
+pub(crate) fn set_model_request_line(request_id: &str, model: Option<&str>) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "set_model", "model": model },
+    })
+    .to_string()
+}
+
+/// Replace the live process's flag-layer settings (effort, fast mode, …).
+pub(crate) fn apply_flag_settings_line(request_id: &str, settings: Value) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "apply_flag_settings", "settings": settings },
+    })
+    .to_string()
+}
+
+/// Stop the in-flight turn only. `cancel_queued` drops steers the CLI has
+/// queued but not yet consumed: a stopped turn never continues into them.
+pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "interrupt", "cancel_queued": true },
     })
     .to_string()
 }

@@ -28,7 +28,7 @@ use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage, TurnControl};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
     UserInputQuestion,
@@ -69,38 +69,47 @@ struct HarnessSessionRef {
     cwd: String,
 }
 
-/// Configuration baked into a live harness runtime. The steering mailbox only
-/// carries prompt text, so routing a request whose model/effort/sandbox changed
-/// would silently run it with the old process configuration. Such requests
+/// The configuration a live harness runtime launched with. The steering
+/// mailbox carries only the prompt (and its images), so a request whose
+/// launch settings differ would silently run with the old process's — it
 /// must replace the runtime and resume its harness-native session instead.
-#[derive(Debug, Clone, PartialEq)]
+/// The driver decides what "differ" means ([`Harness::same_runtime`]): a
+/// replacement kills the runtime's background work, so a setting the
+/// launch never reads, or the same value spelled differently by another
+/// client, must never force one.
+#[derive(Clone)]
 struct RuntimeConfig {
     harness_id: HarnessId,
-    model: Option<String>,
-    reasoning: Option<zeron_proto::ReasoningLevel>,
-    model_options: serde_json::Map<String, serde_json::Value>,
-    cwd: String,
-    sandbox: zeron_proto::SandboxLevel,
-    auto_approve: bool,
-    worktree: Option<zeron_proto::WorktreeSpec>,
+    request: RunRequest,
+    harness: Arc<dyn Harness>,
 }
 
 impl RuntimeConfig {
-    fn from_request(harness_id: HarnessId, request: &RunRequest) -> Self {
+    fn new(harness_id: HarnessId, request: &RunRequest, harness: Arc<dyn Harness>) -> Self {
         Self {
             harness_id,
-            model: request.model.clone(),
-            reasoning: request.reasoning,
-            model_options: request.model_options.clone(),
-            cwd: request.cwd.clone(),
-            sandbox: request.sandbox,
-            auto_approve: request.auto_approve,
-            worktree: request.worktree.clone(),
+            request: request.clone(),
+            harness,
         }
     }
 
     fn can_route(&self, harness_id: HarnessId, request: &RunRequest) -> bool {
-        request.attachments.is_empty() && self == &Self::from_request(harness_id, request)
+        self.harness_id == harness_id && self.harness.same_runtime(&self.request, request)
+    }
+
+    /// How `request` reaches this runtime: `Some(false)` as is, `Some(true)`
+    /// with its configuration adopted in place first
+    /// ([`Harness::reconfigures_in_place`]), `None` only by replacing it.
+    fn route(&self, harness_id: HarnessId, request: &RunRequest) -> Option<bool> {
+        if self.can_route(harness_id, request) {
+            Some(false)
+        } else if self.harness_id == harness_id
+            && self.harness.reconfigures_in_place(&self.request, request)
+        {
+            Some(true)
+        } else {
+            None
+        }
     }
 }
 
@@ -111,6 +120,13 @@ struct RunHandle {
     steer_tx: mpsc::Sender<SteerMessage>,
     /// Harness-level cancellation (protocol interrupt + child teardown).
     interrupt_token: CancellationToken,
+    /// Turn-level stop + the runtime's background-work report. Used for
+    /// stopping a turn when the driver [`Harness::stops_turn_in_place`].
+    turn: TurnControl,
+    stops_turn_in_place: bool,
+    /// The harness stream is open. Before that there is no runtime to keep:
+    /// a stop tears the pending start down instead.
+    started: Arc<std::sync::atomic::AtomicBool>,
     /// Engine-level cancel: arms the run task's grace deadline so a harness that
     /// ignores its token can never strand the run.
     cancel: watch::Sender<bool>,
@@ -126,6 +142,11 @@ struct RunHandle {
     /// This runtime's provider session holds the fork's copied history (a
     /// side chat's bootstrap went out on its run or on one of its steers).
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// The user stopped this runtime: it is being torn down and takes no
+    /// more prompts. Flipped under the ledger lock, so every accepted steer
+    /// is unambiguously before the stop (cancelled with it) or after it
+    /// (re-dispatched to a fresh runtime — never lost).
+    retiring: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -137,10 +158,15 @@ struct RoutedSteer {
     /// is recorded only when the runtime confirms consuming it (`Steered`).
     /// An orphan re-dispatches the bare prompt, still owing the history.
     fork_history: bool,
+    /// Accepted after the user's Stop began tearing the runtime down: the
+    /// Stop did not cancel it, so the message still runs.
+    after_stop: bool,
 }
 
 struct Inner {
     device_id: String,
+    /// The engine is shutting down: dying runs re-dispatch nothing.
+    shutting_down: std::sync::atomic::AtomicBool,
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
@@ -195,6 +221,7 @@ impl SessionsEngine {
         Self {
             inner: Arc::new(Inner {
                 device_id,
+                shutting_down: std::sync::atomic::AtomicBool::new(false),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
                 journal,
                 registry,
@@ -315,7 +342,8 @@ impl SessionsEngine {
     /// but a mailbox delivery writes the user message now — above the reply
     /// still streaming for the message before it. Such prompts belong in the
     /// visible queue. `request` = a Run that may differ from the live config
-    /// (a different config restarts the runtime instead, which is no hold).
+    /// (one the runtime adopts in place still lands in its mailbox; any other
+    /// config restarts the runtime instead, which is no hold).
     pub fn defers_to_turn_end(
         &self,
         chat_id: &str,
@@ -327,7 +355,8 @@ impl SessionsEngine {
         let live = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.runtime_config.harness_id,
-                h.steerable && request.is_none_or(|(id, r)| h.runtime_config.can_route(id, r)),
+                h.steerable
+                    && request.is_none_or(|(id, r)| h.runtime_config.route(id, r).is_some()),
             )
         });
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
@@ -346,7 +375,7 @@ impl SessionsEngine {
     pub fn live_run_steerable(&self, chat_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
-            .is_some_and(|h| h.steerable)
+            .is_some_and(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// The last request dispatched for a chat (steer→new-turn fallback).
@@ -430,16 +459,19 @@ impl SessionsEngine {
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
-                h.steerable,
-                h.runtime_config.can_route(harness_id, &request),
+                h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire),
+                h.runtime_config.route(harness_id, &request),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
+                h.retiring.clone(),
             )
         });
-        if let Some((run_id, steerable, same_runtime, steer_tx, ledger, history_sent)) = routed {
+        if let Some((run_id, steerable, route, steer_tx, ledger, history_sent, retiring)) = routed {
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let mut bootstrap = None;
+            let same_runtime = route.is_some();
+            let reconfigure = route == Some(true);
             let accepted = if steerable && same_runtime {
                 bootstrap =
                     self.warm_fork_history(chat_id, harness_id, &request.prompt, &history_sent);
@@ -456,6 +488,12 @@ impl SessionsEngine {
                         zeron_proto::invocation::harness_prompt(delivered, harness_id)
                     },
                     message_id: Some(user_id.clone()),
+                    // Images ride the mailbox too: replacing the runtime just
+                    // to inline them killed its background work.
+                    attachments: request.attachments.clone(),
+                    // A changed model/effort/option the live process adopts
+                    // in place: replacing it killed its background work.
+                    config: reconfigure.then(|| Box::new(request.clone())),
                 };
                 if let Ok(permit) = steer_tx.reserve().await {
                     // Commit the reserved slot atomically with the update
@@ -469,6 +507,7 @@ impl SessionsEngine {
                                 prompt: request.prompt.clone(),
                                 message_id: user_id.clone(),
                                 fork_history: bootstrap.is_some(),
+                                after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
                             });
                             permit.send(message);
                         })
@@ -480,6 +519,18 @@ impl SessionsEngine {
                 false
             };
             if accepted {
+                if reconfigure {
+                    // The runtime runs this configuration from now on: later
+                    // sends compare against it, and a re-dispatch of an
+                    // orphaned steer starts from it.
+                    if let Some(h) = lock(&self.inner.runs)
+                        .get_mut(chat_id)
+                        .filter(|h| h.run_id == run_id)
+                    {
+                        h.runtime_config.request = request.clone();
+                    }
+                    lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
+                }
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 self.note_turn_start(chat_id, &request.cwd);
@@ -514,15 +565,15 @@ impl SessionsEngine {
                 message_id = Some(user_id);
             }
             if !same_runtime {
-                tracing::debug!(
+                tracing::info!(
                     chat = %chat_id,
                     "restarting live harness to apply changed run configuration"
                 );
             }
             // Mailbox closed (runtime mid-teardown / non-steering harness) or
-            // the routed run died with the message reclaimed, or configuration
-            // changed beyond what the text-only mailbox can carry: replace it.
-            self.interrupt(chat_id).await?;
+            // the routed run died with the message reclaimed, or the launch
+            // configuration changed: replace the runtime.
+            self.terminate(chat_id).await?;
         }
 
         let harness = self.inner.registry.resolve(harness_id)?;
@@ -580,12 +631,15 @@ impl SessionsEngine {
             })
         };
         let interrupt_token = CancellationToken::new();
+        let turn = TurnControl::default();
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fork_history_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let controls = RunControls {
             execution_lease: None,
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            turn: turn.clone(),
         };
 
         lock(&self.inner.runs).insert(
@@ -593,14 +647,18 @@ impl SessionsEngine {
             RunHandle {
                 run_id: run_id.clone(),
                 steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                runtime_config: RuntimeConfig::new(harness_id, &request, harness.clone()),
                 steer_tx,
                 interrupt_token,
+                stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
+                turn: turn.clone(),
+                started: started.clone(),
                 cancel: cancel_tx,
                 engine_tx,
                 pending_inputs,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: fork_history_sent.clone(),
+                retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         self.set_status(chat_id, SessionStatus::Working, true);
@@ -632,7 +690,9 @@ impl SessionsEngine {
                 resume_injected,
                 startup_retry,
                 fork_history_sent,
+                started,
             },
+            turn,
         ));
         Ok(run_id)
     }
@@ -686,7 +746,7 @@ impl SessionsEngine {
     ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
-            .filter(|h| h.steerable)
+            .filter(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
             .map(|h| {
                 (
                     h.run_id.clone(),
@@ -694,9 +754,10 @@ impl SessionsEngine {
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
                     h.fork_history_sent.clone(),
+                    h.retiring.clone(),
                 )
             });
-        let Some((run_id, harness_id, steer_tx, ledger, history_sent)) = target else {
+        let Some((run_id, harness_id, steer_tx, ledger, history_sent, retiring)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
         zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
@@ -711,6 +772,8 @@ impl SessionsEngine {
                 zeron_proto::invocation::harness_prompt(delivered, harness_id)
             },
             message_id: Some(user_id.clone()),
+            attachments: Vec::new(),
+            config: None,
         };
         // Saturation is backpressure, not a dead runtime. Waiting for room
         // preserves the live process and every accepted message in a burst.
@@ -727,6 +790,7 @@ impl SessionsEngine {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
                 fork_history: bootstrap.is_some(),
+                after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
             });
             permit.send(message);
         });
@@ -765,21 +829,81 @@ impl SessionsEngine {
         Ok(SteerOutcome::Accepted)
     }
 
-    /// Interrupt the live run, if any. The run settles with a synthetic
-    /// `Done{interrupted}` and its streaming entry stamped `aborted`; this waits
-    /// (bounded) for that settlement so callers observe a consistent doc.
+    /// The user's Stop: a hard boundary. The in-flight turn ends `aborted`
+    /// and the runtime goes with it — background subagents, background
+    /// shells, everything the agent runs. The next message resumes the
+    /// conversation in a fresh process. (Sending, steering and switching
+    /// models never come here: they keep the runtime and its work.)
     pub async fn interrupt(&self, chat_id: &str) -> Result<bool, EngineError> {
+        self.terminate(chat_id).await
+    }
+
+    /// End the in-flight turn so another prompt can take its place ("send
+    /// now"), keeping the runtime and its background work. Its streaming
+    /// entry is stamped `aborted`; this waits (bounded) for that settlement
+    /// so callers observe a consistent doc. Returns whether there was a turn
+    /// (or runtime) to stop.
+    ///
+    /// A driver that [`Harness::stops_turn_in_place`] ends only the turn: the
+    /// runtime parks with its background work — subagents, background shells
+    /// — still running, and the next prompt routes into it. Drivers without
+    /// that, runs whose harness has not started yet, and stops that do not
+    /// settle fall back to [`Self::terminate`].
+    pub async fn stop_turn(&self, chat_id: &str) -> Result<bool, EngineError> {
+        const STOP_SETTLE: std::time::Duration = std::time::Duration::from_secs(15);
+        let target = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|h| {
+                h.stops_turn_in_place && h.started.load(std::sync::atomic::Ordering::Acquire)
+            })
+            .map(|h| (h.run_id.clone(), h.turn.clone(), h.pending_inputs.clone()));
+        let Some((run_id, turn, pending)) = target else {
+            return self.terminate(chat_id).await;
+        };
+        if !self.turn_in_flight(chat_id) {
+            return Ok(false); // parked between turns: nothing to stop
+        }
+        // Unpark questions first: the stopped turn can never be answered.
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        for tx in parked {
+            let _ = tx.send(Vec::new());
+        }
+        turn.stop_turn();
+        let deadline = tokio::time::Instant::now() + STOP_SETTLE;
+        while tokio::time::Instant::now() < deadline {
+            if !self.is_live(chat_id, &run_id) || !self.turn_in_flight(chat_id) {
+                return Ok(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tracing::warn!(chat = %chat_id, "turn stop did not settle; tearing the runtime down");
+        self.terminate(chat_id).await
+    }
+
+    /// Tear the chat's live runtime down (protocol interrupt, then the
+    /// child). The run settles with a synthetic `Done{interrupted}` and its
+    /// streaming entry stamped `aborted`; this waits (bounded) for that
+    /// settlement. Background work the runtime held dies with it.
+    pub async fn terminate(&self, chat_id: &str) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
                 h.interrupt_token.clone(),
                 h.cancel.clone(),
                 h.pending_inputs.clone(),
+                h.routed_steers.clone(),
+                h.retiring.clone(),
             )
         });
-        let Some((run_id, token, cancel, pending)) = target else {
+        let Some((run_id, token, cancel, pending, ledger, retiring)) = target else {
             return Ok(false);
         };
+        // From here the runtime takes no prompt: a send now starts a fresh
+        // runtime, and one that raced into this mailbox is re-dispatched.
+        {
+            let _order = lock(&ledger);
+            retiring.store(true, std::sync::atomic::Ordering::Release);
+        }
         // Publish cancellation BEFORE waking the harness. Otherwise a fast
         // EOF after token.cancel() can beat this watch notification and be
         // classified as an error instead of an interrupted turn.
@@ -962,9 +1086,12 @@ impl SessionsEngine {
 
     /// Graceful shutdown: interrupt every live run so streaming entries settle.
     pub async fn shutdown(&self) {
+        self.inner
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
         let chats: Vec<String> = lock(&self.inner.runs).keys().cloned().collect();
         for chat_id in chats {
-            if let Err(err) = self.interrupt(&chat_id).await {
+            if let Err(err) = self.terminate(&chat_id).await {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
@@ -1718,6 +1845,8 @@ struct RunResumeState {
     resume_injected: bool,
     startup_retry: bool,
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the harness stream is open (see [`RunHandle::started`]).
+    started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn cursor_unstarted_history(
@@ -1794,6 +1923,7 @@ async fn drive_run(
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
+    turn: TurnControl,
 ) {
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
@@ -1889,7 +2019,12 @@ async fn drive_run(
         Err(error) => Err(error),
     };
     let mut stream = match started {
-        Ok(stream) => stream,
+        Ok(stream) => {
+            resume_state
+                .started
+                .store(true, std::sync::atomic::Ordering::Release);
+            stream
+        }
         Err(err) => {
             let message = err.to_string();
             tracing::warn!(chat = %chat_id, harness = ?harness_id, error = %message, "run failed to start");
@@ -1996,7 +2131,12 @@ async fn drive_run(
     // chip failed.
     let subagent_silence = session_idle * 8;
     let mut idle_since: Option<tokio::time::Instant> = None;
+    // A parked runtime whose agent reports background work (see
+    // `TurnControl::background_live`) is not idle: reaping it killed that
+    // work. The reaper re-checks a full idle window later instead.
+    let mut reap_deferred_until: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
+    let stops_turn_in_place = steerable && harness.stops_turn_in_place();
     // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
     // that loses a turn's Done — the adapter never settles `session/prompt`
     // even though the agent finished — strands Working forever: the live
@@ -2096,7 +2236,11 @@ async fn drive_run(
                 // already durable, so retire the parked process cleanly and let
                 // the queued exclusive lease proceed.
                 _ = tokio::time::sleep_until(tokio::time::Instant::now()),
-                    if idle_since.is_some() && inner.registry.update_pending(harness_id) =>
+                    if idle_since.is_some()
+                        && inner.registry.update_pending(harness_id)
+                        && !turn.background_live()
+                        && (subagents.is_empty()
+                            || last_subagent_activity.is_none_or(|at| at.elapsed() >= subagent_silence)) =>
                 {
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -2114,13 +2258,25 @@ async fn drive_run(
                 // the window counts from its last activity, and stretches to
                 // `subagent_silence` while its sink is open.
                 _ = tokio::time::sleep_until(
-                    idle_since
-                        .map(|at| {
-                            at.max(last_subagent_activity.unwrap_or(at))
-                                + if subagents.is_empty() { session_idle } else { subagent_silence }
-                        })
-                        .unwrap_or_else(tokio::time::Instant::now)
+                    {
+                        let window = if subagents.is_empty() { session_idle } else { subagent_silence };
+                        let base = idle_since
+                            .map(|at| at.max(last_subagent_activity.unwrap_or(at)) + window);
+                        match (base, reap_deferred_until) {
+                            (Some(base), Some(deferred)) => base.max(deferred),
+                            (base, deferred) => base.or(deferred).unwrap_or_else(tokio::time::Instant::now),
+                        }
+                    }
                 ), if idle_since.is_some() => {
+                    // The driver's own report of background work (Claude's
+                    // background agents and shells) is authoritative — it
+                    // lists every task the process still runs — so it holds
+                    // the runtime for as long as that work lives.
+                    if turn.background_live() {
+                        tracing::info!(chat = %chat_id, "idle reaper deferred: the agent reports background work");
+                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        continue;
+                    }
                     tracing::info!(
                         chat = %chat_id,
                         live_subagents = subagents.len(),
@@ -2247,6 +2403,7 @@ async fn drive_run(
                     entry_id = new_id();
                     segment_started = now_ms();
                     idle_since = Some(tokio::time::Instant::now());
+                    reap_deferred_until = None;
                     self_continued_turn = false;
                     inner.set_status_with_completion(
                         &chat_id, SessionStatus::Idle, false, completed_turn,
@@ -2795,6 +2952,21 @@ async fn drive_run(
             {
                 titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
             }
+            // A turn stopped in place: the runtime lives on, parked like a
+            // completed turn. Steers it had accepted but not yet delivered
+            // were cancelled with the turn (never delivered, never
+            // confirmed) — drop them, or they would hold the parked session
+            // Working forever.
+            let stopped_in_place =
+                *status == DoneStatus::Interrupted && stops_turn_in_place && !interrupted;
+            if stopped_in_place
+                && let Some(ledger) = lock(&inner.runs)
+                    .get(&chat_id)
+                    .filter(|h| h.run_id == run_id)
+                    .map(|h| h.routed_steers.clone())
+            {
+                lock(&ledger).clear();
+            }
             // An accepted steer awaiting its boundary owns the continuation:
             // the previous Done is an internal handoff, not a completion ping.
             // Ordinary queued rows are not in this ledger and still notify.
@@ -2807,7 +2979,7 @@ async fn drive_run(
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
-            if *status == DoneStatus::Completed
+            if (*status == DoneStatus::Completed || stopped_in_place)
                 && steerable
                 && !interrupted
                 && !inner.registry.update_pending(harness_id)
@@ -2819,6 +2991,7 @@ async fn drive_run(
                 // Resume-retry is strictly a first-turn concern.
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
+                reap_deferred_until = None;
                 self_continued_turn = false;
                 // Accepted steers still own this runtime. Publishing Idle
                 // here lets the ordinary queue overtake that continuation.
@@ -2877,7 +3050,19 @@ async fn drive_run(
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
-    if !interrupted && !orphans.is_empty() {
+    // A Stop cancels the messages it found waiting; one accepted after it
+    // began is still the user's next message and must run.
+    let orphans: Vec<RoutedSteer> = if inner
+        .shutting_down
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        Vec::new()
+    } else if interrupted {
+        orphans.into_iter().filter(|s| s.after_stop).collect()
+    } else {
+        orphans
+    };
+    if !orphans.is_empty() {
         // The dying run accepted these into its mailbox but never confirmed a
         // Steered boundary (idle-reaper race, a mid-turn error discarding
         // queued boundary steers, a parked child death). Their user entries
@@ -3102,11 +3287,35 @@ mod tests {
     #[test]
     fn live_routing_requires_the_same_runtime_configuration() {
         let initial = request();
-        let config = RuntimeConfig::from_request(HarnessId::Grok, &initial);
+        let config = RuntimeConfig::new(
+            HarnessId::Grok,
+            &initial,
+            Arc::new(zeron_harness::AcpHarness::grok()),
+        );
 
         let mut follow_up = initial.clone();
         follow_up.prompt = "second".into();
         follow_up.resume = Some("session-1".into());
+        assert!(config.can_route(HarnessId::Grok, &follow_up));
+        assert!(!config.can_route(HarnessId::Devin, &follow_up));
+
+        // Images ride the mailbox: they never force a replacement runtime.
+        follow_up.attachments.push("/tmp/image.png".into());
+        assert!(config.can_route(HarnessId::Grok, &follow_up));
+
+        // Another client's spelling of the same option value is the same runtime.
+        let mut spelled = initial.clone();
+        spelled
+            .model_options
+            .insert("fastMode".into(), serde_json::json!(true));
+        let config = RuntimeConfig::new(
+            HarnessId::Grok,
+            &spelled,
+            Arc::new(zeron_harness::AcpHarness::grok()),
+        );
+        follow_up
+            .model_options
+            .insert("fastMode".into(), serde_json::json!("true"));
         assert!(config.can_route(HarnessId::Grok, &follow_up));
 
         follow_up.model = Some("grok-4.5".into());
@@ -3115,10 +3324,34 @@ mod tests {
 
         follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
-        follow_up.reasoning = initial.reasoning;
+    }
 
-        follow_up.attachments.push("/tmp/image.png".into());
-        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+    #[test]
+    fn claude_routing_compares_what_the_cli_launches_with() {
+        let claude = || -> Arc<dyn Harness> { Arc::new(zeron_harness::ClaudeHarness::new()) };
+        let mut initial = request();
+        initial.model = Some("claude-opus-5-5".into());
+        initial
+            .model_options
+            .insert("fastMode".into(), serde_json::json!(false));
+        let config = RuntimeConfig::new(HarnessId::ClaudeCode, &initial, claude());
+
+        // The CLI never reads the sandbox level; an option that launches no
+        // flag in either spelling is the same runtime.
+        let mut follow_up = initial.clone();
+        follow_up.sandbox = SandboxLevel::DangerFullAccess;
+        follow_up.model_options.clear();
+        follow_up.worktree = None;
+        assert!(config.can_route(HarnessId::ClaudeCode, &follow_up));
+
+        follow_up
+            .model_options
+            .insert("fastMode".into(), serde_json::json!("true"));
+        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
+        follow_up.model_options.clear();
+
+        follow_up.cwd = "/elsewhere".into();
+        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
     }
 
     #[test]

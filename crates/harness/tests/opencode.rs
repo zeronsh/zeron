@@ -289,6 +289,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering,
         interrupt: token.clone(),
+        turn: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -568,6 +569,8 @@ async fn steer_queues_mid_turn_and_delivers_at_idle() {
         .send(SteerMessage {
             prompt: "also do this".into(),
             message_id: None,
+            attachments: Vec::new(),
+            config: None,
         })
         .await
         .unwrap();

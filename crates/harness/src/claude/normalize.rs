@@ -655,9 +655,10 @@ impl Normalizer {
             }
 
             // A claude.ai plan window was hit. A hard `rejected` blocks the
-            // turn — make it visible; allowed/allowed_warning stay quiet.
+            // turn — make it visible; allowed/allowed_warning stay quiet, and
+            // so does a reject the account's overage carries past.
             Frame::RateLimit(f) => {
-                if f.rate_limit_info.status != "rejected" {
+                if !f.rate_limit_info.blocks() {
                     return Vec::new();
                 }
                 let window =
@@ -770,7 +771,10 @@ impl Normalizer {
             }
 
             // Control frames are handled by the run loop, not normalized.
-            Frame::ControlRequest(_) | Frame::Other => Vec::new(),
+            Frame::ControlRequest(_)
+            | Frame::ControlResponse(_)
+            | Frame::CommandLifecycle(_)
+            | Frame::Other => Vec::new(),
         }
     }
 }
@@ -845,6 +849,24 @@ mod tests {
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
         Normalizer::new().normalize(frame, false)
+    }
+
+    #[test]
+    fn a_rejected_window_carried_by_overage_is_not_an_error() {
+        let blocked = normalize_one(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#,
+        );
+        assert!(matches!(blocked.as_slice(), [AgentEvent::Error { .. }]));
+        for overage in [
+            r#""overageStatus":"allowed""#,
+            r#""overageStatus":"allowed_warning""#,
+            r#""isUsingOverage":true"#,
+        ] {
+            let raw = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"five_hour",{overage}}}}}"#
+            );
+            assert!(normalize_one(&raw).is_empty(), "{overage}");
+        }
     }
 
     fn result_done(raw: &str) -> AgentEvent {

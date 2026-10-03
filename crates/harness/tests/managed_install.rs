@@ -33,6 +33,7 @@ async fn managed_install_reaches_session_started() {
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering,
         interrupt: interrupt.clone(),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,

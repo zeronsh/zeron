@@ -4042,6 +4042,80 @@ impl DocHost {
         }
     }
 
+    /// A Stop acts on everything sent before it, in the order the user sent
+    /// it. Controls bypass the prompt drain (so a stalled provider stays
+    /// stoppable), which let a Stop execute before a send queued ahead of it
+    /// had dispatched: with no turn yet it did nothing and the turn then ran
+    /// in full; mid-turn, the earlier steer landed after the Stop and read as
+    /// the user's next message, re-running in the fresh runtime. Wait for
+    /// earlier prompts to dispatch (milliseconds) — bounded short while a
+    /// turn is in flight, so a provider wedged on backpressure still stops.
+    async fn await_earlier_prompts(
+        &self,
+        sessions: &SessionsEngine,
+        handle: &Arc<ChatDocHandle>,
+        stop_id: &str,
+    ) {
+        let started = tokio::time::Instant::now();
+        loop {
+            let bound = if sessions.turn_in_flight(&handle.chat_id) {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::from_secs(15)
+            };
+            if started.elapsed() >= bound {
+                return;
+            }
+            let Ok(commands) = handle.doc.read_commands() else {
+                return;
+            };
+            let Some(at) = commands.iter().position(|c| c.id == stop_id) else {
+                return;
+            };
+            let earlier_prompt = commands[..at].iter().any(|c| {
+                c.status == SessionCommandStatus::Pending
+                    && matches!(
+                        c.payload,
+                        SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+                    )
+            });
+            if !earlier_prompt {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A prompt queued after a control that is still executing (a Stop
+    /// tearing the runtime down) waits for it: running ahead of it put the
+    /// user's next message into the runtime the Stop was killing.
+    async fn await_earlier_controls(&self, handle: &Arc<ChatDocHandle>, prompt_id: &str) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            let Ok(commands) = handle.doc.read_commands() else {
+                return;
+            };
+            let Some(at) = commands.iter().position(|c| c.id == prompt_id) else {
+                return;
+            };
+            let earlier_control = {
+                let executing = lock(&self.inner.executing);
+                commands[..at].iter().any(|c| {
+                    c.status == SessionCommandStatus::Pending
+                        && !matches!(
+                            c.payload,
+                            SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+                        )
+                        && executing.contains(&c.id)
+                })
+            };
+            if !earlier_control {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     /// Stop the active turn without treating the resulting Idle transition as
     /// permission to release the next queued message. The same lock used by
     /// drains closes the race between clicking Cancel and the status watcher.
@@ -4110,8 +4184,10 @@ impl DocHost {
         }
         // Same reading of "busy" as the drain: a turn parked on a question is
         // still a turn, and it has to be stopped before this one starts.
+        // The message replaces the turn, not the agent: its background work
+        // keeps running (only the user's Stop tears that down).
         if send == QueueSend::Interrupt && sessions.turn_in_flight(chat_id) {
-            sessions.interrupt(chat_id).await?;
+            sessions.stop_turn(chat_id).await?;
         }
         let previous = sessions.last_request(chat_id);
         let request = self
@@ -4593,8 +4669,12 @@ impl DocHost {
                 CommandDisposition::Skip => Ok("duplicate"),
                 CommandDisposition::Expired => Ok("expired"),
                 CommandDisposition::Superseded => Ok("superseded"),
-                CommandDisposition::Execute => match self.execute(&sessions, &handle, &entry).await
-                {
+                CommandDisposition::Execute => match {
+                    if _prompt_guard.is_some() {
+                        self.await_earlier_controls(&handle, &entry.id).await;
+                    }
+                    self.execute(&sessions, &handle, &entry).await
+                } {
                     Ok(_) => Ok("executed"),
                     Err(err) => Err(err),
                 },
@@ -4985,6 +5065,12 @@ impl DocHost {
                     self.resolve_command(handle, &entry.id, SessionCommandStatus::Superseded, None);
                 }
                 CommandDisposition::Execute => {
+                    if matches!(
+                        entry.payload,
+                        SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+                    ) {
+                        self.await_earlier_controls(handle, &entry.id).await;
+                    }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
                         Ok(outcome) => outcome,
                         Err(err) => (SessionCommandStatus::Rejected, Some(err.to_string())),
@@ -5280,6 +5366,8 @@ impl DocHost {
                 .await
             }
             SessionCommandPayload::Interrupt {} => {
+                self.await_earlier_prompts(sessions, handle, &entry.id)
+                    .await;
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
             }

@@ -285,6 +285,81 @@ case "$turnline" in
   ;;
 
 # NOTE: steer-race before steer — `case` takes the first matching glob.
+*scenario:steer-item*)
+  # Live shape (0.159.3): an accepted turn/steer joins the turn only when
+  # the reply streaming ahead of it finishes — its userMessage item carries
+  # the clientUserMessageId it was sent with as `clientId`.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"first"}}'
+  read -r steerline || exit 1
+  has "$steerline" '"method":"turn/steer"' || exit 8
+  cid=$(printf '%s' "$steerline" | sed 's/.*"clientUserMessageId":"\([^"]*\)".*/\1/')
+  [ -n "$cid" ] && [ "$cid" != "$steerline" ] || exit 8
+  emit "{\"id\":$(rid "$steerline"),\"result\":{\"turnId\":\"t-1\"}}"
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"-still-first"}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"agentMessage","id":"m1","text":"first-still-first"}}}'
+  emit "{\"method\":\"item/started\",\"params\":{\"threadId\":\"th-1\",\"item\":{\"type\":\"userMessage\",\"id\":\"u2\",\"clientId\":\"$cid\",\"content\":[{\"type\":\"text\",\"text\":\"redirect please\"}]}}}"
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m2","delta":"steered"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:stale-completion*)
+  # A completion for a turn other than the one in flight must not settle it.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"before"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-zombie","status":"completed"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"after"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  # A duplicate of the settled turn's completion is stale too.
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:stop-before-announce*)
+  # The turn/start response lands before the app-server registers the turn:
+  # an interrupt now is rejected ("no active turn to interrupt", live
+  # 0.159.3). The stop must wait for turn/started.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"working"}}'
+  if read -t 1 early; then
+    has "$early" '"method":"turn/interrupt"' &&
+      emit "{\"id\":$(rid "$early"),\"error\":{\"code\":-32600,\"message\":\"no active turn to interrupt\"}}"
+    exec sleep 30
+  fi
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  read -r intline || exit 1
+  has "$intline" '"method":"turn/interrupt"' && has "$intline" '"turnId":"t-1"' || exit 9
+  emit "{\"id\":$(rid "$intline"),\"result\":{}}"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"interrupted"}}}'
+  cat >/dev/null
+  ;;
+
+*scenario:background-commands*)
+  # A command still running after its turn is background work; an
+  # interrupted turn's foreground command is killed without item/completed
+  # (live, 0.159.3) and must not pin the runtime once its process is gone.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit "{\"method\":\"item/started\",\"params\":{\"threadId\":\"th-1\",\"item\":{\"type\":\"commandExecution\",\"id\":\"bg\",\"command\":\"npm run dev\",\"processId\":\"$$\",\"status\":\"inProgress\"}}}"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  read -r next || exit 1
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-2"}}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"fg","command":"sleep 60","processId":"999999","status":"inProgress"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m2","delta":"running"}}'
+  read -r intline || exit 1
+  has "$intline" '"method":"turn/interrupt"' || exit 9
+  emit "{\"id\":$(rid "$intline"),\"result\":{}}"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-2","status":"interrupted"}}}'
+  read -r last || exit 1
+  emit "{\"id\":$(rid "$last"),\"result\":{\"turn\":{\"id\":\"t-3\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-3"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","status":"completed"}}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-3","status":"completed"}}}'
+  cat >/dev/null
+  ;;
+
 *scenario:steer-race*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
@@ -374,6 +449,26 @@ case "$turnline" in
     emit "{\"id\":$iid,\"result\":{}}"
     emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"expected turn/interrupt"}}}}'
   fi
+  ;;
+
+*scenario:stop-in-place*)
+  # A turn stop: turn/interrupt ends the turn, the app-server stays up, and
+  # the next prompt is a turn/start on the same thread.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"working"}}'
+  read -r intline || exit 1
+  iid=$(rid "$intline")
+  has "$intline" '"method":"turn/interrupt"' && has "$intline" '"turnId":"t-1"' || exit 8
+  emit "{\"id\":$iid,\"result\":{}}"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"interrupted"}}}'
+  read -r nextline || exit 1
+  has "$nextline" '"method":"turn/start"' && has "$nextline" '"threadId":"th-1"' || exit 9
+  emit "{\"id\":$(rid "$nextline"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m2","delta":"resumed"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  cat >/dev/null
   ;;
 
 *scenario:wedge*)

@@ -378,6 +378,7 @@ impl Harness for PiHarness {
                 request_input,
                 mut steering,
                 interrupt,
+                turn: _,
             } = controls;
             runner.process.dialogs.input = Some(std::sync::Arc::from(request_input));
             let consumer = runner.tx.clone();
@@ -680,7 +681,8 @@ impl Runner {
                         self.active = true;
                         // Atomic Pi operation: queue at a step boundary if busy, start if idle.
                         // A separate get_state + steer pair would strand an input on the idle race.
-                        self.submit(steer.prompt.clone(), json!([]), true)?;
+                        let images = load_images(&steer.attachments).await;
+                        self.submit(steer.prompt.clone(), images, true)?;
                         self.deliveries.push_back(Delivery {
                             epoch: self.epoch,
                             queued: false,

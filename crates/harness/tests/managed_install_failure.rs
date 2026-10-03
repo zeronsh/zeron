@@ -42,6 +42,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering,
         interrupt: CancellationToken::new(),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,

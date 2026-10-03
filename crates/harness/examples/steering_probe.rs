@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
             let _ = tx.send(vec![]);
             rx
         }),
+        turn: Default::default(),
     };
     let mut stream =
         tokio::time::timeout(Duration::from_secs(90), harness.run(request, controls)).await??;
@@ -77,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
                 _ = ticker.tick(), if !injected => {
                     if workspace.path().join("started").exists() {
                         for index in 0..3 {
-                            steer.send(SteerMessage { prompt: format!("Additive follow-up {index}: keep all earlier work running. Write ONLY the secret from the first user message into file followup-{index}. Do not read it from another file. Use a shell command to append {index} as one line to receipts. Reply FOLLOWUP-{index}-DONE."), message_id: Some(format!("probe-{index}")) }).await?;
+                            steer.send(SteerMessage { prompt: format!("Additive follow-up {index}: keep all earlier work running. Write ONLY the secret from the first user message into file followup-{index}. Do not read it from another file. Use a shell command to append {index} as one line to receipts. Reply FOLLOWUP-{index}-DONE."), message_id: Some(format!("probe-{index}")), attachments: Vec::new(), config: None }).await?;
                         }
                         injected = true;
                         println!("{name}: injected 3 steers while shell was running");

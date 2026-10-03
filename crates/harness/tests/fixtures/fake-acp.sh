@@ -410,6 +410,20 @@ case "$promptline" in
   fi
   ;;
 
+*scenario:stop-in-place*)
+  # A turn stop: session/cancel settles the prompt `cancelled`; the agent
+  # and its session take the next session/prompt.
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
+  read -r intline || exit 1
+  has "$intline" '"method":"session/cancel"' || exit 8
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+  read -r nextline || exit 1
+  has "$nextline" '"method":"session/prompt"' || exit 9
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed"}}'
+  emit "{\"id\":$(rid "$nextline"),\"result\":{\"stopReason\":\"end_turn\"}}"
+  cat >/dev/null
+  ;;
+
 *scenario:wedge*)
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
   # Ignore session/cancel entirely — forces the SIGTERM escalation path.
