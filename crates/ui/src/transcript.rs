@@ -6000,10 +6000,10 @@ impl Transcript {
             None,
         );
         self.attachment_preview_return_focus = window.focused(cx);
-        self.attachment_preview = Some(crate::attachments::PreviewImage::new(
-            "Mermaid diagram",
-            enlarged.image,
-        ));
+        self.attachment_preview = Some(
+            crate::attachments::PreviewImage::new("Mermaid diagram", enlarged.image)
+                .with_plate(crate::markdown::mermaid::Palette::plate(Theme::of(cx))),
+        );
         self.diagram_zoom = Some(source);
         window.focus(&self.attachment_preview_focus, cx);
         cx.notify();

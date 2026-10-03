@@ -919,6 +919,8 @@ pub struct PreviewImage {
     pub name: SharedString,
     pub image: Arc<Image>,
     pub(crate) viewer: crate::image_viewer::ImageView,
+    /// Fill behind an image drawn on a transparent canvas (diagrams).
+    pub(crate) plate: Option<gpui::Hsla>,
 }
 
 impl PreviewImage {
@@ -927,7 +929,13 @@ impl PreviewImage {
             name: name.into(),
             image,
             viewer: Default::default(),
+            plate: None,
         }
+    }
+
+    pub(crate) fn with_plate(mut self, plate: gpui::Hsla) -> Self {
+        self.plate = Some(plate);
+        self
     }
 }
 
@@ -969,9 +977,14 @@ pub(crate) fn lightbox_with_size(
             })
     });
     let content = match natural_size {
-        Some(natural) => preview
-            .viewer
-            .render(preview.image.clone(), natural, None, window, cx),
+        Some(natural) => preview.viewer.render(
+            preview.image.clone(),
+            natural,
+            None,
+            preview.plate,
+            window,
+            cx,
+        ),
         None => div()
             .text_color(ink(0.6))
             .child("Loading image…")

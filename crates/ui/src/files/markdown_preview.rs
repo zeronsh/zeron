@@ -981,9 +981,11 @@ impl MarkdownPreview {
         loaded: &crate::image_media::MediaImage,
         id: gpui::SharedString,
         name: String,
+        plate: Option<gpui::Hsla>,
         weak: gpui::WeakEntity<Self>,
     ) -> AnyElement {
-        let preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
+        let mut preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
+        preview.plate = plate;
         let source = loaded.clone();
         crate::image_media::preview_element(loaded, id, move |window, cx| {
             let _ = weak.update(cx, |view, cx| {
@@ -1126,6 +1128,7 @@ impl MarkdownPreview {
                                 loaded,
                                 format!("{id}-image").into(),
                                 "Mermaid diagram".into(),
+                                Some(crate::markdown::mermaid::Palette::plate(theme)),
                                 diagram_owner.clone(),
                             ),
                             Some(Err(error)) => div()
@@ -1170,6 +1173,7 @@ impl MarkdownPreview {
                                         } else {
                                             image.alt.clone()
                                         },
+                                        None,
                                         image_owner.clone(),
                                     ),
                                 );
