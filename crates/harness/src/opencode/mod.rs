@@ -65,8 +65,11 @@ use zeron_proto::{
     UserInputQuestion,
 };
 
-use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, shutdown_child};
+use crate::process::{Command, Stdio, owned::Child};
+use crate::{Harness, HarnessError, RunControls};
+
+#[cfg(all(test, unix))]
+mod process_tests;
 
 /// opencode loads plugins and MCP config before the server answers; cold
 /// plugin-heavy starts can take minutes. Shared by chat startup and model
@@ -601,6 +604,9 @@ impl Server {
         })?;
         let password = uuid::Uuid::new_v4().to_string();
         let mut cmd = Command::new(exe);
+        // npm/bun launchers spawn the server instead of exec'ing it. Own the
+        // entire group, including on startup failure or future cancellation.
+        crate::process::owned::configure(&mut cmd);
         cmd.arg("serve")
             .arg("--port")
             .arg(port.to_string())
@@ -644,13 +650,13 @@ impl Server {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = Child::new(cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(exe))
             } else {
                 HarnessError::Io(e)
             }
-        })?;
+        })?);
         let stderr_tail = crate::StderrTail::default();
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
@@ -845,7 +851,7 @@ impl Server {
 
     async fn shutdown(&mut self, kill_grace: Duration) {
         if let Some(child) = self.child.as_mut() {
-            shutdown_child(child, kill_grace).await;
+            child.shutdown(kill_grace).await;
         }
     }
 

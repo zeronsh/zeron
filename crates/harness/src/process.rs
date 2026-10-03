@@ -12,7 +12,7 @@ pub use windows::{Child, ChildStdin, ChildStdout, Command, Stdio};
 #[cfg(unix)]
 pub(crate) fn signal_target(child: &Child) -> Option<i32> {
     let pid = child.id()? as i32;
-    // ACP children lead a private group; other harnesses retain pid signaling.
+    // Owned children lead a private group; other harnesses retain pid signaling.
     // SAFETY: getpgid only inspects the owned, unreaped child.
     Some(if unsafe { libc::getpgid(pid) } == pid {
         -pid

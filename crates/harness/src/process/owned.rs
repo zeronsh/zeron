@@ -33,7 +33,7 @@ impl Child {
 
     pub(crate) async fn shutdown(&mut self, grace: std::time::Duration) {
         #[cfg(unix)]
-        if let Some(group) = self.group.take() {
+        if let Some(group) = self.group {
             crate::send_signal(&group, crate::Signal::Term);
             // Pi uses detached bash groups and cleans them in its TERM handler.
             // Give descendants their grace even when the adapter exited first.
@@ -50,6 +50,9 @@ impl Child {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
+            // Keep ownership across awaits so a cancelled shutdown still
+            // kills descendants when the child is dropped.
+            self.group = None;
         }
         crate::shutdown_child(&mut self.inner, grace).await;
     }
