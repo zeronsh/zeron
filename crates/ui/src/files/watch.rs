@@ -16,7 +16,17 @@ impl FilesSurface {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let local = context.target_device_id.is_none();
         let client = WorkspaceFilesClient::new(engine, context);
+        // A local watch that is refused because this device disabled local
+        // execution says so, instead of reading as a transient retry (#730).
+        let failure = move |surface: &FilesSurface, cx: &Context<Self>, fallback: &str| {
+            if local && surface.state.read(cx).local_execution_disabled {
+                "Local execution is disabled on this device".into()
+            } else {
+                fallback.to_string().into()
+            }
+        };
         self.watch_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 match client.watch().await {
@@ -45,8 +55,11 @@ impl FilesSurface {
                         }
                         if this
                             .update(cx, |surface, cx| {
-                                surface.watch_error =
-                                    Some("File updates interrupted — retrying".into());
+                                surface.watch_error = Some(failure(
+                                    surface,
+                                    cx,
+                                    "File updates interrupted — retrying",
+                                ));
                                 cx.notify();
                             })
                             .is_err()
@@ -57,7 +70,8 @@ impl FilesSurface {
                     Err(error) => {
                         if this
                             .update(cx, |surface, cx| {
-                                surface.watch_error = Some(error.to_string().into());
+                                surface.watch_error =
+                                    Some(failure(surface, cx, &error.to_string()));
                                 cx.notify();
                             })
                             .is_err()

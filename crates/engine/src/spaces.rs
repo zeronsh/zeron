@@ -86,6 +86,7 @@ impl SpacesSync {
         let task = tokio::spawn(spaces_task(
             Arc::downgrade(&sync.inner),
             workspace.watch_spaces(),
+            sync.inner.repos.local_execution(),
             sync.inner.cancel.clone(),
         ));
         *lock(&sync.inner.supervisor) = Some(task);
@@ -121,6 +122,11 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
         .collect();
 
     let mut entries = lock(&inner.entries);
+    // Local execution disabled: no entries, so no folder watchers and no git.
+    if inner.repos.local_execution().disabled() {
+        entries.clear();
+        return;
+    }
     entries.retain(|id, _| owned.contains_key(id.as_str()));
     for (id, space) in owned {
         if entries.contains_key(id) {
@@ -210,6 +216,10 @@ async fn entry_task(
 
 /// Probe git presence and stamp the row — write only on change.
 async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) {
+    // A refused git probe must never be stamped as "no repository".
+    if inner.repos.local_execution().disabled() {
+        return;
+    }
     let detected = inner.repos.is_repo(path).await;
     let checkout_id = if detected {
         match inner.repos.checkout_identity(path).await {
@@ -222,6 +232,10 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
     } else {
         None
     };
+    // Probes refused by a disable that landed mid-check are not evidence.
+    if inner.repos.local_execution().disabled() {
+        return;
+    }
     let current = match inner.workspace.read_spaces() {
         Ok(spaces) => spaces.into_iter().find(|s| s.id == space_id),
         Err(err) => {
@@ -284,8 +298,10 @@ fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
 async fn spaces_task(
     inner: Weak<SpacesSyncInner>,
     mut spaces_rx: watch::Receiver<Vec<Space>>,
+    policy: crate::local_execution::LocalExecution,
     cancel: CancellationToken,
 ) {
+    let mut policy_rx = policy.watch();
     let mut repair = tokio::time::interval(REPAIR_INTERVAL);
     repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     repair.tick().await; // consume the immediate first tick
@@ -313,6 +329,12 @@ async fn spaces_task(
                     let _ = entry.kick_tx.send(());
                 }
                 sweep_orphans(&inner);
+            }
+            // Policy flip: disabling drops every entry; enabling rebuilds them.
+            Ok(()) = policy_rx.changed() => {
+                let Some(inner) = inner.upgrade() else { break };
+                let spaces = spaces_rx.borrow().clone();
+                reconcile(&inner, &spaces);
             }
         }
     }

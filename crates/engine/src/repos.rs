@@ -138,6 +138,8 @@ struct ReposInner {
     github_avatars: std::sync::Mutex<HashMap<String, String>>,
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
     file_index: FileIndexCache,
+    /// Device policy (issue #730). [`Repos::git`] is the engine's git funnel.
+    local_execution: std::sync::OnceLock<crate::local_execution::LocalExecution>,
 }
 
 struct IndexedPath {
@@ -185,8 +187,24 @@ impl Repos {
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
                 file_index: std::sync::Mutex::new(HashMap::new()),
+                local_execution: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Wire the device's local-execution policy (once, at engine assembly,
+    /// before any worker starts).
+    pub fn set_local_execution(&self, policy: crate::local_execution::LocalExecution) {
+        let _ = self.inner.local_execution.set(policy);
+    }
+
+    /// The device policy; the default (enabled) when none is wired.
+    pub(crate) fn local_execution(&self) -> crate::local_execution::LocalExecution {
+        self.inner
+            .local_execution
+            .get()
+            .cloned()
+            .unwrap_or_default()
     }
 
     // ── registry (repos.json) ───────────────────────────────────────────────
@@ -222,6 +240,7 @@ impl Repos {
 
     /// Run `git <args>` (optionally under `cwd`), returning trimmed stdout.
     async fn git(&self, args: &[&str], cwd: Option<&Path>) -> Result<String, EngineError> {
+        let policy = self.local_execution();
         let mut cmd = tokio::process::Command::new("git");
         #[cfg(windows)]
         {
@@ -233,8 +252,11 @@ impl Repos {
             cmd.current_dir(cwd);
         }
         cmd.stdin(std::process::Stdio::null());
-        let output = cmd
-            .output()
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let child = policy.spawn(&mut cmd)?;
+        let output = child
+            .wait_with_output()
             .await
             .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
         if !output.status.success() {

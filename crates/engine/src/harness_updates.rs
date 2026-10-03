@@ -487,9 +487,17 @@ impl HarnessUpdateCoordinator {
         *worker = Some(tokio::spawn(async move {
             let mut retry = FIRST_RETRY;
             loop {
+                // Local execution disabled: idle until it is allowed again.
+                let policy = coordinator.inner.registry.local_execution();
+                tokio::select! {
+                    _ = coordinator.inner.shutdown.cancelled() => break,
+                    _ = policy.wait_enabled() => {}
+                }
                 // Shutdown must not wait out slow probes or registry requests.
                 let snapshot = tokio::select! {
                     _ = coordinator.inner.shutdown.cancelled() => break,
+                    // Disabled mid-check: drop the probes and wait above.
+                    _ = policy.wait_disabled() => continue,
                     snapshot = coordinator.check_all() => snapshot,
                 };
                 let failed = snapshot
@@ -507,6 +515,8 @@ impl HarnessUpdateCoordinator {
                 tokio::select! {
                     _ = coordinator.inner.shutdown.cancelled() => break,
                     _ = tokio::time::sleep(delay) => {}
+                    // Re-check as soon as local execution comes back.
+                    _ = policy.wait_disabled() => {}
                 }
             }
         }));
@@ -549,7 +559,24 @@ impl HarnessUpdateCoordinator {
     }
 
     pub async fn check_one(&self, harness: HarnessId) -> Result<(), String> {
-        self.check_one_inner(harness).await?;
+        // Every probe, policy-change check and automatic update starts here.
+        // Probes run detached from any RPC: stop them with the policy.
+        let Ok(result) = self
+            .inner
+            .registry
+            .local_execution()
+            .until_disabled(self.check_one_inner(harness))
+            .await
+        else {
+            // A dropped probe must not leave the row stuck in Checking.
+            self.mutate(harness, |status| {
+                if status.phase == HarnessUpdatePhase::Checking {
+                    status.phase = HarnessUpdatePhase::Dormant;
+                }
+            });
+            return Ok(());
+        };
+        result?;
         // Every successful discovery, including policy changes and single-row
         // retries, gets the same automatic-install behavior. The check's
         // operation lock has been released before scheduling the mutation.
@@ -560,6 +587,7 @@ impl HarnessUpdateCoordinator {
     fn automatic_update_ready(&self, harness: HarnessId) -> bool {
         let status = self.status(harness);
         !self.inner.shutdown.is_cancelled()
+            && !self.inner.registry.local_execution().disabled()
             && self.inner.registry.enabled_set().contains(&harness)
             && status.policy == HarnessUpdatePolicy::AutoWhenIdle
             && status.phase == HarnessUpdatePhase::Available
@@ -1036,8 +1064,12 @@ impl HarnessUpdateCoordinator {
         }
         let applied = match plan {
             UpdatePlan::Command { executable, args } => {
-                match self.begin_install(harness, &cancel) {
-                    Ok(()) => run_command(&executable, args, UPDATE_TIMEOUT).await,
+                match self
+                    .begin_install_with(harness, &cancel, || spawn_command(&executable, args, &[]))
+                {
+                    Ok(child) => collect_command(child, &executable, UPDATE_TIMEOUT)
+                        .await
+                        .map(drop),
                     Err(error) => Err(error),
                 }
             }
@@ -1063,12 +1095,12 @@ impl HarnessUpdateCoordinator {
             UpdatePlan::Homebrew(package) => match resolve_brew(&package.brew) {
                 Ok(brew) => {
                     let args = package.upgrade_args();
-                    match self.begin_install(harness, &cancel) {
-                        Ok(()) => {
-                            run_command_output_env(&brew, &args, UPDATE_TIMEOUT, BREW_UPGRADE_ENV)
-                                .await
-                                .map(drop)
-                        }
+                    match self.begin_install_with(harness, &cancel, || {
+                        spawn_command(&brew, &args, BREW_UPGRADE_ENV)
+                    }) {
+                        Ok(child) => collect_command(child, &brew, UPDATE_TIMEOUT)
+                            .await
+                            .map(drop),
                         Err(error) => Err(error),
                     }
                 }
@@ -1089,14 +1121,21 @@ impl HarnessUpdateCoordinator {
         self.mutate(harness, |status| {
             status.phase = HarnessUpdatePhase::Verifying
         });
-        let verified = match self.executable(harness) {
-            Ok(executable) => {
+        // Verification starts the agent CLI: only while local execution is
+        // allowed. A disable that landed during the install leaves it
+        // unverified (Failed); the worker re-checks it once re-enabled.
+        let verified = self
+            .inner
+            .registry
+            .local_execution()
+            .until_disabled(async {
+                let executable = self.executable(harness)?;
                 run_version_command(harness, &executable, provider(harness).version_args)
                     .await
                     .map(|version| (version, executable))
-            }
-            Err(error) => Err(error),
-        };
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
         let result = match verified {
             Ok((version, executable)) => {
                 let expected = current.latest_version.as_deref();
@@ -1169,6 +1208,23 @@ impl HarnessUpdateCoordinator {
     /// Serialize the final cancellation check and installation commit with
     /// `cancel`: once cancellation is accepted, mutation cannot begin.
     fn begin_install(&self, harness: HarnessId, cancel: &CancellationToken) -> Result<(), String> {
+        self.begin_install_with(harness, cancel, || Ok(()))
+    }
+
+    /// The point of no return as one admission: the device policy check, the
+    /// Installing transition and `start` (the installer spawn, or the
+    /// activation) all happen under `LocalExecution::admit`, so a disable
+    /// either waits for this start or refuses it.
+    fn begin_install_with<T>(
+        &self,
+        harness: HarnessId,
+        cancel: &CancellationToken,
+        start: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let policy = self.inner.registry.local_execution();
+        let Ok(_lease) = policy.admit() else {
+            return Err("update cancelled".into());
+        };
         let cancellations = lock(&self.inner.cancellations);
         if cancellations
             .get(&harness)
@@ -1184,7 +1240,8 @@ impl HarnessUpdateCoordinator {
             status.phase = HarnessUpdatePhase::Installing;
             status.progress = None;
         });
-        Ok(())
+        drop(cancellations);
+        start()
     }
 
     pub fn cancel(&self, harness: HarnessId) -> bool {
@@ -1577,23 +1634,30 @@ impl HarnessUpdateCoordinator {
             .ok_or_else(|| "system tar is unavailable".to_string())?;
         let archive_arg = archive.to_string_lossy();
         let staging_arg = staging.to_string_lossy();
-        run_command(
-            tar,
-            &["-xzf", archive_arg.as_ref(), "-C", staging_arg.as_ref()],
-            UPDATE_TIMEOUT,
-        )
-        .await?;
+        let extract = {
+            let policy = self.inner.registry.local_execution();
+            let Ok(_lease) = policy.admit() else {
+                return Err("update cancelled".into());
+            };
+            spawn_command(
+                tar,
+                &["-xzf", archive_arg.as_ref(), "-C", staging_arg.as_ref()],
+                &[],
+            )?
+        };
+        collect_command(extract, tar, UPDATE_TIMEOUT).await?;
         validate_codex_package(&staging, version, &install.target)?;
-        self.begin_install(harness, cancel)?;
-        let destination = releases.join(format!("{version}-{}", install.target));
-        if destination.exists() {
-            validate_codex_package(&destination, version, &install.target)?;
-        } else {
-            std::fs::rename(&staging, &destination)
-                .map_err(|error| format!("could not install Codex release: {error}"))?;
-            cleanup.release_staging();
-        }
-        activate_codex_release(&install.root, &destination, nonce)?;
+        self.begin_install_with(harness, cancel, || {
+            let destination = releases.join(format!("{version}-{}", install.target));
+            if destination.exists() {
+                validate_codex_package(&destination, version, &install.target)?;
+            } else {
+                std::fs::rename(&staging, &destination)
+                    .map_err(|error| format!("could not install Codex release: {error}"))?;
+                cleanup.release_staging();
+            }
+            activate_codex_release(&install.root, &destination, nonce)
+        })?;
         Ok(())
     }
 
@@ -2137,12 +2201,6 @@ async fn run_version_command(
         .ok_or_else(|| "command returned no recognizable version".into())
 }
 
-async fn run_command(executable: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
-    run_command_output(executable, args, timeout)
-        .await
-        .map(drop)
-}
-
 const BREW_UPGRADE_ENV: &[(&str, &str)] = &[
     ("NONINTERACTIVE", "1"),
     ("HOMEBREW_NO_ANALYTICS", "1"),
@@ -2185,6 +2243,17 @@ async fn run_command_output_env(
     timeout: Duration,
     env: &[(&str, &str)],
 ) -> Result<String, String> {
+    let child = spawn_command(executable, args, env)?;
+    collect_command(child, executable, timeout).await
+}
+
+/// Start an updater/probe process in its own group (unix). Synchronous, so a
+/// caller can hold `LocalExecution::admit` across it.
+fn spawn_command(
+    executable: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<zeron_harness::process::Child, String> {
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -2199,9 +2268,16 @@ async fn run_command_output_env(
     zeron_harness::compose_child_path(&mut command, executable);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command
+    command
         .spawn()
-        .map_err(|error| format!("could not run {}: {error}", executable.display()))?;
+        .map_err(|error| format!("could not run {}: {error}", executable.display()))
+}
+
+async fn collect_command(
+    mut child: zeron_harness::process::Child,
+    executable: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
     #[cfg(unix)]
     let group =
         UpdateProcessGroup(child.id().expect("newly spawned updater has a PID") as libc::pid_t);
@@ -2543,6 +2619,63 @@ mod tests {
         assert_eq!(status.latest_version.as_deref(), Some("1.0.41"));
     }
 
+    /// With local execution disabled, a relay peer's `SetHarnessUpdatePolicy`
+    /// stores the preference but runs nothing — not even across a restart
+    /// with the policy on — and probes resume once it is allowed again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_policy_from_a_relay_spawns_nothing_while_disabled() {
+        use std::os::unix::fs::PermissionsExt;
+        use zeron_rpc::{RpcService, methods};
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("grok");
+        let spawned = temp.path().join("spawned");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ntouch '{}'\necho 'grok 1.0.4 (d846eb93d9) [stable]'\n",
+                spawned.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let data = temp.path().join("engine");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("local-execution.json"), r#"{"disabled":true}"#).unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(executable, HarnessId::Grok)));
+        let core = crate::EngineCore::assemble(&data, registry, HarnessId::Mock, None).unwrap();
+        let relay = core.relay_rpc_service();
+        for policy in ["auto-when-idle", "notify"] {
+            relay
+                .handle(
+                    methods::SET_HARNESS_UPDATE_POLICY,
+                    serde_json::json!({ "harness": "grok", "policy": policy }),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            core.harness_updates.status(HarnessId::Grok).policy,
+            zeron_proto::HarnessUpdatePolicy::Notify
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !spawned.exists(),
+            "agent CLI ran while local execution was disabled"
+        );
+
+        core.local_execution.set(false).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !spawned.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("update probes resume once local execution is allowed");
+        core.shutdown().await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn shutdown_does_not_wait_for_a_slow_periodic_check() {
@@ -2747,6 +2880,103 @@ esac
         })
         .await
         .unwrap_or_else(|_| panic!("expected {phase:?}, got {:?}", coordinator.status(harness)));
+    }
+
+    /// The point of no return is one admission: a disable that lands after
+    /// the policy check waits until the installer has been started (and is
+    /// then a running install, the accepted residual); after it returns, no
+    /// install can start.
+    #[cfg(unix)]
+    #[test]
+    fn a_disable_waits_for_an_admitted_install_start() {
+        let (_temp, coordinator) = automatic_fixture();
+        let policy = crate::local_execution::LocalExecution::default();
+        coordinator
+            .inner
+            .registry
+            .set_local_execution(policy.clone());
+        let token = tokio_util::sync::CancellationToken::new();
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+        let disabled_at = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let disable = std::thread::spawn({
+            let policy = policy.clone();
+            let disabled_at = disabled_at.clone();
+            move || {
+                admitted_rx.recv().unwrap();
+                policy.set(true).unwrap();
+                *disabled_at.lock().unwrap() = Some(std::time::Instant::now());
+            }
+        });
+        let started_at = coordinator
+            .begin_install_with(HarnessId::Grok, &token, || {
+                admitted_tx.send(()).unwrap();
+                // The disable is now waiting on this admission.
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(std::time::Instant::now())
+            })
+            .unwrap();
+        disable.join().unwrap();
+        assert!(disabled_at.lock().unwrap().unwrap() >= started_at);
+        assert!(coordinator.begin_install(HarnessId::Grok, &token).is_err());
+    }
+
+    /// An install already running when local execution is disabled finishes
+    /// (the accepted residual), but no verification process follows it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disable_during_install_starts_no_verification() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("agent");
+        std::fs::write(temp.path().join("version"), "1.0.0\n").unwrap();
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+root="$(dirname "$0")"
+echo "$1:$2" >> "$root/log"
+case "$1:$2" in
+  version:) cat "$root/version" ;;
+  update:--check) printf '2.0.0\n' ;;
+  update:)
+    touch "$root/installing"
+    while [ ! -e "$root/release" ]; do sleep 0.02; done
+    printf '2.0.0\n' > "$root/version" ;;
+  *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(executable, HarnessId::Grok)));
+        let policy = crate::local_execution::LocalExecution::default();
+        registry.set_local_execution(policy.clone());
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        assert_eq!(
+            coordinator.status(HarnessId::Grok).phase,
+            HarnessUpdatePhase::Available
+        );
+        let apply = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.apply(HarnessId::Grok).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !temp.path().join("installing").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        policy.set(true).unwrap();
+        std::fs::write(temp.path().join("release"), "").unwrap();
+        assert!(apply.await.unwrap().is_err());
+        let log = std::fs::read_to_string(temp.path().join("log")).unwrap();
+        assert_eq!(
+            log.lines().last(),
+            Some("update:"),
+            "a process ran after the install:\n{log}"
+        );
     }
 
     #[cfg(unix)]

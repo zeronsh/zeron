@@ -38,6 +38,12 @@
 //!   `UploadCommit {uploadId, fileName}` → `{path}`,
 //!   `ReadAttachmentChunk {path, offset}` → `{name, mimeType, data, nextOffset,
 //!   done}` (path-jailed to the uploads dir + workspace-known chat cwds).
+//! - Local execution (issue #730, never forwarded): `WatchLocalExecution` →
+//!   stream of `disabled: bool`; `SetLocalExecution {disabled, interrupt?}` →
+//!   `{disabled, activeChatIds, terminalsOpen}`. Refused from relay peers.
+//!   While disabled, forwardable methods outside
+//!   [`serves_without_local_execution`] are rejected when handled locally;
+//!   with another device's `targetDeviceId` they still forward.
 //!
 //! ## Device-addressed routing (`targetDeviceId`, feature-inventory §2.1)
 //!
@@ -626,6 +632,9 @@ pub struct EngineRpc {
     updater: Option<zeron_update::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
+    local_execution: crate::local_execution::LocalExecution,
+    /// Served to relay peers (`EngineCore::relay_rpc_service`), not local IPC.
+    relay_origin: bool,
     engine_info: EngineInfo,
 }
 
@@ -644,6 +653,7 @@ impl EngineRpc {
         diff_sync: CheckoutDiffSync,
         uploads: Uploads,
         agent_accounts: AgentAccounts,
+        local_execution: crate::local_execution::LocalExecution,
         workspace_scope: WorkspaceScope,
     ) -> Self {
         let engine_info = EngineInfo {
@@ -671,8 +681,16 @@ impl EngineRpc {
             updater: None,
             harness_updates: None,
             local_import: None,
+            local_execution,
+            relay_origin: false,
             engine_info,
         }
+    }
+
+    /// Mark this service as the one relay peers reach.
+    pub(crate) fn relay_origin(mut self) -> Self {
+        self.relay_origin = true;
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -1430,6 +1448,47 @@ fn forwardable(method: &str) -> bool {
     )
 }
 
+/// Forwardable methods this device still serves itself while local execution
+/// is disabled (issue #730): viewing and steering chats through their docs
+/// (the host runs them; the sessions funnel refuses local hosts), staging
+/// attachments for a remote host, settings, and stopping work. Everything
+/// else forwardable — agents/CLIs, processes, git, terminals, project
+/// Actions, workspace filesystem — is denied by default.
+fn serves_without_local_execution(method: &str) -> bool {
+    matches!(
+        method,
+        methods::LIST_HARNESSES
+            | methods::CANCEL_INSTALL
+            | methods::GET_TITLE_SETTINGS
+            | methods::SET_TITLE_SETTINGS
+            | methods::SET_HARNESS_ENABLED
+            | methods::QUEUE_COMMAND
+            | methods::TAKE_PROJECT_ACTION_SETUP
+            | methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_QUEUE
+            | methods::QUEUE_MESSAGE
+            | methods::UPDATE_QUEUED_MESSAGE
+            | methods::BEGIN_QUEUED_MESSAGE_EDIT
+            | methods::RENEW_QUEUED_MESSAGE_EDIT
+            | methods::FINISH_QUEUED_MESSAGE_EDIT
+            | methods::MOVE_QUEUED_MESSAGE
+            | methods::REMOVE_QUEUED_MESSAGE
+            | methods::SEND_QUEUED_MESSAGE_NOW
+            | methods::STEER_QUEUED_MESSAGE_NOW
+            | methods::CLOSE_TERMINAL
+            | methods::CANCEL_AGENT_LOGIN
+            | methods::UPLOAD_CHUNK
+            | methods::UPLOAD_COMMIT
+            | methods::READ_ATTACHMENT_CHUNK
+            | methods::UPDATE_STATUS
+            | methods::APPLY_UPDATE
+            | methods::WATCH_HARNESS_UPDATES
+            | methods::CANCEL_HARNESS_UPDATE
+            | methods::DISMISS_HARNESS_UPDATE
+            | methods::SET_HARNESS_UPDATE_POLICY
+    )
+}
+
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
 fn is_stream_method(method: &str) -> bool {
     matches!(
@@ -1702,6 +1761,45 @@ impl RpcService for EngineRpc {
             }
             return self.forward(&target, method, params).await;
         }
+        if !forwardable(method) || serves_without_local_execution(method) {
+            return self.handle_local(method, params).await;
+        }
+        self.local_execution
+            .check()
+            .map_err(|error| RpcError::Failed(error.to_string()))?;
+        // An admitted call is dropped the moment local execution is disabled,
+        // so a multi-step sequence stops at its next await. What dropping
+        // cannot stop (detached tasks, a subprocess already running) re-checks
+        // at its own boundary: discard steps, login flow registration, the
+        // session/terminal/git/agent-CLI funnels.
+        let policy = self.local_execution.clone();
+        let reply = tokio::select! {
+            _ = policy.wait_disabled() => {
+                return Err(RpcError::Failed(
+                    crate::local_execution::DISABLED_MESSAGE.into(),
+                ));
+            }
+            reply = Box::pin(self.handle_local(method, params)) => reply?,
+        };
+        // A device stream opened while allowed (file watchers, change-request
+        // polling) ends the moment local execution is disabled.
+        match reply {
+            RpcReply::Stream(stream) => Ok(RpcReply::Stream(
+                stream
+                    .take_until(Box::pin(async move { policy.wait_disabled().await }))
+                    .boxed(),
+            )),
+            reply => Ok(reply),
+        }
+    }
+}
+
+impl EngineRpc {
+    async fn handle_local(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())
                 .handle(method, params)
@@ -1755,6 +1853,7 @@ impl RpcService for EngineRpc {
                     harness,
                     p.force,
                     Some(lease),
+                    self.local_execution.clone(),
                 )
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -2292,6 +2391,79 @@ impl RpcService for EngineRpc {
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))
             }
+            methods::WATCH_LOCAL_EXECUTION => {
+                Ok(RpcReply::Stream(watch_stream(self.local_execution.watch())))
+            }
+            methods::SET_LOCAL_EXECUTION => {
+                #[derive(Deserialize)]
+                struct P {
+                    disabled: bool,
+                    #[serde(default)]
+                    interrupt: bool,
+                }
+                if self.relay_origin {
+                    return Err(RpcError::Failed(
+                        "Local execution can only be changed on this device".into(),
+                    ));
+                }
+                let p: P = parse_params(params)?;
+                // The transition runs on an engine-owned task: a client that
+                // disconnects mid-drain must not leave the policy published
+                // with local work still running. The ticket is taken here, in
+                // request order, so a change the task picks up late cannot
+                // undo a later request that already ran.
+                let policy = self.local_execution.clone();
+                let ticket = policy.ticket();
+                let sessions = self.sessions.clone();
+                let terminals = self.terminals.clone();
+                let agent_accounts = self.agent_accounts.clone();
+                let previews = self.previews.clone();
+                let harness_updates = self.harness_updates.clone();
+                let registry = self.registry.clone();
+                tokio::spawn(async move {
+                    let transition = policy.transition(ticket).await;
+                    let active_chat_ids = sessions.active_chat_ids();
+                    let terminals_open = terminals.any_open();
+                    let busy = !active_chat_ids.is_empty() || terminals_open;
+                    // Never interrupt silently: report the running work and let
+                    // the client ask before retrying with `interrupt`. A stale
+                    // request (overtaken by a later one) only reports.
+                    if transition.is_some() && (!p.disabled || !busy || p.interrupt) {
+                        policy
+                            .set(p.disabled)
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                        // Preview discovery inspects local projects and processes.
+                        if let Some(previews) = &previews {
+                            previews.set_local_paused(p.disabled);
+                        }
+                        if p.disabled {
+                            // Policy first, so nothing new starts while we stop
+                            // the rest (idle warm agent processes included).
+                            // Async starts (agent CLIs, probes, sign-ins) are
+                            // dropped first.
+                            policy.quiesce().await;
+                            sessions.shutdown().await;
+                            terminals.shutdown();
+                            // In-flight agent sign-ins are local CLI processes too.
+                            agent_accounts.shutdown();
+                            // Queued agent CLI updates stop before installing
+                            // (an install already running is non-interruptible).
+                            if let Some(updates) = &harness_updates {
+                                for descriptor in registry.descriptors() {
+                                    updates.cancel(descriptor.id);
+                                }
+                            }
+                        }
+                    }
+                    RpcReply::value(&serde_json::json!({
+                        "disabled": policy.disabled(),
+                        "activeChatIds": active_chat_ids,
+                        "terminalsOpen": terminals_open,
+                    }))
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+            }
             methods::LOCAL_IMPORT_STATUS => {
                 let importer = self.local_importer()?.clone();
                 let status = tokio::task::spawn_blocking(move || importer.status())
@@ -2480,9 +2652,10 @@ impl RpcService for EngineRpc {
                                 .base_ref
                                 .as_deref()
                                 .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-                            let base = crate::diff_sync::merge_base(root, base_ref)
-                                .await
-                                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                            let base =
+                                crate::diff_sync::merge_base(&self.local_execution, root, base_ref)
+                                    .await
+                                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                             crate::diff_sync::capture_diff_against(&self.repos, root, Some(&base))
                                 .await
                         }
@@ -2626,9 +2799,13 @@ impl RpcService for EngineRpc {
                                 .base_ref
                                 .as_deref()
                                 .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-                            let base = Box::pin(crate::diff_sync::merge_base(root, base_ref))
-                                .await
-                                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                            let base = Box::pin(crate::diff_sync::merge_base(
+                                &self.local_execution,
+                                root,
+                                base_ref,
+                            ))
+                            .await
+                            .map_err(|error| RpcError::Failed(error.to_string()))?;
                             let snapshot = Box::pin(crate::diff_sync::capture_diff_against(
                                 &self.repos,
                                 root,
@@ -2643,8 +2820,12 @@ impl RpcService for EngineRpc {
                                 .commit_sha
                                 .as_deref()
                                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-                            let base =
-                                Box::pin(crate::diff_sync::commit_diff_base(root, sha)).await;
+                            let base = Box::pin(crate::diff_sync::commit_diff_base(
+                                &self.local_execution,
+                                root,
+                                sha,
+                            ))
+                            .await;
                             let snapshot = Box::pin(crate::diff_sync::capture_commit_diff(
                                 &self.repos,
                                 root,
@@ -2674,9 +2855,12 @@ impl RpcService for EngineRpc {
                             (snapshot, turn.tree, None)
                         }
                         _ => {
-                            let base = Box::pin(crate::diff_sync::working_diff_base(root))
-                                .await
-                                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                            let base = Box::pin(crate::diff_sync::working_diff_base(
+                                &self.local_execution,
+                                root,
+                            ))
+                            .await
+                            .map_err(|error| RpcError::Failed(error.to_string()))?;
                             let snapshot =
                                 Box::pin(crate::diff_sync::capture_diff(&self.repos, root))
                                     .await
@@ -2705,6 +2889,7 @@ impl RpcService for EngineRpc {
                             RpcError::Failed("path is not part of diff snapshot".into())
                         })?;
                     let pair = Box::pin(crate::diff_sync::read_diff_file_text_at(
+                        &self.local_execution,
                         root,
                         &base,
                         target.as_deref(),
@@ -3940,6 +4125,84 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// Every forwardable method must be deliberately classified for the
+    /// "Disable local execution" policy: served locally ([`serves_without_local_execution`])
+    /// or listed here as blocked. A new forwardable method fails this test
+    /// until someone decides which side it belongs on.
+    #[test]
+    fn every_forwardable_method_is_classified_for_local_execution() {
+        const BLOCKED: &[&str] = &[
+            methods::FORK_SIDE_CHAT,
+            methods::INSTALL_HARNESS,
+            methods::LIST_MODELS,
+            methods::LIST_SKILLS,
+            methods::LIST_COMMANDS,
+            methods::LIST_REPOS,
+            methods::ADD_REPO,
+            methods::CLONE_REPO,
+            methods::CREATE_REPO,
+            methods::LIST_BRANCHES,
+            methods::LIST_REFS,
+            methods::LIST_GIT_HISTORY,
+            methods::SEARCH_GIT_HISTORY,
+            methods::RESOLVE_GIT_AVATARS,
+            methods::FETCH_ALL,
+            methods::SWITCH_REF,
+            methods::LIST_FOLDERS,
+            methods::LIST_DRIVES,
+            methods::SEARCH_FILES,
+            methods::LIST_WORKSPACE_DIRECTORY,
+            methods::SEARCH_WORKSPACE_FILES,
+            methods::READ_WORKSPACE_IMAGE,
+            methods::READ_WORKSPACE_FILE,
+            methods::DELETE_WORKSPACE_ENTRY,
+            methods::MOVE_WORKSPACE_ENTRY,
+            methods::WRITE_WORKSPACE_FILE,
+            methods::WATCH_WORKSPACE_FILES,
+            methods::CREATE_WORKTREE,
+            methods::DELETE_WORKTREE,
+            methods::LIST_PROJECT_ACTIONS,
+            methods::UPSERT_PROJECT_ACTION,
+            methods::DELETE_PROJECT_ACTION,
+            methods::RUN_PROJECT_ACTION,
+            methods::WATCH_CHECKOUT_DIFFS,
+            methods::WATCH_WORKSPACE_GIT_STATUS,
+            methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+            methods::GET_CHECKOUT_DIFF,
+            methods::DISCARD_WORKING_TREE,
+            methods::GET_CHECKOUT_FILE_DIFF_TEXT,
+            methods::OPEN_TERMINAL,
+            methods::SUBSCRIBE_TERMINAL,
+            methods::WRITE_TERMINAL,
+            methods::RESIZE_TERMINAL,
+            methods::LIST_AGENT_ACCOUNTS,
+            methods::ACTIVATE_AGENT_ACCOUNT,
+            methods::FORGET_AGENT_ACCOUNT,
+            methods::START_AGENT_LOGIN,
+            methods::COMPLETE_AGENT_LOGIN,
+            methods::POLL_AGENT_LOGIN,
+            methods::CHECK_HARNESS_UPDATES,
+            methods::APPLY_HARNESS_UPDATE,
+        ];
+        // Every method name constant, read from the `methods` module source.
+        let source = include_str!("../../rpc/src/lib.rs");
+        let names: Vec<&str> = source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("pub const "))
+            .filter_map(|line| line.split('"').nth(1))
+            .collect();
+        assert!(
+            names.contains(&methods::OPEN_TERMINAL),
+            "method parse broke"
+        );
+        for name in names.into_iter().filter(|name| forwardable(name)) {
+            assert!(
+                serves_without_local_execution(name) != BLOCKED.contains(&name),
+                "{name} must be classified exactly once for local execution"
+            );
+        }
     }
 }
 

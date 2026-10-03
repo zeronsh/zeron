@@ -1132,7 +1132,9 @@ async fn diff_capture_against_merge_base_shows_branch_changes() {
     assert!(!working.patch.contains("committed on feature"));
 
     // Branch capture (vs merge-base with main) sees the commit AND the edit.
-    let base = merge_base(&repo_dir, "main").await.expect("merge base");
+    let base = merge_base(&Default::default(), &repo_dir, "main")
+        .await
+        .expect("merge base");
     let branch = capture_diff_against(&repos, &repo_dir, Some(&base))
         .await
         .expect("branch capture");
@@ -1141,7 +1143,11 @@ async fn diff_capture_against_merge_base_shows_branch_changes() {
     assert!(branch.files.iter().any(|f| f.path == "c.txt"));
 
     // Unknown ref errors instead of silently falling back.
-    assert!(merge_base(&repo_dir, "no-such-ref").await.is_err());
+    assert!(
+        merge_base(&Default::default(), &repo_dir, "no-such-ref")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1158,8 +1164,10 @@ async fn diff_file_text_returns_both_checked_sources() {
         .iter()
         .find(|file| file.path == "a.txt")
         .unwrap();
-    let base = working_diff_base(&repo_dir).await.expect("base");
-    let pair = read_diff_file_text(&repo_dir, &base, file)
+    let base = working_diff_base(&Default::default(), &repo_dir)
+        .await
+        .expect("base");
+    let pair = read_diff_file_text(&Default::default(), &repo_dir, &base, file)
         .await
         .expect("source pair");
     assert_eq!(pair.old_text.as_deref(), Some("one\ntwo\n"));
@@ -1178,7 +1186,7 @@ async fn diff_file_text_returns_both_checked_sources() {
         binary: false,
     };
     assert!(
-        read_diff_file_text(&repo_dir, &base, &escape)
+        read_diff_file_text(&Default::default(), &repo_dir, &base, &escape)
             .await
             .is_err()
     );
@@ -1226,7 +1234,9 @@ async fn turn_diff_captures_only_changes_since_snapshot() {
     // Pre-turn state: a tracked edit and an untracked file already exist.
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo\npre-turn\n").expect("edit a.txt");
     std::fs::write(repo_dir.join("pre.txt"), "before the turn\n").expect("pre.txt");
-    let turn_tree = snapshot_tree(&repo_dir).await.expect("snapshot");
+    let turn_tree = snapshot_tree(&Default::default(), &repo_dir)
+        .await
+        .expect("snapshot");
 
     // Nothing changed yet: the turn diff is empty (pre-existing untracked
     // files must NOT reappear as new).

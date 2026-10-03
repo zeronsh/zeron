@@ -49,6 +49,10 @@ impl TitleGenerator {
     /// Fire-and-forget: title `chat_id` if it's still untitled. Called by the run
     /// task after a completed exchange; runs detached so it never delays anything.
     pub fn maybe_generate(&self, chat_id: &str, harness: HarnessId, prompt: &str, cwd: &str) {
+        let policy = self.inner.registry.local_execution();
+        if policy.disabled() {
+            return;
+        }
         if !self
             .inner
             .in_flight
@@ -63,7 +67,13 @@ impl TitleGenerator {
         let prompt = prompt.to_string();
         let cwd = cwd.to_string();
         tokio::spawn(async move {
-            if let Err(err) = this.generate(&chat_id, harness, &prompt, &cwd).await {
+            // Disabling local execution drops the title run (its CLI and the
+            // branch rename) wherever it is.
+            let result = policy
+                .until_disabled(this.generate(&chat_id, harness, &prompt, &cwd))
+                .await
+                .and_then(|result| result);
+            if let Err(err) = result {
                 tracing::debug!(chat = %chat_id, error = %err, "chat auto-titling skipped");
             }
             this.inner
@@ -490,6 +500,137 @@ mod tests {
                     .contains(&serde_json::to_string(prompt).unwrap())
             );
         }
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn disabled_local_execution_refuses_title_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        let recorder = Arc::new(RecordingTitleHarness(Default::default()));
+        registry.register(recorder.clone());
+        let core = crate::EngineCore::assemble(dir.path(), registry.clone(), HarnessId::Mock, None)
+            .unwrap();
+        core.local_execution.set(true).unwrap();
+        let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone());
+        assert_eq!(
+            generator
+                .run_title_model(
+                    HarnessId::ClaudeCode,
+                    "prompt",
+                    &dir.path().to_string_lossy()
+                )
+                .await,
+            None
+        );
+        assert!(recorder.0.lock().unwrap().is_empty());
+        core.shutdown().await;
+    }
+
+    /// A title run whose stream never ends; `live` is true while it is held.
+    struct HangingTitleHarness(Arc<std::sync::atomic::AtomicBool>);
+
+    struct Live(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Live {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl zeron_harness::Harness for HangingTitleHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::ClaudeCode
+        }
+        fn display_name(&self) -> &str {
+            "Hanging title"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, zeron_harness::HarnessError> {
+            Ok(Vec::new())
+        }
+        async fn run(
+            &self,
+            _: RunRequest,
+            _: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            panic!("title generation must never call the coding entry point")
+        }
+        async fn run_title(
+            &self,
+            _: RunRequest,
+            _: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            let live = Live(self.0.clone());
+            Ok(futures::stream::pending()
+                .map(move |event| {
+                    let _ = &live;
+                    event
+                })
+                .boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn disabling_local_execution_stops_a_running_title() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        registry.register(Arc::new(HangingTitleHarness(live.clone())));
+        let core = crate::EngineCore::assemble(dir.path(), registry.clone(), HarnessId::Mock, None)
+            .unwrap();
+        registry
+            .set_title_settings(crate::registry::TitleSettings {
+                harness: Some(HarnessId::ClaudeCode),
+                model: Some("m".into()),
+            })
+            .unwrap();
+        core.workspace
+            .create_chat_with_parent("chat", None, Some(&core.device_id), None, None, None)
+            .unwrap();
+        let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone());
+        let wait = |want: bool| {
+            let live = live.clone();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while live.load(SeqCst) != want {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap()
+            }
+        };
+        generator.maybe_generate("chat", HarnessId::ClaudeCode, "prompt", "~");
+        wait(true).await;
+        core.local_execution.set(true).unwrap();
+        wait(false).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            core.workspace
+                .chat("chat")
+                .unwrap()
+                .unwrap()
+                .title
+                .is_none()
+        );
+        assert!(generator.inner.in_flight.lock().unwrap().is_empty());
         core.shutdown().await;
     }
 

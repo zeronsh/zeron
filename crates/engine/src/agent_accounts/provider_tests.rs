@@ -1906,3 +1906,40 @@ async fn a_failed_sign_ins_output_is_redacted_before_the_ui_sees_it() {
         "failed at https://auth.x.ai/device?… with code [code] token=[redacted]"
     );
 }
+
+// ── Local execution (issue #730) ────────────────────────────────────────────
+
+#[cfg(unix)]
+#[tokio::test]
+async fn disabled_local_execution_refuses_logins_and_cancels_late_registrations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let ran = tmp.path().join("ran");
+    let cli = script(
+        tmp.path(),
+        "grok",
+        &format!("#!/bin/sh\ntouch '{}'\nsleep 30\n", ran.display()),
+    );
+    accounts.override_cli(HarnessId::Grok, cli);
+    let policy = crate::local_execution::LocalExecution::default();
+    accounts.set_local_execution(policy.clone());
+    policy.set(true).unwrap();
+    assert!(accounts.start_login(HarnessId::Grok).await.is_err());
+    assert!(!ran.exists(), "the sign-in CLI ran while disabled");
+
+    // A flow that reaches registration after the disable's drain (it passed
+    // the entry check earlier) is cancelled on the spot.
+    let handle = tokio::spawn(std::future::pending::<()>());
+    accounts.register_flow(
+        "late",
+        LoginFlow::Task {
+            harness: HarnessId::Grok,
+            started_at: Instant::now(),
+            state: Default::default(),
+            handle,
+            home: None,
+            port: None,
+        },
+    );
+    assert!(lock(&accounts.inner.flows).is_empty());
+}

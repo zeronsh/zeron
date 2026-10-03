@@ -80,11 +80,12 @@ pub(crate) async fn list_with_lease(
     harness: Arc<dyn Harness>,
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    policy: crate::local_execution::LocalExecution,
 ) -> Result<Vec<Model>, HarnessError> {
     let root = root.to_path_buf();
     tokio::spawn(async move {
         let _lease = lease.clone();
-        list_inner(&root, harness, force, lease).await
+        list_inner(&root, harness, force, lease, policy).await
     })
     .await
     .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
@@ -96,7 +97,7 @@ async fn list(
     harness: Arc<dyn Harness>,
     force: bool,
 ) -> Result<Vec<Model>, HarnessError> {
-    list_with_lease(root, harness, force, None).await
+    list_with_lease(root, harness, force, None, Default::default()).await
 }
 
 async fn list_inner(
@@ -104,15 +105,17 @@ async fn list_inner(
     harness: Arc<dyn Harness>,
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    policy: crate::local_execution::LocalExecution,
 ) -> Result<Vec<Model>, HarnessError> {
     let Some(context) = harness.model_context().map_err(|error| {
         let failure = CatalogFailure::from(error);
         tracing::warn!(code = %failure.code, error = %failure, "Model discovery context unavailable");
         HarnessError::from(failure)
     })? else {
-        return harness
-            .model_catalog(force)
+        return policy
+            .until_disabled(harness.model_catalog(force))
             .await
+            .map_err(|error| HarnessError::Protocol(error.to_string()))?
             .map(|catalog| catalog.models);
     };
     let path = location(root, harness.as_ref(), &context);
@@ -124,7 +127,11 @@ async fn list_inner(
         let path = path.clone();
         async move {
             let _lease = lease;
-            let result = harness.model_catalog(force).await;
+            // Detached from the request: stop with the policy, not the RPC.
+            let result = match policy.until_disabled(harness.model_catalog(force)).await {
+                Ok(result) => result,
+                Err(error) => return Err(HarnessError::Protocol(error.to_string())),
+            };
             if !unchanged(harness.as_ref(), &context) {
                 return Err(HarnessError::Protocol(
                     "model discovery context changed; retry".into(),
@@ -312,7 +319,7 @@ mod tests {
         probe.delay.store(true, SeqCst);
         let gate = Arc::new(tokio::sync::RwLock::new(()));
         let lease = Arc::new(gate.clone().read_owned().await);
-        list_with_lease(dir.path(), probe, true, Some(lease))
+        list_with_lease(dir.path(), probe, true, Some(lease), Default::default())
             .await
             .unwrap();
         assert!(
@@ -334,7 +341,7 @@ mod tests {
         let lease = Arc::new(gate.clone().read_owned().await);
         let task = tokio::spawn({
             let probe = probe.clone();
-            async move { list_with_lease(&root, probe, true, Some(lease)).await }
+            async move { list_with_lease(&root, probe, true, Some(lease), Default::default()).await }
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             while !probe.forced.load(SeqCst) {

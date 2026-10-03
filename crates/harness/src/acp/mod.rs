@@ -1174,10 +1174,7 @@ fn sign_in_url(line: &str) -> Option<String> {
 /// Skips agents whose adapter is already resolvable; failures are logged and
 /// retried on the next daemon start or blocking launch. A no-op outside a
 /// tokio runtime. Archive-distributed servers require explicit installation.
-pub fn prewarm_managed_adapters() {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
+pub async fn prewarm_managed_adapters() {
     for spec in [grok_spec()] {
         let Some(pkg) = spec.npm_package else {
             continue;
@@ -1191,19 +1188,17 @@ pub fn prewarm_managed_adapters() {
             continue;
         }
         let (bin_name, display_name) = (spec.executable, spec.display_name);
-        handle.spawn(async move {
-            match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
-                Ok(entry) => tracing::info!(
-                    target: "zeron_harness::adapter_install",
-                    adapter = %entry.display(),
-                    "prewarmed {display_name} ACP adapter"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "zeron_harness::adapter_install",
-                    "prewarm of the {display_name} ACP adapter failed: {e}"
-                ),
-            }
-        });
+        match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
+            Ok(entry) => tracing::info!(
+                target: "zeron_harness::adapter_install",
+                adapter = %entry.display(),
+                "prewarmed {display_name} ACP adapter"
+            ),
+            Err(e) => tracing::warn!(
+                target: "zeron_harness::adapter_install",
+                "prewarm of the {display_name} ACP adapter failed: {e}"
+            ),
+        }
     }
 }
 

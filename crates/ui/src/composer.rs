@@ -5446,6 +5446,23 @@ fn references_require_update(text: &str, supported: bool) -> bool {
             || !zeron_proto::file_mentions::file_mention_links(text).is_empty())
 }
 
+/// Why a send must stop while this device's local execution is disabled.
+/// `host_allowed` is `None` when no remote device is known to send to.
+fn local_execution_send_failure(
+    disabled: bool,
+    host_allowed: Option<bool>,
+) -> Option<&'static str> {
+    match (disabled, host_allowed) {
+        (false, _) | (true, Some(true)) => None,
+        (true, Some(false)) => {
+            Some("Local execution is disabled on this device. Choose a remote device.")
+        }
+        (true, None) => {
+            Some("No remote device is available, and local execution is disabled on this device.")
+        }
+    }
+}
+
 /// Slash-command completion state: like [`FileMentionState`] but the
 /// candidate list is scoped to device, harness and workspace, then filtered
 /// locally per keystroke. Commands and skills share focus and keyboard handling.
@@ -8037,6 +8054,28 @@ impl Composer {
             Some(id) => (id, false),
             None => (uuid::Uuid::new_v4().to_string(), true),
         };
+        // This device refuses local runs; say so here instead of letting the
+        // send fall to a local host (or to no host at all).
+        if let Some(failure) = {
+            let state = self.state.read(cx);
+            let host_allowed = if is_new {
+                state
+                    .effective_device_id()
+                    .map(|device| state.may_execute_on(&device))
+            } else {
+                Some(
+                    state
+                        .selected_chat_row()
+                        .is_none_or(|chat| state.may_execute_on(&chat.device_id)),
+                )
+            };
+            local_execution_send_failure(state.local_execution_disabled, host_allowed)
+        } {
+            self.failure = Some(failure.into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return;
+        }
         // Where the new session runs (Current checkout / reuse an existing
         // worktree / fresh worktree off the picked base) — resolved NOW so
         // the async block needs no picker access.
@@ -13641,6 +13680,15 @@ mod tests {
             }
         }
         assert!(!references_require_update("/compact", false));
+    }
+
+    #[test]
+    fn local_execution_blocks_only_local_or_missing_hosts() {
+        assert_eq!(local_execution_send_failure(false, None), None);
+        assert_eq!(local_execution_send_failure(false, Some(false)), None);
+        assert_eq!(local_execution_send_failure(true, Some(true)), None);
+        assert!(local_execution_send_failure(true, Some(false)).is_some());
+        assert!(local_execution_send_failure(true, None).is_some());
     }
 
     #[gpui::test]

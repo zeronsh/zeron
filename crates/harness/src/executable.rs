@@ -270,7 +270,12 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         .ok()
         .flatten()
     };
-    let version = probe();
+    // Running the CLI is local execution: none while the host has it
+    // disabled, and that refusal is not cached as "no version".
+    let version = {
+        let _lease = crate::local_execution_lease()?;
+        probe()
+    };
     cache.retain(|(p, _, _), _| p != &key.0);
     cache.insert(key, (version.clone(), [alias].into_iter().collect()));
     version

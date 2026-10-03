@@ -157,3 +157,57 @@ async fn a_discovered_server_is_probed_once_not_every_cycle() {
     );
     service.shutdown().await;
 }
+
+/// The host's "Disable local execution" hold: while paused nothing local is
+/// scanned (the project list is never even read) and no local route exists;
+/// resuming discovers again, and pausing again clears the routes at once.
+#[tokio::test]
+async fn paused_discovery_never_scans_and_clears_local_routes() {
+    let _serial = SERIAL.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let server = launch(&app, true);
+    let scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let projects = {
+        let scans = scans.clone();
+        let app = app.clone();
+        Arc::new(move || {
+            scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![app.clone()]
+        })
+    };
+    let service = PreviewService::new(
+        temp.path().join("names.json"),
+        "local".into(),
+        "Laptop".into(),
+    )
+    .unwrap();
+    service.set_local_paused(true);
+    service.start(projects, None).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        scans.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "scanned while paused"
+    );
+    assert!(service.catalog().snapshot().services.is_empty());
+
+    service.set_local_paused(false);
+    wait(&service, Some(server.0.id())).await;
+
+    service.set_local_paused(true);
+    assert!(
+        service.catalog().snapshot().services.is_empty(),
+        "routes kept after pause"
+    );
+    let before = scans.load(std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        scans.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "scanned after pause"
+    );
+    assert!(service.catalog().snapshot().services.is_empty());
+    service.shutdown().await;
+}

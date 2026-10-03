@@ -1317,6 +1317,12 @@ impl AgentAccounts {
         let this = self.clone();
         let task_state = state.clone();
         let task_home = home.clone();
+        let policy = self
+            .inner
+            .local_execution
+            .get()
+            .cloned()
+            .unwrap_or_default();
         let handle = tokio::spawn(async move {
             // Where Devin opened (or logged) its page — the recording
             // browser's file, else its log — until the sign-in ends.
@@ -1335,17 +1341,19 @@ impl AgentAccounts {
                 }
             });
             let progress_state = task_state.clone();
-            let signed_in = acp
-                .sign_in_with(options, move |progress| match progress {
+            // The Devin CLI starts inside this await (see `until_disabled`).
+            let signed_in = policy
+                .until_disabled(acp.sign_in_with(options, move |progress| match progress {
                     zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
                         let mut state = lock(&progress_state);
                         if state.url.is_none() {
                             state.url = Some(url);
                         }
                     }
-                })
+                }))
                 .await
-                .map_err(|e| e.to_string());
+                .map_err(|e| e.to_string())
+                .and_then(|result| result.map_err(|e| e.to_string()));
             watcher.abort();
             let detected = signed_in.and_then(|()| {
                 let file = data.join("devin").join("credentials.toml");

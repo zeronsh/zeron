@@ -8000,6 +8000,47 @@ impl Shell {
         )
     }
 
+    /// Standing notice while this device refuses local execution (issue
+    /// #730), naming where new work goes — or that it has nowhere to go.
+    fn render_local_execution_pill(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
+        let state = self.state.read(cx);
+        if !state.local_execution_disabled {
+            return None;
+        }
+        let target = state
+            .default_execution_device()
+            .map(|id| state.device_name(&id).unwrap_or(id.as_str()).to_string());
+        let (label, dot) = match target {
+            Some(name) => (
+                format!("Local execution off · runs on {name}"),
+                theme.text_muted,
+            ),
+            None => (
+                "Local execution off · no remote device online".into(),
+                theme.warning,
+            ),
+        };
+        Some(
+            div()
+                .id("local-execution-pill")
+                .mx(px(Theme::SPACE_SM + 4.0))
+                .mb(px(Theme::SPACE_SM))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(div().flex_none().size(px(5.0)).rounded_full().bg(dot))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(label)),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
@@ -8390,6 +8431,9 @@ impl Shell {
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
             .when_some(self.render_connection_pill(theme, cx), |el, pill| {
+                el.child(pill)
+            })
+            .when_some(self.render_local_execution_pill(theme, cx), |el, pill| {
                 el.child(pill)
             })
             // "Star on GitHub" banner until dismissed (persisted), then the

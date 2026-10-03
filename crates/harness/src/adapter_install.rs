@@ -517,17 +517,6 @@ async fn install_into(
     cache_dir: &Path,
     display_name: &str,
 ) -> Result<(), HarnessError> {
-    let _ = std::fs::remove_dir_all(tmp_dir);
-    std::fs::create_dir_all(tmp_dir)?;
-    std::fs::create_dir_all(cache_dir)?;
-    // A bare manifest keeps npm from walking up into a user project.
-    std::fs::write(tmp_dir.join("package.json"), "{\"private\":true}\n")?;
-    tracing::info!(
-        target: "zeron_harness::adapter_install",
-        package = %pin.spec(),
-        dir = %tmp_dir.display(),
-        "installing ACP adapter"
-    );
     let (program, args) =
         npm_install_plan(npm, pin, cache_dir, crate::executable::Platform::current())?;
     let mut cmd = crate::process::Command::new(&program);
@@ -538,7 +527,25 @@ async fn install_into(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     crate::compose_child_path(&mut cmd, &program);
-    let mut child = cmd.spawn()?;
+    // From the policy check through the first file and the npm spawn, as one
+    // admission (see `crate::local_execution_lease`).
+    let mut child = {
+        let Some(_lease) = crate::local_execution_lease() else {
+            return Err(crate::local_execution_refused());
+        };
+        let _ = std::fs::remove_dir_all(tmp_dir);
+        std::fs::create_dir_all(tmp_dir)?;
+        std::fs::create_dir_all(cache_dir)?;
+        // A bare manifest keeps npm from walking up into a user project.
+        std::fs::write(tmp_dir.join("package.json"), "{\"private\":true}\n")?;
+        tracing::info!(
+            target: "zeron_harness::adapter_install",
+            package = %pin.spec(),
+            dir = %tmp_dir.display(),
+            "installing ACP adapter"
+        );
+        cmd.spawn()?
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let drain = async {
@@ -858,6 +865,93 @@ mod shim_stress_tests {
         });
         println!(
             "stress: 800 publications across 8 concurrent build versions, zero corrupt or replaced shims"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod local_execution_tests {
+    use super::*;
+
+    /// An install queued behind the install lock when the host disables local
+    /// execution creates no files and starts no npm once it gets the lock.
+    /// Runs in a child process: the suspension is process-wide.
+    #[tokio::test]
+    async fn queued_install_starts_nothing_after_a_disable() {
+        const CHILD: &str = "ZERON_ADAPTER_SUSPEND_FIXTURE";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            let held = install_lock().lock().await;
+            let install = tokio::spawn(ensure_installed(
+                NpmPin::parse("zeron-fake-adapter@1.0.0"),
+                "zeron-fake-adapter",
+                "Fake",
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            crate::set_local_execution_suspended(true);
+            drop(held);
+            let error = install.await.unwrap().unwrap_err().to_string();
+            assert!(error.contains("Local execution is disabled"), "{error}");
+            let adapters = root.join("adapters");
+            let entries = std::fs::read_dir(&adapters)
+                .map(|dir| dir.count())
+                .unwrap_or(0);
+            assert_eq!(entries, 0, "install files created after the disable");
+            assert!(!root.join("npm-ran").exists(), "npm ran after the disable");
+            // Agent CLI version probes (executable resolution) are held too,
+            // and the refusal is not cached.
+            let cli = root.join("bin").join("fake-cli");
+            assert_eq!(crate::executable::binary_version(&cli), None);
+            assert!(
+                !root.join("cli-ran").exists(),
+                "CLI probed after the disable"
+            );
+            crate::set_local_execution_suspended(false);
+            assert!(crate::executable::binary_version(&cli).is_some());
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let npm = bin.join("npm");
+        std::fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\n: > '{}'\n",
+                root.path().join("npm-ran").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = bin.join("fake-cli");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\n: > '{}'\necho 1.2.3\n",
+                root.path().join("cli-ran").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "adapter_install::local_execution_tests::queued_install_starts_nothing_after_a_disable",
+                "--nocapture",
+            ])
+            .env(CHILD, root.path())
+            .env("ZERON_ADAPTERS_DIR", root.path().join("adapters"))
+            .env("ZERON_NO_LOGIN_SHELL", "1")
+            .env("PATH", &bin)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

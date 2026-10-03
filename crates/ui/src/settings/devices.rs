@@ -1,6 +1,7 @@
 //! Settings → Devices (feature-inventory §1.5): the device registry — name,
 //! platform, last-seen, an Online/Offline badge, a "This device" badge, click-to-copy id,
-//! and a Rename dialog (Mutate renameDevice).
+//! and a Rename dialog (Mutate renameDevice). This device's row also carries
+//! the engine-enforced "Disable local execution" switch (SetLocalExecution).
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -70,6 +71,13 @@ pub struct DevicesPage {
     error: Option<SharedString>,
     task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
+    /// Local work the engine reported when asked to disable local execution;
+    /// shown for confirmation before it is stopped.
+    stop_local_work: Option<Vec<String>>,
+    /// The SetLocalExecution call in flight, in its own slot so nothing else
+    /// on the page can cancel it: the switch ignores clicks until it replies,
+    /// so two requests can never race each other on the wire.
+    local_execution_task: Option<Task<()>>,
     _observe: Subscription,
 }
 
@@ -84,6 +92,8 @@ impl DevicesPage {
             error: None,
             task: None,
             copy_task: None,
+            local_execution_task: None,
+            stop_local_work: None,
             _observe: observe,
         }
     }
@@ -112,7 +122,7 @@ impl DevicesPage {
     /// Escape that reached Settings unclaimed closes the rename dialog first,
     /// so it never closes Settings under the dialog. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.rename.take().is_none() {
+        if self.rename.take().is_none() && self.stop_local_work.take().is_none() {
             return false;
         }
         cx.notify();
@@ -147,6 +157,121 @@ impl DevicesPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// The engine never stops local work unasked: a first request that finds
+    /// running sessions or terminals reports them and changes nothing; the
+    /// confirmation retries with `interrupt`.
+    fn set_local_execution(&mut self, disabled: bool, interrupt: bool, cx: &mut Context<Self>) {
+        if self.local_execution_task.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.stop_local_work = None;
+        let params = serde_json::json!({ "disabled": disabled, "interrupt": interrupt });
+        self.local_execution_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_LOCAL_EXECUTION, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.local_execution_task = None;
+                match result {
+                    Ok(reply) if disabled && reply["disabled"] == false => {
+                        let state = page.state.read(cx);
+                        let mut work: Vec<String> = reply["activeChatIds"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|id| id.as_str())
+                            .map(|id| {
+                                state
+                                    .chats
+                                    .iter()
+                                    .find(|chat| chat.id == id)
+                                    .and_then(|chat| chat.title.clone())
+                                    .unwrap_or_else(|| "Untitled session".into())
+                            })
+                            .collect();
+                        if reply["terminalsOpen"] == true {
+                            work.push("Open terminals".into());
+                        }
+                        page.stop_local_work = Some(work);
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        page.error =
+                            Some(format!("Could not change local execution: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_stop_local_work_dialog(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).for_popup();
+        let work = self.stop_local_work.as_ref()?;
+        let items: Vec<_> = work
+            .iter()
+            .map(|item| popover::dialog_body(&theme, format!("• {item}")))
+            .collect();
+        let card = popover::dialog_card(&theme)
+            .id("stop-local-work-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("Stop local work")
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.stop_local_work = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(popover::dialog_title(&theme, "Stop local work?"))
+            .child(popover::dialog_body(
+                &theme,
+                "This work is running on this device and must stop before local execution is disabled:",
+            ))
+            .children(items)
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        widgets::text_action(&theme, widgets::ActionTone::Quiet, "Cancel")
+                            .id("stop-local-work-cancel")
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.stop_local_work = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        widgets::text_action(&theme, widgets::ActionTone::Solid, "Stop and disable")
+                            .id("stop-local-work-confirm")
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_local_execution(true, true, cx);
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("stop-local-work-dialog", viewport, card))
     }
 
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
@@ -264,16 +389,22 @@ impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
-        let (devices, local_id, workspace_scope) = {
+        let (devices, local_id, workspace_scope, local_execution_disabled, execution_target) = {
             let state = self.state.read(cx);
             (
                 state.devices.clone(),
                 state.local_device_id.clone(),
                 state.workspace_scope,
+                state.local_execution_disabled,
+                state
+                    .default_execution_device()
+                    .and_then(|id| state.device_name(&id).map(str::to_string)),
             )
         };
         let copied = self.copied.clone();
-        let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        let dialog = self
+            .render_rename_dialog(window.viewport_size(), cx)
+            .or_else(|| self.render_stop_local_work_dialog(window.viewport_size(), cx));
         // Split into this device and the rest; each renders as rows in one
         // block, like every other settings page.
         let (local, others): (Vec<_>, Vec<_>) = devices
@@ -367,7 +498,49 @@ impl Render for DevicesPage {
             for (n, (ix, device)) in local.into_iter().enumerate() {
                 block = block.child(device_row(ix, device, n == 0));
             }
-            block
+            let target = if !local_execution_disabled {
+                "Agents, terminals, Git and files can run on this device.".to_string()
+            } else if let Some(name) = &execution_target {
+                format!("New work runs on {name}.")
+            } else {
+                "No remote device is available. Nothing will run on this device.".to_string()
+            };
+            block.child(
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Disable local execution"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![div().child(SharedString::from(target)).into_any_element()],
+                            )),
+                    )
+                    .child(
+                        widgets::toggle_switch(
+                            &theme,
+                            local_execution_disabled,
+                            "disable-local-execution",
+                        )
+                        .id("disable-local-execution-toggle")
+                        .cursor_pointer()
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Disable local execution")
+                        .aria_toggled(if local_execution_disabled {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_local_execution(!local_execution_disabled, false, cx);
+                        })),
+                    ),
+            )
         });
         let others_block = if others.is_empty() {
             widgets::section_card(&theme).mt(px(8.0)).child(
@@ -485,6 +658,69 @@ mod tests {
             format_last_seen(Some(now - TimeDelta::days(2)), now),
             "2d ago"
         );
+    }
+
+    /// One SetLocalExecution on the wire at a time: a second click while the
+    /// first is unanswered sends nothing; the reply (here an error) frees the
+    /// switch again, and nothing else on the page can cancel that reply.
+    #[gpui::test]
+    fn switch_sends_one_policy_request_at_a_time(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(engine);
+            state
+        });
+        let page = cx.new(|cx| DevicesPage::new(state, cx));
+
+        page.update(cx, |page, cx| {
+            page.set_local_execution(true, false, cx);
+            page.set_local_execution(false, false, cx);
+            // Another task on the page must not cancel the pending call.
+            page.task = Some(cx.spawn(async move |_, _| {}));
+        });
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("first click sends")).unwrap();
+        assert_eq!(request["method"], methods::SET_LOCAL_EXECUTION);
+        assert_eq!(request["params"]["disabled"], true);
+        assert!(requests.try_recv().is_err(), "second click must wait for the reply");
+
+        runtime.block_on(async {
+            replies
+                .send(
+                    serde_json::json!({ "id": request["id"], "err": "engine said no" })
+                        .to_string(),
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            assert!(page.local_execution_task.is_none(), "reply frees the switch");
+            assert!(page.error.is_some());
+            page.set_local_execution(false, false, cx);
+        });
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("next click sends again")).unwrap();
+        assert_eq!(request["params"]["disabled"], false);
     }
 
     #[test]

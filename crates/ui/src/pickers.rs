@@ -2247,6 +2247,7 @@ impl Pickers {
                 Some(d) => s.device_id == d,
                 None => true,
             })
+            .filter(|s| state.may_execute_on(&s.device_id))
             .cloned()
             .collect()
     }
@@ -2332,11 +2333,17 @@ impl Pickers {
         }
     }
 
-    /// Devices in picker order: this device first, then by name.
+    /// Devices in picker order: this device first, then by name. This device
+    /// is not offered while its local execution is disabled.
     fn device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
-        let mut devices: Vec<zeron_proto::Device> = state.devices.clone();
+        let mut devices: Vec<zeron_proto::Device> = state
+            .devices
+            .iter()
+            .filter(|d| state.may_execute_on(&d.id))
+            .cloned()
+            .collect();
         devices.sort_by_key(|d| {
             (
                 local.as_deref() != Some(d.id.as_str()),
@@ -2390,7 +2397,13 @@ impl Pickers {
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No devices match."))
+                .child(SharedString::from(
+                    if self.state.read(cx).local_execution_disabled {
+                        "No remote devices match. Local execution is disabled."
+                    } else {
+                        "No devices match."
+                    },
+                ))
                 .into_any_element()
         } else {
             popover::menu_scroll_host("device-list-host")

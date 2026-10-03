@@ -232,6 +232,7 @@ impl CheckoutDiffSync {
         let task = tokio::spawn(diff_sync_task(
             Arc::downgrade(&sync.inner),
             workspace.watch_chats(),
+            sync.inner.repos.local_execution(),
             sync.inner.cancel.clone(),
         ));
         *lock(&sync.inner.supervisor) = Some(task);
@@ -296,7 +297,7 @@ impl CheckoutDiffSync {
                 Ok(identity) => identity,
                 Err(_) => return, // not a checkout
             };
-            match snapshot_tree(&identity.root).await {
+            match snapshot_tree(&inner.repos.local_execution(), &identity.root).await {
                 Ok(tree) => {
                     lock(&inner.turn_trees).insert(
                         chat_id,
@@ -409,6 +410,15 @@ async fn resolve_identity(
 async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     // One pass at a time — see `reconcile_gate`.
     let _gate = inner.reconcile_gate.lock().await;
+    // Local execution disabled: no entries, so no watchers and no git.
+    if inner.repos.local_execution().disabled() {
+        let had_entries = !lock(&inner.entries).is_empty();
+        lock(&inner.entries).clear();
+        if had_entries {
+            publish_watch(inner);
+        }
+        return;
+    }
     // Group this device's cwd-bearing chats by canonical checkout identity.
     let mut groups: HashMap<String, (CheckoutIdentity, Vec<Chat>)> = HashMap::new();
     // Dedupe resolution within this pass — many chats share one checkout.
@@ -673,6 +683,9 @@ async fn entry_task(
 // ---------------------------------------------------------------------------
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
+    if inner.repos.local_execution().disabled() {
+        return;
+    }
     let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
@@ -789,8 +802,10 @@ fn publish_watch(inner: &Arc<DiffSyncInner>) {
 async fn diff_sync_task(
     inner: Weak<DiffSyncInner>,
     mut chats_rx: watch::Receiver<Vec<Chat>>,
+    policy: crate::local_execution::LocalExecution,
     cancel: CancellationToken,
 ) {
+    let mut policy_rx = policy.watch();
     let mut repair = tokio::time::interval(REPAIR_INTERVAL);
     repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     repair.tick().await; // consume the immediate first tick
@@ -816,6 +831,12 @@ async fn diff_sync_task(
                     let _ = entry.kick_tx.send(());
                 }
             }
+            // Policy flip: disabling drops every entry; enabling rebuilds them.
+            Ok(()) = policy_rx.changed() => {
+                let Some(inner) = inner.upgrade() else { break };
+                let chats = chats_rx.borrow().clone();
+                reconcile(&inner, chats, true).await;
+            }
         }
     }
 }
@@ -831,7 +852,12 @@ struct Capture {
 
 /// Run git capturing stdout under a hard byte ceiling — the child is killed once
 /// the cap is hit, so an arbitrarily large repository diff never buffers fully.
-async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capture, EngineError> {
+async fn capture_git(
+    policy: &crate::local_execution::LocalExecution,
+    cwd: &Path,
+    args: &[&str],
+    max_bytes: usize,
+) -> Result<Capture, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
     #[cfg(windows)]
     {
@@ -842,9 +868,7 @@ async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capt
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
+    let mut child = policy.spawn(&mut cmd)?;
     let mut stdout = child
         .stdout
         .take()
@@ -1090,26 +1114,39 @@ async fn read_worktree_source(root: &Path, path: &Path) -> Result<Capture, Engin
     })
 }
 
-async fn read_git_source(root: &Path, revision: &str, path: &Path) -> Result<Capture, EngineError> {
+async fn read_git_source(
+    policy: &crate::local_execution::LocalExecution,
+    root: &Path,
+    revision: &str,
+    path: &Path,
+) -> Result<Capture, EngineError> {
     let spec = format!("{revision}:{}", path.to_string_lossy());
-    capture_git(root, &["cat-file", "blob", &spec], MAX_DIFF_SOURCE_BYTES).await
+    capture_git(
+        policy,
+        root,
+        &["cat-file", "blob", &spec],
+        MAX_DIFF_SOURCE_BYTES,
+    )
+    .await
 }
 
 /// Read the exact old/new documents for one file in a previously captured diff.
 /// Paths must come from that snapshot's file summary; callers still recheck the
 /// snapshot checksum after this read to close the filesystem race.
 pub async fn read_diff_file_text(
+    policy: &crate::local_execution::LocalExecution,
     root: &Path,
     base: &str,
     file: &DiffFileSummary,
 ) -> Result<DiffFileTextPair, EngineError> {
-    read_diff_file_text_at(root, base, None, file).await
+    read_diff_file_text_at(policy, root, base, None, file).await
 }
 
 /// Read the exact old/new documents for one file in a diff between `base` and
 /// an optional committed target. Without a target, the new source is the live
 /// working tree; with one, both sources are immutable Git blobs.
 pub(crate) async fn read_diff_file_text_at(
+    policy: &crate::local_execution::LocalExecution,
     root: &Path,
     base: &str,
     target: Option<&str>,
@@ -1121,12 +1158,12 @@ pub(crate) async fn read_diff_file_text_at(
     let old = if file.status == "added" {
         None
     } else {
-        Some(read_git_source(root, base, old_path).await?)
+        Some(read_git_source(policy, root, base, old_path).await?)
     };
     let new = if file.status == "deleted" {
         None
     } else if let Some(target) = target {
-        Some(read_git_source(root, target, new_path).await?)
+        Some(read_git_source(policy, root, target, new_path).await?)
     } else {
         Some(read_worktree_source(root, new_path).await?)
     };
@@ -1163,9 +1200,13 @@ pub(crate) async fn read_diff_file_text_at(
 
 /// Resolve the parent used as a commit diff's old side. Root commits compare
 /// against Git's canonical empty tree.
-pub(crate) async fn commit_diff_base(root: &Path, sha: &str) -> String {
+pub(crate) async fn commit_diff_base(
+    policy: &crate::local_execution::LocalExecution,
+    root: &Path,
+    sha: &str,
+) -> String {
     let parent_spec = format!("{sha}^");
-    let parent = capture_git(root, &["rev-parse", "--verify", &parent_spec], 256)
+    let parent = capture_git(policy, root, &["rev-parse", "--verify", &parent_spec], 256)
         .await
         .map(|capture| String::from_utf8_lossy(&capture.stdout).trim().to_string())
         .unwrap_or_default();
@@ -1176,11 +1217,16 @@ pub(crate) async fn commit_diff_base(root: &Path, sha: &str) -> String {
     }
 }
 
-pub async fn working_diff_base(root: &Path) -> Result<String, EngineError> {
-    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
+pub async fn working_diff_base(
+    policy: &crate::local_execution::LocalExecution,
+    root: &Path,
+) -> Result<String, EngineError> {
+    let head = capture_git(policy, root, &["rev-parse", "--verify", "HEAD"], 256)
         .await
         .map(|capture| String::from_utf8_lossy(&capture.stdout).trim().to_string())
         .unwrap_or_default();
+    // A refusal is not "no HEAD".
+    policy.check()?;
     Ok(if head.is_empty() {
         EMPTY_TREE_SHA.into()
     } else {
@@ -1206,7 +1252,9 @@ pub async fn capture_diff_against(
     root: &Path,
     base_override: Option<&str>,
 ) -> Result<DiffSnapshot, EngineError> {
-    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
+    let policy = &repos.local_execution();
+    policy.check()?;
+    let head = capture_git(policy, root, &["rev-parse", "--verify", "HEAD"], 256)
         .await
         .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
         .unwrap_or_default();
@@ -1219,20 +1267,25 @@ pub async fn capture_diff_against(
         .current_branch(root)
         .await
         .unwrap_or_else(|_| "HEAD".into());
+    // Stop at a refusal instead of carrying on with fallback values.
+    policy.check()?;
 
     let names = capture_git(
+        policy,
         root,
         &["diff", "--name-status", "-z", "--find-renames", base, "--"],
         2 * 1024 * 1024,
     )
     .await?;
     let nums = capture_git(
+        policy,
         root,
         &["diff", "--numstat", "-z", "--find-renames", base, "--"],
         2 * 1024 * 1024,
     )
     .await?;
     let tracked = capture_git(
+        policy,
         root,
         &[
             "diff",
@@ -1249,6 +1302,7 @@ pub async fn capture_diff_against(
     // Untracked listing via porcelain status; `--no-optional-locks` keeps this
     // read-only (a status-triggered index refresh would re-kick our own watcher).
     let status = capture_git(
+        policy,
         root,
         &[
             "--no-optional-locks",
@@ -1389,6 +1443,9 @@ pub async fn capture_diff_against(
     hasher.update(files_json.as_bytes());
     hasher.update(if truncated { b"1" } else { b"0" });
     let checksum = crate::repos::hex(&hasher.finalize());
+    // Steps above swallow some git failures (a refused `current_branch`
+    // included); a capture that straddled a disable must not look valid.
+    repos.local_execution().check()?;
 
     Ok(DiffSnapshot {
         git_status: Some(git_status::parse(&status.stdout, status.truncated)),
@@ -1477,17 +1534,20 @@ fn path_batches(paths: &[Vec<u8>], budget: usize) -> Vec<&[Vec<u8>]> {
 }
 
 async fn run_git_for_paths(
+    policy: &crate::local_execution::LocalExecution,
     root: &Path,
     fixed_args: &[OsString],
     paths: &[Vec<u8>],
 ) -> Result<(), EngineError> {
     for batch in path_batches(paths, MAX_PATH_ARGUMENT_BYTES) {
-        run_git_for_path_batch(root, fixed_args, batch).await?;
+        policy.check()?;
+        run_git_for_path_batch(policy, root, fixed_args, batch).await?;
     }
     Ok(())
 }
 
 async fn run_git_for_path_batch(
+    policy: &crate::local_execution::LocalExecution,
     root: &Path,
     fixed_args: &[OsString],
     paths: &[Vec<u8>],
@@ -1508,8 +1568,11 @@ async fn run_git_for_path_batch(
         command.arg(path_argument(path));
     }
     command.stdin(std::process::Stdio::null());
-    let output = command
-        .output()
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let output = policy
+        .spawn(&mut command)?
+        .wait_with_output()
         .await
         .map_err(|error| EngineError::Other(format!("git spawn failed: {error}")))?;
     if output.status.success() {
@@ -1533,6 +1596,9 @@ pub async fn discard_working_tree(
     root: &Path,
     expected_checksum: &str,
 ) -> Result<DiffSnapshot, EngineError> {
+    // Destructive: the policy is re-checked before every step below, since
+    // this runs in its own task that outlives a cancelled RPC.
+    let policy = &repos.local_execution();
     let snapshot = capture_diff(repos, root).await?;
     let head = snapshot.head_sha.as_deref().ok_or_else(|| {
         EngineError::Other("cannot discard changes before the first commit".into())
@@ -1548,7 +1614,9 @@ pub async fn discard_working_tree(
         ));
     }
 
+    policy.check()?;
     let status = capture_git(
+        policy,
         root,
         &[
             "--no-optional-locks",
@@ -1592,9 +1660,9 @@ pub async fn discard_working_tree(
         OsString::from("--staged"),
         OsString::from("--worktree"),
     ];
-    run_git_for_paths(root, &restore_args, &tracked).await?;
+    run_git_for_paths(policy, root, &restore_args, &tracked).await?;
     let clean_args = [OsString::from("clean"), OsString::from("-fd")];
-    run_git_for_paths(root, &clean_args, &untracked).await?;
+    run_git_for_paths(policy, root, &clean_args, &untracked).await?;
     // `--untracked-files=all` gives exact files, so `git clean` can leave
     // their now-empty parent directories behind. Remove only empty ancestors;
     // ignored files or any concurrent writer make `remove_dir` stop safely.
@@ -1602,6 +1670,7 @@ pub async fn discard_working_tree(
         let full = root.join(PathBuf::from(path_argument(path)));
         let mut parent = full.parent();
         while let Some(directory) = parent {
+            policy.check()?;
             if directory == root || std::fs::remove_dir(directory).is_err() {
                 break;
             }
@@ -1627,12 +1696,17 @@ pub async fn capture_commit_diff(
     root: &Path,
     sha: &str,
 ) -> Result<DiffSnapshot, EngineError> {
-    let base = commit_diff_base(root, sha).await;
+    let policy = &repos.local_execution();
+    policy.check()?;
+    let base = commit_diff_base(policy, root, sha).await;
     let branch = repos
         .current_branch(root)
         .await
         .unwrap_or_else(|_| "HEAD".into());
+    // Stop at a refusal instead of carrying on with fallback values.
+    policy.check()?;
     let names = capture_git(
+        policy,
         root,
         &[
             "diff",
@@ -1647,6 +1721,7 @@ pub async fn capture_commit_diff(
     )
     .await?;
     let nums = capture_git(
+        policy,
         root,
         &[
             "diff",
@@ -1661,6 +1736,7 @@ pub async fn capture_commit_diff(
     )
     .await?;
     let tracked = capture_git(
+        policy,
         root,
         &[
             "diff",
@@ -1713,8 +1789,12 @@ pub async fn capture_commit_diff(
 
 /// `git merge-base <base_ref> HEAD` — the diff base for "Branch changes".
 /// Errors when the ref is unknown or the histories are unrelated.
-pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineError> {
-    let capture = capture_git(root, &["merge-base", base_ref, "HEAD"], 256).await?;
+pub async fn merge_base(
+    policy: &crate::local_execution::LocalExecution,
+    root: &Path,
+    base_ref: &str,
+) -> Result<String, EngineError> {
+    let capture = capture_git(policy, root, &["merge-base", base_ref, "HEAD"], 256).await?;
     let sha = String::from_utf8_lossy(&capture.stdout).trim().to_string();
     if sha.is_empty() {
         return Err(EngineError::Other(format!("no merge base with {base_ref}")));
@@ -1728,7 +1808,10 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
 /// over the working tree (no stat cache in a fresh index) — run once per turn
 /// dispatch, that is the same cost class as the untracked-file reads the watch
 /// capture already does.
-pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
+pub async fn snapshot_tree(
+    policy: &crate::local_execution::LocalExecution,
+    root: &Path,
+) -> Result<String, EngineError> {
     let index = std::env::temp_dir().join(format!(
         "zeron-turn-index-{}-{}",
         std::process::id(),
@@ -1744,9 +1827,12 @@ pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
         cmd.arg("-C").arg(root).args(args);
         cmd.env("GIT_INDEX_FILE", &index);
         cmd.stdin(std::process::Stdio::null());
-        cmd.output()
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        policy.spawn(&mut cmd)
     };
-    let added = run(&["add", "-A", "--ignore-errors", "."])
+    let added = run(&["add", "-A", "--ignore-errors", "."])?
+        .wait_with_output()
         .await
         .map_err(|e| EngineError::Other(format!("git add failed: {e}")))?;
     if !added.status.success() {
@@ -1756,9 +1842,13 @@ pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
             String::from_utf8_lossy(&added.stderr).trim()
         )));
     }
-    let written = run(&["write-tree"])
-        .await
-        .map_err(|e| EngineError::Other(format!("git write-tree failed: {e}")));
+    let written = match run(&["write-tree"]) {
+        Ok(child) => child
+            .wait_with_output()
+            .await
+            .map_err(|e| EngineError::Other(format!("git write-tree failed: {e}"))),
+        Err(refused) => Err(refused),
+    };
     let _ = tokio::fs::remove_file(&index).await;
     let written = written?;
     if !written.status.success() {
@@ -1780,8 +1870,10 @@ pub async fn capture_turn_diff(
     root: &Path,
     turn_tree: &str,
 ) -> Result<DiffSnapshot, EngineError> {
-    let current = snapshot_tree(root).await?;
-    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
+    let policy = &repos.local_execution();
+    policy.check()?;
+    let current = snapshot_tree(policy, root).await?;
+    let head = capture_git(policy, root, &["rev-parse", "--verify", "HEAD"], 256)
         .await
         .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
         .unwrap_or_default();
@@ -1789,8 +1881,11 @@ pub async fn capture_turn_diff(
         .current_branch(root)
         .await
         .unwrap_or_else(|_| "HEAD".into());
+    // Stop at a refusal instead of carrying on with fallback values.
+    policy.check()?;
 
     let names = capture_git(
+        policy,
         root,
         &[
             "diff",
@@ -1805,6 +1900,7 @@ pub async fn capture_turn_diff(
     )
     .await?;
     let nums = capture_git(
+        policy,
         root,
         &[
             "diff",
@@ -1819,6 +1915,7 @@ pub async fn capture_turn_diff(
     )
     .await?;
     let tracked = capture_git(
+        policy,
         root,
         &[
             "diff",

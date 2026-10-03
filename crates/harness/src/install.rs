@@ -361,11 +361,15 @@ async fn run(
     if cancel.is_cancelled() {
         return Err(HarnessError::Install("installation cancelled".into()));
     }
-    let mut child = crate::acp::child::Child::new(
-        command
-            .spawn()
-            .map_err(|e| HarnessError::Install(e.to_string()))?,
-    );
+    let spawned = {
+        // Host admission (see `crate::local_execution_lease`).
+        let Some(_lease) = crate::local_execution_lease() else {
+            return Err(crate::local_execution_refused());
+        };
+        command.spawn()
+    };
+    let mut child =
+        crate::acp::child::Child::new(spawned.map_err(|e| HarnessError::Install(e.to_string()))?);
     let tail = StderrTail::default();
     let stdout = capture(child.stdout.take().expect("piped stdout"), tail.clone());
     let stderr = capture(child.stderr.take().expect("piped stderr"), tail.clone());

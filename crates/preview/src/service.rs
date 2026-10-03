@@ -99,6 +99,12 @@ struct Inner {
     /// Sign-in callbacks this device forwards to the device running them.
     callback_tunnels: CallbackTunnels,
     peers: std::sync::OnceLock<Peers>,
+    /// Host hold on everything that inspects this device (the engine's
+    /// "Disable local execution" policy): no scans, no local routes, no local
+    /// connections. Remote previews and sign-in callbacks are unaffected.
+    /// Scans and route publication hold the read side; [`PreviewService::
+    /// set_local_paused`] takes the write side, so once it returns none runs.
+    local_paused: Arc<tokio::sync::watch::Sender<bool>>,
 }
 pub type Projects = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
 impl PreviewService {
@@ -111,7 +117,22 @@ impl PreviewService {
             callback_routes: CallbackRoutes::default(),
             callback_tunnels: CallbackTunnels::default(),
             peers: std::sync::OnceLock::new(),
+            local_paused: Arc::new(tokio::sync::watch::channel(false).0),
         })))
+    }
+    /// Pause (or resume) local discovery. Pausing clears the local routes.
+    pub fn set_local_paused(&self, paused: bool) {
+        let catalog = self.0.catalog.clone();
+        self.0.local_paused.send_if_modified(|current| {
+            if *current == paused {
+                return false;
+            }
+            *current = paused;
+            if paused && let Err(error) = catalog.replace_local(Vec::new()) {
+                tracing::warn!(%error, "could not clear local preview services");
+            }
+            true
+        });
     }
     pub fn catalog(&self) -> &Catalog {
         &self.0.catalog
@@ -160,6 +181,7 @@ impl PreviewService {
         let connector = Arc::new(LocalConnector(
             self.0.catalog.clone(),
             self.0.callback_routes.clone(),
+            self.0.local_paused.clone(),
         ));
         let local = mux::local(connector.clone(), self.0.stop.child_token());
         let (peers, output) = Peers::new(
@@ -202,13 +224,27 @@ impl PreviewService {
         self.0.tasks.lock().unwrap().push(listener_task);
         let catalog = self.0.catalog.clone();
         let stop = self.0.stop.clone();
+        let paused = self.0.local_paused.clone();
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
             loop {
+                // Paused: no scanning until resumed.
+                let mut resumed = paused.subscribe();
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = resumed.wait_for(|paused| !*paused) => {}
+                }
                 let memory = &mut memory;
+                let paused_for_scan = paused.clone();
                 let scan = async {
                     let projects = projects.clone();
+                    let paused = paused_for_scan.clone();
                     let candidates = tokio::task::spawn_blocking(move || {
+                        // Enumeration (lsof/ps on macOS) under the read side.
+                        let paused = paused.borrow();
+                        if *paused {
+                            return Vec::new();
+                        }
                         let mut roots: Vec<_> = projects()
                             .into_iter()
                             .collect::<std::collections::BTreeSet<_>>()
@@ -254,11 +290,17 @@ impl PreviewService {
                             servers.push((root, listener));
                         }
                     }
-                    if let Err(error) = catalog.replace_local(servers) {
+                    let paused = paused_for_scan.borrow();
+                    if !*paused && let Err(error) = catalog.replace_local(servers) {
                         tracing::warn!(%error, "could not update preview services");
                     }
                 };
-                tokio::select! { _ = stop.cancelled() => break, _ = scan => {} }
+                let mut pausing = paused.subscribe();
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = pausing.wait_for(|paused| *paused) => continue,
+                    _ = scan => {}
+                }
                 tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
             }
         });
@@ -286,7 +328,14 @@ impl PreviewService {
         }
     }
 }
-struct LocalConnector(Catalog, CallbackRoutes);
+struct LocalConnector(
+    Catalog,
+    CallbackRoutes,
+    Arc<tokio::sync::watch::Sender<bool>>,
+);
+/// A loopback dev server answers at once or not at all.
+const LOCAL_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[async_trait::async_trait]
 impl Connector for LocalConnector {
     async fn connect(&self, id: &str) -> anyhow::Result<BoxIo> {
@@ -298,6 +347,10 @@ impl Connector for LocalConnector {
         if let Some(port) = self.1.target(peer, id) {
             return CallbackRoutes::connect(port?).await;
         }
+        anyhow::ensure!(
+            !*self.2.borrow(),
+            "local previews are paused on this device"
+        );
         let route = self
             .0
             .local_route(id)
@@ -308,12 +361,22 @@ impl Connector for LocalConnector {
         // asset a remote page requested, which showed up as memory and CPU
         // churn on the hosting Mac.
         let (pid, started_at) = (route.listener.pid, route.listener.started_at);
-        let valid =
-            tokio::task::spawn_blocking(move || discovery::same_process(pid, started_at)).await?;
-        anyhow::ensure!(valid, "preview process changed; waiting for rediscovery");
-        Ok(Box::new(
-            tokio::net::TcpStream::connect(route.listener.address).await?,
-        ))
+        let address = route.listener.address;
+        let paused = self.2.clone();
+        // Dial under the pause borrow, so a pause that has returned means no
+        // local connection can still be starting.
+        let stream = tokio::task::spawn_blocking(move || {
+            let paused = paused.borrow();
+            anyhow::ensure!(
+                !*paused && discovery::same_process(pid, started_at),
+                "preview process changed; waiting for rediscovery"
+            );
+            let stream = std::net::TcpStream::connect_timeout(&address, LOCAL_DIAL_TIMEOUT)?;
+            stream.set_nonblocking(true)?;
+            Ok(stream)
+        })
+        .await??;
+        Ok(Box::new(tokio::net::TcpStream::from_std(stream)?))
     }
 }
 

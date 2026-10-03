@@ -5443,11 +5443,17 @@ impl Shell {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let devices = &self.state.read(cx).devices;
+        // This device is not offered while its local execution is disabled.
+        let state = self.state.read(cx);
+        let devices: Vec<&Device> = state
+            .devices
+            .iter()
+            .filter(|d| state.may_execute_on(&d.id))
+            .collect();
         let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()
-            .map(|ix| devices[ix].clone())
+            .map(|ix| Device::clone(devices[ix]))
             .collect()
     }
 
@@ -6194,6 +6200,10 @@ impl Shell {
             );
         } else if count == 0 && !(step == ProjectStep::Locations && drives_loading) {
             let (title, hint) = match step {
+                ProjectStep::Devices if self.state.read(cx).local_execution_disabled => (
+                    "No remote devices found",
+                    "Local execution is disabled on this device.".into(),
+                ),
                 ProjectStep::Devices => ("No devices found", "Try another device name.".into()),
                 ProjectStep::Locations => {
                     ("No locations found", "Try Home or a drive name.".into())

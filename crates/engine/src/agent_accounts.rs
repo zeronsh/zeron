@@ -738,6 +738,9 @@ struct Inner {
     identities: Mutex<HashMap<String, IdentityLookup>>,
     /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
+    /// Device policy (issue #730), checked at login start and again after
+    /// every flow registration.
+    local_execution: std::sync::OnceLock<crate::local_execution::LocalExecution>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -829,7 +832,30 @@ impl AgentAccounts {
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
+                local_execution: std::sync::OnceLock::new(),
             }),
+        }
+    }
+
+    /// Wire the device's local-execution policy (once, at engine assembly).
+    pub fn set_local_execution(&self, policy: crate::local_execution::LocalExecution) {
+        let _ = self.inner.local_execution.set(policy);
+    }
+
+    fn check_local_execution(&self) -> Result<(), EngineError> {
+        match self.inner.local_execution.get() {
+            Some(policy) => policy.check(),
+            None => Ok(()),
+        }
+    }
+
+    /// Every login flow registers here. Disabling publishes the policy and
+    /// then cancels every registered flow, so a flow registered after that
+    /// scan is cancelled on the spot — even if its RPC is later dropped.
+    fn register_flow(&self, login_id: &str, flow: LoginFlow) {
+        lock(&self.inner.flows).insert(login_id.to_string(), flow);
+        if self.check_local_execution().is_err() {
+            self.cancel_login(login_id);
         }
     }
 
@@ -1415,6 +1441,7 @@ impl AgentAccounts {
         provider: Option<&str>,
         requester: Option<&str>,
     ) -> Result<AgentLoginStart, EngineError> {
+        self.check_local_execution()?;
         self.sweep_flows();
         let provider = provider.filter(|p| !p.is_empty());
         let mut start = match harness {
@@ -1457,6 +1484,11 @@ impl AgentAccounts {
                 )));
             }
         };
+        // Its flow was cancelled at registration if the policy turned on.
+        if let Err(err) = self.check_local_execution() {
+            self.cancel_login(&start.login_id);
+            return Err(err);
+        }
         if start.callback_port.is_none() {
             start.callback_port = loopback_port(&start.url);
         }
@@ -1517,8 +1549,8 @@ impl AgentAccounts {
                 .await;
             lock(&outcome_state).outcome = Some(outcome.map_err(|e| e.to_string()));
         });
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
+        self.register_flow(
+            &login_id,
             LoginFlow::Task {
                 harness: HarnessId::ClaudeCode,
                 started_at: Instant::now(),
@@ -1596,8 +1628,8 @@ impl AgentAccounts {
             urlencode(CLAUDE_REDIRECT),
             urlencode(CLAUDE_SCOPES),
         );
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
+        self.register_flow(
+            &login_id,
             LoginFlow::Claude {
                 verifier,
                 state,
@@ -1672,35 +1704,57 @@ impl AgentAccounts {
             .stdin(zeron_harness::process::Stdio::null())
             .stdout(zeron_harness::process::Stdio::piped())
             .stderr(zeron_harness::process::Stdio::piped());
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = std::fs::remove_dir_all(&home);
-                let cli = stores::cli_name(harness);
-                return Err(EngineError::Other(
-                    if err.kind() == std::io::ErrorKind::NotFound {
-                        format!("The `{cli}` CLI was not found on this device — install it first.")
-                    } else {
-                        format!("Could not start the {cli} sign-in: {err}")
-                    },
-                ));
-            }
+        // Admission lease from the policy check through spawn and flow
+        // registration (see `LocalExecution::admit`): a disable waits for this
+        // start, and its drain then finds the flow.
+        let (output, exit) = {
+            let lease = match self
+                .inner
+                .local_execution
+                .get()
+                .map(|policy| policy.admit())
+                .transpose()
+            {
+                Ok(lease) => lease,
+                Err(err) => {
+                    let _ = std::fs::remove_dir_all(&home);
+                    return Err(err);
+                }
+            };
+            let child = match command.spawn() {
+                Ok(child) => child,
+                Err(err) => {
+                    let _ = std::fs::remove_dir_all(&home);
+                    let cli = stores::cli_name(harness);
+                    return Err(EngineError::Other(
+                        if err.kind() == std::io::ErrorKind::NotFound {
+                            format!(
+                                "The `{cli}` CLI was not found on this device — install it first."
+                            )
+                        } else {
+                            format!("Could not start the {cli} sign-in: {err}")
+                        },
+                    ));
+                }
+            };
+            let (child, output, exit) = wire_login_child(child);
+            lock(&self.inner.flows).insert(
+                login_id.clone(),
+                LoginFlow::Spawned {
+                    harness,
+                    child,
+                    home,
+                    completion,
+                    started_at: Instant::now(),
+                    output: output.clone(),
+                    exit: exit.clone(),
+                    scan_url,
+                    requester: requester.map(str::to_string),
+                },
+            );
+            drop(lease);
+            (output, exit)
         };
-        let (child, output, exit) = wire_login_child(child);
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
-            LoginFlow::Spawned {
-                harness,
-                child,
-                home,
-                completion,
-                started_at: Instant::now(),
-                output: output.clone(),
-                exit: exit.clone(),
-                scan_url,
-                requester: requester.map(str::to_string),
-            },
-        );
         let url = await_login_url(&output, &exit, scan_url).await;
         Ok(AgentLoginStart {
             login_id,
@@ -1793,16 +1847,27 @@ impl AgentAccounts {
         let home = self.inner.config.antigravity_home.clone();
         let keychain = self.inner.config.antigravity_keychain;
         let task_state = state.clone();
+        let policy = self
+            .inner
+            .local_execution
+            .get()
+            .cloned()
+            .unwrap_or_default();
         let handle = tokio::spawn(async move {
             let progress_state = task_state.clone();
-            let mut outcome = zeron_harness::AcpHarness::antigravity()
-                .sign_in(browser, move |progress| match progress {
-                    zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
-                        lock(&progress_state).url = Some(url);
-                    }
-                })
+            // The adapter process starts inside this await.
+            let mut outcome = policy
+                .until_disabled(zeron_harness::AcpHarness::antigravity().sign_in(
+                    browser,
+                    move |progress| match progress {
+                        zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
+                            lock(&progress_state).url = Some(url);
+                        }
+                    },
+                ))
                 .await
-                .map_err(|e| e.to_string());
+                .map_err(|e| e.to_string())
+                .and_then(|result| result.map_err(|e| e.to_string()));
             // A success the list can't show would drop the user back at
             // "Connect" with no word why — say where the login went missing.
             if outcome.is_ok()
@@ -1816,8 +1881,8 @@ impl AgentAccounts {
             }
             lock(&task_state).outcome = Some(outcome);
         });
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
+        self.register_flow(
+            &login_id,
             LoginFlow::Task {
                 harness: HarnessId::Antigravity,
                 started_at: Instant::now(),
