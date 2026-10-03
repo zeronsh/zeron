@@ -105,6 +105,7 @@ impl TurnWire {
         let posts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = posts.clone();
         let hold_prompt = overrides["holdPrompt"].as_bool().unwrap_or(false);
+        let hold_bus = overrides["holdBus"].as_bool().unwrap_or(false);
         let busy_polls = overrides["busyPolls"].as_u64().unwrap_or(0) as usize;
         let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let server_polls = polls.clone();
@@ -144,6 +145,7 @@ impl TurnWire {
                     }
                     if is_post { recorded.lock().unwrap().push((path.clone(), serde_json::from_slice(&request[header_end..header_end+length]).unwrap_or(Value::Null))); }
                     if path == "/global/event" || path == "/api/event" {
+                        if hold_bus { std::future::pending::<()>().await; }
                         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: connected\n\n").await.unwrap();
                         let mut events = bus_rx.lock().await.take().unwrap();
                         while let Some(event) = events.recv().await {
@@ -199,6 +201,7 @@ impl TurnWire {
                             "/api/health" => ("200 OK", health.as_str()),
                             "/api/session" => ("200 OK", r#"{"data":{"id":"fixture"}}"#),
                             "/api/command" => ("200 OK", r#"{"data":[]}"#),
+                            "/api/agent" => ("200 OK", r#"{"data":[{"id":"build-id","name":"Build","mode":"primary"}]}"#),
                             // Non-empty: the catalog-sync retry loop must not stall tests.
                             "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true},{"providerID":"opencode","id":"long-context","name":"Long Context","limit":{"context":2000},"enabled":true}]}"#),
                             _ => ("200 OK", "{}"),
@@ -1016,7 +1019,7 @@ fn missing_connected_list_falls_back_to_the_full_catalog() {
         "connected": [],
     }))
     .unwrap();
-    assert_eq!(models_from_providers(&providers).len(), 2);
+    assert!(models_from_providers(&providers).is_empty());
 }
 
 #[test]
@@ -1058,7 +1061,8 @@ fn prompt_body_carries_model_variant_and_attachments() {
         Some(("anthropic", "claude-opus-5")),
         Some("high"),
         &["/tmp/shot.png".to_owned()],
-    );
+    )
+    .unwrap();
     assert_eq!(body["model"]["providerID"], "anthropic");
     assert_eq!(body["model"]["modelID"], "claude-opus-5");
     assert_eq!(body["variant"], "high");
@@ -1067,6 +1071,130 @@ fn prompt_body_carries_model_variant_and_attachments() {
     assert_eq!(body["parts"][1]["type"], "file");
     assert_eq!(body["parts"][1]["mime"], "image/png");
     assert_eq!(body["parts"][1]["url"], "file:///tmp/shot.png");
+}
+
+#[test]
+fn file_urls_preserve_reserved_characters_and_reject_relative_paths() {
+    let path = "/tmp/O'Brien 日本語 #1 %23.png";
+    let uri = attachment_uri(path).unwrap();
+    assert!(uri.contains("%23"));
+    assert!(uri.contains("%2523"));
+    assert!(!uri.contains('#'));
+    let url = reqwest::Url::parse(&uri).unwrap();
+    assert!(url.fragment().is_none());
+    assert!(attachment_uri("relative-image.png").is_err());
+    assert!(prompt_body_v2("hello", &["relative-image.png".into()]).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_drive_and_unc_attachment_urls_round_trip() {
+    for path in [
+        r"C:\Users\O'Brien 日本語\shot #1 %23.png",
+        r"\\server\share\shot #1.png",
+    ] {
+        let url = reqwest::Url::parse(&attachment_uri(path).unwrap()).unwrap();
+        assert_eq!(url.to_file_path().unwrap(), std::path::PathBuf::from(path));
+    }
+}
+
+#[test]
+fn selection_requires_a_model_from_a_connected_provider() {
+    let mut catalog: ProviderCatalog = serde_json::from_value(json!({
+        "all":[{"id":"provider", "models":{"alias":{"name":"Alias"}}}],
+        "connected":[]
+    }))
+    .unwrap();
+    assert!(validate_selection(&catalog, Some("provider/alias")).is_err());
+    catalog.connected = Some(vec!["provider".into()]);
+    assert!(validate_selection(&catalog, Some("provider/alias")).is_ok());
+    assert!(validate_selection(&catalog, Some("provider/deleted")).is_err());
+    assert!(validate_selection(&catalog, Some("alias")).is_err());
+    assert!(validate_selection(&catalog, None).is_ok());
+}
+
+#[tokio::test]
+async fn unavailable_agent_fails_before_creating_or_prompting_a_session() {
+    let mut wire = TurnWire::start_config(
+        false,
+        true,
+        true,
+        None,
+        "2.0.22",
+        json!({"modelOptions":{"agent":"removed-agent"}}),
+        false,
+    )
+    .await;
+    let error = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::Done {
+                status: DoneStatus::Errored,
+                error: Some(error),
+                ..
+            } = wire.events.recv().await.unwrap().unwrap()
+            {
+                return error;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(error.contains("unavailable in this project"));
+    assert!(wire.posts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_unavailable_event_bus_never_receives_a_prompt_and_can_be_interrupted() {
+    for interrupt in [false, true] {
+        let mut wire = TurnWire::start_config(
+            false,
+            false,
+            true,
+            None,
+            "1.18.34",
+            json!({"holdBus":true}),
+            false,
+        )
+        .await;
+        while !matches!(
+            wire.events.recv().await.unwrap().unwrap(),
+            AgentEvent::SessionStarted { .. }
+        ) {}
+        if interrupt {
+            wire.interrupt.cancel();
+        }
+        let (status, error) =
+            tokio::time::timeout(Duration::from_secs(if interrupt { 2 } else { 20 }), async {
+                loop {
+                    if let AgentEvent::Done { status, error, .. } =
+                        wire.events.recv().await.unwrap().unwrap()
+                    {
+                        return (status, error);
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            if interrupt {
+                DoneStatus::Interrupted
+            } else {
+                DoneStatus::Errored
+            }
+        );
+        if !interrupt {
+            assert!(error.unwrap().contains("no prompt was sent"));
+        }
+        assert!(
+            !wire
+                .posts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, _)| path.ends_with("/prompt_async"))
+        );
+    }
 }
 
 fn feed_with_assistant(message: &str) -> SessionFeed {
@@ -1457,7 +1585,7 @@ fn v2_frames_normalize_to_v1_payloads() {
         out[0],
         json!({"type":"session.error","properties":{
             "sessionID":"ses_1",
-            "error":{"name":"provider.auth","data":{"message":"provider.auth"}}}}),
+            "error":{"name":"provider.auth","data":{"message":"provider.auth: OpenCode could not authenticate this provider. Reconnect it with `opencode auth login`, then refresh the model picker"}}}}),
     );
     // The interrupt's step-level echo is NOT a provider error.
     assert!(
@@ -1644,7 +1772,7 @@ fn v2_model_list_folds_into_provider_catalog() {
 
 #[test]
 fn prompt_body_v2_carries_text_and_files_only() {
-    let body = prompt_body_v2("hello", &["/tmp/shot.png".to_owned()]);
+    let body = prompt_body_v2("hello", &["/tmp/shot.png".to_owned()]).unwrap();
     assert_eq!(body["text"], "hello");
     assert_eq!(body["files"][0]["uri"], "file:///tmp/shot.png");
     assert_eq!(body["files"][0]["name"], "shot.png");
@@ -2060,20 +2188,20 @@ async fn detection_routes_and_authentication() {
 fn v2_command_bodies_follow_server_version() {
     for version in ["2.0.2", "2.0.3", "unknown"] {
         assert_eq!(
-            command_body_v2(Some(&ServerVersion::parse(version)), "test", "args", &[]),
+            command_body_v2(Some(&ServerVersion::parse(version)), "test", "args", &[]).unwrap(),
             json!({"command":"test","text":"args"})
         );
     }
     for version in ["2.0.4", "v2.0.11", "3.0.0"] {
         let version = ServerVersion::parse(version);
         assert_eq!(
-            command_body_v2(Some(&version), "test", "args", &[]),
+            command_body_v2(Some(&version), "test", "args", &[]).unwrap(),
             json!({"name":"test","text":"args"})
         );
         let attachments = vec!["/workspace/image.png".into()];
         assert_eq!(
-            command_body_v2(Some(&version), "test", "args", &attachments)["files"],
-            prompt_body_v2("args", &attachments)["files"]
+            command_body_v2(Some(&version), "test", "args", &attachments).unwrap()["files"],
+            prompt_body_v2("args", &attachments).unwrap()["files"]
         );
     }
 }

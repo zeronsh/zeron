@@ -68,6 +68,15 @@ use zeron_proto::{
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, shutdown_child};
 
+pub mod paths;
+
+/// The credential format belongs to the selected CLI, not Zeron's version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialStorage {
+    LegacyJson,
+    Sqlite,
+}
+
 /// opencode loads plugins and MCP config before the server answers; cold
 /// plugin-heavy starts can take minutes. Shared by chat startup and model
 /// discovery (same boot either way).
@@ -137,31 +146,34 @@ fn opencode_install_paths() -> Vec<PathBuf> {
     }
     dirs.push(PathBuf::from("/opt/homebrew/bin/opencode"));
     dirs.push(PathBuf::from("/usr/local/bin/opencode"));
+    if cfg!(windows)
+        && let Some(local) = std::env::var_os("LOCALAPPDATA")
+    {
+        dirs.push(PathBuf::from(local).join("Programs/OpenCodeCLI/opencode.exe"));
+    }
     dirs
 }
 
 const INSTALL_HINT: &str = "opencode (searched PATH, the login shell's PATH, ~/.opencode/bin, \
      ~/.local/bin, ~/.bun/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, and \
      fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE, \
-     %APPDATA%\\npm, and explicit NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; install with \
+     %APPDATA%\\npm, %LOCALAPPDATA%\\Programs\\OpenCodeCLI, and explicit NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; install with \
      `curl -fsSL https://opencode.ai/install | bash` or \
      `npm install -g @opencode/cli`, then `opencode auth login`; set \
      OPENCODE_EXECUTABLE to override)";
 
-/// The user's opencode: `OPENCODE_EXECUTABLE` when it exists, else PATH (plus
-/// install locations). The override is validated at launch through
+/// The user's opencode: an authoritative `OPENCODE_EXECUTABLE`, else PATH
+/// (plus install locations). The override is validated through
 /// [`crate::executable::validate_native_override`] — including the `.cmd`
 /// shims npm installs on Windows.
-fn resolve_opencode_executable() -> Option<PathBuf> {
+fn resolve_opencode_executable() -> Result<PathBuf, HarnessError> {
     if let Some(path) = std::env::var_os("OPENCODE_EXECUTABLE")
         && !path.is_empty()
     {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
+        return crate::executable::validate_native_override(&PathBuf::from(path));
     }
     crate::acp::find_on_paths("opencode", opencode_install_paths())
+        .ok_or_else(|| HarnessError::NotInstalled(INSTALL_HINT.into()))
 }
 
 /// Effort ladder surfaced in the picker; applied per run by picking the
@@ -272,9 +284,39 @@ impl OpencodeHarness {
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
         if let Some(exe) = &self.executable {
-            return Ok(exe.clone());
+            return crate::executable::validate_native_override(exe);
         }
-        resolve_opencode_executable().ok_or_else(|| HarnessError::NotInstalled(INSTALL_HINT.into()))
+        resolve_opencode_executable()
+    }
+
+    /// Resolve the same CLI as a run. Let OpenCode initialize/migrate its own
+    /// database before an account write; Zeron never creates its schema.
+    pub async fn credential_storage(
+        &self,
+        initialize: bool,
+    ) -> Result<CredentialStorage, HarnessError> {
+        let exe = self.resolve_executable()?;
+        if let Some(version) = opencode_version(&exe).await {
+            if version.major == 1 {
+                return Ok(CredentialStorage::LegacyJson);
+            }
+            if version.major == 2 && !initialize {
+                return Ok(CredentialStorage::Sqlite);
+            }
+            if version.major > 2 {
+                return Err(HarnessError::Protocol(format!(
+                    "OpenCode {version} credential storage is not supported; use OpenCode's native login"
+                )));
+            }
+        }
+        let mut server = self.server(None, None).await?;
+        let storage = match server.version.get().and_then(|version| version.number) {
+            Some((1,_,_)) => Ok(CredentialStorage::LegacyJson),
+            Some((2,_,_)) => Ok(CredentialStorage::Sqlite),
+            _ => Err(HarnessError::Protocol("Unable to determine a supported OpenCode credential storage generation; use `opencode auth login`".into())),
+        };
+        server.shutdown(self.kill_grace).await;
+        storage
     }
 
     /// Boot (or attach to) a server for a run/probe. Probes have no chat cwd:
@@ -288,7 +330,12 @@ impl OpencodeHarness {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
+        let home = paths::Paths::detect().home;
+        let cwd = cwd.map(PathBuf::from).unwrap_or(home);
+        let cwd = cwd.to_str().ok_or_else(|| {
+            HarnessError::Protocol("OpenCode working directory is not valid UTF-8".into())
+        })?;
+        Server::spawn(&exe, Some(cwd), self.startup_timeout, mcp).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -360,9 +407,7 @@ impl Harness for OpencodeHarness {
         REASONING_LEVELS
     }
     fn installed(&self) -> bool {
-        self.executable.is_some()
-            || self.base_url.is_some()
-            || resolve_opencode_executable().is_some()
+        self.base_url.is_some() || self.resolve_executable().is_ok()
     }
     fn executable_path(&self) -> Option<PathBuf> {
         self.resolve_executable().ok()
@@ -610,6 +655,7 @@ impl Server {
             // own value would otherwise lock us out of our server (401).
             .env("OPENCODE_PASSWORD", &password)
             .env("OPENCODE_SERVER_PASSWORD", &password)
+            .env("OPENCODE_SERVER_USERNAME", "opencode")
             .env("OPENCODE_CLIENT", "zeron");
         if let Some(mcp) = mcp {
             // The config shape differs by generation. If even the cold probe
@@ -621,14 +667,18 @@ impl Server {
                     } else {
                         Protocol::V1
                     };
-                    cmd.env(
-                        "OPENCODE_CONFIG_CONTENT",
-                        mcp_config(
-                            std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
-                            mcp,
-                            protocol,
-                        )?,
-                    );
+                    match mcp_config(
+                        std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
+                        mcp,
+                        protocol,
+                    ) {
+                        Ok(config) => {
+                            cmd.env("OPENCODE_CONFIG_CONTENT", config);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "OpenCode MCP bridge unavailable; preserving inherited config")
+                        }
+                    }
                 }
                 None => tracing::warn!(
                     binary_path = %exe.display(),
@@ -648,18 +698,25 @@ impl Server {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(exe))
             } else {
-                HarnessError::Io(e)
+                HarnessError::Protocol(format!(
+                    "OpenCode launch failed at {} (directory {}): {e}",
+                    exe.display(),
+                    cwd.unwrap_or("<inherited>")
+                ))
             }
         })?;
         let stderr_tail = crate::StderrTail::default();
+        let (stderr_done, mut stderr_drained) = tokio::sync::oneshot::channel();
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    let line = crate::redact::redact_output(&line);
                     tracing::debug!(target: "zeron_harness::opencode", "stderr: {line}");
                     tail.push(&line);
                 }
+                let _ = stderr_done.send(());
             });
         }
 
@@ -683,16 +740,22 @@ impl Server {
         // with its stderr tail instead of burning the whole budget.
         let deadline = tokio::time::Instant::now() + startup;
         loop {
-            if let Some(child) = server.child.as_mut()
-                && let Ok(Some(status)) = child.try_wait()
-            {
-                return Err(HarnessError::Protocol(crate::crash_message(
-                    "opencode serve",
-                    Some(status),
-                    &server.stderr_tail,
-                )));
-            }
-            let detected = match Protocol::detect(&server).await {
+            // Race readiness against process exit and the overall deadline.
+            // Four parked health routes must not conceal a quick child crash.
+            let mut child = server.child.take().expect("owned startup child");
+            let observation = tokio::select! {
+                status = child.wait() => {
+                    let _ = tokio::time::timeout(Duration::from_millis(250),&mut stderr_drained).await;
+                    Err(HarnessError::Protocol(crate::crash_message(
+                        &format!("OpenCode serve at {} (directory {})",exe.display(),cwd.unwrap_or("<inherited>")),
+                        status.ok(), &server.stderr_tail,
+                    )))
+                },
+                result = Protocol::detect(&server) => result,
+                _ = tokio::time::sleep_until(deadline) => Ok(None),
+            };
+            server.child = Some(child);
+            let detected = match observation {
                 Ok(detected) => detected,
                 Err(error) => {
                     server.shutdown(Duration::from_secs(1)).await;
@@ -702,6 +765,8 @@ impl Server {
             if let Some(protocol) = detected {
                 tracing::debug!(
                     version = server.version.get().map(|v| v.raw.as_str()),
+                    binary_path = %exe.display(),
+                    cwd,
                     "opencode ready"
                 );
                 let _ = server.protocol.set(protocol);
@@ -710,8 +775,9 @@ impl Server {
             if tokio::time::Instant::now() >= deadline {
                 server.shutdown(Duration::from_secs(1)).await;
                 return Err(HarnessError::Protocol(format!(
-                    "opencode serve did not become healthy within {}s (raise {} if this \
-                     machine's plugin load is genuinely slow)",
+                    "OpenCode serve at {} (directory {}) did not become healthy within {}s (raise {} for slow plugin initialization)",
+                    exe.display(),
+                    cwd.unwrap_or("<inherited>"),
                     startup.as_secs(),
                     STARTUP_TIMEOUT_ENV,
                 )));
@@ -1072,7 +1138,7 @@ async fn decode_json_response<T: serde::de::DeserializeOwned + Send + 'static>(
 /// open, slow to scroll, and full of models every run of which fails with
 /// "Model not found" (field report, v0.2.21). `connected` names exactly
 /// the usable set (credentialed + config-declared + the anonymous Zen
-/// tier). An absent/empty `connected` (older server) falls back to `all`.
+/// tier). Only an absent `connected` (older server) falls back to `all`.
 fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
     let connected: std::collections::HashSet<&str> = providers
         .connected
@@ -1085,7 +1151,7 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
         let Some(provider_id) = provider.id.as_deref() else {
             continue;
         };
-        if !connected.is_empty() && !connected.contains(provider_id) {
+        if providers.connected.is_some() && !connected.contains(provider_id) {
             continue;
         }
         let provider_name = provider.name.as_deref().unwrap_or(provider_id);
@@ -1121,6 +1187,32 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
         out.extend(provider_models);
     }
     out
+}
+
+fn validate_selection(
+    providers: &ProviderCatalog,
+    selected: Option<&str>,
+) -> Result<(), HarnessError> {
+    let Some(selected) = selected.filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    if !selected
+        .split_once('/')
+        .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+    {
+        return Err(HarnessError::Protocol(format!(
+            "OpenCode model '{selected}' must name a provider and model (provider/model)"
+        )));
+    }
+    if !models_from_providers(providers)
+        .iter()
+        .any(|model| model.id == selected)
+    {
+        return Err(HarnessError::Protocol(format!(
+            "OpenCode model '{selected}' is unavailable in this project. Connect its provider with `opencode auth login`, check the project's OpenCode configuration, then refresh the model picker"
+        )));
+    }
+    Ok(())
 }
 
 /// Stored with the models so overlapping discovery calls share the same probe.
@@ -1500,6 +1592,24 @@ async fn run_session(session: Session) {
 
     // ---- session create/resume -------------------------------------------
     let setup = async {
+        // Validate against the *run's* project configuration, never the cached
+        // global picker catalog. An unavailable provider is not a usable model.
+        let providers = server.provider_catalog(dir).await?;
+        validate_selection(&providers, request.model.as_deref())?;
+        if server.protocol().await == Protocol::V2
+            && let Some(agent) = agent
+        {
+            let agents = server.get_json("/api/agent", dir).await?;
+            if !agent_option(&agents)
+                .choices
+                .iter()
+                .any(|choice| choice.id == agent)
+            {
+                return Err(HarnessError::Protocol(format!(
+                    "OpenCode agent '{agent}' is unavailable in this project; refresh the model picker and select an available agent"
+                )));
+            }
+        }
         let session_id = match &request.resume {
             Some(resume) => {
                 // Sessions are durable server-side: resume = reuse the id.
@@ -1537,7 +1647,6 @@ async fn run_session(session: Session) {
 
         // Provider catalog: resolves the model's advertised reasoning
         // variants so the requested effort only rides models that have it.
-        let providers = server.provider_catalog(dir).await.unwrap_or_default();
 
         // 2.x: the requested model (+ variant) is set on the session once;
         // prompts carry only text and files.
@@ -1662,21 +1771,37 @@ async fn run_session(session: Session) {
     // prompting, or a fast-failing turn's whole lifecycle can slip into the
     // gap (observed live: busy → error → idle inside ~200ms). Bounded — the
     // stall watchdog still guards a bus that never comes up.
-    let connect_wait = tokio::time::timeout(Duration::from_secs(15), async {
+    let connect_wait = tokio::select! {
+        _ = interrupt.cancelled() => {
+            let _ = server.abort_session(&session_id,dir).await;
+            let _ = send(&event_tx,AgentEvent::Done {
+                status:DoneStatus::Interrupted,result:None,error:None,session_id:Some(session_id),
+            }).await;
+            bus_handle.abort();
+            server.shutdown(kill_grace).await;
+            return;
+        },
+        result = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             match bus_rx.recv().await {
-                Some(BusMsg::Connected) | None => return,
+                Some(BusMsg::Connected) => return true,
+                None => return false,
                 // Nothing else can arrive before Connected; drop defensively.
                 Some(_) => {}
             }
         }
-    })
-    .await;
-    if connect_wait.is_err() {
-        tracing::debug!(
-            target: "zeron_harness::opencode",
-            "event bus not connected within 15s; prompting anyway"
-        );
+        }) => result,
+    };
+    if !matches!(connect_wait, Ok(true)) {
+        let _ = send(&event_tx, AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some("OpenCode event stream could not connect within 15s; no prompt was sent. Check local proxy/firewall settings and retry".into()),
+            session_id: Some(session_id),
+        }).await;
+        bus_handle.abort();
+        server.shutdown(kill_grace).await;
+        return;
     }
     let stall = stall_bound();
     let (command_failure_tx, mut command_failure_rx) = mpsc::unbounded_channel();
@@ -2322,7 +2447,7 @@ fn prompt_body(
     model: Option<(&str, &str)>,
     variant: Option<&str>,
     attachments: &[String],
-) -> Value {
+) -> Result<Value, HarnessError> {
     let mut parts = vec![json!({ "type": "text", "text": prompt })];
     for path in attachments {
         parts.push(json!({
@@ -2332,7 +2457,7 @@ fn prompt_body(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            "url": format!("file://{path}"),
+            "url": attachment_uri(path)?,
         }));
     }
     let mut body = serde_json::Map::new();
@@ -2346,26 +2471,48 @@ fn prompt_body(
     if let Some(variant) = variant {
         body.insert("variant".into(), Value::String(variant.to_owned()));
     }
-    Value::Object(body)
+    Ok(Value::Object(body))
 }
 
 /// 2.x prompt body: plain text plus `{uri, name}` file attachments. Model
 /// and variant do NOT ride here — they were set on the session at run
 /// start (`POST /api/session/{id}/model`).
-fn prompt_body_v2(prompt: &str, attachments: &[String]) -> Value {
+fn prompt_body_v2(prompt: &str, attachments: &[String]) -> Result<Value, HarnessError> {
     let files: Vec<Value> = attachments
         .iter()
         .map(|path| {
-            json!({
-                "uri": format!("file://{path}"),
+            Ok(json!({
+                "uri": attachment_uri(path)?,
                 "name": std::path::Path::new(path)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-            })
+            }))
         })
-        .collect();
-    json!({ "text": prompt, "files": files })
+        .collect::<Result<_, HarnessError>>()?;
+    Ok(json!({ "text": prompt, "files": files }))
+}
+
+fn attachment_uri(path: &str) -> Result<String, HarnessError> {
+    // URL conversion percent-encodes #, %, spaces and Unicode and preserves
+    // Windows drive letters and UNC hosts. Raw interpolation loses filenames.
+    let url = reqwest::Url::from_file_path(path)
+        .or_else(|()| {
+            // Accept POSIX absolute paths in wire fixtures on every host.
+            if path.starts_with('/') && !path.starts_with("//") {
+                let mut url = reqwest::Url::parse("file:///").unwrap();
+                url.set_path(&path.replace('%', "%25"));
+                Ok(url)
+            } else {
+                Err(())
+            }
+        })
+        .map_err(|()| {
+            HarnessError::Protocol(format!(
+                "OpenCode attachment must be an absolute file path: {path}"
+            ))
+        })?;
+    Ok(url.into())
 }
 
 fn mime_for(path: &str) -> &'static str {
@@ -2397,18 +2544,18 @@ fn command_body_v2(
     name: &str,
     text: &str,
     attachments: &[String],
-) -> Value {
+) -> Result<Value, HarnessError> {
     if version
         .and_then(|v| v.number)
         .is_some_and(|v| v >= (2, 0, 4))
     {
         let mut body = json!({"name": name, "text": text});
         if !attachments.is_empty() {
-            body["files"] = prompt_body_v2(text, attachments)["files"].clone();
+            body["files"] = prompt_body_v2(text, attachments)?["files"].clone();
         }
-        body
+        Ok(body)
     } else {
-        json!({"command": name, "text": text})
+        Ok(json!({"command": name, "text": text}))
     }
 }
 
@@ -2453,7 +2600,7 @@ async fn post_prompt(
             ),
             Protocol::V2 => (
                 format!("/api/session/{session_id}/command"),
-                command_body_v2(server.version.get(), name, &arguments, attachments),
+                command_body_v2(server.version.get(), name, arguments, attachments)?,
             ),
         };
         let server_base = server.base.clone();
@@ -2505,11 +2652,11 @@ async fn post_prompt(
                 model.map(|(provider, model)| (provider.as_str(), model.as_str())),
                 variant,
                 attachments,
-            ),
+            )?,
         ),
         Protocol::V2 => (
             format!("/api/session/{session_id}/prompt"),
-            prompt_body_v2(prompt, attachments),
+            prompt_body_v2(prompt, attachments)?,
         ),
     };
     let server = Server {
@@ -3965,8 +4112,9 @@ fn v2_error_payload(data: &Value) -> Value {
     let error = data.get("error").cloned().unwrap_or(Value::Null);
     let name = error.get("type").and_then(Value::as_str).unwrap_or("");
     let message = match error.get("message").and_then(Value::as_str) {
-        Some(message) if !message.is_empty() => message,
-        _ => name,
+        Some(message) if !message.is_empty() => message.to_owned(),
+        _ if name == "provider.auth" => "provider.auth: OpenCode could not authenticate this provider. Reconnect it with `opencode auth login`, then refresh the model picker".into(),
+        _ => name.to_owned(),
     };
     json!({
         "type": "session.error",
@@ -4242,6 +4390,11 @@ mod context_tests {
 /// for 2.0.20, longer on slower machines and under Windows Defender).
 const COLD_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
+type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
+type VersionResult = (tokio::time::Instant, Option<semver::Version>);
+static COLD_VERSIONS: std::sync::OnceLock<tokio::sync::Mutex<HashMap<VersionKey, VersionResult>>> =
+    std::sync::OnceLock::new();
+
 /// The shared probe caps `--version` at 2s and caches a timeout for the
 /// binary's lifetime, so one cold first exec after an upgrade failed every
 /// later run instantly until restart. Retry past that cache with a longer
@@ -4256,25 +4409,43 @@ async fn opencode_version(exe: &std::path::Path) -> Option<semver::Version> {
     if cached.is_some() {
         return cached;
     }
+    let metadata = exe.metadata().ok()?;
+    let key = (
+        exe.canonicalize().ok()?,
+        metadata.modified().ok(),
+        metadata.len(),
+    );
+    // Coalesce slow probes across chats/account operations and retain a cold
+    // success even if the shared 2s probe still times out. Negative results
+    // get only a short cooldown, never a process-lifetime failure cache.
+    let mut versions = COLD_VERSIONS.get_or_init(Default::default).lock().await;
+    if let Some((at, version)) = versions.get(&key)
+        && (version.is_some() || at.elapsed() < Duration::from_secs(5))
+    {
+        return version.clone();
+    }
     let mut cmd = Command::new(exe);
+    crate::compose_child_path(&mut cmd, exe);
     cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(COLD_VERSION_TIMEOUT, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let version = crate::executable::parse_version(&output.stdout)
-        .or_else(|| crate::executable::parse_version(&output.stderr))?;
-    if let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) {
+    let version = match tokio::time::timeout(COLD_VERSION_TIMEOUT, cmd.output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            crate::executable::parse_version(&output.stdout)
+                .or_else(|| crate::executable::parse_version(&output.stderr))
+        }
+        _ => None,
+    };
+    versions.retain(|(path, _, _), _| path != &key.0);
+    versions.insert(key, (tokio::time::Instant::now(), version.clone()));
+    if version.is_some()
+        && let Some(stem) = exe.file_stem().and_then(|s| s.to_str())
+    {
         crate::executable::invalidate_versions(&[stem]);
     }
-    Some(version)
+    version
 }
 
 /// Inline config is the final user config layer. Preserve inherited overrides

@@ -17,6 +17,11 @@ path = "tests/fixtures/native_agent.rs"
 required-features = ["native-fixture"]
 
 [[bin]]
+name = "harness-opencode-fixture"
+path = "tests/fixtures/opencode_server.rs"
+required-features = ["native-fixture"]
+
+[[bin]]
 name = "harness-pi-fixture"
 path = "tests/fixtures/pi_rpc.rs"
 required-features = ["native-fixture"]
@@ -39,6 +44,7 @@ thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 semver = "1"
+rusqlite.workspace = true
 zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]
