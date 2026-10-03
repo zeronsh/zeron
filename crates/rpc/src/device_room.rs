@@ -446,8 +446,8 @@ fn make_virtual_conn(
     conn_id: String,
     host_out: mpsc::Sender<Vec<u8>>,
 ) -> VirtualConn {
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
-    let (srv_out_tx, mut srv_out_rx) = mpsc::channel::<String>(256);
+    let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+    let (srv_out_tx, mut srv_out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
     tokio::spawn(serve_connection(service, srv_out_tx, in_rx));
     tokio::spawn(async move {
         while let Some(text) = srv_out_rx.recv().await {
@@ -475,7 +475,7 @@ async fn host_session(
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(crate::FRAME_QUEUE_CAP);
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(1);
     let transport = zeron_sync::socket::pump_with_timing(
         ws,
@@ -615,8 +615,8 @@ impl DeviceLink {
     {
         let (wire_tx, wire_rx) = mpsc::channel::<Vec<u8>>(1);
         let (wire_in, mut wire_out) = mpsc::channel::<Vec<u8>>(1);
-        let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-        let (in_tx, in_rx) = mpsc::channel::<String>(256);
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+        let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
 
         let pump = tokio::spawn(async move {

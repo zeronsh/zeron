@@ -266,7 +266,7 @@ fn bmp_coverage_bitmap_matches_cmap() {
             if let Some(c) = char::from_u32(u) {
                 assert_eq!(
                     face.covers(c),
-                    face.hb.glyph_index(c).is_some(),
+                    face.hb().glyph_index(c).is_some(),
                     "{f} U+{u:04X}"
                 );
             }

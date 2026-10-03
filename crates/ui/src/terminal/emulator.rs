@@ -212,6 +212,16 @@ impl Emulator {
         self.term.resize(GridSize::new(cols, rows));
     }
 
+    /// Lost bytes can leave the ANSI parser inside an unfinished OSC/CSI.
+    /// Reset it first so the visible gap marker cannot become escape payload.
+    pub fn output_gap(&mut self, skipped: u64) {
+        self.parser = Processor::new();
+        self.feed(
+            format!("\x1bc\r\n[Earlier terminal output unavailable: {skipped} chunks skipped]\r\n")
+                .as_bytes(),
+        );
+    }
+
     pub fn cols(&self) -> usize {
         self.term.columns()
     }
@@ -419,6 +429,19 @@ impl std::fmt::Debug for Emulator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_gap_recovers_from_an_unterminated_escape_sequence() {
+        let mut emulator = super::Emulator::new(120, 10);
+        emulator.feed(b"\x1b]0;unfinished title");
+        emulator.output_gap(68);
+        emulator.feed(b"next output");
+        let text = (0..10)
+            .map(|row| emulator.row_text(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("68 chunks skipped"));
+        assert!(text.contains("next output"));
+    }
     use super::*;
 
     fn emu(cols: u16, rows: u16) -> Emulator {

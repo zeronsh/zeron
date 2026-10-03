@@ -183,6 +183,24 @@ pub(crate) fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaIma
     }
 }
 
+/// Normalize user images so decoded pixels count toward the cache budget.
+pub(crate) fn decode_attachment_image(
+    bytes: Vec<u8>,
+    mime: &str,
+    max_bytes: usize,
+) -> Result<MediaImage, String> {
+    if bytes.len() > max_bytes {
+        return Err("Attachment image exceeds its byte limit".into());
+    }
+    if mime == "image/svg+xml" {
+        decode_image(mime, bytes).map(|media| media.for_view((256.0, 256.0), 2.0, 512 * 512))
+    } else {
+        // Bound previews consistently with generated images. The original
+        // attachment remains on the owning device for open/download.
+        decode_raster_image_bounded(bytes, max_bytes, Some(2048))
+    }
+}
+
 /// Validate generated raster metadata and retain a bounded static preview.
 pub(crate) fn decode_generated_image(
     bytes: Vec<u8>,
@@ -255,6 +273,23 @@ fn decode_raster_image_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_jpeg_preview_is_normalized_bounded_and_charged_for_pixels() {
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(3072, 128)
+            .write_to(&mut encoded, image::ImageFormat::Jpeg)
+            .unwrap();
+        let media =
+            decode_attachment_image(encoded.into_inner(), "image/jpeg", 24 * 1024 * 1024).unwrap();
+        assert_eq!(media.width, 2048.0);
+        assert_eq!(
+            image::guess_format(&media.image.bytes).unwrap(),
+            image::ImageFormat::Png
+        );
+        assert!(media.bytes >= media.width as usize * media.height as usize * 8);
+        assert!(decode_attachment_image(vec![0; 10], "image/jpeg", 9).is_err());
+    }
 
     fn assert_svg_text_is_visible(family: &str) {
         let svg = format!(

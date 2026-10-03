@@ -14,7 +14,7 @@ use crate::{ClientFrame, RpcError, ServerFrame};
 /// the connection reader — transport backpressure instead of unbounded growth
 /// when a consumer stalls behind a fast producer (watch frames every 120ms
 /// during streaming used to pile up whole-transcript payloads here).
-const STREAM_QUEUE_CAP: usize = 256;
+const STREAM_QUEUE_CAP: usize = 8;
 
 enum Pending {
     Call(oneshot::Sender<Result<serde_json::Value, RpcError>>),
@@ -52,6 +52,19 @@ pub struct RpcSubscription {
     shared: Arc<Shared>,
 }
 
+// Own cleanup before the first await, including a cancelled/backpressured send.
+struct RequestGuard {
+    id: u64,
+    out: mpsc::Sender<String>,
+    shared: Arc<Shared>,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        cancel_pending(self.id, &self.shared, &self.out);
+    }
+}
+
 impl RpcSubscription {
     pub async fn recv(&mut self) -> Option<serde_json::Value> {
         self.items.recv().await
@@ -60,26 +73,30 @@ impl RpcSubscription {
 
 impl Drop for RpcSubscription {
     fn drop(&mut self) {
-        if self.shared.lock().remove(&self.id).is_none() {
-            return;
-        }
-        let Ok(frame) = serde_json::to_string(&ClientFrame {
-            id: self.id,
-            method: None,
-            params: serde_json::Value::Null,
-            cancel: true,
-        }) else {
-            return;
-        };
-        match self.out.try_send(frame) {
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-            Err(mpsc::error::TrySendError::Full(frame)) => {
-                let out = self.out.clone();
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    runtime.spawn(async move {
-                        let _ = out.send(frame).await;
-                    });
-                }
+        cancel_pending(self.id, &self.shared, &self.out);
+    }
+}
+
+fn cancel_pending(id: u64, shared: &Arc<Shared>, out: &mpsc::Sender<String>) {
+    if shared.lock().remove(&id).is_none() {
+        return;
+    }
+    let Ok(frame) = serde_json::to_string(&ClientFrame {
+        id,
+        method: None,
+        params: serde_json::Value::Null,
+        cancel: true,
+    }) else {
+        return;
+    };
+    match out.try_send(frame) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(frame)) => {
+            let out = out.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = out.send(frame).await;
+                });
             }
         }
     }
@@ -147,6 +164,11 @@ impl RpcClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.shared.lock().insert(id, Pending::Call(tx));
+        let _guard = RequestGuard {
+            id,
+            out: self.out.clone(),
+            shared: self.shared.clone(),
+        };
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -370,8 +392,8 @@ pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
         .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
         .map_err(|e| RpcError::Transport(e.to_string()))?;
     let (mut sink, mut stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+    let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
     tokio::spawn(async move {
         loop {
             tokio::select! {

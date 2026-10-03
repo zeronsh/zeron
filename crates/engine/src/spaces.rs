@@ -42,7 +42,7 @@ const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 
 struct SpaceEntry {
     path: PathBuf,
-    kick_tx: mpsc::UnboundedSender<()>,
+    kick_tx: mpsc::Sender<()>,
     /// Keeps the folder watcher alive; dropped on entry close. Filled
     /// asynchronously — FSEvents registration blocks, so [`reconcile`] builds
     /// it off the runtime and attaches it here once ready.
@@ -107,7 +107,7 @@ impl SpacesSync {
         let spaces = self.inner.workspace.watch_spaces().borrow().clone();
         reconcile(&self.inner, &spaces);
         for entry in lock(&self.inner.entries).values() {
-            let _ = entry.kick_tx.send(());
+            let _ = entry.kick_tx.try_send(());
         }
     }
 }
@@ -126,7 +126,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
         if entries.contains_key(id) {
             continue; // deviceId/path are immutable — nothing to refresh
         }
-        let (kick_tx, kick_rx) = mpsc::unbounded_channel();
+        let (kick_tx, kick_rx) = mpsc::channel(1);
         let entry = Arc::new(SpaceEntry {
             path: PathBuf::from(&space.path),
             kick_tx: kick_tx.clone(),
@@ -139,7 +139,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
             Arc::downgrade(&entry),
             kick_rx,
         ));
-        let _ = kick_tx.send(()); // initial check (boot / first observed)
+        let _ = kick_tx.try_send(()); // initial check (boot / first observed)
 
         // Non-recursive watcher on the space folder: `.git` appearing/vanishing
         // among the direct children is exactly the signal we need. Watch
@@ -160,7 +160,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
                         .iter()
                         .any(|p| p.file_name().is_some_and(|n| n == ".git"))
                     {
-                        let _ = tx.send(());
+                        let _ = tx.try_send(());
                     }
                 });
             match result {
@@ -171,7 +171,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
                             *lock(&entry.folder_watch) = Some(watcher);
                             // Close the check→attach gap: a `.git` change while
                             // unwatched gets caught by this recheck.
-                            let _ = entry.kick_tx.send(());
+                            let _ = entry.kick_tx.try_send(());
                         }
                         Err(err) => {
                             tracing::debug!(path = %entry.path.display(), error = %err, "spaces: watch failed");
@@ -191,7 +191,7 @@ async fn entry_task(
     inner: Weak<SpacesSyncInner>,
     space_id: String,
     entry: Weak<SpaceEntry>,
-    mut kick_rx: mpsc::UnboundedReceiver<()>,
+    mut kick_rx: mpsc::Receiver<()>,
 ) {
     while kick_rx.recv().await.is_some() {
         loop {
@@ -310,7 +310,7 @@ async fn spaces_task(
                 let spaces = spaces_rx.borrow().clone();
                 reconcile(&inner, &spaces);
                 for entry in lock(&inner.entries).values() {
-                    let _ = entry.kick_tx.send(());
+                    let _ = entry.kick_tx.try_send(());
                 }
                 sweep_orphans(&inner);
             }

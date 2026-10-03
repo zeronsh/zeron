@@ -573,6 +573,40 @@ impl TerminalPanel {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        // Wait for an authoritative chat list: reconnect initially has no
+        // rows. Navigation/archive keeps tabs; deletion releases their tasks
+        // and emulators and closes otherwise-inaccessible PTYs.
+        let deleted: Vec<_> = {
+            let state = self.state.read(cx);
+            self.chats
+                .keys()
+                .filter(|id| {
+                    state.chats_synced
+                        && !id.starts_with(CANVAS_PANEL_PREFIX)
+                        && !state.chats.iter().any(|chat| &chat.id == *id)
+                })
+                .cloned()
+                .collect()
+        };
+        for chat_id in deleted {
+            if let Some(tabs) = self.chats.remove(&chat_id) {
+                for tab in tabs.tabs {
+                    if let (Some(engine), Some(id)) = (self.engine(cx), tab.terminal_id.clone()) {
+                        let target = tab.target_device_id.clone();
+                        cx.spawn(async move |_, _| {
+                            let _ = engine
+                                .client()
+                                .call(
+                                    methods::CLOSE_TERMINAL,
+                                    with_target(serde_json::json!({ "terminalId": id }), &target),
+                                )
+                                .await;
+                        })
+                        .detach();
+                    }
+                }
+            }
+        }
         let selected_key = self.selected_chat(cx);
         let prev = self.last_selected.clone();
         let switched = Some(selected_key.clone()) != prev;
@@ -770,7 +804,7 @@ impl TerminalPanel {
 
                 let subscribed = engine
                     .client()
-                    .subscribe(
+                    .subscribe_scoped(
                         methods::SUBSCRIBE_TERMINAL,
                         with_target(
                             serde_json::json!({ "terminalId": terminal_id, "afterSeq": after_seq }),
@@ -839,6 +873,12 @@ impl TerminalPanel {
         };
         let target = tab.target_device_id.clone();
         match event {
+            TerminalEvent::Gap { seq, skipped } => {
+                tab.last_seq = seq;
+                tab.emulator.output_gap(skipped);
+                cx.notify();
+                StreamDisposition::Continue
+            }
             TerminalEvent::Data { seq, data } => {
                 tab.last_seq = seq;
                 let responses = tab.emulator.feed(&decode_base64(&data));

@@ -1103,6 +1103,9 @@ pub struct TerminalSession {
 pub enum TerminalEvent {
     /// Output chunk; `data` is base64 (PTY output is raw bytes, not valid UTF-8).
     Data { seq: u64, data: String },
+    /// The viewer fell outside bounded replay/live output. Reset its parser
+    /// and show the gap before consuming the next available ordered chunk.
+    Gap { seq: u64, skipped: u64 },
     #[serde(rename_all = "camelCase")]
     Exit {
         seq: u64,

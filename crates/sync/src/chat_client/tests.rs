@@ -1672,7 +1672,96 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
 }
 
 struct JournalSink(crate::DocsStore, RecordingSink);
+#[tokio::test(start_paused = true)]
+async fn reopened_disk_backlog_has_a_bounded_window_and_drains_all_http_pages() {
+    struct ImmediateHttp(Arc<Mutex<Vec<String>>>, Arc<tokio::sync::Semaphore>);
+    impl ChatTransport for ImmediateHttp {
+        fn push(&self, id: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            let attempts = self.0.clone();
+            let gate = self.1.clone();
+            Box::pin(async move {
+                gate.acquire()
+                    .await
+                    .map_err(|_| SyncError::Closed)?
+                    .forget();
+                lock(&attempts).push(id.clone());
+                Ok(serde_json::json!({"batchId":id,"seq":0}).to_string())
+            })
+        }
+        fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            Box::pin(async { Err(SyncError::Closed) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = crate::DocsStore::open(dir.path()).unwrap();
+        for i in 0..100 {
+            store
+                .enqueue_chat_update("impaired", &format!("batch-{i}"), &vec![b'x'; 64 * 1024])
+                .unwrap();
+        }
+    }
+    let sink = Arc::new(JournalSink(
+        crate::DocsStore::open(dir.path()).unwrap(),
+        RecordingSink::default(),
+    ));
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        connector(vec![]),
+        sink.clone(),
+        fetch,
+        "local",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(ImmediateHttp(attempts.clone(), gate.clone()))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.stats().pending_pushes, 100);
+    assert!(
+        lock(&client.shared)
+            .pending
+            .iter()
+            .map(|p| p.bytes.len())
+            .sum::<usize>()
+            <= PENDING_WINDOW_BYTES
+    );
+    gate.add_permits(100);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while client.stats().pending_pushes != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        *lock(&attempts),
+        (0..100).map(|i| format!("batch-{i}")).collect::<Vec<_>>()
+    );
+    assert!(!sink.0.has_pending_chat_updates("impaired").unwrap());
+    client.shutdown().await;
+}
+
 impl ChatDocSink for JournalSink {
+    fn pending_window(&self) -> Result<Option<Vec<(String, Vec<u8>)>>, String> {
+        self.0
+            .pending_chat_updates_window(
+                "impaired",
+                PENDING_WINDOW_BATCHES,
+                PENDING_WINDOW_BYTES,
+                MAX_PUSH_BYTES,
+            )
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+    fn pending_update_count(&self) -> Result<Option<u64>, String> {
+        self.0
+            .pending_chat_update_count("impaired")
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
     fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         self.0
             .pending_chat_updates("impaired")

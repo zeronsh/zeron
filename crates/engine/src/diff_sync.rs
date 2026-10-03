@@ -128,7 +128,7 @@ struct CheckoutEntry {
     /// transient identity failure must never destroy a live entry.
     orphaned_since: Mutex<Option<std::time::Instant>>,
     /// Kick channel into the entry's debounce/sync task.
-    kick_tx: mpsc::UnboundedSender<()>,
+    kick_tx: mpsc::Sender<()>,
     /// Destructive mutations are serialized per checkout. File-system
     /// watchers and read-only captures may still run concurrently.
     discard_lock: tokio::sync::Mutex<()>,
@@ -279,7 +279,7 @@ impl CheckoutDiffSync {
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
     pub fn sync_all(&self) {
         for entry in lock(&self.inner.entries).values() {
-            let _ = entry.kick_tx.send(());
+            let _ = entry.kick_tx.try_send(());
         }
     }
 
@@ -347,7 +347,7 @@ impl CheckoutDiffSync {
             // The watcher kick remains useful if an external writer races this
             // operation after the final capture.
             sync_entry(&inner, &entry).await;
-            let _ = entry.kick_tx.send(());
+            let _ = entry.kick_tx.try_send(());
             result
         })
         .await
@@ -488,7 +488,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     has_new
                 };
                 if has_new {
-                    let _ = entry.kick_tx.send(()); // new chat needs a sidecar now
+                    let _ = entry.kick_tx.try_send(()); // new chat needs a sidecar now
                 }
             }
             None => add_entry(inner, identity, chats),
@@ -561,7 +561,7 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
 }
 
 fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
-    let (kick_tx, kick_rx) = mpsc::unbounded_channel();
+    let (kick_tx, kick_rx) = mpsc::channel(1);
     let entry = Arc::new(CheckoutEntry {
         identity,
         chats: Mutex::new(chats),
@@ -578,7 +578,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_rx,
         inner.cancel.clone(),
     ));
-    let _ = kick_tx.send(()); // initial snapshot — must not wait for watchers
+    let _ = kick_tx.try_send(()); // initial snapshot — must not wait for watchers
 
     // Watcher setup is genuinely blocking: the budget walk reads up to
     // MAX_WATCH_DIRS directory entries and FSEvents stream registration stalls
@@ -594,7 +594,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         };
         let watchers = build_watchers(&entry.identity, &kick_tx);
         *lock(&entry.watchers) = watchers;
-        let _ = kick_tx.send(());
+        let _ = kick_tx.try_send(());
     });
 }
 
@@ -604,7 +604,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
 /// from the blocking pool.
 fn build_watchers(
     identity: &CheckoutIdentity,
-    kick_tx: &mpsc::UnboundedSender<()>,
+    kick_tx: &mpsc::Sender<()>,
 ) -> Vec<notify::RecommendedWatcher> {
     let mut watchers = Vec::new();
     for target in watch_targets(identity) {
@@ -612,7 +612,7 @@ fn build_watchers(
         let watcher =
             notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
                 if event.as_ref().is_ok_and(is_checkout_change) {
-                    let _ = tx.send(());
+                    let _ = tx.try_send(());
                 }
             });
         match watcher {
@@ -644,7 +644,7 @@ fn is_checkout_change(event: &notify::Event) -> bool {
 async fn entry_task(
     inner: Weak<DiffSyncInner>,
     entry: Weak<CheckoutEntry>,
-    mut kick_rx: mpsc::UnboundedReceiver<()>,
+    mut kick_rx: mpsc::Receiver<()>,
     cancel: CancellationToken,
 ) {
     while kick_rx.recv().await.is_some() {
@@ -813,7 +813,7 @@ async fn diff_sync_task(
                 // Fresh: revalidate every memoized identity against git.
                 reconcile(&inner, chats, true).await;
                 for entry in lock(&inner.entries).values() {
-                    let _ = entry.kick_tx.send(());
+                    let _ = entry.kick_tx.try_send(());
                 }
             }
         }
@@ -1888,7 +1888,7 @@ mod watch_budget_tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let _watchers = super::build_watchers(&identity(&root, &root.join(".git")), &tx);
         // Let registration settle and drop anything it raised.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;

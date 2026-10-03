@@ -66,7 +66,7 @@ pub use source_control::{
     GitRemote, parse_git_remote,
 };
 pub use spaces::SpacesSync;
-pub use terminals::Terminals;
+pub use terminals::{TerminalSubscription, Terminals};
 pub use titles::TitleGenerator;
 pub use uploads::{AttachmentChunk, Uploads};
 pub use workspace_files::WorkspaceFiles;

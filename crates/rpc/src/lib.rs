@@ -285,6 +285,10 @@ pub trait RpcService: Send + Sync + 'static {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError>;
 }
 
+// RPC watch frames can contain whole transcripts. A 256-frame queue can
+// retain hundreds of MiB per leg; small queues preserve order via backpressure.
+pub(crate) const FRAME_QUEUE_CAP: usize = 8;
+
 /// Deserialize typed params out of the envelope's `params` value.
 pub fn parse_params<T: serde::de::DeserializeOwned>(
     params: serde_json::Value,
@@ -296,8 +300,8 @@ pub fn parse_params<T: serde::de::DeserializeOwned>(
 /// Same envelopes, same dispatch loop as the WebSocket path — the in-process UI
 /// transport (ARCHITECTURE §1 "zero serialization shortcuts").
 pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
-    let (client_out, server_in) = tokio::sync::mpsc::channel::<String>(256);
-    let (server_out, client_in) = tokio::sync::mpsc::channel::<String>(256);
+    let (client_out, server_in) = tokio::sync::mpsc::channel::<String>(FRAME_QUEUE_CAP);
+    let (server_out, client_in) = tokio::sync::mpsc::channel::<String>(FRAME_QUEUE_CAP);
     tokio::spawn(serve_connection(service, server_out, server_in));
     RpcClient::new(client_out, client_in)
 }
@@ -376,6 +380,68 @@ mod tests {
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_silent_call_releases_server_resources() {
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let service = Arc::new(CancelAwareService {
+            dropped: Mutex::new(Some(dropped_tx)),
+        });
+        let client = Arc::new(memory_client(service.clone()));
+        let call_client = client.clone();
+        let task =
+            tokio::spawn(async move { call_client.call("Silent", serde_json::Value::Null).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.dropped.lock().unwrap().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            client
+                .call("Echo", serde_json::Value::Null)
+                .await
+                .unwrap_err()
+                .to_string(),
+            RpcError::UnknownMethod("Echo".into()).to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn small_stream_queues_preserve_order_and_cancel_backpressured_producers() {
+        let client = memory_client(Arc::new(TestService));
+        let mut stream = client
+            .subscribe_scoped("Count", serde_json::json!({"n":4096}))
+            .await
+            .unwrap();
+        for i in 0..4096 {
+            assert_eq!(stream.recv().await, Some(serde_json::json!(i)));
+        }
+        assert!(stream.recv().await.is_none());
+        let blocked = client
+            .subscribe_scoped("Count", serde_json::json!({"n":4096}))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        drop(blocked);
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client.call("Echo", serde_json::json!("responsive"))
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            serde_json::json!("responsive")
+        );
     }
 
     #[tokio::test]

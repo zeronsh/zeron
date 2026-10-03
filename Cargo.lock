@@ -13093,6 +13093,7 @@ dependencies = [
  "icu_segmenter",
  "rustc-hash 2.1.3",
  "rustybuzz",
+ "self_cell",
  "unicode-bidi",
  "unicode-segmentation",
 ]

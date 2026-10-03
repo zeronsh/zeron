@@ -127,8 +127,18 @@ impl fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
+type BuzzFace<'a> = rustybuzz::Face<'a>;
+
+self_cell::self_cell!(
+    struct OwnedFace {
+        owner: Arc<[u8]>,
+        #[covariant]
+        dependent: BuzzFace,
+    }
+);
+
 pub(crate) struct FaceData {
-    pub(crate) hb: rustybuzz::Face<'static>,
+    font: OwnedFace,
     pub(crate) upem: f32,
     /// Bit `c` set when printable ASCII char `c` (0x20..0x7F) maps to a glyph. Lets the cold
     /// coverage check skip the cmap lookup for the overwhelmingly common case.
@@ -139,6 +149,9 @@ pub(crate) struct FaceData {
 }
 
 impl FaceData {
+    pub(crate) fn hb(&self) -> &rustybuzz::Face<'_> {
+        self.font.borrow_dependent()
+    }
     /// Whether the face's cmap has a glyph for `c`.
     #[inline]
     pub(crate) fn covers(&self, c: char) -> bool {
@@ -149,7 +162,7 @@ impl FaceData {
         if u < 0x10000 {
             return self.bmp[u as usize / 64] & (1u64 << (u % 64)) != 0;
         }
-        self.hb.glyph_index(c).is_some()
+        self.hb().glyph_index(c).is_some()
     }
 }
 
@@ -178,6 +191,28 @@ impl Default for FontBook {
     }
 }
 
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_font_books_releases_font_bytes() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui/assets/fonts/Geist.ttf");
+        for _ in 0..32 {
+            let mut book = FontBook::new();
+            book.add_face(std::fs::read(&path).unwrap()).unwrap();
+            let bytes = Arc::downgrade(book.faces[0].font.borrow_owner());
+            assert!(bytes.upgrade().is_some());
+            drop(book);
+            assert!(
+                bytes.upgrade().is_none(),
+                "a dropped layout worker retained its font"
+            );
+        }
+    }
+}
+
 impl fmt::Debug for FontBook {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FontBook")
@@ -200,16 +235,16 @@ impl FontBook {
         }
     }
 
-    /// Registers a font file (face index 0 of a collection). The bytes are leaked to `'static`;
-    /// faces are expected to live for the process.
+    /// Registers a font file (face index 0 of a collection). The book owns both
+    /// the bytes and their parsed face; dropping a layout worker frees them.
     pub fn add_face(&mut self, data: Vec<u8>) -> Result<FaceId, FontError> {
         if self.faces.len() >= u16::MAX as usize {
             return Err(FontError::TooManyFaces);
         }
-        // Validate before leaking so a bad file doesn't leak.
-        ttf_parser::Face::parse(&data, 0).map_err(|_| FontError::Parse)?;
-        let data: &'static [u8] = Box::leak(data.into_boxed_slice());
-        let hb = rustybuzz::Face::from_slice(data, 0).ok_or(FontError::Parse)?;
+        let font = OwnedFace::try_new(data.into(), |bytes| {
+            rustybuzz::Face::from_slice(bytes, 0).ok_or(FontError::Parse)
+        })?;
+        let hb = font.borrow_dependent();
         let upem = hb.units_per_em() as f32;
         let mut ascii = 0u128;
         for u in 0x20u32..0x7F {
@@ -241,7 +276,7 @@ impl FontBook {
         }
         let id = FaceId(self.faces.len() as u16);
         self.faces.push(FaceData {
-            hb,
+            font,
             upem,
             ascii,
             bmp,
@@ -251,7 +286,7 @@ impl FontBook {
 
     /// The face's PostScript name (name ID 6), for the host to resolve the same font natively.
     pub fn face_postscript_name(&self, face: FaceId) -> Option<String> {
-        let face = &self.faces.get(face.0 as usize)?.hb;
+        let face = self.faces.get(face.0 as usize)?.hb();
         face.names().into_iter().find_map(|name| {
             (name.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
                 .then(|| name.to_string())
@@ -316,7 +351,7 @@ impl FontBook {
     /// Vertical metrics for `id`, in points.
     pub fn metrics(&self, id: StyleId) -> FontMetrics {
         let sd = self.style_data(id);
-        let face = &self.face_data(sd.style.face).hb;
+        let face = self.face_data(sd.style.face).hb();
         let s = sd.scale;
         FontMetrics {
             ascent: face.ascender() as f32 * s,

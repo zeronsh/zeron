@@ -59,6 +59,10 @@ const QUOTA_RETRY: Duration = Duration::from_secs(5);
 /// enqueue: a batch the server can never accept must not enter the replay
 /// queue.
 pub const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
+pub const PENDING_WINDOW_BYTES: usize = 256 * 1024;
+pub const PENDING_WINDOW_BATCHES: usize = 32;
+const CHECKPOINT_BUFFER_BYTES: usize = 256 * 1024;
+const CHECKPOINT_BUFFER_FRAMES: usize = 32;
 
 /// Per-client tuning.
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +127,15 @@ pub trait ChatDocSink: Send + Sync + 'static {
     /// Durable publication hooks. In-memory/test sinks may use the defaults.
     fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         Ok(Vec::new())
+    }
+    /// `Some` opts into a disk-backed transport window: successfully persisted
+    /// updates need not retain their payloads in memory until admitted here.
+    /// The default preserves in-memory/test sinks without durable storage.
+    fn pending_window(&self) -> Result<Option<Vec<(String, Vec<u8>)>>, String> {
+        Ok(None)
+    }
+    fn pending_update_count(&self) -> Result<Option<u64>, String> {
+        Ok(None)
     }
     fn persist_update(&self, _batch_id: &str, _bytes: &[u8]) -> Result<(), String> {
         Ok(())
@@ -242,8 +255,10 @@ impl BinConnector for WsBinConnector {
                 SyncError::WebSocket(e.to_string())
             })?;
             drop(dial_permit);
-            let (out_tx, out_rx) = mpsc::channel(64);
-            let (in_tx, in_rx) = mpsc::channel(64);
+            // Keep payload queues small as well as the actor's prefetch window.
+            // Otherwise a paused checkpoint import still retains 64 large rows.
+            let (out_tx, out_rx) = mpsc::channel(2);
+            let (in_tx, in_rx) = mpsc::channel(2);
             tokio::spawn(async move {
                 let _socket_permit = socket_permit;
                 crate::socket::pump(ws, out_rx, in_tx, WsMessage::Binary, |frame| match frame {
@@ -265,7 +280,7 @@ impl BinConnector for WsBinConnector {
 #[derive(Clone)]
 struct PendingPush {
     batch_id: String,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     durable: bool,
 }
 
@@ -278,6 +293,7 @@ struct Shared {
     refresh_requested: u64,
     refresh_completed: u64,
     pending: VecDeque<PendingPush>,
+    paged_outbox: bool,
     /// Last hello/probe view of the server log (checkpoint-policy inputs).
     server: Option<wire::StateHeader>,
     /// Set by a transient (`quota`) rejection: re-push at this instant
@@ -312,6 +328,35 @@ struct Shared {
     needs_checkpoint: bool,
     /// Prevent an overlapping HTTP/socket catch-up from clearing a newer gap.
     causal_gap_generation: u64,
+}
+
+fn refill_pending(shared: &mut Shared, sink: &dyn ChatDocSink) -> Result<(), String> {
+    if !shared.paged_outbox {
+        return Ok(());
+    }
+    let count = shared.pending.len();
+    let mut bytes = shared.pending.iter().map(|p| p.bytes.len()).sum::<usize>();
+    if count >= PENDING_WINDOW_BATCHES || bytes >= PENDING_WINDOW_BYTES {
+        return Ok(());
+    }
+    for (batch_id, payload) in sink.pending_window()?.unwrap_or_default() {
+        if shared.pending.iter().any(|p| p.batch_id == batch_id) {
+            continue;
+        }
+        if shared.pending.len() >= PENDING_WINDOW_BATCHES
+            || (!shared.pending.is_empty()
+                && bytes.saturating_add(payload.len()) > PENDING_WINDOW_BYTES)
+        {
+            break;
+        }
+        bytes = bytes.saturating_add(payload.len());
+        shared.pending.push_back(PendingPush {
+            batch_id,
+            bytes: payload.into(),
+            durable: true,
+        });
+    }
+    Ok(())
 }
 
 // Retry failed writes before network admission. Do not reinsert already-ACKed
@@ -582,15 +627,20 @@ impl ChatClient {
         let (probe_tx, probe_rx) = mpsc::channel(1);
         let (redial_tx, redial_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
+        let window = sink.pending_window().map_err(SyncError::Protocol)?;
+        let paged_outbox = window.is_some();
+        let initial = match window {
+            Some(window) => window,
+            None => sink.pending_updates().map_err(SyncError::Protocol)?,
+        };
         let shared = Arc::new(Mutex::new(Shared {
             cursor: initial_cursor,
-            pending: sink
-                .pending_updates()
-                .map_err(SyncError::Protocol)?
+            paged_outbox,
+            pending: initial
                 .into_iter()
                 .map(|(batch_id, bytes)| PendingPush {
                     batch_id,
-                    bytes,
+                    bytes: bytes.into(),
                     durable: true,
                 })
                 .collect(),
@@ -681,14 +731,23 @@ impl ChatClient {
         }
         {
             let mut shared = lock(&self.shared);
-            if !shared.pending.iter().any(|p| p.batch_id == batch_id) {
+            // The durable store owns excess payloads. Failed writes remain
+            // resident and retryable: a RAM target must never discard edits.
+            if !(durable && shared.paged_outbox)
+                && !shared.pending.iter().any(|p| p.batch_id == batch_id)
+            {
                 shared.pending.push_back(PendingPush {
                     batch_id,
-                    bytes,
+                    bytes: bytes.into(),
                     durable,
                 });
             }
         }
+        let _ = self.nudge.try_send(());
+    }
+
+    /// Wake the durable outbox reader without copying persisted payloads.
+    pub fn flush_pending(&self) {
         let _ = self.nudge.try_send(());
     }
 
@@ -789,7 +848,13 @@ impl ChatClient {
             checkpoint_size: server.checkpoint_size,
             row_count: server.row_count,
             row_bytes: server.row_bytes,
-            pending_pushes: shared.pending.len() as u64,
+            pending_pushes: self
+                .sink
+                .pending_update_count()
+                .ok()
+                .flatten()
+                .map(|count| count + shared.pending.iter().filter(|p| !p.durable).count() as u64)
+                .unwrap_or(shared.pending.len() as u64),
             rejoins: self.flags.rejoins.load(Relaxed),
             disconnects: self.flags.disconnects.load(Relaxed),
             rejected: self.flags.rejected.load(Relaxed),
@@ -1157,6 +1222,7 @@ impl Actor {
             return SessionEnd::Reconnect;
         }
         let mut buffered: Vec<wire::WireFrame> = Vec::new();
+        let mut buffered_bytes = 0usize;
         if let CatchUpPlan::CheckpointThenRows { .. } = plan {
             tracing::info!(
                 checkpoint_seq = state.checkpoint_seq,
@@ -1166,9 +1232,8 @@ impl Actor {
             // Deadline + shutdown-interruptible: a hung fetch (half-open
             // TCP, stalled link) must neither pin the actor forever nor
             // block `shutdown()`. The fetch is Range-resumable, so the
-            // redial retries from wherever the bytes stopped. The socket is
-            // drained (into the buffer) for the whole fetch so backpressure
-            // can't stall the server's row stream.
+            // fetch retries partial downloads. Prefetch a small row window,
+            // then let transport backpressure hold the remaining rows.
             let fetch = self.fetcher.fetch();
             tokio::pin!(fetch);
             let deadline = tokio::time::sleep(CHECKPOINT_FETCH_DEADLINE);
@@ -1187,9 +1252,15 @@ impl Actor {
                         return SessionEnd::Reconnect;
                     }
                     _ = self.shutdown.changed() => return SessionEnd::Stop,
-                    inbound = pipe.rx.recv() => match inbound {
+                    // Stop draining once the small window fills. The socket
+                    // pump applies transport backpressure until import finishes.
+                    inbound = pipe.rx.recv(), if buffered_bytes < CHECKPOINT_BUFFER_BYTES
+                        && buffered.len() < CHECKPOINT_BUFFER_FRAMES => match inbound {
                         Some(raw) => match wire::decode(&raw) {
-                            Some(frame) => buffered.push(frame),
+                            Some(frame) => {
+                                buffered_bytes = buffered_bytes.saturating_add(raw.len());
+                                buffered.push(frame);
+                            },
                             None => {
                                 tracing::warn!("chat2: unparseable frame during checkpoint fetch");
                                 return SessionEnd::Reconnect;
@@ -1351,6 +1422,12 @@ impl Actor {
                     if !self.handle_frame(frame) {
                         return SessionEnd::Reconnect;
                     }
+                    let paged_outbox = lock(&self.shared).paged_outbox;
+                    if paged_outbox
+                        && !self.push_pending(&mut pipe, &mut in_flight).await
+                    {
+                        return SessionEnd::Reconnect;
+                    }
                     if let Some(done) = refreshed_head
                         && let Some((ticket, _)) = refresh_in_flight.take()
                     {
@@ -1443,7 +1520,14 @@ impl Actor {
 
     /// Send only the queue's head batch — the quota-probe path.
     async fn push_head(&self, pipe: &mut BinPipe) -> bool {
-        let push = lock(&self.shared).pending.front().cloned();
+        let push = {
+            let mut shared = lock(&self.shared);
+            if let Err(err) = refill_pending(&mut shared, self.sink.as_ref()) {
+                tracing::error!(%err, "chat2: outbox window read failed");
+                return false;
+            }
+            shared.pending.front().cloned()
+        };
         let Some(push) = push else { return true };
         if !ensure_durable(&self.shared, self.sink.as_ref(), &push) {
             return false;
@@ -1478,39 +1562,68 @@ impl Actor {
         let busy = self.sync_busy.clone();
         let amnesty = self.cursor_amnesty_done.clone();
         let task = tokio::spawn(async move {
-            let batches: Vec<PendingPush> = lock(&shared).pending.iter().cloned().collect();
-            for push in batches {
-                if !ensure_durable(&shared, sink.as_ref(), &push) {
-                    break;
-                }
-                match transport.push(push.batch_id, push.bytes).await {
-                    Ok(ack) => {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ack) {
-                            if let (Some(b), Some(seq)) = (v["batchId"].as_str(), v["seq"].as_u64())
-                            {
-                                let mut sh = lock(&shared);
-                                if sink.acknowledge_update(b).is_ok() {
-                                    sh.pending.retain(|p| p.batch_id != b);
-                                }
-                                // Contiguity rule (see handle_frame ACK): an
-                                // own-push ack proves the server has rows up
-                                // to `seq`, not that WE have the interleaved
-                                // ones. The pull below starts at the honest
-                                // cursor and walks the gap.
-                                if seq <= sh.cursor + 1 {
-                                    sh.cursor = sh.cursor.max(seq);
-                                }
-                                let cursor = sh.cursor;
-                                drop(sh);
-                                sink.advance_cursor(cursor);
-                                let _ = events.send(ChatEvent::Applied);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "chat2: http push failed; will retry");
+            'windows: loop {
+                let (batches, paged): (Vec<PendingPush>, bool) = {
+                    let mut sh = lock(&shared);
+                    if let Err(err) = refill_pending(&mut sh, sink.as_ref()) {
+                        tracing::error!(%err, "chat2: HTTP outbox window read failed");
                         break;
                     }
+                    (sh.pending.iter().cloned().collect(), sh.paged_outbox)
+                };
+                if batches.is_empty() {
+                    break;
+                }
+                let mut acknowledged = 0usize;
+                for push in batches {
+                    if !ensure_durable(&shared, sink.as_ref(), &push) {
+                        break 'windows;
+                    }
+                    match transport
+                        .push(push.batch_id.clone(), push.bytes.to_vec())
+                        .await
+                    {
+                        Ok(ack) => {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ack) {
+                                if let (Some(b), Some(seq)) =
+                                    (v["batchId"].as_str(), v["seq"].as_u64())
+                                {
+                                    if b != push.batch_id {
+                                        tracing::warn!(
+                                            "chat2: HTTP acknowledgment names another batch"
+                                        );
+                                        break 'windows;
+                                    }
+                                    let mut sh = lock(&shared);
+                                    if sink.acknowledge_update(b).is_ok() {
+                                        sh.pending.retain(|p| p.batch_id != b);
+                                        acknowledged += 1;
+                                    }
+                                    // Contiguity rule (see handle_frame ACK): an
+                                    // own-push ack proves the server has rows up
+                                    // to `seq`, not that WE have the interleaved
+                                    // ones. The pull below starts at the honest
+                                    // cursor and walks the gap.
+                                    if seq <= sh.cursor + 1 {
+                                        sh.cursor = sh.cursor.max(seq);
+                                    }
+                                    let cursor = sh.cursor;
+                                    drop(sh);
+                                    sink.advance_cursor(cursor);
+                                    let _ = events.send(ChatEvent::Applied);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "chat2: http push failed; will retry");
+                            break 'windows;
+                        }
+                    }
+                }
+                // Drain additional disk windows without an HTTP polling delay,
+                // but stop on missing ACKs or storage failure instead of spinning.
+                if !paged || acknowledged == 0 {
+                    break;
                 }
             }
             let (cursor, replay_epoch, mut was_live, refresh_ticket, gap_generation) = {
@@ -1718,7 +1831,11 @@ impl Actor {
 
     async fn push_pending(&self, pipe: &mut BinPipe, in_flight: &mut HashSet<String>) -> bool {
         let batches: Vec<PendingPush> = {
-            let shared = lock(&self.shared);
+            let mut shared = lock(&self.shared);
+            if let Err(err) = refill_pending(&mut shared, self.sink.as_ref()) {
+                tracing::error!(%err, "chat2: outbox window read failed");
+                return false;
+            }
             // New edits must not retransmit every slow-to-ack batch. Keep
             // this set local to the session so a reconnect still replays
             // the durable outbox with exactly the same batch IDs.

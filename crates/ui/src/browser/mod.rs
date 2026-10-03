@@ -267,7 +267,7 @@ impl BrowserSurface {
             loop {
                 let subscription = handle
                     .client()
-                    .subscribe(
+                    .subscribe_scoped(
                         zeron_rpc::methods::WATCH_PREVIEWS,
                         serde_json::json!({"chatId": chat_id}),
                     )

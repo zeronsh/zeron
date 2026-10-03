@@ -139,6 +139,88 @@ impl DocsStore {
         store_blocking(|| self.pending_chat_updates_blocking(doc_id))
     }
 
+    /// Recovery also needs checkpoint-only rows. Page by immutable ordinal so
+    /// importing an offline history never materializes its whole outbox.
+    pub fn chat_updates_after(
+        &self,
+        doc_id: &str,
+        after: i64,
+        max_bytes: usize,
+    ) -> Result<Vec<(i64, Vec<u8>)>, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut statement = conn.prepare(
+                "SELECT ordinal,bytes,length(bytes) FROM chat_outbox WHERE doc_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 32",
+            )?;
+            let mut rows = statement.query(params![doc_id, after])?;
+            let mut page = Vec::new();
+            let mut bytes = 0usize;
+            while let Some(row) = rows.next()? {
+                let size: usize = row.get(2)?;
+                if !page.is_empty() && bytes.saturating_add(size) > max_bytes {
+                    break;
+                }
+                page.push((row.get(0)?, row.get(1)?));
+                bytes = bytes.saturating_add(size);
+            }
+            Ok(page)
+        })
+    }
+
+    pub fn has_rejected_chat_updates(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| {
+            Ok(self.conn().query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=1)",
+                params![doc_id],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
+    /// A bounded transport window over the durable outbox. Inspect lengths
+    /// before copying BLOBs; one legal large row may exceed the window target.
+    /// Rejected rows stay on disk for checkpoint coverage.
+    pub fn pending_chat_updates_window(
+        &self,
+        doc_id: &str,
+        max_batches: usize,
+        max_bytes: usize,
+        max_row_bytes: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            conn.execute(
+                "UPDATE chat_outbox SET needs_checkpoint=1 WHERE doc_id=?1 AND length(bytes)>?2 AND needs_checkpoint=0",
+                params![doc_id, max_row_bytes as i64],
+            )?;
+            let mut statement = conn.prepare(
+                "SELECT batch_id,bytes,length(bytes) FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=0 ORDER BY ordinal LIMIT ?2",
+            )?;
+            let mut rows = statement.query(params![doc_id, max_batches as i64])?;
+            let mut window = Vec::new();
+            let mut bytes = 0usize;
+            while let Some(row) = rows.next()? {
+                let size: usize = row.get(2)?;
+                if !window.is_empty() && bytes.saturating_add(size) > max_bytes {
+                    break;
+                }
+                window.push((row.get(0)?, row.get(1)?));
+                bytes = bytes.saturating_add(size);
+            }
+            Ok(window)
+        })
+    }
+
+    pub fn pending_chat_update_count(&self, doc_id: &str) -> Result<u64, StoreError> {
+        store_blocking(|| {
+            Ok(self.conn().query_row(
+                "SELECT count(*) FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=0",
+                params![doc_id],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
     /// Admission/lifetime checks must not copy the pending payloads.
     pub fn has_pending_chat_updates(&self, doc_id: &str) -> Result<bool, StoreError> {
         store_blocking(|| {
@@ -815,6 +897,44 @@ mod publication_tests {
 #[cfg(test)]
 mod publication_failure_tests {
     use super::*;
+    #[test]
+    fn bounded_windows_preserve_order_and_keep_rejected_rows_for_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        for (id, size) in [("first", 4), ("large", 12), ("third", 4), ("fourth", 4)] {
+            store
+                .enqueue_chat_update("chat", id, &vec![b'x'; size])
+                .unwrap();
+        }
+        let window = store.pending_chat_updates_window("chat", 32, 8, 8).unwrap();
+        assert_eq!(
+            window.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["first", "third"]
+        );
+        assert_eq!(store.pending_chat_update_count("chat").unwrap(), 3);
+        assert!(store.has_rejected_chat_updates("chat").unwrap());
+        let mut after = 0;
+        let mut sizes = Vec::new();
+        loop {
+            let page = store.chat_updates_after("chat", after, 8).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() == 1 || page.iter().map(|(_, b)| b.len()).sum::<usize>() <= 8);
+            for (ordinal, bytes) in page {
+                after = ordinal;
+                sizes.push(bytes.len());
+            }
+        }
+        assert_eq!(sizes, [4, 12, 4, 4]);
+        store.acknowledge_chat_update("chat", "first").unwrap();
+        assert_eq!(
+            store.pending_chat_updates_window("chat", 1, 8, 8).unwrap()[0].0,
+            "third"
+        );
+        assert_eq!(store.rejected_chat_updates("chat").unwrap()[0].0, "large");
+    }
+
     #[test]
     fn cursor_save_after_failed_outbox_write_keeps_a_durable_replay_obligation() {
         for cursor_save in [false, true] {

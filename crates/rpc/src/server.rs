@@ -47,6 +47,10 @@ pub async fn serve_connection(
                 tracing::warn!(id = frame.id, "rpc: frame has neither method nor cancel");
                 continue;
             };
+            // Reusing an ID must not orphan the original request's lease/task.
+            if let Some(previous) = running.remove(&frame.id) {
+                previous.abort();
+            }
             let task = tokio::spawn(handle_request(
                 service.clone(),
                 out.clone(),
@@ -182,8 +186,8 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
         }
     };
     let (mut sink, mut ws_stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+    let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
 
     // Pump: socket <-> string channels. Ends when either side closes.
     let pump = tokio::spawn(async move {

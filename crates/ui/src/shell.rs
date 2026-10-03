@@ -5891,7 +5891,7 @@ impl Shell {
         let stream = Tokio::spawn(cx, async move {
             let mut items = engine
                 .client()
-                .subscribe(methods::IMPORT_LOCAL_WORKSPACE, serde_json::json!({}))
+                .subscribe_scoped(methods::IMPORT_LOCAL_WORKSPACE, serde_json::json!({}))
                 .await
                 .map_err(|error| error.to_string())?;
             while let Some(item) = items.recv().await {
