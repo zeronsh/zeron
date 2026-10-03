@@ -117,6 +117,36 @@ impl MediaImage {
     }
 }
 
+/// Prepared media centered at its natural size within the reading column,
+/// capped at 480px tall. A click requests the enlarged lightbox.
+pub(crate) fn preview_element(
+    loaded: &MediaImage,
+    id: gpui::SharedString,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::AnyElement {
+    use gpui::{InteractiveElement as _, IntoElement as _, StyledImage as _, prelude::*};
+    gpui::div()
+        .id(id)
+        .w_full()
+        .max_w(gpui::px(loaded.width))
+        .mx_auto()
+        .max_h(gpui::px(480.0))
+        .aspect_ratio(loaded.width / loaded.height)
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label("Enlarge image")
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
+        .child(
+            gpui::img(loaded.image.clone())
+                .size_full()
+                .object_fit(gpui::ObjectFit::Contain),
+        )
+        .into_any_element()
+}
+
 pub(crate) fn svg_options() -> usvg::Options<'static> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     let fonts = FONTS

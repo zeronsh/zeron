@@ -10,7 +10,7 @@ Task lists use the existing GPUI base checkbox with Zeron theme colors and icons
 
 Hovering a Markdown block exposes the same add-comment button used in diffs. The shared inline draft and comment cards appear below the block across the full preview panel width, with their location, input, text and actions aligned to the centered reading column. Each card retains its original file and line reference. Comments use the existing file-review staging, removal and editor anchors; they join the composer without modifying the Markdown. A paragraph, list, table or fence is one comment target, cited at its first source line. Existing notes on inner lines appear below their containing block. Cancel or Escape dismisses the draft. Truncated and non-editable previews cannot start comments, and stale preview offsets are rejected.
 
-Workspace-relative images are loaded from the device owning the checkout. HTTP(S) images remain links. HTML and MDX are not executed. Images and diagrams open in the shared centered lightbox with trackpad pinch, Ctrl + wheel zoom and pan; see [image preview and zoom](image-preview.md). Mermaid in chat is not enabled by this change.
+Workspace-relative images are loaded from the device owning the checkout. HTTP(S) images remain links. HTML and MDX are not executed. Images and diagrams open in the shared centered lightbox with trackpad pinch, Ctrl + wheel zoom and pan; see [image preview and zoom](image-preview.md). Chat renders Mermaid with the same engine; see [Mermaid in chat](#mermaid-in-chat).
 
 Mermaid diagrams use the same fence frame, header metrics, border, background and code actions as ordinary fenced code blocks. Switching between diagram and source replaces the body inside that single frame.
 
@@ -38,6 +38,16 @@ Mermaid source is limited to 16 KiB, 256 lines and 2048 lexical segments; genera
 
 Manual validation on macOS and a second physical remote device must be recorded separately from headless Linux tests. Automated tests cannot establish platform-specific focus, GPU rendering or real network behavior by themselves.
 
+## Mermaid in chat
+
+Assistant replies render ```` ```mermaid ```` fences as diagrams, sharing the file preview's engine, fence frame, source toggle, Copy action and lightbox. Inline images in chat keep their existing text rendering.
+
+Streaming never renders a fence that may still be growing. Only blocks that a later row of the same reply follows, or blocks of a completed reply, request a diagram. The streaming tail keeps its source; per-token commits start no render work. Until a diagram is ready, the fence shows its ordinary source, so completion changes the row height at most once. A failed render keeps the source and shows the engine's diagnostic in a warning marker in the fence header.
+
+Rows request their fences while they lay out, so only painted diagrams cost anything. One serialized loop per transcript renders them off the UI thread, choosing its next source between renders and dropping requests whose rows scrolled away. Retained diagrams share a 64 MiB budget and are evicted least recently painted first, with a 64-entry cap; an evicted diagram renders again when its row returns. Diagrams painted in the latest two passes are never evicted. Theme changes discard every diagram, and results computed under the previous theme are rejected. Rasters follow the conversation column width and display density.
+
+A diagram swap remeasures only the rows painting it and uses the same layout signals as other row-height changes. The bottom pin glides to the new end, and the own-turn runway reservation absorbs the change in the same layout without moving the sent prompt. Source toggles keep the stable row identity across streaming completion. The lightbox enlarges the diagram within the memory the retained diagrams leave available and releases that raster when it closes.
+
 ## Implementation validation
 
 The implementation was checked on Linux with the following commands:
@@ -58,3 +68,7 @@ Formatting checks pass for all changed Rust files, and `git diff --check` passes
 ### Browser link follow-up
 
 The file preview's session Browser routing was checked on Linux with `cargo test -p zeron-ui -- --test-threads=1` (918 passed), `cargo build -p zeron`, Rustfmt for changed modules, and `git diff --check`. New tests cover the preview-to-Files event, source-session ownership, complete destinations and clipboard content, rejected URLs, mail handling, preview suspension, and the Shell subscriptions for both Files and standalone file tabs. The first parallel suite run failed the existing `active_reply_text_selection_survives_streaming_and_completion` test; it passed in isolation and in the complete sequential run. This follow-up did not repeat native visual verification on Linux or macOS.
+
+### Mermaid in chat follow-up
+
+Chat Mermaid rendering was checked on Linux with `cargo test -p zeron-ui --lib -- --test-threads=1` (1528 passed), `cargo check -p zeron`, Rustfmt for changed modules and `git diff --check`. Cache unit tests cover single queueing per source, row tracking, dropping requests that scrolled away, theme invalidation of retained and in-flight results, eviction ordering that spares recently painted diagrams, and source toggles following their rows. Transcript tests stream a fence token by token and verify that the tail starts no render. They also verify that the following block renders it once, that the row height changes and the toggle restores the source, and that completion keeps the diagram and toggle. Other transcript tests check that a pinned overflowing stream stays at the bottom through the swap and further streaming. They also check that rendering a completed tail neither moves the own-turn prompt nor opens blank space below the runway, and that the diagram lightbox opens and releases its raster. In one parallel suite run, the existing `markdown_drag_tracks_each_table_column_and_wrapped_cell` and `rendered_truncation_resizes_and_selects_the_original_url` tests failed. Both passed in isolation and in the complete sequential run. Native visual verification on Linux or macOS was not performed.

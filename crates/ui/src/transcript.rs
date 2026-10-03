@@ -42,6 +42,7 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
+use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
 };
@@ -3260,6 +3261,17 @@ pub struct Transcript {
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
+    /// Mermaid fences drawn as diagrams in settled Markdown blocks. Each
+    /// row's media handler requests its fences while laying out, so only
+    /// painted diagrams are rendered (see [`MermaidCache`]).
+    diagrams: Rc<RefCell<MermaidCache>>,
+    /// The media handler over `diagrams`, built once and shared by every row.
+    diagram_media: Option<render::MediaUi>,
+    /// The single serialized diagram render loop, while requests remain.
+    diagram_worker: Option<Task<()>>,
+    /// Prepared diagram shown in the lightbox: its natural size frames the
+    /// enlarged raster, which is released when the lightbox closes.
+    diagram_zoom: Option<crate::image_media::MediaImage>,
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
@@ -3435,6 +3447,11 @@ impl Transcript {
             .ok();
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        cx.on_release(|this: &mut Self, cx| {
+            this.close_diagram_zoom(cx);
+            crate::image_media::release_media(this.diagrams.borrow_mut().drain(), cx);
+        })
+        .detach();
         let text_changes = cx.subscribe(
             &state,
             |this: &mut Self, state, event: &crate::state::TranscriptTextChanged, cx| {
@@ -3535,6 +3552,10 @@ impl Transcript {
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
+            diagrams: Rc::default(),
+            diagram_media: None,
+            diagram_worker: None,
+            diagram_zoom: None,
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
@@ -4918,6 +4939,11 @@ impl Transcript {
             .collect();
         self.code_fences
             .retain(|key, _| active_code_fences.contains(key));
+        // Diagram source toggles follow the same stable row identity.
+        if self.diagrams.borrow().has_source_toggles() {
+            let row_ids: HashSet<&str> = new_rows.iter().map(|row| row.id.as_ref()).collect();
+            self.diagrams.borrow_mut().retain_rows(&row_ids);
+        }
 
         // Text already streamed before this (re)attach is the veil BASELINE:
         // its rows' veils seed instead of fading (render creates them from
@@ -5822,6 +5848,180 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// Media wiring for settled Markdown: Mermaid fences become diagrams
+    /// once rendered and keep their source until then (or on failure).
+    /// Inline images keep their ordinary chat rendering.
+    fn diagram_media(&mut self, cx: &Context<Self>) -> render::MediaUi {
+        let cache = self.diagrams.clone();
+        let owner = cx.weak_entity();
+        let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
+            image: None,
+            diagram: Some(Rc::new(move |code, id, _theme| {
+                let lookup = cache.borrow_mut().request(code, &id);
+                match lookup {
+                    mermaid_cache::Lookup::Pending => render::DiagramView::Source,
+                    mermaid_cache::Lookup::Failed(reason) => render::DiagramView::Failed(reason),
+                    mermaid_cache::Lookup::Ready(media) => {
+                        let show_source = cache.borrow().source_visible(&id);
+                        let body = if show_source {
+                            gpui::Empty.into_any_element()
+                        } else {
+                            let open = owner.clone();
+                            let source = media.clone();
+                            crate::image_media::preview_element(
+                                &media,
+                                format!("{id}-image").into(),
+                                move |window, cx| {
+                                    let _ = open.update(cx, |this, cx| {
+                                        this.open_diagram_preview(source.clone(), window, cx)
+                                    });
+                                },
+                            )
+                        };
+                        let toggle = owner.clone();
+                        render::DiagramView::Diagram(render::DiagramUi {
+                            body,
+                            show_source,
+                            toggle_source: Rc::new(move |_, cx| {
+                                let _ = toggle.update(cx, |this, cx| {
+                                    this.diagrams.borrow_mut().toggle_source(&id);
+                                    let row = mermaid_cache::frame_row(&id).to_owned();
+                                    this.diagram_layout_changed(&[row.into()], cx);
+                                });
+                            }),
+                        })
+                    }
+                }
+            })),
+        });
+        media.clone()
+    }
+
+    /// Render requested diagrams one at a time off the UI thread. The loop
+    /// picks its next source between renders, so rows that scrolled away in
+    /// the meantime are skipped rather than queued.
+    fn ensure_diagram_worker(&mut self, cx: &mut Context<Self>) {
+        if self.diagram_worker.is_some() || !self.diagrams.borrow_mut().take_new_requests() {
+            return;
+        }
+        self.diagram_worker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let job = this.update(cx, |this, cx| {
+                    let job = this.diagrams.borrow_mut().next_job();
+                    if job.is_none() {
+                        this.diagram_worker = None;
+                    }
+                    job.map(|code| {
+                        (
+                            code,
+                            crate::markdown::mermaid::Palette::from_theme(Theme::of(cx)),
+                            crate::theme::style_generation(),
+                        )
+                    })
+                });
+                let Ok(Some((code, palette, style))) = job else {
+                    return;
+                };
+                let source = code.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let svg = crate::markdown::mermaid::render(&source, &palette)?;
+                        crate::image_media::decode_image("image/svg+xml", svg.into_bytes())
+                    })
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.finish_diagram(code, style, result, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn finish_diagram(
+        &mut self,
+        code: String,
+        style: u32,
+        result: Result<crate::image_media::MediaImage, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((rows, released)) = self.diagrams.borrow_mut().finish(code, style, result) else {
+            return;
+        };
+        crate::image_media::release_media(released, cx);
+        self.diagram_layout_changed(&rows, cx);
+    }
+
+    /// A diagram replaced its source (or the reverse): remeasure the rows
+    /// painting it and let the bottom pin and the own-turn runway absorb the
+    /// height change, exactly like any other layout-affecting row update.
+    fn diagram_layout_changed(&mut self, rows: &[SharedString], cx: &mut Context<Self>) {
+        let mut changed = false;
+        for (ix, row) in self.rows.iter().enumerate() {
+            if rows.contains(&row.id) {
+                self.list.remeasure_items(ix..ix + 1);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
+        if self.pinned {
+            self.wake_spring();
+        }
+        if self.own_turn.is_some() {
+            self.own_turn_kick = true;
+        }
+        cx.notify();
+    }
+
+    /// Open a diagram in the shared lightbox, rasterized for the window
+    /// within the memory the retained diagrams leave available.
+    fn open_diagram_preview(
+        &mut self,
+        source: crate::image_media::MediaImage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_diagram_zoom(cx);
+        let viewport = window.viewport_size();
+        let available = mermaid_cache::MAX_RETAINED_BYTES
+            .saturating_sub(self.diagrams.borrow().retained_bytes());
+        let enlarged = source.enlarged(
+            (
+                f32::from(viewport.width) * 0.9,
+                f32::from(viewport.height) * 0.85,
+            ),
+            window.scale_factor(),
+            available,
+            None,
+        );
+        self.attachment_preview_return_focus = window.focused(cx);
+        self.attachment_preview = Some(crate::attachments::PreviewImage::new(
+            "Mermaid diagram",
+            enlarged.image,
+        ));
+        self.diagram_zoom = Some(source);
+        window.focus(&self.attachment_preview_focus, cx);
+        cx.notify();
+    }
+
+    /// Release a diagram lightbox's dedicated raster. The row's own preview
+    /// stays with the diagram cache.
+    fn close_diagram_zoom(&mut self, cx: &mut gpui::App) {
+        let Some(source) = self.diagram_zoom.take() else {
+            return;
+        };
+        if let Some(preview) = self.attachment_preview.take()
+            && !Arc::ptr_eq(&preview.image, &source.image)
+        {
+            cx.defer(move |cx| gpui::ImageSource::Image(preview.image).evict(None, cx));
+        }
+    }
+
     fn render_generated_image(
         &mut self,
         row_id: &SharedString,
@@ -6494,7 +6694,7 @@ impl Transcript {
                 let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 let opts = RenderOptions {
                     tasks: None,
-                    media: None,
+                    media: Some(self.diagram_media(cx)),
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
@@ -6553,9 +6753,18 @@ impl Transcript {
                         })
                         .clone()
                 });
+                // A streaming fence may still be growing, so only blocks the
+                // reply has already moved past draw diagrams: a later row of
+                // the same entry proves this block is complete. The tail
+                // keeps its source until the next block or completion, and
+                // per-token commits never start a render.
+                let settled = self
+                    .rows
+                    .get(ix + 1)
+                    .is_some_and(|next| next.entry_id == row.entry_id);
                 let opts = RenderOptions {
                     tasks: None,
-                    media: None,
+                    media: settled.then(|| self.diagram_media(cx)),
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
@@ -6575,6 +6784,8 @@ impl Transcript {
                         let seed_opts = RenderOptions {
                             cache: None,
                             link: None,
+                            // Seed fences as source text, never request diagrams.
+                            media: None,
                             ..opts.clone()
                         };
                         let _ = render::render_block(
@@ -6642,6 +6853,8 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
+        // Diagram fences this row just requested start rendering after layout.
+        self.ensure_diagram_worker(cx);
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
         // entry's last row. Timestamp, copy action, and copied feedback only
@@ -8900,6 +9113,23 @@ impl Render for Transcript {
         // Release gpui-side decoded copies of any images the attachment LRU
         // evicted since the last frame (no-op when nothing was evicted).
         crate::attachments::flush_evicted(Some(window), cx);
+        // Diagram requests are scoped to paint passes; rasters follow the
+        // reading column and display density (a no-op while both hold).
+        let released_diagrams = {
+            let mut diagrams = self.diagrams.borrow_mut();
+            let mut released = diagrams.begin_frame(crate::theme::style_generation());
+            let list_width = f32::from(self.list.viewport_bounds().size.width);
+            let column = if list_width > 0.0 {
+                self.content_width.min(list_width)
+            } else {
+                self.content_width
+            };
+            released.extend(diagrams.set_view((column.max(1.0), 480.0), window.scale_factor()));
+            released
+        };
+        if !released_diagrams.is_empty() {
+            crate::image_media::release_media(released_diagrams, cx);
+        }
         // Own-turn driver: measurements are only authoritative after layout,
         // so reservation sizing, the send glide, and the outgrown-handoff
         // each advance at most once per requested frame. Scheduled on every
@@ -9046,12 +9276,19 @@ impl Render for Transcript {
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
             let weak = cx.weak_entity();
-            return root.child(crate::attachments::lightbox(
+            // A diagram's enlarged raster is framed by its natural size.
+            let natural_size = self
+                .diagram_zoom
+                .as_ref()
+                .map(|source| size(px(source.width), px(source.height)));
+            return root.child(crate::attachments::lightbox_with_size(
                 window,
                 &preview,
                 &self.attachment_preview_focus,
+                natural_size,
                 move |window, cx| {
                     if let Ok(focus) = weak.update(cx, |this, cx| {
+                        this.close_diagram_zoom(cx);
                         this.attachment_preview = None;
                         cx.notify();
                         this.attachment_preview_return_focus.take()
@@ -13069,6 +13306,275 @@ mod tests {
                     overflow_height,
                     "retiring the minimum must be height-neutral"
                 );
+            });
+        }
+
+        /// Run the next queued diagram synchronously, as the worker would.
+        fn render_next_diagram(transcript: &Entity<Transcript>, cx: &mut gpui::App) -> bool {
+            transcript.update(cx, |this, cx| {
+                let Some(code) = this.diagrams.borrow_mut().next_job() else {
+                    return false;
+                };
+                let palette = crate::markdown::mermaid::Palette::from_theme(Theme::of(cx));
+                let result = crate::markdown::mermaid::render(&code, &palette).and_then(|svg| {
+                    crate::image_media::decode_image("image/svg+xml", svg.into_bytes())
+                });
+                assert!(result.is_ok(), "fixture diagram must render");
+                this.finish_diagram(code, crate::theme::style_generation(), result, cx);
+                true
+            })
+        }
+
+        const MERMAID_FENCE: &str =
+            "```mermaid\nflowchart TD\n    A[Request] --> B[Plan]\n    B --> C[Done]\n```\n";
+
+        #[test]
+        fn mermaid_streaming_tail_keeps_source_until_the_reply_moves_past_it() {
+            with_window(|transcript, window, cx| {
+                let reply = |status, text: String| {
+                    vec![
+                        prompt("prompt"),
+                        assistant("reply", status, vec![text_part("text", &text)]),
+                    ]
+                };
+                let mut text = String::from("Intro.\n\n");
+                // Token-sized commits through the open fence, then the closed
+                // fence while it is still the reply's tail.
+                for token in MERMAID_FENCE.split_inclusive([' ', '\n']) {
+                    text.push_str(token);
+                    transcript.update(cx, |this, cx| {
+                        this.rail_enabled = false;
+                        feed(this, reply(MessageStatus::Streaming, text.clone()), cx)
+                    });
+                    tick(&transcript, window, cx);
+                    let this = transcript.read(cx);
+                    assert!(
+                        this.diagram_worker.is_none(),
+                        "a streaming tail fence must not start a render"
+                    );
+                    assert!(this.diagrams.borrow_mut().next_job().is_none());
+                }
+                // Enough reply after the fence that the viewport can anchor on
+                // it without clamping back to the end.
+                text.push_str(&format!(
+                    "\nAfter the diagram. {}",
+                    "More detail. ".repeat(300)
+                ));
+                transcript.update(cx, |this, cx| {
+                    feed(this, reply(MessageStatus::Streaming, text.clone()), cx)
+                });
+                draw(window, cx);
+                assert!(
+                    transcript.read(cx).diagram_worker.is_some(),
+                    "a fence followed by more reply renders"
+                );
+                // A pinned end is glued, where rows report no bounds; read
+                // them with the viewport anchored at the diagram row instead.
+                transcript.update(cx, |this, cx| {
+                    this.pinned = false;
+                    let ix = this
+                        .rows
+                        .iter()
+                        .position(|row| row.id.as_ref() == "reply#text.1")
+                        .unwrap();
+                    this.list.scroll_to(ListOffset {
+                        item_ix: ix,
+                        offset_in_item: px(0.0),
+                    });
+                    cx.notify();
+                });
+                draw(window, cx);
+                let fence_height = |cx: &gpui::App| {
+                    let this = transcript.read(cx);
+                    let ix = this
+                        .rows
+                        .iter()
+                        .position(|row| row.id.as_ref() == "reply#text.1")
+                        .unwrap();
+                    this.list.bounds_for_item(ix).unwrap().size.height
+                };
+                let source_height = fence_height(cx);
+                assert!(render_next_diagram(&transcript, cx));
+                assert!(
+                    !render_next_diagram(&transcript, cx),
+                    "one request per source"
+                );
+                draw(window, cx);
+                assert_ne!(
+                    fence_height(cx),
+                    source_height,
+                    "the diagram replaced its source"
+                );
+                let frame: SharedString = "reply#text.1-mermaid-1".into();
+                transcript.update(cx, |this, cx| {
+                    assert_eq!(this.diagrams.borrow().ready_count(), 1);
+                    this.diagrams.borrow_mut().toggle_source(&frame);
+                    this.diagram_layout_changed(&["reply#text.1".into()], cx);
+                });
+                draw(window, cx);
+                assert_eq!(
+                    fence_height(cx),
+                    source_height,
+                    "the toggle restores the source"
+                );
+                // Completion keeps row identity, the rendered diagram and
+                // the reader's source toggle; nothing renders again.
+                transcript.update(cx, |this, cx| {
+                    feed(this, reply(MessageStatus::Complete, text.clone()), cx)
+                });
+                draw(window, cx);
+                let this = transcript.read(cx);
+                assert!(this.diagrams.borrow().source_visible(&frame));
+                assert!(this.diagrams.borrow_mut().next_job().is_none());
+            });
+        }
+
+        #[test]
+        fn mermaid_diagram_swap_keeps_a_pinned_stream_at_the_bottom() {
+            with_window(|transcript, window, cx| {
+                let intro = "A paragraph that explains the result in detail. ".repeat(12);
+                let reply = |status, tail: &str| {
+                    let mut text = String::new();
+                    for section in 0..8 {
+                        text.push_str(&format!("Section {section}. {intro}\n\n"));
+                    }
+                    text.push_str(MERMAID_FENCE);
+                    text.push_str(tail);
+                    vec![
+                        prompt("prompt"),
+                        assistant("reply", status, vec![text_part("text", &text)]),
+                    ]
+                };
+                transcript.update(cx, |this, cx| {
+                    this.rail_enabled = false;
+                    feed(
+                        this,
+                        reply(MessageStatus::Streaming, "\nAfter the diagram."),
+                        cx,
+                    )
+                });
+                for _ in 0..50 {
+                    tick(&transcript, window, cx);
+                }
+                let this = transcript.read(cx);
+                assert!(this.pinned);
+                assert!(
+                    this.list.max_offset_for_scrollbar().y > px(100.0),
+                    "must overflow"
+                );
+                assert!(this.distance_from_bottom() <= 1.0);
+                assert!(render_next_diagram(&transcript, cx));
+                for _ in 0..50 {
+                    tick(&transcript, window, cx);
+                }
+                let this = transcript.read(cx);
+                assert!(this.pinned, "a diagram swap is not user input");
+                assert!(this.distance_from_bottom() <= 1.0, "pin follows the swap");
+                // More streaming after the swap keeps following.
+                transcript.update(cx, |this, cx| {
+                    feed(
+                        this,
+                        reply(
+                            MessageStatus::Streaming,
+                            &format!("\nAfter the diagram.\n\n{intro}\n\n{intro}"),
+                        ),
+                        cx,
+                    )
+                });
+                for _ in 0..50 {
+                    tick(&transcript, window, cx);
+                }
+                let this = transcript.read(cx);
+                assert!(this.pinned);
+                assert!(this.distance_from_bottom() <= 1.0);
+                assert!(this.diagrams.borrow_mut().next_job().is_none());
+            });
+        }
+
+        #[test]
+        fn mermaid_completion_renders_the_tail_without_moving_the_runway_prompt() {
+            with_window(|transcript, window, cx| {
+                transcript.update(cx, |this, cx| {
+                    feed(this, vec![prompt("prompt")], cx);
+                    this.rail_enabled = false;
+                });
+                draw(window, cx);
+                transcript.update(cx, |this, cx| {
+                    this.on_own_send("chat".into(), "prompt".into(), cx)
+                });
+                draw(window, cx);
+                for _ in 0..80 {
+                    tick(&transcript, window, cx);
+                }
+                let reply = |status| {
+                    vec![
+                        prompt("prompt"),
+                        assistant(
+                            "reply",
+                            status,
+                            vec![text_part(
+                                "text",
+                                &format!("Here it is:\n\n{MERMAID_FENCE}"),
+                            )],
+                        ),
+                    ]
+                };
+                transcript.update(cx, |this, cx| {
+                    feed(this, reply(MessageStatus::Streaming), cx)
+                });
+                for _ in 0..50 {
+                    tick(&transcript, window, cx);
+                }
+                assert!(transcript.read(cx).diagram_worker.is_none());
+                transcript.update(cx, |this, cx| {
+                    feed(this, reply(MessageStatus::Complete), cx)
+                });
+                for _ in 0..50 {
+                    tick(&transcript, window, cx);
+                }
+                let prompt_top = |cx: &gpui::App| {
+                    let this = transcript.read(cx);
+                    assert!(this.own_turn.is_some(), "a short reply keeps its runway");
+                    this.list.bounds_for_item(0).unwrap().top()
+                };
+                let before = prompt_top(cx);
+                assert!(render_next_diagram(&transcript, cx));
+                // No controller tick between the swap and this paint.
+                draw(window, cx);
+                assert_eq!(prompt_top(cx), before, "the diagram swap moved the prompt");
+                let this = transcript.read(cx);
+                assert!(
+                    this.list.max_offset_for_scrollbar().y <= px(2.5),
+                    "the swap opened blank space below the runway"
+                );
+                for _ in 0..50 {
+                    tick(&transcript, window, cx);
+                }
+                assert_eq!(prompt_top(cx), before);
+
+                // The lightbox frames an enlarged raster by the diagram's
+                // natural size and releases it on close.
+                let media = transcript
+                    .read(cx)
+                    .diagrams
+                    .borrow()
+                    .ready_media()
+                    .expect("rendered diagram");
+                cx.update_window(window.into(), |_, window, cx| {
+                    transcript.update(cx, |this, cx| {
+                        this.open_diagram_preview(media.clone(), window, cx)
+                    });
+                })
+                .unwrap();
+                draw(window, cx);
+                transcript.update(cx, |this, cx| {
+                    assert!(this.attachment_preview.is_some());
+                    assert!(this.diagram_zoom.is_some());
+                    this.close_diagram_zoom(cx);
+                    assert!(this.attachment_preview.is_none());
+                    assert!(this.diagram_zoom.is_none());
+                });
+                draw(window, cx);
             });
         }
 
