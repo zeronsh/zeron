@@ -151,11 +151,7 @@ fn model(
 /// normalization borrows these labels so alias rows served by older engines
 /// still read with their version numbers ("Opus 5.5", not "Opus").
 pub(crate) fn configured_models() -> Vec<Model> {
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".claude"));
-    models_with_settings(&root.join("settings.json"))
+    models_with_settings(&super::config_dir().join("settings.json"))
 }
 
 fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
