@@ -239,14 +239,29 @@ impl MarkdownPreview {
             480.0,
         );
         let mut retired = Vec::new();
+        // Admission accounts current rasters, so a sharper one must still fit
+        // the document budget.
+        let mut used: usize = self
+            .images
+            .values()
+            .chain(self.diagrams.values())
+            .filter_map(|m| m.as_ref().ok())
+            .map(|m| m.bytes)
+            .sum();
         for media in self
             .images
             .values_mut()
             .chain(self.diagrams.values_mut())
             .filter_map(|m| m.as_mut().ok())
         {
-            let next = media.preview_for_view(target, window.scale_factor());
+            let others = used - media.bytes;
+            let next = media.preview_within(
+                target,
+                window.scale_factor(),
+                MAX_MEDIA_BYTES.saturating_sub(others),
+            );
             if !Arc::ptr_eq(&media.image, &next.image) {
+                used = others + next.bytes;
                 retired.push(std::mem::replace(media, next));
                 self.media_dirty = true;
             }

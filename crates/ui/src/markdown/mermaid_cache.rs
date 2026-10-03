@@ -74,10 +74,14 @@ impl MermaidCache {
         }
         self.view = Some((target, scale));
         let mut retired = Vec::new();
+        let mut used = self.retained_bytes();
         for entry in self.entries.values_mut() {
             if let State::Ready(media) = &mut entry.state {
-                let next = media.preview_for_view(target, scale);
+                let others = used - media.bytes;
+                let next =
+                    media.preview_within(target, scale, MAX_RETAINED_BYTES.saturating_sub(others));
                 if !std::sync::Arc::ptr_eq(&media.image, &next.image) {
+                    used = others + next.bytes;
                     retired.push(std::mem::replace(media, next));
                 }
             }
