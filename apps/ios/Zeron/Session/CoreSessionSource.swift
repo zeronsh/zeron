@@ -36,9 +36,19 @@ final class CoreSessionSource: SessionSource {
         handle.setViewAttached(attached: true)
     }
 
+    private func selection(for row: SessionRow?) -> (harness: String, model: String?, reasoning: String?)? {
+        // A local config write reaches the core before AppModel's workspace event.
+        if let config = client.sessionConfig(chatId: chatId) {
+            return (config.harness, config.model, config.reasoning)
+        }
+        guard let row else { return nil }
+        return (row.harness ?? "claude-code", row.model, row.reasoning)
+    }
+
     private func refresh() {
         let c = handle.composer()
         let row = app?.row(chatId)
+        let selected = selection(for: row)
         hostDevice = c.host.deviceId
         var next = SessionChrome()
         next.title = c.title
@@ -48,10 +58,13 @@ final class CoreSessionSource: SessionSource {
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
-        if let model = row?.modelLabel ?? row?.harnessLabel {
-            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
+        if let selected {
+            let title = selected.model.map { modelLabel(harness: selected.harness, model: $0) }
+                ?? (row?.harness == selected.harness ? row?.harnessLabel : nil)
+                ?? harnessLabel(harness: selected.harness)
+            chips.append(ComposerChip(id: "model", title: title, symbol: nil, icon: BrandMarks.image(for: selected.harness, side: 13)))
         }
-        if let r = row?.reasoning, !r.isEmpty {
+        if let r = selected?.reasoning, !r.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
         }
         if let pr = row?.pullRequest {
@@ -76,6 +89,8 @@ final class CoreSessionSource: SessionSource {
             next.banner = .failed(sendFailure)
         } else if c.sendState == .failed {
             next.banner = .notDelivered
+        } else if let settingFailure {
+            next.banner = .failed(settingFailure)
         } else if c.sendState == .queued {
             next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
         } else if app?.connectivity?.state == .offline {
@@ -122,6 +137,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     private var sendFailure: String?
+    private var settingFailure: String?
 
     func stop() {
         try? handle.interrupt()
@@ -197,16 +213,27 @@ final class CoreSessionSource: SessionSource {
 
     func chipMenu(_ id: String) -> UIMenu? {
         guard let row = app?.row(chatId) else { return nil }
-        let harness = row.harness ?? "claude-code"
+        let harness = selection(for: row)?.harness ?? "claude-code"
         switch id {
         case "model":
             return UIMenu(title: "Model", children: [UIDeferredMenuElement { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
+                    let selectedModel = self.selection(for: self.app?.row(self.chatId))?.model
                     done(models.map { m in
-                        UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
-                            self?.setConfig { $0.model = m.id }
+                        UIAction(title: m.label, subtitle: m.description, state: m.id == selectedModel ? .on : .off) { [weak self] _ in
+                            self?.setConfig { config in
+                                config.model = m.id
+                                if !m.reasoningLevels.contains(config.reasoning ?? "") {
+                                    config.reasoning = m.defaultReasoning
+                                }
+                                config.modelOptions = config.modelOptions.filter { pair in
+                                    m.options.contains { option in
+                                        option.id == pair.key && option.choices.contains { $0.id == pair.value }
+                                    }
+                                }
+                            }
                         }
                     })
                 }
@@ -216,9 +243,10 @@ final class CoreSessionSource: SessionSource {
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    let levels = models.first { $0.id == row.model }?.reasoningLevels ?? models.first?.reasoningLevels ?? []
+                    let selected = self.selection(for: self.app?.row(self.chatId))
+                    let levels = models.first { $0.id == selected?.model }?.reasoningLevels ?? models.first?.reasoningLevels ?? []
                     done(levels.map { l in
-                        UIAction(title: reasoningLabel(level: l), state: l == row.reasoning ? .on : .off) { [weak self] _ in
+                        UIAction(title: reasoningLabel(level: l), state: l == selected?.reasoning ? .on : .off) { [weak self] _ in
                             self?.setConfig { $0.reasoning = l }
                         }
                     })
@@ -238,7 +266,13 @@ final class CoreSessionSource: SessionSource {
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
         var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "claude-code", model: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
         change(&config)
-        try? client.setSessionConfig(chatId: chatId, config: config)
+        do {
+            try client.setSessionConfig(chatId: chatId, config: config)
+            settingFailure = nil
+        } catch {
+            settingFailure = "Couldn't change session settings: \(error)"
+        }
+        refresh()
     }
 
     func searchFiles(_ query: String) async -> [FileMatch] {
