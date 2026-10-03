@@ -84,6 +84,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/windows-ci-setup
+      - name: Worktree path compatibility
+        run: |
+          cargo test --release --locked -p zeron-proto --lib device_paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked -p zeron-engine --test worktree_on_run worktree_location_
       - name: Engine unit tests
         run: cargo test --release --locked -p zeron-engine --lib
       - name: Harness catalog and login tests

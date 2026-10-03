@@ -42,6 +42,7 @@ mod transcript_history;
 pub mod uploads;
 pub mod workspace_files;
 pub mod workspace_host;
+mod worktree_settings;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};

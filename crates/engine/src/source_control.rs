@@ -1094,7 +1094,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         }
 
         let runner: Arc<dyn ProcessRunner> = Arc::new(ExecutableGhRunner {
-            executable: fake_gh,
+            executable: fake_gh.clone(),
         });
         let resolver = ChangeRequestResolver {
             inspector: GitCheckoutInspector::new(runner.clone()),
@@ -1116,6 +1116,87 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(pull_request.number, 90);
         assert_eq!(pull_request.state, ChangeRequestState::Open);
         assert_eq!(pull_request.head_ref, "feature/status");
+
+        // A worktree created in a user-chosen folder must still resolve its
+        // repository, branch and PR through the same host-side badge path.
+        run_git(
+            &checkout,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        let repos = crate::Repos::with_worktrees_root(
+            &temp.path().join("settings"),
+            "test-device",
+            temp.path().join("default-worktrees"),
+        );
+        let custom_root = temp.path().join("other disk/worktrees");
+        repos
+            .set_worktree_settings(zeron_proto::WorktreeSettings {
+                use_custom_directory: true,
+                custom_directory: Some(custom_root.to_string_lossy().into_owned()),
+            })
+            .await
+            .unwrap();
+        let worktree = repos.create_worktree(&checkout, "HEAD").await.unwrap();
+        assert!(Path::new(&worktree.path).starts_with(custom_root.canonicalize().unwrap()));
+        std::fs::write(
+            &fake_gh,
+            fake_gh_contents.replace("feature/status", &worktree.branch),
+        )
+        .unwrap();
+        let resolution = resolver
+            .resolve_github(Path::new(&worktree.path))
+            .await
+            .unwrap();
+        assert_eq!(
+            resolution.source.checkout_root.canonicalize().unwrap(),
+            Path::new(&worktree.path).canonicalize().unwrap()
+        );
+        assert_eq!(resolution.source.branch.local_branch, worktree.branch);
+        assert_eq!(resolution.source.branch.owner.as_deref(), Some("acme"));
+        let badge = resolution.change_request.unwrap();
+        assert_eq!(badge.number, 90);
+        assert_eq!(badge.state, ChangeRequestState::Open);
+        assert_eq!(badge.head_ref, worktree.branch);
+        let identity = repos
+            .checkout_identity(Path::new(&worktree.path))
+            .await
+            .unwrap();
+        repos
+            .set_worktree_settings(zeron_proto::WorktreeSettings::default())
+            .await
+            .unwrap();
+        let default_worktree = repos.create_worktree(&checkout, "HEAD").await.unwrap();
+        assert!(
+            Path::new(&default_worktree.path).starts_with(temp.path().join("default-worktrees"))
+        );
+        assert_eq!(
+            repos
+                .checkout_identity(Path::new(&worktree.path))
+                .await
+                .unwrap(),
+            identity
+        );
+        let refs = repos.refs(&checkout).await.unwrap();
+        for path in [&worktree.path, &default_worktree.path] {
+            // Git reports slash-separated paths on Windows, while settings
+            // retain canonical Win32 prefixes. Compare the actual directory.
+            assert!(
+                refs.iter().any(|entry| entry
+                    .worktree_path
+                    .as_ref()
+                    .is_some_and(|listed| same_file::is_same_file(listed, path).unwrap_or(false))),
+                "Git refs must include worktree {path}; got {refs:?}"
+            );
+        }
     }
 
     #[tokio::test]
