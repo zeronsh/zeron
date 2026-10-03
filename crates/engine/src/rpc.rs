@@ -252,6 +252,9 @@ struct SwitchRefParams {
     /// The checkout to switch — a session's cwd (main folder or worktree).
     repo_path: String,
     ref_name: String,
+    /// Only new-session drafts may fall back to an isolated worktree.
+    #[serde(default)]
+    allow_worktree_fallback: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2917,12 +2920,27 @@ impl RpcService for EngineRpc {
             }
             methods::SWITCH_REF => {
                 let p: SwitchRefParams = parse_params(params)?;
-                let branch = self
+                let result = self
                     .repos
                     .switch_ref(std::path::Path::new(&p.repo_path), &p.ref_name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "branch": branch }))
+                    .await;
+                let outcome = match result {
+                    Ok(branch) => zeron_proto::SwitchRefOutcome {
+                        branch: Some(branch),
+                        worktree_required: false,
+                    },
+                    Err(error)
+                        if p.allow_worktree_fallback
+                            && crate::repos::checkout_requires_worktree(&error) =>
+                    {
+                        zeron_proto::SwitchRefOutcome {
+                            branch: None,
+                            worktree_required: true,
+                        }
+                    }
+                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                };
+                RpcReply::value(&outcome)
             }
             methods::LIST_FOLDERS => {
                 let p: ListFoldersParams = parse_params(params)?;

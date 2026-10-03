@@ -328,6 +328,17 @@ pub struct RepoRef {
     pub worktree_path: Option<String>,
 }
 
+/// A draft may opt into worktree isolation when Git refuses a checkout.
+/// Callers that do not opt in still receive the original checkout error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchRefOutcome {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktree_required: bool,
+}
+
 /// Public Git reference attached to a commit in the history graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

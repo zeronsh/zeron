@@ -25,6 +25,7 @@ use gpui::{
 use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
 use zeron_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    SwitchRefOutcome,
 };
 use zeron_rpc::methods;
 
@@ -620,11 +621,13 @@ pub struct Pickers {
     /// Own slot: the refs load runs concurrently with the eager
     /// harness/model loads — sharing `load_task` would abort one mid-flight.
     refs_task: Option<Task<()>>,
-    /// In-flight mid-session `SwitchRef` (the ref being switched to).
+    /// In-flight draft `SwitchRef` (the ref being switched to).
     switching: Option<String>,
     switch_task: Option<Task<()>>,
-    /// Last mid-session switch failure (shown in the ref popover).
+    /// Last draft switch failure (shown in the ref popover).
     switch_error: Option<String>,
+    /// Non-blocking explanation of an automatic switch to New worktree.
+    switch_notice: Option<String>,
     mutate_task: Option<Task<()>>,
     _search_events: Subscription,
     _state_observe: Subscription,
@@ -711,6 +714,9 @@ impl Pickers {
                 this.config.model = None;
                 this.config.reasoning = None;
                 this.switch_error = None;
+                this.switch_notice = None;
+                this.switch_task = None;
+                this.switching = None;
             }
             // A space switch invalidates the branch draft + cache — the folder
             // (and possibly the device) changed under them.
@@ -724,6 +730,10 @@ impl Pickers {
                 this.setting_bounds = None;
                 this.refs_task = None;
                 this.load_task = None;
+                this.switch_task = None;
+                this.switching = None;
+                this.switch_error = None;
+                this.switch_notice = None;
                 this.config.branch = None;
                 this.config.checkout = CheckoutKind::default();
                 this.refs = Loadable::Idle;
@@ -831,6 +841,7 @@ impl Pickers {
             switching: None,
             switch_task: None,
             switch_error: None,
+            switch_notice: None,
             mutate_task: None,
             _search_events: search_events,
             _state_observe: state_observe,
@@ -1602,9 +1613,10 @@ impl Pickers {
         // Refs are fixed at creation: an existing session can never move
         // (wing's rule — the footer renders read-only labels there, so this
         // is a belt-and-braces guard).
-        if self.state.read(cx).selected_chat_row().is_some() {
+        if self.state.read(cx).selected_chat_row().is_some() || self.switching.is_some() {
             return;
         }
+        self.switch_notice = None;
         if row.worktree_path.is_some() {
             // Reuse the ref's existing worktree ("Current worktree") — the
             // t3code `reuseExistingWorktree` path.
@@ -1615,8 +1627,7 @@ impl Pickers {
             self.config.branch = Some(row.name.clone());
         } else {
             // Local mode + a plain non-current ref: CHECK OUT the space
-            // folder (full t3code `switchRef` — picking `main` means "put my
-            // local checkout on main", it must never flip the mode).
+            // folder. A checkout conflict automatically selects isolation.
             self.switch_draft_ref(row, cx);
             return;
         }
@@ -1626,7 +1637,8 @@ impl Pickers {
 
     /// Draft-mode checkout switch: `git checkout` in the SPACE's folder
     /// (relay-forwarded for remote spaces). Success records the pick and
-    /// refreshes tags; failure keeps the popover open with git's message.
+    /// refreshes tags; checkout conflicts select New worktree with a notice.
+    /// Other failures keep the popover open with git's message.
     fn switch_draft_ref(&mut self, row: RepoRef, cx: &mut Context<Self>) {
         if self.switching.is_some() {
             return; // one switch at a time
@@ -1639,8 +1651,11 @@ impl Pickers {
         };
         let local = self.state.read(cx).local_device_id.clone();
         self.switch_error = None;
+        self.switch_notice = None;
         self.switching = Some(row.name.clone());
         let ref_name = row.name.clone();
+        let generation = self.target_generation;
+        let draft_owner = self.state.read(cx).selected_chat.clone();
         self.switch_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
             params.insert(
@@ -1651,6 +1666,10 @@ impl Pickers {
                 "refName".into(),
                 serde_json::Value::String(ref_name.clone()),
             );
+            params.insert(
+                "allowWorktreeFallback".into(),
+                serde_json::Value::Bool(true),
+            );
             if local.as_deref() != Some(space.device_id.as_str()) {
                 params.insert(
                     "targetDeviceId".into(),
@@ -1660,25 +1679,58 @@ impl Pickers {
             let result = engine
                 .client()
                 .call(methods::SWITCH_REF, serde_json::Value::Object(params))
-                .await;
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<SwitchRefOutcome>(value)
+                        .map_err(|error| error.to_string())
+                });
             this.update(cx, |pickers, cx| {
-                pickers.switching = None;
-                match result {
-                    Ok(_) => {
-                        pickers.config.branch = Some(ref_name);
-                        pickers.animate_close(cx);
-                        pickers.ensure_refs(true, cx);
-                    }
-                    Err(err) => pickers.switch_error = Some(err.to_string()),
+                if pickers.target_generation != generation
+                    || pickers.state.read(cx).selected_chat != draft_owner
+                    || pickers.state.read(cx).selected_space.as_deref() != Some(space.id.as_str())
+                {
+                    return;
                 }
-                cx.notify();
+                pickers.apply_draft_ref_result(ref_name, result, cx);
             })
             .ok();
         }));
         cx.notify();
     }
 
+    fn apply_draft_ref_result(
+        &mut self,
+        ref_name: String,
+        result: Result<SwitchRefOutcome, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.switching = None;
+        match result {
+            Ok(outcome) => {
+                self.config.branch = Some(ref_name.clone());
+                if outcome.worktree_required {
+                    self.config.checkout = CheckoutKind::NewWorktree;
+                    self.switch_notice = Some(format!(
+                        "Checkout conflict: a new worktree from {ref_name} will be created when you send. Your current checkout is unchanged."
+                    ));
+                    // Leave the informational notice visible; the draft is
+                    // ready to send and the popover can be dismissed normally.
+                } else {
+                    self.animate_close(cx);
+                }
+                self.ensure_refs(true, cx);
+            }
+            Err(error) => self.switch_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn pick_checkout(&mut self, kind: CheckoutKind, cx: &mut Context<Self>) {
+        if self.switching.is_some() {
+            return;
+        }
+        self.switch_notice = None;
         if kind == CheckoutKind::Local
             && self.config.checkout == CheckoutKind::NewWorktree
             && self.selected_ref_worktree().is_none()
@@ -3067,6 +3119,17 @@ impl Pickers {
                     .text_color(theme.text_muted.opacity(0.7)),
             )
             .child(div().min_w_0().truncate().child(label))
+            .when(kind == PickerKind::Checkout, |el| {
+                el.when_some(self.switch_notice.clone(), |el, notice| {
+                    el.tooltip(crate::settings::widgets::text_tooltip(notice))
+                        .child(
+                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(theme.warning),
+                        )
+                })
+            })
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
@@ -3708,8 +3771,19 @@ impl Pickers {
             .flex_col()
             .child(self.search_box(&theme))
             .child(body);
-        // Mid-session switch failure (dirty tree, ref checked out elsewhere):
-        // git's own message, under a hairline.
+        if let Some(notice) = &self.switch_notice {
+            popover = popover.child(
+                popover::menu_section().child(
+                    div()
+                        .px(px(Theme::SPACE_SM))
+                        .py(px(4.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.warning)
+                        .child(SharedString::from(notice.clone())),
+                ),
+            );
+        }
+        // Unrelated checkout errors retain Git's message under a hairline.
         if let Some(error) = &self.switch_error {
             popover = popover.child(
                 popover::menu_section().child(
@@ -5958,6 +6032,113 @@ mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
+    #[gpui::test]
+    fn draft_ref_conflict_selects_new_worktree_and_keeps_a_notice(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.config.branch = Some("main".into());
+            pickers.refs = Loadable::Ready(vec![RepoRef {
+                name: "feature".into(),
+                current: false,
+                // A refreshed ref may now exist elsewhere: the fallback
+                // must still create a new worktree rather than reuse it.
+                worktree_path: Some("/occupied".into()),
+            }]);
+            pickers.switching = Some("feature".into());
+            pickers.open.open(PickerKind::Branch);
+            pickers.apply_draft_ref_result(
+                "feature".into(),
+                Ok(SwitchRefOutcome {
+                    branch: None,
+                    worktree_required: true,
+                }),
+                cx,
+            );
+            assert_eq!(pickers.config.checkout, CheckoutKind::NewWorktree);
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::NewWorktree {
+                    base: Some("feature".into())
+                }
+            );
+            assert_eq!(pickers.checkout_label(), "New worktree");
+            assert_eq!(pickers.ref_label().as_ref(), "From feature");
+            assert!(pickers.switching.is_none());
+            assert!(pickers.switch_error.is_none());
+            assert!(
+                pickers
+                    .switch_notice
+                    .as_deref()
+                    .unwrap()
+                    .contains("when you send")
+            );
+            assert!(pickers.is_open(), "the informational notice stays visible");
+            pickers.dismiss(cx);
+            assert!(
+                pickers.switch_notice.is_some(),
+                "the checkout chip retains its explanation"
+            );
+            pickers.pick_ref(
+                RepoRef {
+                    name: "another".into(),
+                    current: false,
+                    worktree_path: None,
+                },
+                cx,
+            );
+            assert!(pickers.switch_notice.is_none());
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::NewWorktree {
+                    base: Some("another".into())
+                }
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn draft_ref_error_preserves_the_checkout_plan(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.config.branch = Some("main".into());
+            let original = pickers.checkout_plan();
+            pickers.switching = Some("missing".into());
+            pickers.open.open(PickerKind::Branch);
+            pickers.apply_draft_ref_result("missing".into(), Err("git: missing branch".into()), cx);
+            assert_eq!(pickers.checkout_plan(), original);
+            assert_eq!(pickers.switch_error.as_deref(), Some("git: missing branch"));
+            assert!(pickers.switch_notice.is_none());
+            assert!(pickers.switching.is_none());
+            assert!(pickers.is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn draft_ref_switch_state_is_cleared_when_the_target_changes(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, _| {
+            pickers.config.branch = Some("feature".into());
+            pickers.config.checkout = CheckoutKind::NewWorktree;
+            pickers.switching = Some("feature".into());
+            pickers.switch_notice = Some("New worktree selected".into());
+            pickers.switch_error = Some("Old error".into());
+        });
+        state.update(cx, |state, cx| {
+            state.select_device("other-device".into(), cx)
+        });
+        cx.run_until_parked();
+        pickers.update(cx, |pickers, _| {
+            assert_eq!(pickers.config.checkout, CheckoutKind::Local);
+            assert!(pickers.config.branch.is_none());
+            assert!(pickers.switching.is_none());
+            assert!(pickers.switch_error.is_none());
+            assert!(pickers.switch_notice.is_none());
+        });
+    }
+
     struct ModelShortcutHost {
         focus_sub: Option<gpui::Subscription>,
         root: FocusHandle,
@@ -8149,7 +8330,10 @@ mod tests {
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude"));
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.model_rows(cx)[picker.active].harness, HarnessId::ClaudeCode);
+                assert_eq!(
+                    picker.model_rows(cx)[picker.active].harness,
+                    HarnessId::ClaudeCode
+                );
             })
             .unwrap();
     }
@@ -8323,7 +8507,9 @@ mod tests {
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
                 assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
                 // Searching must also find another provider's model.
-                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
                 picker.activate_model_index(0, cx);
@@ -8357,7 +8543,9 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
-                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 0);
                 picker.search.update(cx, |input, cx| input.set_text("", cx));
                 // A chat's provider is fixed: the provider page stays shut.

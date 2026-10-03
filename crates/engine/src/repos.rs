@@ -57,6 +57,19 @@ const NOUNS: &[&str] = &[
     "onyx", "quartz", "raven", "summit", "willow", "aspen",
 ];
 
+/// Checkout refusals that an isolated worktree can bypass without touching
+/// local edits or an in-progress merge. Other failures must remain errors.
+pub(crate) fn checkout_requires_worktree(error: &EngineError) -> bool {
+    let EngineError::Other(message) = error else {
+        return false;
+    };
+    message.contains("would be overwritten by checkout")
+        || message.contains("you need to resolve your current index first")
+        || (message.contains("fatal:")
+            && (message.contains("is already checked out at")
+                || message.contains("is already used by worktree at")))
+}
+
 /// Canonical identity shared by every chat operating in this exact worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutIdentity {
@@ -233,6 +246,9 @@ impl Repos {
             cmd.current_dir(cwd);
         }
         cmd.stdin(std::process::Stdio::null());
+        // Git's machine-facing output and checkout-conflict classification
+        // must be independent of the host's display language.
+        cmd.env("LC_ALL", "C");
         let output = cmd
             .output()
             .await
@@ -1132,6 +1148,21 @@ impl Repos {
             name.ok_or_else(|| EngineError::Other("Could not allocate a worktree name".into()))?;
         let path = base.join(&name);
         let branch_name = format!("zeron/{name}");
+        // ListRefs strips remote prefixes. A failed tracking checkout may
+        // leave its selected branch remote-only, so resolve it just as
+        // switch_ref does before using it as the new worktree's base.
+        let base_ref = if self
+            .git(
+                &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+                Some(repo_path),
+            )
+            .await
+            .is_ok()
+        {
+            branch.to_string()
+        } else {
+            format!("origin/{branch}")
+        };
         self.git(
             &[
                 "worktree",
@@ -1139,7 +1170,7 @@ impl Repos {
                 "-b",
                 &branch_name,
                 &path.to_string_lossy(),
-                branch,
+                &base_ref,
             ],
             Some(repo_path),
         )

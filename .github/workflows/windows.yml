@@ -86,6 +86,8 @@ jobs:
       - uses: ./.github/actions/windows-ci-setup
       - name: Engine unit tests
         run: cargo test --release --locked -p zeron-engine --lib
+      - name: Checkout conflict and worktree tests
+        run: cargo test --release --locked -p zeron-engine --test switch_ref_worktree
       - name: Harness catalog and login tests
         run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
       - name: Auth integration tests
