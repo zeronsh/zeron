@@ -220,6 +220,38 @@ fn settings_models_keep_manifest_and_full_ladder() {
     assert_eq!(models_with_settings(&path), static_models());
 }
 
+/// Claude's named rows put the versioned display name before the capability
+/// text in their descriptions. Use that supplied name when the displayName is
+/// a short alias; never reconstruct a model name from a catalog or model ID.
+fn discovered_model_label(entry: &serde_json::Value, id: &str) -> String {
+    let Some(name) = model_text(entry, "displayName") else {
+        return id.to_owned();
+    };
+    let short_name = name
+        .strip_suffix(')')
+        .and_then(|name| name.rsplit_once(" (").map(|(base, _)| base))
+        .unwrap_or(name);
+    if let Some(description) = model_text(entry, "description") {
+        let heading = description.split('·').next().unwrap_or(description).trim();
+        if let Some(version) = heading
+            .strip_prefix(short_name)
+            .and_then(|s| s.strip_prefix(' '))
+            && version.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            return heading.to_owned();
+        }
+    }
+    name.to_owned()
+}
+
+fn model_text<'a>(entry: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    entry
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
 /// Overlay only new concrete model IDs; curated metadata remains authoritative.
 pub(super) fn with_discovered_models(
     mut models: Vec<Model>,
@@ -236,13 +268,7 @@ pub(super) fn with_discovered_models(
     let mut default = None;
     let mut valid = false;
     for entry in entries {
-        let text = |key: &str| {
-            entry
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-        };
+        let text = |key: &str| model_text(entry, key);
         let Some(id) = text("resolvedModel").or_else(|| text("value")) else {
             continue;
         };
@@ -283,10 +309,27 @@ pub(super) fn with_discovered_models(
         if ladder.contains(&ReasoningLevel::XHigh) {
             ladder.extend([ReasoningLevel::Ultracode, ReasoningLevel::Ultrathink]);
         }
+        // The default row is a selection policy, not a model name. Match its
+        // resolved ID to the CLI's named row before deduplication, regardless
+        // of row order. Unnamed defaults retain the concrete ID as their label.
+        let named_entry = if text("value") == Some("default") {
+            entries.iter().find(|named| {
+                model_text(named, "value") != Some("default")
+                    && model_text(named, "resolvedModel").or_else(|| model_text(named, "value"))
+                        == Some(id)
+            })
+        } else {
+            Some(entry)
+        };
         models.push(Model {
             id: id.into(),
-            label: text("displayName").unwrap_or(id).into(),
-            description: text("description").map(str::to_owned),
+            label: named_entry
+                .map(|named| discovered_model_label(named, id))
+                .unwrap_or_else(|| id.to_owned()),
+            description: named_entry
+                .and_then(|named| model_text(named, "description"))
+                .or_else(|| text("description"))
+                .map(str::to_owned),
             reasoning_levels: ladder,
             options: vec![],
         });
