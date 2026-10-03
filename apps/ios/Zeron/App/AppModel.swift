@@ -503,6 +503,11 @@ final class AppModel {
         try? await client?.listFolders(deviceId: deviceId, path: path)
     }
 
+    func createFolder(deviceId: String, parentPath: String, name: String) async throws -> String {
+        guard let client else { throw CoreError.Closed }
+        return try await client.createFolder(deviceId: deviceId, parentPath: parentPath, name: name)
+    }
+
     @MainActor
     func createProject(deviceId: String, path: String, gitDetected: Bool) async -> String? {
         guard let client else { return nil }

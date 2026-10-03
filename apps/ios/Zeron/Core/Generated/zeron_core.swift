@@ -905,6 +905,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func connectivity()  -> Connectivity
     
     /**
+     * Create a child folder on the selected computer, not on the phone.
+     */
+    func createFolder(deviceId: String, parentPath: String, name: String) async throws  -> String
+    
+    /**
      * Create (or find) the project for `path` on `device_id`. Returns its id.
      */
     func createProject(deviceId: String, path: String, gitDetected: Bool) async throws  -> String
@@ -1234,6 +1239,25 @@ open func connectivity() -> Connectivity  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Create a child folder on the selected computer, not on the phone.
+     */
+open func createFolder(deviceId: String, parentPath: String, name: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_create_folder(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(parentPath),FfiConverterString.lower(name)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -13127,6 +13151,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_connectivity() != 51284) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_create_folder() != 46976) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_create_project() != 59427) {

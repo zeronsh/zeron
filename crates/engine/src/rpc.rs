@@ -20,7 +20,8 @@
 //!   `SelectOrg {organizationId}`
 //! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
 //!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
-//!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
+//!   `ListFolders {path?}`, `CreateFolder {parentPath, name}`,
+//!   `CreateWorktree {repoPath, branch}`, `DeleteWorktree
 //!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
 //! - Workspace files: lazy directory listing, recursive path search, bounded text
 //!   reads, hash-guarded writes, and a checkout-scoped filesystem change stream.
@@ -318,6 +319,13 @@ struct RunProjectActionParams {
 struct ListFoldersParams {
     #[serde(default)]
     path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateFolderParams {
+    parent_path: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1374,6 +1382,7 @@ fn forwardable(method: &str) -> bool {
             | methods::FETCH_ALL
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
+            | methods::CREATE_FOLDER
             | methods::LIST_DRIVES
             | methods::SEARCH_FILES
             | methods::LIST_WORKSPACE_DIRECTORY
@@ -2932,6 +2941,15 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
+            }
+            methods::CREATE_FOLDER => {
+                let p: CreateFolderParams = parse_params(params)?;
+                let path = self
+                    .repos
+                    .create_folder(p.parent_path, p.name)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "path": path }))
             }
             methods::LIST_DRIVES => {
                 let drives = self

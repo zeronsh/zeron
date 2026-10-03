@@ -1310,6 +1310,32 @@ impl Client {
         }
     }
 
+    /// Create a new child folder on the selected execution device.
+    pub async fn create_folder(
+        &self,
+        device_id: &str,
+        parent_path: &str,
+        name: &str,
+    ) -> Result<String> {
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.create_folder(device_id, parent_path, name).await,
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::CREATE_FOLDER,
+                        serde_json::json!({ "parentPath": parent_path, "name": name }),
+                    )
+                    .await?;
+                value["path"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| ClientError::HostError("Missing created folder path".into()))
+            }
+        }
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {
