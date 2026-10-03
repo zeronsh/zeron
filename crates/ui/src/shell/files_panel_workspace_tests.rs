@@ -1,6 +1,7 @@
 //! Exercise the explorer and editors against an isolated real workspace/RPC.
 //! Set ZERON_FILES_CAPTURES to a directory to run on X11 and capture the fixture.
 use super::*;
+use crate::settings::{FILES_PANEL_DEFAULT, RIGHT_PANE_DEFAULT};
 use gpui::{AppContext, AsyncApp, WindowHandle};
 use std::{path::Path, sync::Arc};
 
@@ -287,6 +288,8 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         assert_eq!(shell.files_visible_width(cx), 284.0);
                         assert_eq!(shell.files_reserved_width(cx), 284.0);
                         assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
+                        // Squeezed by the narrow window, Files keeps its own
+                        // width for when there is room again.
                         assert_eq!(shell.settings.files_panel_width, FILES_PANEL_MAX);
                         assert!(shell.right_surface_rows(cx).is_empty());
                         shell.set_surfaces_open(false, cx);
@@ -384,11 +387,12 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "04b-expanded-narrow-files").await;
                 window
                     .update(cx, |shell, _, cx| {
+                        // Takeover keeps Files at its own width.
                         assert_eq!(shell.files_visible_width(cx), FILES_PANEL_DEFAULT);
-                        assert_eq!(
-                            shell.right_visible_width(cx),
-                            1000.0 - 256.0 - FILES_PANEL_DEFAULT
-                        );
+                        // The narrow fit already hid the sidebar. Takeover must
+                        // keep it hidden and give only the chat's space to the editor.
+                        assert_eq!(shell.sidebar_now(), 0.0);
+                        assert_eq!(shell.right_visible_width(cx), 1000.0 - FILES_PANEL_DEFAULT);
                         shell.toggle_right_pane_expand(cx);
                     })
                     .unwrap();

@@ -1085,6 +1085,8 @@ fn project_action_params(
 
 const ACTION_CONTROL_HEIGHT: f32 = 24.0;
 const ACTION_CONTROL_RADIUS: f32 = 7.0;
+// The empty-state "Add action" label is wider than the compact split button.
+pub(super) const PROJECT_ACTION_CONTROL_MIN_WIDTH: f32 = 96.0;
 
 /// The pill's fill (or its hover): the composer's own material and edge, so
 /// the two read as one family. Hover is a faint wash over that dark fill —
