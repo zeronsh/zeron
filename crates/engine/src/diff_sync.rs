@@ -15,7 +15,8 @@
 //! is captured by the command host and is never rewritten from this watcher;
 //! otherwise one checkout change would relabel every chat sharing that folder.
 //!
-//! Fast recursive `notify` watchers (debounced [`WATCH_DEBOUNCE`]) are backed by a
+//! Fast recursive `notify` watchers (debounced [`WATCH_DEBOUNCE`], and synced at
+//! least every [`WATCH_MAX_WAIT`] under a steady stream of writes) are backed by a
 //! slow 2-minute repair tick because native watchers may coalesce or drop events.
 //! Snapshots carry a sha256 checksum; an unchanged checksum publishes nothing.
 //!
@@ -59,6 +60,9 @@ pub const MAX_PATCH_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_DIFF_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// Trailing debounce after a filesystem event burst.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+/// A burst that never goes quiet (an agent writing a file every half second)
+/// still syncs after this long, so the diff keeps up while it is going on.
+const WATCH_MAX_WAIT: Duration = Duration::from_millis(1_500);
 /// Slow repair pass: re-reconcile + re-sync every checkout.
 const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 /// Max subdirectories a checkout may have before we skip its live recursive
@@ -151,6 +155,18 @@ pub struct TurnSnapshot {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
+/// How long a request for a run's base waits for its snapshot to be taken.
+const RUN_BASE_WAIT: Duration = Duration::from_secs(5);
+
+/// A run's base tree: pending while its snapshot is being taken.
+#[derive(Debug, Clone)]
+enum RunBase {
+    Pending,
+    /// Not a checkout, or the snapshot failed.
+    Missing,
+    Ready(TurnSnapshot),
+}
+
 struct DiffSyncInner {
     repos: Repos,
     workspace: WorkspaceHost,
@@ -171,6 +187,10 @@ struct DiffSyncInner {
     statuses_tx: watch::Sender<Vec<zeron_proto::CheckoutGitStatus>>,
     /// chat_id → turn-start tree (see [`TurnSnapshot`]).
     turn_trees: Mutex<HashMap<String, TurnSnapshot>>,
+    /// chat_id → tree at the start of the current run. Unlike `turn_trees`, a
+    /// steer into a run that is already working leaves it alone, so it spans
+    /// everything the agent did since it started working.
+    run_trees: Mutex<HashMap<String, watch::Sender<RunBase>>>,
     /// The tasks hold `Weak` refs, but an in-flight iteration holds an
     /// upgraded Arc — the token cuts it so no sidecar HTTP outlives shutdown.
     cancel: CancellationToken,
@@ -225,6 +245,7 @@ impl CheckoutDiffSync {
                 diffs_tx,
                 statuses_tx: watch::channel(Vec::new()).0,
                 turn_trees: Mutex::new(HashMap::new()),
+                run_trees: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
                 supervisor: Mutex::new(None),
             }),
@@ -286,31 +307,34 @@ impl CheckoutDiffSync {
     /// A turn is starting for `chat_id` in `cwd`: snapshot the checkout's tree
     /// in the background so "Latest turn" has a base. Best-effort — failures
     /// only log; a chat outside a checkout simply records nothing.
-    pub fn note_turn_start(&self, chat_id: &str, cwd: &str) {
+    ///
+    /// `starts_run` is false for a steer into a run that is already working: it
+    /// is a new turn, but the run's own snapshot (see [`Self::run_snapshot`])
+    /// keeps its original base. A chat with no run snapshot yet (engine
+    /// restarted mid-run) takes this one as its base.
+    pub fn note_turn_start(&self, chat_id: &str, cwd: &str, starts_run: bool) {
+        // A new run replaces the old base at once, while its snapshot is still
+        // being taken: a request for it must wait for the new tree rather
+        // than be answered from the previous run's.
+        let run_slot = {
+            let mut runs = lock(&self.inner.run_trees);
+            (starts_run || !runs.contains_key(chat_id)).then(|| {
+                let (slot, _) = watch::channel(RunBase::Pending);
+                runs.insert(chat_id.to_string(), slot.clone());
+                slot
+            })
+        };
         let inner = Arc::downgrade(&self.inner);
         let chat_id = chat_id.to_string();
         let cwd = PathBuf::from(cwd);
         tokio::spawn(async move {
             let Some(inner) = inner.upgrade() else { return };
-            let identity = match inner.repos.checkout_identity(&cwd).await {
-                Ok(identity) => identity,
-                Err(_) => return, // not a checkout
-            };
-            match snapshot_tree(&identity.root).await {
-                Ok(tree) => {
-                    lock(&inner.turn_trees).insert(
-                        chat_id,
-                        TurnSnapshot {
-                            root: identity.root,
-                            tree,
-                            at: chrono::Utc::now(),
-                        },
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(chat = %chat_id, error = %err,
-                        "diff-sync: turn snapshot failed");
-                }
+            let snapshot = snapshot_checkout(&inner.repos, &chat_id, &cwd).await;
+            if let Some(slot) = run_slot {
+                slot.send_replace(snapshot.clone().map_or(RunBase::Missing, RunBase::Ready));
+            }
+            if let Some(snapshot) = snapshot {
+                lock(&inner.turn_trees).insert(chat_id, snapshot);
             }
         });
     }
@@ -319,6 +343,24 @@ impl CheckoutDiffSync {
     /// since boot.
     pub fn turn_snapshot(&self, chat_id: &str) -> Option<TurnSnapshot> {
         lock(&self.inner.turn_trees).get(chat_id).cloned()
+    }
+
+    /// The snapshot from when the chat's current run started working; steers
+    /// mid-run don't move it. Waits (briefly) for a run that has just started
+    /// and is still taking its snapshot.
+    pub async fn run_snapshot(&self, chat_id: &str) -> Option<TurnSnapshot> {
+        let mut base = lock(&self.inner.run_trees).get(chat_id)?.subscribe();
+        let base = tokio::time::timeout(
+            RUN_BASE_WAIT,
+            base.wait_for(|base| !matches!(base, RunBase::Pending)),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        match &*base {
+            RunBase::Ready(snapshot) => Some(snapshot.clone()),
+            _ => None,
+        }
     }
 
     /// Discard the complete uncommitted state for a tracked checkout after
@@ -639,32 +681,52 @@ fn is_checkout_change(event: &notify::Event) -> bool {
     !matches!(event.kind, notify::EventKind::Access(_))
 }
 
-/// Per-checkout task: trailing-debounce fs kicks, then compute + publish. Runs
-/// syncs sequentially — kicks during a sync accumulate and trigger another pass.
+/// After a first kick, wait for the burst to settle: `debounce` of quiet, but
+/// never longer than `max_wait` in total, so a steady stream of events cannot
+/// postpone the sync forever. `false` when the channel closed mid-burst.
+async fn settle(
+    kick_rx: &mut mpsc::UnboundedReceiver<()>,
+    debounce: Duration,
+    max_wait: Duration,
+) -> bool {
+    let started = std::time::Instant::now();
+    while let Some(left) = max_wait.checked_sub(started.elapsed()) {
+        match tokio::time::timeout(debounce.min(left), kick_rx.recv()).await {
+            Ok(Some(())) => continue,
+            Ok(None) => return false,
+            Err(_) => break,
+        }
+    }
+    true
+}
+
+/// Per-checkout task: debounce fs kicks, then compute + publish. Runs syncs
+/// sequentially — kicks during a sync accumulate and trigger another pass.
 async fn entry_task(
     inner: Weak<DiffSyncInner>,
     entry: Weak<CheckoutEntry>,
     mut kick_rx: mpsc::UnboundedReceiver<()>,
     cancel: CancellationToken,
 ) {
+    let mut last_sync = Duration::ZERO;
     while kick_rx.recv().await.is_some() {
-        // Trailing debounce: wait for the burst to settle.
-        loop {
-            match tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()).await {
-                Ok(Some(())) => continue,
-                Ok(None) => return, // entry closed mid-burst
-                Err(_) => break,
-            }
+        // The cap grows with the cost of a sync, so a tree that never stops
+        // changing can't keep a core busy re-capturing it.
+        let max_wait = WATCH_MAX_WAIT.max(last_sync * 4);
+        if !settle(&mut kick_rx, WATCH_DEBOUNCE, max_wait).await {
+            return;
         }
         let (Some(inner), Some(entry)) = (inner.upgrade(), entry.upgrade()) else {
             return;
         };
+        let started = std::time::Instant::now();
         // The upgraded Arc would let a sync outlive shutdown — race the token
         // so an in-flight sidecar POST is dropped, not completed.
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = sync_entry(&inner, &entry) => {}
         }
+        last_sync = started.elapsed();
     }
 }
 
@@ -1722,6 +1784,23 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
     Ok(sha)
 }
 
+/// Snapshot the checkout `cwd` sits in for `chat_id`'s turn. Best-effort: a
+/// directory outside a checkout, or a failed snapshot, records nothing.
+async fn snapshot_checkout(repos: &Repos, chat_id: &str, cwd: &Path) -> Option<TurnSnapshot> {
+    let identity = repos.checkout_identity(cwd).await.ok()?;
+    match snapshot_tree(&identity.root).await {
+        Ok(tree) => Some(TurnSnapshot {
+            root: identity.root,
+            tree,
+            at: chrono::Utc::now(),
+        }),
+        Err(err) => {
+            tracing::debug!(chat = %chat_id, error = %err, "diff-sync: turn snapshot failed");
+            None
+        }
+    }
+}
+
 /// Write the checkout's current tracked + untracked (unignored) tree into the
 /// object db via a throwaway index: `git add -A` under `GIT_INDEX_FILE`, then
 /// `git write-tree`. The real index is never touched. Costs one full hash pass
@@ -1876,8 +1955,65 @@ pub async fn capture_turn_diff(
 mod watch_budget_tests {
     use super::{
         CheckoutIdentity, MAX_WATCH_DIRS, exceeds_watch_budget, has_non_utf8_status_path,
-        is_checkout_change, path_batches, watch_targets,
+        is_checkout_change, path_batches, settle, watch_targets,
     };
+
+    /// A write every 30 ms never leaves the 60 ms of quiet a plain trailing
+    /// debounce waits for. With the cap it must still settle, on time. (An
+    /// agent writing a file every half second did exactly this to the 500 ms
+    /// debounce: nothing published until it stopped.)
+    #[tokio::test]
+    async fn settle_gives_up_waiting_on_a_steady_stream() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = tokio::spawn(async move {
+            for _ in 0..100 {
+                if tx.send(()).is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        });
+        let started = std::time::Instant::now();
+        let open = settle(
+            &mut rx,
+            std::time::Duration::from_millis(60),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        let waited = started.elapsed();
+        assert!(open);
+        assert!(
+            waited >= std::time::Duration::from_millis(280)
+                && waited < std::time::Duration::from_millis(900),
+            "settled after {waited:?}, expected about the 300 ms cap"
+        );
+        sender.abort();
+    }
+
+    #[tokio::test]
+    async fn settle_still_waits_for_quiet_and_reports_a_closed_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let started = std::time::Instant::now();
+        // No further kicks: returns after one debounce, far under the cap.
+        assert!(
+            settle(
+                &mut rx,
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(tx);
+        assert!(
+            !settle(
+                &mut rx,
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+        );
+    }
 
     /// End to end through a real watcher: opening a file under a watched
     /// checkout raises access events on Linux, and before the filter each one

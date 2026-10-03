@@ -285,3 +285,117 @@ async fn deleted_checkout_is_evicted_after_grace() {
     );
     core.shutdown().await;
 }
+
+/// Poll until `ready` holds (the snapshots are taken on background tasks).
+async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !ready() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what} before timeout"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Steering a run that is already working starts a new *turn* but not a new
+/// *run*: the live-diff pill reads the run snapshot, so a steer must not reset
+/// the files it counts. A fresh run replaces both bases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_moves_the_turn_snapshot_but_not_the_run_snapshot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_dirty_repo(&repo_dir).await;
+    let cwd = repo_dir.to_string_lossy().to_string();
+    let core = assemble(&tmp.path().join("data"));
+    let sync = &core.diff_sync;
+
+    sync.note_turn_start("chat-1", &cwd, true);
+    let run = sync.run_snapshot("chat-1").await.expect("run snapshot");
+    wait_until("turn snapshot", || sync.turn_snapshot("chat-1").is_some()).await;
+    let turn = sync.turn_snapshot("chat-1").expect("turn snapshot");
+    assert_eq!(run.tree, turn.tree, "a fresh run starts both from one tree");
+
+    // The agent edits, then the user steers mid-run.
+    std::fs::write(repo_dir.join("b.txt"), "written during the run\n").expect("b.txt");
+    sync.note_turn_start("chat-1", &cwd, false);
+    wait_until("turn snapshot moves", || {
+        sync.turn_snapshot("chat-1")
+            .is_some_and(|t| t.tree != turn.tree)
+    })
+    .await;
+    assert_eq!(
+        sync.run_snapshot("chat-1")
+            .await
+            .expect("run snapshot")
+            .tree,
+        run.tree,
+        "a steer must not move the run's base"
+    );
+
+    // The next run (after the agent went idle) re-bases both. Asked for at
+    // once, before its snapshot has been taken, the run's base must be the new
+    // one: answering from the previous run's is the stale diff the live-diff
+    // pill used to flash when a turn started.
+    sync.note_turn_start("chat-1", &cwd, true);
+    let next = sync.run_snapshot("chat-1").await.expect("run snapshot");
+    assert_ne!(
+        next.tree, run.tree,
+        "the new run must not read the old base"
+    );
+    core.shutdown().await;
+}
+
+/// An agent writing a file every ~0.3 s never leaves the 500 ms of quiet a plain
+/// trailing debounce waits for, so nothing was published until it stopped. The
+/// diff must show the new files while the stream is still going on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diff_publishes_during_a_steady_write_stream() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_dirty_repo(&repo_dir).await;
+
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space(
+            "space-1",
+            &core.device_id,
+            &repo_dir.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space row");
+    core.workspace
+        .create_chat("chat-1", Some("space-1"), None, None, None)
+        .expect("chat row");
+    wait_chat_state(&core, "chat-1", true).await;
+    core.diff_sync.reconcile_now().await;
+    wait_for_diff(&core.diff_sync).await;
+    // Let the watchers attach and the initial capture settle.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let stream_dir = repo_dir.clone();
+    let stream = tokio::spawn(async move {
+        for i in 0..60 {
+            std::fs::write(stream_dir.join(format!("stream-{i}.txt")), "x\n").expect("write");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    });
+    // The stream runs for 18 s; the diff must list a file well before it ends.
+    let started = tokio::time::Instant::now();
+    loop {
+        let listed = current_diffs(&core.diff_sync)
+            .iter()
+            .any(|diff| diff.files.iter().any(|f| f.path.starts_with("stream-")));
+        if listed {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "no stream file published within 6 s of a steady write stream"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stream.abort();
+    core.shutdown().await;
+}

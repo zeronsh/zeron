@@ -1995,6 +1995,13 @@ impl AppState {
         if self.send_pending(chat_id, now) {
             return Indicator::Working;
         }
+        self.reported_indicator_for(chat_id, now)
+    }
+
+    /// [`Self::indicator_for`] without the optimistic send overlay: only what
+    /// the host has reported, so `Working` here means the host has started
+    /// the turn.
+    pub fn reported_indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
         effective_indicator(self.session_for(chat_id), now)
     }
 

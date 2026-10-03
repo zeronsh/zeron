@@ -4,8 +4,8 @@
 //! shell persists them and re-applies the app keymap.
 
 use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, Keystroke, SharedString, Window, div, prelude::*,
-    px,
+    App, Context, Entity, EventEmitter, FocusHandle, Keystroke, SharedString, Window, div,
+    prelude::*, px,
 };
 
 use crate::appshots::{AppshotCapabilities, AppshotDestination};
@@ -769,78 +769,45 @@ impl Render for ShortcutsPage {
                     .child(widgets::row_title(&theme, "Send messages with")),
             )
             .child(send_behavior_control);
-        let compact_mode_row = widgets::card_row(&theme, false)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(widgets::row_title(&theme, "Compact mode"))
-                    .child(widgets::meta_line(
-                        &theme,
-                        vec![
-                            div()
-                                .child("Collapse thinking and tools.")
-                                .into_any_element(),
-                        ],
-                    )),
-            )
-            .child(
-                widgets::toggle_switch(&theme, compact_mode, "transcript-compact-mode")
-                    .id("transcript-compact-mode-toggle")
-                    .tab_index(0)
-                    .role(gpui::Role::Switch)
-                    .aria_label("Compact mode")
-                    .aria_toggled(if compact_mode {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        crate::settings::set_transcript_compact_mode(!compact_mode, cx);
-                        cx.notify();
-                    })),
-            );
+        let compact_mode_row = toggle_row(
+            &theme,
+            "Compact mode",
+            "Collapse thinking and tools.",
+            "transcript-compact-mode",
+            compact_mode,
+            crate::settings::set_transcript_compact_mode,
+            cx,
+        );
         let compact_model_picker = crate::settings::compact_model_picker(cx);
-        let compact_model_picker_row = widgets::card_row(&theme, false)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(widgets::row_title(&theme, "Compact model picker"))
-                    .child(widgets::meta_line(
-                        &theme,
-                        vec![
-                            div()
-                                .child("Adjust effort with a slider, then open the model list when needed.")
-                                .into_any_element(),
-                        ],
-                    )),
-            )
-            .child(
-                widgets::toggle_switch(&theme, compact_model_picker, "compact-model-picker")
-                    .id("compact-model-picker-toggle")
-                    .tab_index(0)
-                    .role(gpui::Role::Switch)
-                    .aria_label("Compact model picker")
-                    .aria_toggled(if compact_model_picker {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        crate::settings::update(
-                            crate::settings::SavePolicy::Debounced,
-                            cx,
-                            |settings| settings.compact_model_picker = !compact_model_picker,
-                        );
-                        cx.refresh_windows();
-                        cx.notify();
-                    })),
-            );
+        let compact_model_picker_row = toggle_row(
+            &theme,
+            "Compact model picker",
+            "Adjust effort with a slider, then open the model list when needed.",
+            "compact-model-picker",
+            compact_model_picker,
+            |on, cx| {
+                crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                    settings.compact_model_picker = on
+                });
+                cx.refresh_windows();
+            },
+            cx,
+        );
+        let live_diff_pill = crate::settings::live_diff_pill(cx);
+        let live_diff_pill_row = toggle_row(
+            &theme,
+            "Live diff",
+            "Show the files an agent has changed above the composer while it works.",
+            "live-diff-pill",
+            live_diff_pill,
+            |on, cx| {
+                crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                    settings.live_diff_pill = on
+                });
+                cx.refresh_windows();
+            },
+            cx,
+        );
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -903,6 +870,7 @@ impl Render for ShortcutsPage {
                                             .child(send_behavior_row)
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
+                                            .child(live_diff_pill_row)
                                             .child(escape_behavior_row),
                                     )
                                     .child(self.thread_naming.clone()),
@@ -1042,6 +1010,49 @@ impl Render for ShortcutsPage {
             .children(scrollbar)
             .into_any_element()
     }
+}
+
+/// One switch row of the General card. `key` names the switch and its element
+/// id; `apply` writes the flipped value to the settings store.
+fn toggle_row(
+    theme: &Theme,
+    title: &'static str,
+    blurb: &'static str,
+    key: &'static str,
+    on: bool,
+    apply: impl Fn(bool, &mut App) + 'static,
+    cx: &mut Context<ShortcutsPage>,
+) -> gpui::Div {
+    let accent = theme.accent;
+    widgets::card_row(theme, false)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(widgets::row_title(theme, title))
+                .child(widgets::meta_line(
+                    theme,
+                    vec![div().child(blurb).into_any_element()],
+                )),
+        )
+        .child(
+            widgets::toggle_switch(theme, on, key)
+                .id(SharedString::from(format!("{key}-toggle")))
+                .tab_index(0)
+                .role(gpui::Role::Switch)
+                .aria_label(title)
+                .aria_toggled(if on {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .focus_visible(move |s| s.border_2().border_color(accent))
+                .cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    apply(!on, cx);
+                    cx.notify();
+                })),
+        )
 }
 
 #[cfg(test)]

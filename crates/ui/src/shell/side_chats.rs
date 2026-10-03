@@ -330,10 +330,11 @@ impl Shell {
                 .right_0()
                 .flex()
                 .justify_center()
-                .child(self.jump_pill(
+                .child(Self::jump_pill(
                     "side-chat-jump",
                     "side-chat-jump-pill",
                     transcript.clone(),
+                    super::ChipFold::OPEN,
                     cx,
                 ))
         });

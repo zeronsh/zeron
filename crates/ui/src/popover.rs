@@ -326,6 +326,24 @@ pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
     }
 }
 
+/// `(surface, hover wash)` of a floating chip over the transcript ("Scroll to
+/// bottom", the live-diff pill). `theme` is [`Theme::for_popup`]. Glass themes
+/// tint with the popover surface and wash on hover; solid themes blend raised
+/// surfaces instead.
+pub fn pill_fills(hover_key: &str, theme: &Theme) -> (gpui::Hsla, gpui::Hsla) {
+    if theme.is_frost() {
+        (
+            surface_bg(theme),
+            motion::hover_blend(hover_key, gpui::transparent_black(), theme.glass_hover()),
+        )
+    } else {
+        (
+            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover),
+            gpui::transparent_black(),
+        )
+    }
+}
+
 pub fn popover_card(theme: &Theme) -> gpui::Div {
     div()
         .border_1()
@@ -755,6 +773,38 @@ pub fn anchored_menu_above_at(
         .top(position.y)
         .size_0()
         .child(anchored_menu_above(id, content, closing))
+        .into_any_element()
+}
+
+/// [`anchored_menu_above`] centered over a trigger that fills its `relative`
+/// parent's width (a centered chip): the menu sits above the parent's top edge,
+/// horizontally centered on it.
+pub fn centered_menu_above(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+) -> AnyElement {
+    let exit = closing.map(exit_progress);
+    let content = frosted_menu(exit, content);
+    div()
+        .absolute()
+        .bottom_full()
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        // `flex_none`: a menu wider than the trigger overflows both sides
+        // equally instead of shrinking to the trigger's width.
+        .child(
+            div().flex_none().child(
+                gpui::deferred(menu_motion(
+                    id.into(),
+                    exit,
+                    div().occlude().pb(px(6.0)).child(content),
+                ))
+                .priority(1),
+            ),
+        )
         .into_any_element()
 }
 
