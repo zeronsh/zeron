@@ -24,6 +24,7 @@ if [[ "${CONFIGURATION:-Debug}" == "Release" ]]; then PROFILE=mobile-dist; fi
 
 OUT="$ROOT/target/ios-core/$PLATFORM"
 mkdir -p "$OUT/include"
+bash "$ROOT/scripts/ios/build-codex.sh" "$PLATFORM"
 
 # Iterating on Swift while the core is mid-edit: reuse the last good build.
 if [[ "${ZERON_SKIP_CORE:-}" == "1" && -f "$OUT/libzeron_mobile.a" ]]; then

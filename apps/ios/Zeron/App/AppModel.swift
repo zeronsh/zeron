@@ -5,6 +5,7 @@ import UIKit
 /// App-wide state owner: holds the Rust `CoreClient`, maps its snapshots
 /// into view models, and fans change notifications out to screens. All
 /// members are main-thread; core events hop here through `ListenerBridge`.
+@MainActor
 final class AppModel {
     struct FrontPage: Equatable {
         var folders: [FolderRowVM] = []
@@ -69,10 +70,12 @@ final class AppModel {
 
     private static let newSessionDraftKey = "new-session"
 
-    var isSignedIn: Bool { client != nil }
+    private var localMode = UserDefaults.standard.bool(forKey: "nativeCodexLocalMode")
+    var isSignedIn: Bool { client != nil || localMode }
     var isDemo: Bool { client?.isDemo() ?? false }
 
     init() {
+        NativeCodexSession.shared.onWorkspaceChange = { [weak self] in self?.refreshWorkspace() }
         // Online/offline + interface changes cut sync backoff short.
         path.pathUpdateHandler = { [weak self] p in
             DispatchQueue.main.async { self?.client?.setNetworkOnline(online: p.status == .satisfied) }
@@ -82,6 +85,7 @@ final class AppModel {
         #if DEBUG
         // Test hooks (never in release builds): wipe the Keychain, or run
         // against a local dev stack.
+        if args.contains("-native-local") { enterNativeMode(); return }
         if args.contains("-signedout") {
             Credentials.clearStored()
         }
@@ -94,7 +98,15 @@ final class AppModel {
             start(.demo(options: Self.demoOptions()))
         } else if let stored = Credentials.stored() {
             start(stored)
-        }
+        } else if localMode { refreshWorkspace() }
+    }
+
+    func enterNativeMode() {
+        localMode = true
+        UserDefaults.standard.set(true, forKey: "nativeCodexLocalMode")
+        lastDraft = NewSessionDraft(harness: "native-codex")
+        refreshWorkspace()
+        onSignedIn?()
     }
 
     static func demoOptions() -> DemoOptions {
@@ -207,6 +219,8 @@ final class AppModel {
     private var forgetOnSignOut = false
 
     func signOutLocally() {
+        localMode = false
+        UserDefaults.standard.removeObject(forKey: "nativeCodexLocalMode")
         client?.shutdown()
         client = nil
         Credentials.clearStored()
@@ -310,32 +324,37 @@ final class AppModel {
     }
 
     private func refreshWorkspace() {
-        guard let client else { return }
-        let ws = client.workspace()
-        workspaceRevision = ws.revision
+        let ws = client?.workspace()
+        workspaceRevision = ws?.revision ?? 0
         var all: [String: SessionRow] = [:]
         func vm(_ r: SessionRow) -> SessionRowVM {
             all[r.id] = r
             return Self.vm(r)
         }
         var page = FrontPage()
-        let pinned = ws.front.pinned.map(vm)
+        let native = nativeRows
+        let pinned = (ws?.front.pinned ?? []).map(vm) + native.filter { $0.pinned && !isNativeArchived($0.id) }
         if !pinned.isEmpty {
             page.folders.append(FolderRowVM(id: "pinned", name: "Pinned", count: pinned.count, symbol: "pin"))
         }
         page.sectionSessions["pinned"] = pinned
-        for s in ws.front.sections {
-            let list = s.sessions.map(vm)
+        for s in ws?.front.sections ?? [] {
+            let list = s.sessions.map(vm) + native.filter { nativeConversation($0.id)?.section == s.id && !$0.pinned && !isNativeArchived($0.id) }
             page.folders.append(FolderRowVM(id: s.id, name: s.name, count: list.count, symbol: "folder"))
             page.sectionSessions[s.id] = list
         }
-        page.sessions = ws.front.recent.map(vm)
-        rawProjects = ws.projects
+        page.sessions = native.filter { !isNativeArchived($0.id) && !$0.pinned && nativeConversation($0.id)?.section == nil } + (ws?.front.recent ?? []).map(vm)
+        page.sessions.sort {
+            let left = nativeConversation($0.id)?.updatedAt?.timeIntervalSince1970 ?? Double(all[$0.id]?.lastActivityMs ?? 0) / 1000
+            let right = nativeConversation($1.id)?.updatedAt?.timeIntervalSince1970 ?? Double(all[$1.id]?.lastActivityMs ?? 0) / 1000
+            return left > right
+        }
+        rawProjects = ws?.projects ?? []
         // Sessions reachable only through their project still resolve by id.
-        for p in ws.projects {
+        for p in ws?.projects ?? [] {
             for r in p.sessions where all[r.id] == nil { all[r.id] = r }
         }
-        let archivedVMs = ws.archived.map(vm)
+        let archivedVMs = (ws?.archived ?? []).map(vm) + native.filter { isNativeArchived($0.id) }
         var counts = LiveCounts()
         var seen = Set<String>()
         for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
@@ -389,8 +408,24 @@ final class AppModel {
         )
     }
 
+    private func nativeConversation(_ id: String) -> NativeCodexConversation? {
+        guard id.hasPrefix("native-codex-") else { return nil }
+        return NativeCodexSession.shared.conversations.first { "native-codex-" + $0.id == id }
+    }
+    private func isNativeArchived(_ id: String) -> Bool { nativeConversation(id)?.archived == true }
+    private var nativeRows: [SessionRowVM] {
+        let native = NativeCodexSession.shared
+        return native.conversations.map { c in
+            SessionRowVM(id: "native-codex-" + c.id, title: c.title, projectName: "Native Codex · This iPhone", hasProject: false, colorIndex: 0, harness: "native-codex", branch: nil, pr: nil, prNumber: nil, status: c.id == native.conversation.id && native.running ? .working : .idle, timeLabel: "", unseen: false, pinned: c.pinned == true, sendFailed: false)
+        }
+    }
+    func sessionScreen(_ id: String) -> SessionViewController {
+        if let c = nativeConversation(id) { return NativeCodexViewController(conversationId: c.id, app: self) }
+        return SessionViewController(app: self, chatId: id)
+    }
+
     func session(_ id: String) -> SessionRowVM? {
-        rows[id].map(Self.vm) ?? client?.sessionRow(chatId: id).map(Self.vm)
+        nativeRows.first { $0.id == id } ?? rows[id].map(Self.vm) ?? client?.sessionRow(chatId: id).map(Self.vm)
     }
 
     func row(_ id: String) -> SessionRow? {
@@ -403,8 +438,8 @@ final class AppModel {
 
     func search(_ query: String) -> [SessionRowVM] {
         let q = query.trimmingCharacters(in: .whitespaces)
-        guard let client, !q.isEmpty else { return frontPage.sessions }
-        return client.search(query: q, limit: 60).map { Self.vm($0.session) }
+        guard !q.isEmpty else { return frontPage.sessions }
+        return nativeRows.filter { $0.title.localizedCaseInsensitiveContains(q) } + (client?.search(query: q, limit: 60) ?? []).map { Self.vm($0.session) }
     }
 
 
@@ -415,24 +450,26 @@ final class AppModel {
     }
 
     func setPinned(_ id: String, _ pinned: Bool) {
+        if let c = nativeConversation(id) { NativeCodexSession.shared.updateConversation(c.id) { $0.pinned = pinned }; return }
         attempt("pin") { pinned ? try client?.pinSession(chatId: id) : try client?.unpinSession(chatId: id) }
     }
 
     func archive(_ id: String) {
+        if let c = nativeConversation(id) { NativeCodexSession.shared.updateConversation(c.id) { $0.archived = true }; return }
         attempt("archive") { try client?.archiveSession(chatId: id) }
         let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
         Toast.show("Archived", action: "Undo", in: window) { [weak self] in self?.unarchive(id) }
     }
-    func unarchive(_ id: String) { attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
-    func move(_ id: String, toSection section: String?) { attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
+    func unarchive(_ id: String) { if let c = nativeConversation(id) { NativeCodexSession.shared.updateConversation(c.id) { $0.archived = false }; return }; attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
+    func move(_ id: String, toSection section: String?) { if let c = nativeConversation(id) { NativeCodexSession.shared.updateConversation(c.id) { $0.section = section }; return }; attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
     func movePin(_ id: String, after: String?, before: String?) {
         attempt("move pin") { try client?.movePin(chatId: id, after: after, before: before) }
     }
     func renameSection(_ id: String, _ name: String) { attempt("rename section") { try client?.renameSection(sectionId: id, name: name) } }
-    func deleteSection(_ id: String) { attempt("delete section") { try client?.deleteSection(sectionId: id) } }
+    func deleteSection(_ id: String) { for c in NativeCodexSession.shared.conversations where c.section == id { NativeCodexSession.shared.updateConversation(c.id) { $0.section = nil } }; attempt("delete section") { try client?.deleteSection(sectionId: id) } }
     func createSection(_ name: String) { attempt("section") { _ = try client?.createSection(name: name) } }
-    func rename(_ id: String, _ title: String) { attempt("rename") { try client?.renameSession(chatId: id, title: title) } }
-    func markSeen(_ id: String) { attempt("seen") { try client?.markSeen(chatId: id) } }
+    func rename(_ id: String, _ title: String) { if let c = nativeConversation(id) { NativeCodexSession.shared.updateConversation(c.id) { $0.title = title }; return }; attempt("rename") { try client?.renameSession(chatId: id, title: title) } }
+    func markSeen(_ id: String) { if id.hasPrefix("native-codex-") { return }; attempt("seen") { try client?.markSeen(chatId: id) } }
 
     // MARK: Sessions
 
@@ -448,13 +485,14 @@ final class AppModel {
     /// Who's signed in, by name (never the WorkOS user / org ids).
     var accountName: String {
         if isDemo { return "Demo" }
-        guard client != nil else { return "Signed out" }
+        guard client != nil else { return localMode ? "On this iPhone" : "Signed out" }
         let p = AccountProfile.load()
         return p.name ?? p.email ?? "Signed in"
     }
 
     var accountDetail: String {
         if isDemo { return "Offline demo workspace" }
+        if localMode && client == nil { return "Local chats · Native Codex" }
         let p = AccountProfile.load()
         return [p.name != nil ? p.email : nil, p.orgName].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Zeron account"
     }
@@ -529,6 +567,10 @@ final class AppModel {
 
     /// Create the chat, open it, and send the first message.
     func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
+        if draft.harness == "native-codex" {
+            guard images.isEmpty else { return nil }
+            return NativeCodexSession.shared.createConversation(prompt: text)
+        }
         guard let client else { return nil }
         let target: SessionTarget
         if let p = draft.projectId {

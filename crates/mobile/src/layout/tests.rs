@@ -561,3 +561,29 @@ fn links_get_hit_regions() {
         assert!(!links.is_empty(), "no link hits for {md:?}");
     }
 }
+
+#[test]
+fn local_tools_use_grouped_native_rows_with_stable_keys() {
+    let input = |resolved: bool| local_input(vec![
+        LocalTranscriptEntry { id: "user".into(), user: true, text: "Build a site".into(), streaming: false, tool: None },
+        LocalTranscriptEntry { id: "assistant".into(), user: false, text: "Creating files.".into(), streaming: false, tool: None },
+        LocalTranscriptEntry { id: "write".into(), user: false, text: String::new(), streaming: !resolved,
+            tool: Some(LocalTranscriptTool { name: "mobile_write_file".into(), argument: "/workspace/index.html".into(), output: resolved.then(|| "File saved.".into()), resolved, is_error: false }) },
+        LocalTranscriptEntry { id: "read".into(), user: false, text: String::new(), streaming: !resolved,
+            tool: Some(LocalTranscriptTool { name: "mobile_read_file".into(), argument: "/workspace/index.html".into(), output: None, resolved, is_error: false }) },
+    ], !resolved);
+    let mut w = worker(390.0);
+    w.input = input(false);
+    assert_eq!(w.input.entries.len(), 2);
+    assert!(matches!(&w.input.entries[1].parts[1], MessagePart::Tool { call: zeron_proto::ToolCall::WriteFile { .. }, resolved: false, .. }));
+    w.pass();
+    let before = w.shared.frame.lock().unwrap().clone();
+    let tool_rows: Vec<_> = (0..before.row_count()).filter(|&i| before.placement(i).unwrap().kind == RowKind::Tools).collect();
+    assert_eq!(tool_rows.len(), 1);
+    let key = before.display(tool_rows[0]).unwrap().key;
+    w.input = input(true);
+    w.pass();
+    let after = w.shared.frame.lock().unwrap().clone();
+    let tool_row = (0..after.row_count()).find(|&i| after.placement(i).unwrap().kind == RowKind::Tools).unwrap();
+    assert_eq!(after.display(tool_row).unwrap().key, key);
+}

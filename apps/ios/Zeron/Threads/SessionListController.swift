@@ -206,7 +206,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             split.openSession(id)
             return
         }
-        navigationController?.pushViewController(SessionViewController(app: app, chatId: id), animated: true)
+        navigationController?.pushViewController(app.sessionScreen(id), animated: true)
     }
 
     func openFolder(_ id: String) {

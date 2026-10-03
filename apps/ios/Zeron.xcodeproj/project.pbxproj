@@ -6,6 +6,29 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		A2000000000000000000X001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000PJ01 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1000000000000000000T001;
+			remoteInfo = Zeron;
+		};
+		A3000000000000000000X001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000PJ01 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1000000000000000000T001;
+			remoteInfo = Zeron;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A1000000000000000000PR01 /* Zeron.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zeron.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000PR01 /* ZeronTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A3000000000000000000PR01 /* ZeronUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
 		A100000000000000000000E1 /* Exceptions for "Zeron" folder in "Zeron" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -36,42 +59,6 @@
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
-
-/* Begin PBXContainerItemProxy section */
-		A2000000000000000000X001 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = A1000000000000000000PJ01 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = A1000000000000000000T001;
-			remoteInfo = Zeron;
-		};
-		A3000000000000000000X001 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = A1000000000000000000PJ01 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = A1000000000000000000T001;
-			remoteInfo = Zeron;
-		};
-/* End PBXContainerItemProxy section */
-
-/* Begin PBXTargetDependency section */
-		A2000000000000000000D001 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = A1000000000000000000T001 /* Zeron */;
-			targetProxy = A2000000000000000000X001 /* PBXContainerItemProxy */;
-		};
-		A3000000000000000000D001 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = A1000000000000000000T001 /* Zeron */;
-			targetProxy = A3000000000000000000X001 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
-
-/* Begin PBXFileReference section */
-		A1000000000000000000PR01 /* Zeron.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zeron.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A2000000000000000000PR01 /* ZeronTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		A3000000000000000000PR01 /* ZeronUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-/* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A1000000000000000000F001 /* Frameworks */ = {
@@ -265,6 +252,19 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		A2000000000000000000D001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1000000000000000000T001 /* Zeron */;
+			targetProxy = A2000000000000000000X001 /* PBXContainerItemProxy */;
+		};
+		A3000000000000000000D001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1000000000000000000T001 /* Zeron */;
+			targetProxy = A3000000000000000000X001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
 		A1000000000000000000BC01 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -319,37 +319,41 @@
 		A1000000000000000000BC03 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos";
-				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator";
-				OTHER_LDFLAGS = (
-					"-lzeron_mobile",
-					"-lc++",
-					"-framework",
-					Security,
-					"-framework",
-					SystemConfiguration,
-				);
-				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
-				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Zeron.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Zeron/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator";
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-lzeron_mobile",
+					"-lzeron_codex_mobile",
+					"-lc++",
+					"-lz",
+					"-liconv",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
+				SWIFT_OBJC_BRIDGING_HEADER = Zeron/NativeCodex/CodexMobile.h;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -358,37 +362,41 @@
 		A1000000000000000000BC04 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos";
-				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator";
-				OTHER_LDFLAGS = (
-					"-lzeron_mobile",
-					"-lc++",
-					"-framework",
-					Security,
-					"-framework",
-					SystemConfiguration,
-				);
-				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
-				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Zeron.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Zeron/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator";
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-lzeron_mobile",
+					"-lzeron_codex_mobile",
+					"-lc++",
+					"-lz",
+					"-liconv",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
+				SWIFT_OBJC_BRIDGING_HEADER = Zeron/NativeCodex/CodexMobile.h;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -397,8 +405,6 @@
 		A2000000000000000000BC03 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
-				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -408,16 +414,37 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Zeron.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Zeron";
 			};
 			name = Debug;
 		};
+		A2000000000000000000BC04 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Zeron.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Zeron";
+			};
+			name = Release;
+		};
 		A3000000000000000000BC03 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -432,30 +459,9 @@
 			};
 			name = Debug;
 		};
-		A2000000000000000000BC04 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
-				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Zeron.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Zeron";
-			};
-			name = Release;
-		};
 		A3000000000000000000BC04 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -510,7 +516,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
 	};
 	rootObject = A1000000000000000000PJ01 /* Project object */;
 }
