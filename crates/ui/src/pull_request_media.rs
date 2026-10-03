@@ -84,7 +84,13 @@ fn description_markdown(source: &str) -> String {
         let tokenizer = Tokenizer::new(DescriptionHtml::default(), Default::default());
         let _ = tokenizer.feed(&input);
         tokenizer.end();
-        result.push_str(&tokenizer.sink.text.borrow());
+        let converted = tokenizer.sink.text.borrow();
+        result.push_str(&converted);
+        // An image renders as its own block, so the line break after it
+        // would otherwise open the next line with a space.
+        if converted.ends_with(">)") && source[range.end..].starts_with(['\r', '\n']) {
+            result.push_str("\n\n");
+        }
         end = range.end;
     }
     result.push_str(&source[end..]);
@@ -230,7 +236,7 @@ impl gpui::Element for PreviewImage {
                 .debug_selector(|| "pr-description-image-error".into())
                 .w(bounds.size.width)
                 .child(placeholder(
-                    format!("{} · Could not load image. Open in browser ↗", self.alt),
+                    format!("{} · Couldn’t load image. Open in browser ↗", self.alt),
                     &self.theme,
                 ))
                 .into_any_element(),
@@ -269,12 +275,13 @@ pub(super) fn media(
         image: image_renderer(move |image, id, theme| {
             let Some(source) = image_url(&image.source, &pr_url) else {
                 return placeholder(
-                    "Image unavailable here · use the browser view".into(),
+                    "Image unavailable here. Open the pull request in your browser to see it."
+                        .into(),
                     theme,
                 );
             };
             let alt = if image.alt.is_empty() {
-                "PR image".to_owned()
+                "Image".to_owned()
             } else {
                 image.alt.clone()
             };
@@ -294,14 +301,23 @@ pub(super) fn media(
                 .overflow_hidden()
                 .role(gpui::Role::Button)
                 .tab_index(0)
-                .focus_visible(|style| style.bg(theme.glass_hover()))
+                .focus_visible(|style| style.border_2().border_color(theme.accent))
                 .cursor_pointer()
                 .on_click({
                     let source = source.clone();
                     let open = open.clone();
                     move |_, window, cx| {
                         cx.stop_propagation();
-                        open(&source, window, cx);
+                        // A failed inline image offers the browser instead.
+                        let resource = gpui::Resource::Uri(source.clone().into());
+                        if matches!(
+                            window.get_asset::<gpui::ImgResourceLoader>(&resource, cx),
+                            Some(Err(_))
+                        ) {
+                            cx.open_url(&source);
+                        } else {
+                            open(&source, window, cx);
+                        }
                     }
                 });
             if inline {
@@ -506,6 +522,15 @@ mod tests {
         assert!(converted.contains("![shot]"));
         assert!(!converted.contains("<details>"));
         assert!(!description_markdown("<script><img src=x></script>").contains("!["));
+        // Text on the line after an image starts a paragraph, not " text".
+        let tree =
+            parse_description("Look\r\n<img src=\"https://example.com/a.png\" />\r\nthen this");
+        let last = tree.blocks.last().map(|block| &block.block);
+        assert!(
+            matches!(last, Some(markdown::parser::Block::Paragraph { runs }) if runs[0].text == "then this"),
+            "{:?}",
+            tree.blocks
+        );
     }
 
     #[test]

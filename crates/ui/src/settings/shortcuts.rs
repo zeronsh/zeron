@@ -916,7 +916,7 @@ impl Render for ShortcutsPage {
                             &theme,
                             vec![
                                 div()
-                                    .child("Applies to PR badges and the pull request board.")
+                                    .child("Applies to PR badges and the Pull requests board.")
                                     .into_any_element(),
                             ],
                         )),

@@ -69,7 +69,7 @@ pub(crate) fn tab_frame(
         } else {
             theme.text_muted
         })
-        .focus_visible(|style| style.bg(crate::theme::wash(0.14)))
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .when(selected, |el| el.bg(crate::theme::wash(0.10)))
 }
 

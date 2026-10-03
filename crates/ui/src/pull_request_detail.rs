@@ -58,7 +58,7 @@ fn failure_reason(error: &zeron_rpc::RpcError) -> &'static str {
             "GitHub’s response was too large or unreadable. Open it on GitHub instead."
         }
         RpcError::UnknownMethod(_) => "Update Zeron on the selected device.",
-        _ => "Check the connection and try again.",
+        _ => "Check the link and your connection, then try again.",
     }
 }
 
@@ -342,6 +342,12 @@ pub struct PullRequestDetailPage {
     checks_expanded: bool,
     tab_slide: crate::motion::IndicatorSlide,
     tab_focus: [gpui::FocusHandle; 3],
+    /// The file tree is one Tab stop; arrow keys move between files.
+    tree_focus: gpui::FocusHandle,
+    /// The narrow layout's file picker trigger, refocused when it closes.
+    files_focus: gpui::FocusHandle,
+    /// Focus to restore on the next frame, from handlers without a window.
+    return_focus: Option<gpui::FocusHandle>,
     file_search: Entity<crate::composer::ComposerInput>,
     file_search_subscription: Option<Subscription>,
     file_query: String,
@@ -361,7 +367,8 @@ pub struct PullRequestDetailPage {
     image_task: Option<Task<()>>,
     image_cached: Option<(String, crate::attachments::PreviewImage)>,
     image_previous_focus: Option<gpui::FocusHandle>,
-    image_error: Option<String>,
+    /// The image that failed to load, offered in the browser instead.
+    image_failed: Option<String>,
 }
 
 impl PullRequestDetailPage {
@@ -411,6 +418,9 @@ impl PullRequestDetailPage {
             checks_expanded: false,
             tab_slide: crate::motion::IndicatorSlide::at(tab_slot(Tab::Summary), Instant::now()),
             tab_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
+            tree_focus: cx.focus_handle().tab_stop(true),
+            files_focus: cx.focus_handle().tab_stop(true),
+            return_focus: None,
             file_search: cx.new(|cx| {
                 crate::composer::ComposerInput::with_context(
                     "Find a changed file…",
@@ -419,6 +429,7 @@ impl PullRequestDetailPage {
                 )
                 .with_single_line()
                 .with_text_metrics(12.0, 16.0)
+                .with_tab_stop()
             }),
             file_search_subscription: None,
             file_query: String::new(),
@@ -432,6 +443,7 @@ impl PullRequestDetailPage {
                     cx,
                 )
                 .with_viewport_height(120.0)
+                .with_tab_stop()
             }),
             comment_subscription: None,
             sending: false,
@@ -444,7 +456,7 @@ impl PullRequestDetailPage {
             image_task: None,
             image_cached: None,
             image_previous_focus: None,
-            image_error: None,
+            image_failed: None,
         };
         page.file_search_subscription = Some(cx.subscribe(
             &page.file_search,
@@ -461,6 +473,7 @@ impl PullRequestDetailPage {
                         page.select_code_file(index, cx);
                         if page.files_expanded {
                             page.toggle_files(cx);
+                            page.return_focus = Some(page.files_focus.clone());
                         }
                     }
                 }
@@ -815,7 +828,7 @@ impl PullRequestDetailPage {
                         theme.glass_hover(),
                         hover * (1.0 - covered) * 0.6,
                     ))
-                    .focus_visible(|style| style.bg(theme.glass_hover()))
+                    .focus_visible(|style| style.border_2().border_color(theme.accent))
                     .cursor_pointer()
                     .on_hover(crate::motion::hover_listener(hover_key))
                     .child(
@@ -830,11 +843,7 @@ impl PullRequestDetailPage {
                             .flex_none()
                             .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(crate::motion::mix(
-                                theme.text_muted.opacity(0.7),
-                                theme.text_muted,
-                                emphasis,
-                            ))
+                            .text_color(theme.text_muted)
                             .child(count.to_string())
                     }))
                     .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
@@ -1009,7 +1018,7 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         "pr-copy-url" | "pr-copy-patch" | "pr-copy-path" | "pr-copy-checkout" => {
             Some(crate::icons::COPY)
         }
-        "pr-detail-refresh" | "pr-retry-diff" => Some(crate::icons::REFRESH),
+        "pr-detail-refresh" | "pr-retry" | "pr-retry-diff" => Some(crate::icons::REFRESH),
         "pr-external" => Some(crate::icons::ARROW_UP_RIGHT),
         "pr-files" => Some(crate::icons::FILE_TREE),
         "pr-summary" => Some(crate::icons::DOCUMENT),
@@ -1025,7 +1034,7 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         .tab_index(0)
         .border_1()
         .border_color(gpui::transparent_black())
-        .focus_visible(|style| style.border_color(theme.accent))
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .cursor_pointer()
         .when(icon_only, |el| {
             el.size(px(24.0))
@@ -1234,7 +1243,7 @@ fn detail_header(
                     };
                     el.child(meta_item(
                         crate::icons::CLOCK_CIRCLE,
-                        format!("Updated {age}"),
+                        format!("Loaded {age}"),
                         theme,
                     ))
                 }),
@@ -1268,9 +1277,9 @@ fn field(label: &str, value: String, first: bool, theme: &Theme) -> AnyElement {
             .children(value.split_whitespace().map(|word| {
                 div()
                     .text_color(if word.starts_with('+') {
-                        theme.success
+                        theme.success_muted
                     } else if word.starts_with('−') {
-                        theme.danger
+                        theme.danger_muted
                     } else {
                         theme.text_muted
                     })
@@ -1278,9 +1287,9 @@ fn field(label: &str, value: String, first: bool, theme: &Theme) -> AnyElement {
             }))
             .into_any_element()
     } else {
+        // Wraps rather than truncates: long branch names would hide the base.
         div()
             .min_w_0()
-            .truncate()
             .font_family(theme.font_mono.clone())
             .text_size(crate::typography::ui_rems(12.0))
             .child(value)
@@ -1322,6 +1331,9 @@ impl crate::popover::ScrollRailHost for PullRequestDetailPage {
 
 impl Render for PullRequestDetailPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(focus) = self.return_focus.take() {
+            window.focus(&focus, cx);
+        }
         let theme = Theme::of(cx).clone();
         let content = {
             let mut column = widgets::page_column()
@@ -1342,7 +1354,14 @@ impl Render for PullRequestDetailPage {
                 .text_size(crate::typography::ui_rems(13.0))
                 .text_color(theme.text);
             if let Some(error) = &self.error {
-                column = column.child(widgets::error_strip(&theme, error.clone()));
+                column = column
+                    .child(widgets::error_strip(&theme, error.clone()))
+                    .child(
+                        div().mt(px(8.0)).flex().child(
+                            action("pr-retry", "Try again", &theme)
+                                .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                        ),
+                    );
             }
             if let Some(detail) = &self.detail {
                 let repository = self
@@ -1398,8 +1417,13 @@ impl Render for PullRequestDetailPage {
                                 .child(field(
                                     "Changes",
                                     format!(
-                                        "{} files · +{} −{}",
+                                        "{} {} · +{} −{}",
                                         detail.files.len(),
+                                        if detail.files.len() == 1 {
+                                            "file"
+                                        } else {
+                                            "files"
+                                        },
                                         detail.additions,
                                         detail.deletions
                                     ),
@@ -1420,7 +1444,11 @@ impl Render for PullRequestDetailPage {
                                 .debug_selector(|| "pr-checks-toggle".into())
                                 .role(gpui::Role::Button)
                                 .tab_index(0)
-                                .aria_label("Checks")
+                                .aria_label(format!(
+                                    "Checks, {}, {}",
+                                    detail.status_check_rollup.len(),
+                                    status_style(ci_status(&detail.status_check_rollup)).0
+                                ))
                                 .aria_expanded(self.checks_expanded)
                                 .rounded_t(px(12.0))
                                 .when(!self.checks_expanded, |el| el.rounded_b(px(12.0)))
@@ -1432,7 +1460,7 @@ impl Render for PullRequestDetailPage {
                                 .gap(px(8.0))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(theme.glass_hover()))
-                                .focus_visible(|style| style.bg(theme.glass_hover()))
+                                .focus_visible(|style| style.border_2().border_color(theme.accent))
                                 .child(
                                     crate::icons::icon(if self.checks_expanded {
                                         crate::icons::ALT_ARROW_DOWN
@@ -1505,7 +1533,6 @@ impl Render for PullRequestDetailPage {
                                             })
                                             .flex_1()
                                             .min_w_0()
-                                            .truncate()
                                             .child(name.clone()),
                                     )
                                     .child(div().flex_none().child(status_chip(&status, &theme)))
@@ -1514,7 +1541,9 @@ impl Render for PullRequestDetailPage {
                                             .role(gpui::Role::Link)
                                             .tab_index(0)
                                             .aria_label(format!("Open {name}"))
-                                            .focus_visible(|style| style.bg(theme.glass_hover()))
+                                            .focus_visible(|style| {
+                                                style.border_2().border_color(theme.accent)
+                                            })
                                             .hover(|style| style.bg(theme.glass_hover()))
                                             .on_click(move |_, _, cx| cx.open_url(&link))
                                     }),
@@ -1583,6 +1612,9 @@ impl Render for PullRequestDetailPage {
                             .id("pr-activity-thread")
                             .debug_selector(|| "pr-activity-thread".into())
                             .mt(px(24.0))
+                            // Authors line up with the title and metadata above;
+                            // your own replies stay flush with the composer.
+                            .pl(px(8.0))
                             .flex()
                             .flex_col();
                         if activity.is_empty() {
@@ -1808,7 +1840,7 @@ impl Render for PullRequestDetailPage {
                 cx,
             ));
         }
-        if self.image_task.is_some() || self.image_error.is_some() {
+        if self.image_task.is_some() || self.image_failed.is_some() {
             root = root.child(
                 div()
                     .id("pr-image-loading")
@@ -1827,12 +1859,17 @@ impl Render for PullRequestDetailPage {
                             cx.stop_propagation();
                         }
                     }))
-                    .on_click(cx.listener(|page, _, window, cx| page.close_image(window, cx)))
-                    .child(
-                        self.image_error
-                            .clone()
-                            .unwrap_or_else(|| "Loading image… · Escape to cancel".into()),
-                    ),
+                    .on_click(cx.listener(|page, _, window, cx| {
+                        if let Some(source) = &page.image_failed {
+                            cx.open_url(source);
+                        }
+                        page.close_image(window, cx)
+                    }))
+                    .child(if self.image_failed.is_some() {
+                        "Couldn’t load image. Click to open it in your browser · Escape to close"
+                    } else {
+                        "Loading image… · Escape to cancel"
+                    }),
             );
         }
         root
@@ -2831,7 +2868,7 @@ mod tests {
                 assert_eq!(composer.right() - send.right(), px(9.0));
             }
             assert_eq!(mine.right(), composer.right());
-            assert_eq!(other.left(), composer.left());
+            assert_eq!(other.left(), composer.left() + px(8.0), "title's text edge");
             assert!(mine.left() > other.left());
         }
 

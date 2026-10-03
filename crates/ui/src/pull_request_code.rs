@@ -240,6 +240,31 @@ impl PullRequestDetailPage {
         }
     }
 
+    /// Arrow keys in the file tree: the previous or next file it shows.
+    fn step_tree(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let files: Vec<usize> = tree(&self.code_files, &self.file_query)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                TreeEntry::File { index, .. } => Some(index),
+                TreeEntry::Directory { .. } => None,
+            })
+            .collect();
+        let current = self
+            .active_file()
+            .and_then(|file| files.iter().position(|index| *index == file));
+        let next = match (key, current) {
+            ("down", Some(at)) => (at + 1).min(files.len().saturating_sub(1)),
+            ("up", Some(at)) => at.saturating_sub(1),
+            ("down" | "up" | "home", None) | ("home", _) => 0,
+            ("end", _) => files.len().saturating_sub(1),
+            _ => return false,
+        };
+        if let Some(index) = files.get(next) {
+            self.select_code_file(*index, cx);
+        }
+        true
+    }
+
     pub(super) fn select_code_file(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.code_ranges.len() {
             return;
@@ -426,7 +451,7 @@ impl PullRequestDetailPage {
             })
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
-            .focus_visible(move |style| style.bg(hover))
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
             .on_click(cx.listener(move |page, _, _, cx| page.toggle_fold(file, cx)))
             .child(
                 crate::icons::icon(if collapsed {
@@ -531,6 +556,17 @@ impl PullRequestDetailPage {
             .debug_selector(|| "pr-file-list".into())
             .role(gpui::Role::Tree)
             .aria_label("Changed files")
+            .track_focus(&self.tree_focus)
+            .rounded(px(6.0))
+            // A resting transparent ring, so focusing never shifts the rows.
+            .border_2()
+            .border_color(gpui::transparent_black())
+            .focus_visible(|style| style.border_color(theme.accent))
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if page.step_tree(&event.keystroke.key, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.file_tree_scroll)
@@ -589,7 +625,6 @@ impl PullRequestDetailPage {
                         .role(gpui::Role::TreeItem)
                         .aria_label(format!("Open diff for {path}"))
                         .aria_selected(selected)
-                        .tab_index(0)
                         .h(px(TREE_ROW_HEIGHT))
                         .flex_none()
                         .flex()
@@ -603,7 +638,6 @@ impl PullRequestDetailPage {
                         .when(selected, |el| el.bg(theme.glass_hover()))
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.glass_hover()))
-                        .focus_visible(|style| style.bg(theme.glass_hover()))
                         .child(
                             crate::file_icons::icon(
                                 crate::file_icons::FileIconIdentity::file(path),
@@ -618,7 +652,7 @@ impl PullRequestDetailPage {
                             page.select_code_file(index, cx);
                             if !wide {
                                 page.files_expanded = false;
-                                window.blur();
+                                window.focus(&page.files_focus, cx);
                             }
                         }))
                         .into_any_element()
@@ -724,6 +758,7 @@ impl PullRequestDetailPage {
             .when(!wide, |el| {
                 el.child(
                     action("pr-files", "Choose a changed file", theme)
+                        .track_focus(&self.files_focus)
                         .aria_expanded(self.files_expanded)
                         .when(self.files_expanded, |el| el.bg(theme.glass_hover()))
                         .on_click(cx.listener(move |page, _, window, cx| {
@@ -874,7 +909,7 @@ impl PullRequestDetailPage {
                         .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, window, cx| {
                             if event.keystroke.key == "escape" {
                                 page.files_expanded = false;
-                                window.blur();
+                                window.focus(&page.files_focus, cx);
                                 cx.stop_propagation();
                                 cx.notify();
                             }

@@ -298,7 +298,7 @@ impl PullRequestDestination {
     pub const ALL: [Self; 2] = [Self::Native, Self::External];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Native => "PR view",
+            Self::Native => "Pull request view",
             Self::External => "Default browser",
         }
     }

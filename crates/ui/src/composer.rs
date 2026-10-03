@@ -2148,6 +2148,12 @@ impl ComposerInput {
         self
     }
 
+    /// Join the window's Tab order, for a field the keyboard must reach.
+    pub(crate) fn with_tab_stop(mut self) -> Self {
+        self.focus_handle = self.focus_handle.tab_stop(true);
+        self
+    }
+
     fn set_key_context(&mut self, key_context: &'static str, cx: &mut Context<Self>) {
         if self.key_context != key_context {
             self.key_context = key_context;

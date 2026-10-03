@@ -241,6 +241,14 @@ pub struct PullRequestsPage {
     device_menu: popover::Popup<()>,
     sort_menu: popover::Popup<()>,
     repository_menu: popover::Popup<()>,
+    /// Menu triggers, so a menu closed from the keyboard hands focus back.
+    repository_focus: gpui::FocusHandle,
+    sort_focus: gpui::FocusHandle,
+    device_focus: gpui::FocusHandle,
+    /// The current option of an open sort or device menu, so a menu opened
+    /// from the keyboard starts there and Tab walks its options.
+    option_focus: gpui::FocusHandle,
+    return_focus: Option<gpui::FocusHandle>,
     _observe: Subscription,
 }
 
@@ -262,6 +270,7 @@ impl PullRequestsPage {
                 .with_text_metrics(12.0, 16.0)
                 .with_accessibility_role(gpui::Role::SearchInput)
                 .with_single_line()
+                .with_tab_stop()
         });
         let search_events = cx.subscribe(&search, |page: &mut Self, input, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -280,6 +289,7 @@ impl PullRequestsPage {
         });
         let repository_events = cx.subscribe(&repository_input, |page: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
+                page.return_focus = Some(page.repository_focus.clone());
                 page.select_repository(cx);
             }
         });
@@ -333,6 +343,11 @@ impl PullRequestsPage {
             device_menu: popover::Popup::default(),
             sort_menu: popover::Popup::default(),
             repository_menu: popover::Popup::default(),
+            repository_focus: cx.focus_handle().tab_stop(true),
+            sort_focus: cx.focus_handle().tab_stop(true),
+            device_focus: cx.focus_handle().tab_stop(true),
+            option_focus: cx.focus_handle().tab_stop(true),
+            return_focus: None,
             _observe: observe,
         };
         page.initialize_repository(cx);
@@ -692,6 +707,7 @@ impl PullRequestsPage {
                     if page.target_device != target {
                         page.reset_for_target(target.clone());
                     }
+                    page.return_focus = Some(page.repository_focus.clone());
                     page.apply_initial_repository(repository, target, cx);
                 } else {
                     page.repository_error = Some(
@@ -721,15 +737,18 @@ impl PullRequestsPage {
                 .px(px(8.0))
                 .max_w(px(220.0))
                 .min_w_0()
+                .text_size(crate::typography::ui_rems(12.0))
                 .aria_label(format!("Repository: {label}"))
                 .aria_expanded(self.repository_menu.is_open())
+                .track_focus(&self.repository_focus)
                 .tooltip(move |_, cx| cx.new(|_| DashboardTooltip(tooltip.clone().into())).into())
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|page, _, _, _| page.repository_menu.note_trigger_press()),
                 )
                 .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
+                    if event.keystroke.key == "escape" && page.repository_menu.is_open() {
+                        page.return_focus = Some(page.repository_focus.clone());
                         page.close_repository_menu(cx);
                     }
                 }))
@@ -805,6 +824,7 @@ impl PullRequestsPage {
                                 .child("Open")
                                 .on_click(cx.listener(|page, _, _, cx| {
                                     cx.stop_propagation();
+                                    page.return_focus = Some(page.repository_focus.clone());
                                     page.select_repository(cx);
                                 })),
                         ),
@@ -838,6 +858,9 @@ impl PullRequestsPage {
                                     .role(gpui::Role::Button)
                                     .tab_index(0)
                                     .aria_label(format!("Open repository for {label}"))
+                                    .focus_visible(|style| {
+                                        style.border_2().border_color(theme.accent)
+                                    })
                                     .child(div().flex_none().child(label))
                                     .child(
                                         div()
@@ -872,10 +895,11 @@ impl PullRequestsPage {
                     .role(gpui::Role::Button)
                     .tab_index(0)
                     .aria_label(format!("Open {repo}"))
-                    .focus_visible(|style| style.bg(theme.glass_hover()))
+                    .focus_visible(|style| style.border_2().border_color(theme.accent))
                     .child(div().truncate().child(repo.clone()))
                     .on_click(cx.listener(move |page, _, _, cx| {
                         cx.stop_propagation();
+                        page.return_focus = Some(page.repository_focus.clone());
                         page.repository_input
                             .update(cx, |input, cx| input.set_text(&repo, cx));
                         page.select_repository(cx);
@@ -950,18 +974,21 @@ impl PullRequestsPage {
             .justify_center()
             .aria_label(format!("Sort pull requests: {label}"))
             .aria_expanded(self.sort_menu.is_open())
+            .track_focus(&self.sort_focus)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|page, _, _, _| page.sort_menu.note_trigger_press()),
             )
             .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
+                if event.keystroke.key == "escape" && page.sort_menu.is_open() {
+                    page.return_focus = Some(page.sort_focus.clone());
                     page.close_sort_menu(cx);
                 }
             }))
-            .on_click(cx.listener(|page, event, _, cx| {
+            .on_click(cx.listener(|page, event, window, cx| {
                 cx.stop_propagation();
-                let open = if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                let keyboard = matches!(event, gpui::ClickEvent::Keyboard(_));
+                let open = if keyboard {
                     page.sort_menu.is_open()
                 } else {
                     page.sort_menu.take_press_was_open()
@@ -970,6 +997,9 @@ impl PullRequestsPage {
                     page.close_sort_menu(cx);
                 } else {
                     page.sort_menu.open(());
+                    if keyboard {
+                        window.focus(&page.option_focus, cx);
+                    }
                 }
                 cx.notify();
             }))
@@ -994,16 +1024,18 @@ impl PullRequestsPage {
                     let active = self.sort.field == field && self.sort.direction == direction;
                     popover::menu_row(theme, active, id)
                         .id(id)
+                        .when(active, |row| row.track_focus(&self.option_focus))
                         .debug_selector(move || id.into())
                         .role(gpui::Role::Button)
                         .tab_index(0)
                         .aria_selected(active)
                         .aria_label(label)
-                        .focus_visible(|style| style.bg(theme.glass_hover()))
+                        .focus_visible(|style| style.border_2().border_color(theme.accent))
                         .child(label)
                         .on_click(cx.listener(move |page, _, _, cx| {
                             cx.stop_propagation();
                             page.sort = PullRequestSort { field, direction };
+                            page.return_focus = Some(page.sort_focus.clone());
                             page.view_items = None;
                             page.scroll.scroll.set_offset(gpui::Point::default());
                             page.close_sort_menu(cx);
@@ -1214,7 +1246,7 @@ impl PullRequestsPage {
                         .px(px(14.0))
                         .border_1()
                         .border_color(theme.border)
-                        .focus_visible(|style| style.border_color(theme.accent))
+                        .focus_visible(|style| style.border_2().border_color(theme.accent))
                         .when(loading, |el| el.opacity(0.6))
                         .gap(px(8.0))
                         .when(loading, |el| {
@@ -1262,10 +1294,11 @@ impl PullRequestsPage {
             .role(gpui::Role::Button)
             .aria_label(format!("Desktop device: {label}"))
             .aria_expanded(open)
+            .track_focus(&self.device_focus)
             .tab_index(0)
             .border_1()
             .border_color(gpui::transparent_black())
-            .focus_visible(|style| style.border_color(theme.accent))
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
             .flex_none()
             .h(px(32.0))
             .px(px(8.0))
@@ -1289,11 +1322,13 @@ impl PullRequestsPage {
             .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" && page.device_menu.is_open() {
                     cx.stop_propagation();
+                    page.return_focus = Some(page.device_focus.clone());
                     page.close_device_menu(cx);
                 }
             }))
-            .on_click(cx.listener(|page, event, _, cx| {
-                let was_open = if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+            .on_click(cx.listener(|page, event, window, cx| {
+                let keyboard = matches!(event, gpui::ClickEvent::Keyboard(_));
+                let was_open = if keyboard {
                     page.device_menu.is_open()
                 } else {
                     page.device_menu.take_press_was_open()
@@ -1302,6 +1337,9 @@ impl PullRequestsPage {
                     page.close_device_menu(cx);
                 } else {
                     page.device_menu.open(());
+                    if keyboard {
+                        window.focus(&page.option_focus, cx);
+                    }
                 }
                 cx.notify();
             }))
@@ -1310,7 +1348,7 @@ impl PullRequestsPage {
                 div()
                     .max_w(px(130.0))
                     .truncate()
-                    .text_size(px(12.5))
+                    .text_size(crate::typography::ui_rems(12.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(label),
@@ -1338,6 +1376,7 @@ impl PullRequestsPage {
                     let online = self.state.read(cx).device_online(&device.id, Utc::now());
                     popover::menu_row(theme, active, format!("pull-requests-device-row-{index}"))
                         .id(("pull-requests-device-row", index))
+                        .when(active, |row| row.track_focus(&self.option_focus))
                         .role(gpui::Role::Button)
                         .aria_label(format!(
                             "{}{}",
@@ -1346,8 +1385,9 @@ impl PullRequestsPage {
                         ))
                         .aria_selected(active)
                         .tab_index(0)
-                        .focus_visible(|style| style.bg(theme.glass_hover()))
+                        .focus_visible(|style| style.border_2().border_color(theme.accent))
                         .on_click(cx.listener(move |page, _, _, cx| {
+                            page.return_focus = Some(page.device_focus.clone());
                             page.set_target_device((!local).then(|| device_id.clone()), cx);
                         }))
                         .child(
@@ -1359,9 +1399,17 @@ impl PullRequestsPage {
                         .when(local, |element| {
                             element.child(
                                 div()
-                                    .text_size(px(10.5))
+                                    .text_size(crate::typography::ui_rems(10.5))
                                     .text_color(theme.text_muted)
                                     .child("This device"),
+                            )
+                        })
+                        .when(!online, |element| {
+                            element.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(10.5))
+                                    .text_color(theme.text_muted)
+                                    .child("Offline"),
                             )
                         })
                         .child(div().size(px(6.0)).rounded_full().bg(if online {
@@ -1380,14 +1428,14 @@ impl PullRequestsPage {
         trigger.into_any_element()
     }
 
-    fn render_empty_or_error(&self, theme: &Theme) -> AnyElement {
+    fn render_empty_or_error(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let glyph = match &self.load_state {
             PullRequestsLoadState::Failed(PullRequestsPageError::Authentication) => {
                 icons::KEY_MINIMALISTIC
             }
-            PullRequestsLoadState::Failed(
-                PullRequestsPageError::Network | PullRequestsPageError::RemoteOffline(_),
-            ) => icons::WIFI_OFF,
+            PullRequestsLoadState::Failed(PullRequestsPageError::RemoteOffline(_)) => {
+                icons::WIFI_OFF
+            }
             PullRequestsLoadState::Failed(_) => icons::INFO_CIRCLE,
             _ => icons::PULL_REQUEST,
         };
@@ -1432,6 +1480,30 @@ impl PullRequestsPage {
                     .text_color(theme.text_muted)
                     .child(SharedString::from(body)),
             )
+            .when(
+                matches!(
+                    self.load_state,
+                    PullRequestsLoadState::Failed(ref error)
+                        if *error != PullRequestsPageError::RateLimited
+                ),
+                |el| {
+                    el.child(
+                        widgets::ghost_action(theme)
+                            .id("pull-requests-retry")
+                            .debug_selector(|| "pull-requests-retry".into())
+                            .role(gpui::Role::Button)
+                            .tab_index(0)
+                            .mt(px(Theme::SPACE_LG))
+                            .h(px(32.0))
+                            .px(px(14.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .focus_visible(|style| style.border_2().border_color(theme.accent))
+                            .child("Try again")
+                            .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                    )
+                },
+            )
             .into_any_element()
     }
 }
@@ -1447,6 +1519,9 @@ impl popover::ScrollRailHost for PullRequestsPage {
 
 impl Render for PullRequestsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(focus) = self.return_focus.take() {
+            window.focus(&focus, cx);
+        }
         let theme = Theme::of(cx).clone();
         let initial_loading =
             self.items.is_empty() && matches!(self.load_state, PullRequestsLoadState::Loading);
@@ -1547,7 +1622,7 @@ impl Render for PullRequestsPage {
                                     div()
                                         .id("pull-requests-loaded-count")
                                         .debug_selector(|| "pull-requests-loaded-count".into())
-                                        .text_size(px(11.0))
+                                        .text_size(crate::typography::ui_rems(11.0))
                                         .text_color(theme.text_muted)
                                         .child(format!("{} loaded", self.items.len())),
                                 )
@@ -1576,7 +1651,9 @@ impl Render for PullRequestsPage {
                                     .tab_index(0)
                                     .border_1()
                                     .border_color(gpui::transparent_black())
-                                    .focus_visible(|style| style.border_color(theme.accent))
+                                    .focus_visible(|style| {
+                                        style.border_2().border_color(theme.accent)
+                                    })
                                     .h(px(32.0))
                                     .flex_none()
                                     .when(loading, |el| el.opacity(0.5))
@@ -1651,6 +1728,7 @@ impl Render for PullRequestsPage {
                                         ))
                                     })
                                     .debug_selector(move || id.into())
+                                    .text_size(crate::typography::ui_rems(12.0))
                                     .px(px(10.0))
                                     .child(label)
                                     .on_click(cx.listener(move |page, _, _, cx| {
@@ -1696,7 +1774,7 @@ impl Render for PullRequestsPage {
                                                 .justify_center()
                                                 .rounded(px(4.0))
                                                 .focus_visible(|style| {
-                                                    style.bg(theme.glass_hover())
+                                                    style.border_2().border_color(theme.accent)
                                                 })
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|page, _, _, cx| {
@@ -1741,7 +1819,7 @@ impl Render for PullRequestsPage {
         let content = if initial_loading {
             crate::pull_request_skeleton::board(PR_TABLE_ROW_HEIGHT, cx.entity_id(), &theme, cx)
         } else if self.items.is_empty() {
-            self.render_empty_or_error(&theme)
+            self.render_empty_or_error(&theme, cx)
         } else if items.is_empty() {
             div()
                 .id("pull-requests-no-results")
@@ -1933,7 +2011,7 @@ fn render_grouped_requests(
                             .rounded(px(6.0))
                             .border_1()
                             .border_color(gpui::transparent_black())
-                            .focus_visible(|style| style.border_color(theme.accent))
+                            .focus_visible(|style| style.border_2().border_color(theme.accent))
                             .cursor_pointer()
                             .hover(|style| style.bg(crate::theme::ink(0.025)))
                             .on_click(cx.listener(move |page, _, _, cx| {
@@ -2055,7 +2133,7 @@ fn render_table_row(
         .tab_index(0)
         .min_h(px(PR_TABLE_ROW_HEIGHT))
         .when(selected, |el| el.bg(theme.glass_hover()))
-        .focus_visible(|style| style.bg(theme.accent.opacity(0.12)))
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .flex_none()
         .cursor_pointer()
         .hover(|style| style.bg(theme.glass_hover()))
@@ -2203,7 +2281,7 @@ fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
                                 .child(if item.author.login.is_empty() {
                                     "Unknown author".to_owned()
@@ -2440,7 +2518,7 @@ fn error_copy(error: &PullRequestsPageError) -> (String, String) {
         ),
         PullRequestsPageError::Network => (
             "Couldn’t load pull requests".into(),
-            "Check the connection and try again.".into(),
+            "Check the repository name and your connection, then try again.".into(),
         ),
         PullRequestsPageError::RemoteOffline(name) => (
             format!("{name} is offline"),
@@ -2448,7 +2526,7 @@ fn error_copy(error: &PullRequestsPageError) -> (String, String) {
         ),
         PullRequestsPageError::UpdateRequired(name) => (
             format!("Update Zeron on {name}"),
-            "This device doesn’t support the pull request dashboard yet.".into(),
+            "This device doesn’t support pull requests yet.".into(),
         ),
     }
 }

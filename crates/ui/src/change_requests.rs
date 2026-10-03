@@ -160,7 +160,8 @@ fn render_pull_request_badge(
     )
 }
 
-/// Listing surfaces use the exact sidebar badge renderer without inventing checkout refs.
+/// Listing surfaces use the exact sidebar badge renderer without inventing
+/// checkout refs. Inert: the row around it already opens the pull request.
 pub(crate) fn pull_request_list_badge(
     id: SharedString,
     item: &ChangeRequestListItem,
@@ -172,7 +173,7 @@ pub(crate) fn pull_request_list_badge(
         item.url.clone(),
         ChangeRequestBadgeSurface::Sidebar,
         None,
-        true,
+        false,
         None,
         theme,
     )
@@ -211,7 +212,7 @@ fn render_badge_model(
             el.role(gpui::Role::Link)
                 .aria_label(accessible_label)
                 .tab_index(0)
-                .focus_visible(move |style| style.bg(color.opacity(0.16)).text_color(color))
+                .focus_visible(|style| style.border_2().border_color(theme.accent))
                 .cursor_pointer()
                 .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
                 .on_click(move |_, window, cx| {

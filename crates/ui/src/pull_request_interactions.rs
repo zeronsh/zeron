@@ -85,7 +85,8 @@ impl PullRequestDetailPage {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.comment_error = Some("Connect to the PR’s device to send your comment.".into());
+            self.comment_error =
+                Some("Connect to the pull request’s device to send your comment.".into());
             return;
         };
         self.task = None;
@@ -218,7 +219,7 @@ impl PullRequestDetailPage {
                         .p(px(12.0))
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child("No matching PR participants. You can type any @username."),
+                        .child("No matching participants. You can type any @username."),
                 );
             }
             for (index, login) in self.mention_choices.iter().enumerate() {
@@ -314,21 +315,42 @@ impl PullRequestDetailPage {
                         .flex()
                         .items_center()
                         .child(
-                            crate::composer::send_circle("pr-send-comment", !can_send, theme)
-                                .debug_selector(|| "pr-send-comment".into())
-                                .role(gpui::Role::Button)
-                                .aria_label(if sending {
-                                    "Sending PR comment"
-                                } else {
-                                    "Send PR comment"
-                                })
-                                .tab_index(0)
-                                .on_click(cx.listener(move |page, _, _, cx| {
+                            // While `gh` posts, a spinner stands in for the arrow.
+                            if sending {
+                                div()
+                                    .id("pr-send-comment")
+                                    .size(px(28.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(crate::loaders::mini_glyph_spinner(
+                                        "pr-send-spinner",
+                                        1.5,
+                                        theme.glyph,
+                                        cx.entity_id(),
+                                        cx,
+                                    ))
+                            } else {
+                                crate::composer::send_circle("pr-send-comment", !can_send, theme)
+                            }
+                            .debug_selector(|| "pr-send-comment".into())
+                            .role(gpui::Role::Button)
+                            .aria_label(if sending {
+                                "Sending comment"
+                            } else {
+                                "Send comment"
+                            })
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(
+                                move |page, _, _, cx| {
                                     cx.stop_propagation();
                                     if can_send {
                                         page.send_comment(cx);
                                     }
-                                })),
+                                },
+                            )),
                         ),
                 ),
         );
@@ -353,7 +375,7 @@ impl PullRequestDetailPage {
     pub(super) fn close_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.image_task = None;
         self.image_preview = None;
-        self.image_error = None;
+        self.image_failed = None;
         if let Some(focus) = self.image_previous_focus.take() {
             window.focus(&focus, cx);
         }
@@ -361,7 +383,7 @@ impl PullRequestDetailPage {
     }
 
     pub(super) fn open_image(&mut self, source: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.image_error = None;
+        self.image_failed = None;
         self.image_previous_focus = window.focused(cx);
         if let Some((cached_source, preview)) = &self.image_cached
             && cached_source == source
@@ -377,15 +399,10 @@ impl PullRequestDetailPage {
         window.focus(&self.image_focus, cx);
         self.image_task = Some(cx.spawn(async move |this, cx| {
             use futures::AsyncReadExt;
-            let result: Result<_, String> = async {
-                let mut response = client
-                    .get(&source, ().into(), true)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            let result: Result<_, ()> = async {
+                let mut response = client.get(&source, ().into(), true).await.map_err(|_| ())?;
                 if !response.status().is_success() {
-                    return Err(
-                        "Image could not be loaded. Use its external link on GitHub.".into(),
-                    );
+                    return Err(());
                 }
                 let mime = response
                     .headers()
@@ -399,22 +416,25 @@ impl PullRequestDetailPage {
                     .take(20 * 1024 * 1024 + 1)
                     .read_to_end(&mut bytes)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|_| ())?;
                 cx.background_executor()
                     .spawn(async move { crate::image_media::decode_image(&mime, bytes) })
                     .await
+                    .map_err(|_| ())
             }
             .await;
             let _ = this.update(cx, |page, cx| {
                 page.image_task = None;
                 match result {
                     Ok(image) => {
-                        let preview =
-                            crate::attachments::PreviewImage::new("PR image", image.image);
+                        let preview = crate::attachments::PreviewImage::new(
+                            "Pull request image",
+                            image.image,
+                        );
                         page.image_cached = Some((source, preview.clone()));
                         page.image_preview = Some(preview);
                     }
-                    Err(error) => page.image_error = Some(format!("{error} · Click to close")),
+                    Err(()) => page.image_failed = Some(source),
                 }
                 cx.notify();
             });

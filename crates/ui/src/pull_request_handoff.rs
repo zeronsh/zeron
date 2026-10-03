@@ -204,7 +204,7 @@ impl PullRequestDetailPage {
                 .flex_none()
                 .border_1()
                 .border_color(gpui::transparent_black())
-                .focus_visible(|style| style.border_color(theme.accent))
+                .focus_visible(|style| style.border_2().border_color(theme.accent))
                 .child(
                     crate::icons::icon(kind.glyph())
                         .size(px(14.0))
