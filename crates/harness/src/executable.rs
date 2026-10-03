@@ -75,25 +75,21 @@ fn validate_native_override_with(
             path.display()
         )));
     }
-    Ok(path.to_path_buf())
+    std::path::absolute(path).map_err(|error| crate::HarnessError::NotInstalled(error.to_string()))
 }
 
 pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
+    // Selection follows the owner's PATH and fallback order. A newer second
+    // installation must not silently take over when a version probe changes.
     find_on_paths_matching_with(
         exe,
         extra,
         &|key| std::env::var_os(key),
         crate::shell_env::login_shell_path().map(OsString::from),
         Platform::current(),
-        |path| {
-            if runnable(path) {
-                candidates.push(path.to_path_buf());
-            }
-            false
-        },
-    );
-    newest_candidate(candidates)
+        runnable,
+    )
+    .and_then(|path| std::path::absolute(path).ok())
 }
 
 pub(crate) fn binary_hint(path: &Path) -> String {
@@ -117,30 +113,6 @@ fn runnable(path: &Path) -> bool {
     {
         path.is_file()
     }
-}
-
-fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    let mut seen = std::collections::HashSet::new();
-    let candidates: Vec<_> = candidates
-        .into_iter()
-        .filter(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())))
-        .collect();
-    let mut best = candidates.first()?.clone();
-    if candidates.len() > 1 {
-        let mut version = binary_version(&best);
-        for path in candidates.iter().skip(1) {
-            let next = binary_version(path);
-            if next.as_ref().is_some_and(|next| {
-                version
-                    .as_ref()
-                    .is_none_or(|current| next.cmp_precedence(current).is_gt())
-            }) {
-                best = path.clone();
-                version = next;
-            }
-        }
-    }
-    Some(best)
 }
 
 type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
@@ -539,6 +511,18 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn relative_override_is_bound_before_the_child_changes_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let temp = tempfile::tempdir_in(&cwd).unwrap();
+        let binary = temp
+            .path()
+            .join(if cfg!(windows) { "agent.exe" } else { "agent" });
+        std::fs::write(&binary, "fixture").unwrap();
+        let relative = binary.strip_prefix(&cwd).unwrap();
+        assert_eq!(validate_native_override(relative).unwrap(), binary);
+    }
+
+    #[test]
     fn semantic_versions_support_cli_labels_and_prereleases() {
         assert_eq!(
             parse_version(b"Claude Code v2.1.3 (native)"),
@@ -557,7 +541,8 @@ mod tests {
         let second = dir.path().join("new.cmd");
         std::fs::write(&first, "@echo off\r\necho codex-cli 1.0.0\r\n").unwrap();
         std::fs::write(&second, "@echo off\r\necho codex-cli 2.0.0\r\n").unwrap();
-        assert_eq!(newest_candidate(vec![first, second.clone()]), Some(second));
+        assert_eq!(binary_version(&first).unwrap().to_string(), "1.0.0");
+        assert_eq!(binary_version(&second).unwrap().to_string(), "2.0.0");
     }
 
     #[cfg(unix)]
@@ -585,44 +570,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn newest_binary_deduplicates_caches_and_invalidates() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+    fn selection_does_not_probe_or_switch_to_a_newer_copy() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("one/codex");
-        let second = dir.path().join("two/codex");
-        let script = |path: &Path, version: &str| {
+        let first = dir.path().join("one/agent");
+        let second = dir.path().join("two/agent");
+        for (path, version) in [(&first, "1.0.0"), (&second, "9.0.0")] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 path,
                 format!(
-                    "#!/bin/sh\necho codex-cli {version}\necho x >> '{}.calls'\n",
+                    "#!/bin/sh\necho {version}\ntouch '{}.probed'\n",
                     path.display()
                 ),
             )
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        script(&first, "0.99.0");
-        script(&second, "0.110.0");
-        let alias = dir.path().join("alias");
-        symlink(&second, &alias).unwrap();
-        for _ in 0..3 {
-            assert_eq!(
-                newest_candidate(vec![first.clone(), second.clone(), alias.clone()]),
-                Some(second.clone())
-            );
         }
+        let lookup = env(&[(
+            "PATH",
+            joined(&[first.parent().unwrap(), second.parent().unwrap()]),
+        )]);
         assert_eq!(
-            std::fs::read_to_string(second.with_file_name("codex.calls")).unwrap(),
-            "x\n"
-        );
-        script(&first, "1.200.0");
-        assert_eq!(
-            newest_candidate(vec![first.clone(), second.clone()]),
+            find_on_paths_matching_with("agent", vec![], &lookup, None, Platform::Unix, runnable),
             Some(first.clone())
         );
-        script(&second, "1.200.0");
-        assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
+        assert!(!first.with_extension("probed").exists());
+        assert!(!second.with_extension("probed").exists());
     }
 
     #[cfg(unix)]
@@ -637,7 +611,7 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert_eq!(binary_version(&first).unwrap().to_string(), "1.0.0+aaa");
-        assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
+        assert_eq!(binary_version(&second).unwrap().to_string(), "1.0.0+zzz");
     }
 
     #[cfg(unix)]
@@ -652,7 +626,6 @@ mod tests {
             let started = std::time::Instant::now();
             assert_eq!(binary_version(&path), None);
             assert!(started.elapsed() < std::time::Duration::from_secs(3));
-            assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
         }
     }
 

@@ -139,6 +139,10 @@ impl AppUpdate {
         }
     }
 
+    pub fn status(&self) -> Option<&UpdateStatus> {
+        self.status.as_ref()
+    }
+
     pub fn install(&self) -> &InstallKind {
         &self.install
     }
@@ -321,7 +325,9 @@ impl AppUpdate {
         staged: &Path,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        let result = self.install.apply_desktop(staged, true);
+        let result = self
+            .validate_installation(staged)
+            .and_then(|()| self.install.apply_desktop(staged, true));
         self.flow = match &result {
             Ok(()) => Flow::Installed,
             Err(err) => {
@@ -336,6 +342,21 @@ impl AppUpdate {
         result
     }
 
+    fn validate_installation(&self, staged: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.install == zeron_update::detect_install(),
+            "The desktop installation changed since staging; check for updates again"
+        );
+        anyhow::ensure!(
+            matches!(&self.flow, Flow::Ready { staged: expected, .. } if expected == staged),
+            "The staged update changed; check for updates again"
+        );
+        if let Some(blocker) = self.install.desktop_update_blocker() {
+            anyhow::bail!("{blocker}");
+        }
+        Ok(())
+    }
+
     /// Quit hook: a staged update the user never restarted for installs now,
     /// so the next launch is current. Runs synchronously inside the quit.
     fn install_on_quit(&mut self) {
@@ -345,7 +366,10 @@ impl AppUpdate {
         let Flow::Ready { version, staged } = &self.flow else {
             return;
         };
-        match self.install.apply_desktop(staged, false) {
+        match self
+            .validate_installation(staged)
+            .and_then(|()| self.install.apply_desktop(staged, false))
+        {
             Ok(()) => {
                 tracing::info!(%version, "installed staged update on quit");
                 self.flow = Flow::Installed;

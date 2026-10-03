@@ -120,6 +120,7 @@ enum Slot {
         /// shows up on the next settings/picker open, no restart needed.
         installed: InstalledProbe,
         factory: Factory,
+        cached: Option<Arc<dyn Harness>>,
     },
 }
 
@@ -136,8 +137,9 @@ pub struct HarnessRegistry {
     /// write-preferring FIFO policy prevents a stream of new runs from
     /// starving an update that is already waiting.
     gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::RwLock<()>>>>,
-    pending_updates: Mutex<std::collections::HashSet<HarnessId>>,
+    pending_updates: Mutex<HashMap<HarnessId, usize>>,
     update_generation: tokio::sync::watch::Sender<u64>,
+    installers: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for HarnessRegistry {
@@ -218,9 +220,15 @@ impl HarnessRegistry {
             prefs: Mutex::new(HarnessPrefsFile::default()),
             prefs_path: Mutex::new(None),
             gates: Mutex::new(HashMap::new()),
-            pending_updates: Mutex::new(std::collections::HashSet::new()),
+            pending_updates: Mutex::new(HashMap::new()),
             update_generation,
+            installers: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Global package managers are shared by otherwise independent harnesses.
+    pub(crate) async fn installer_lease(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.installers.clone().lock_owned().await
     }
 
     fn gate(&self, id: HarnessId) -> Arc<tokio::sync::RwLock<()>> {
@@ -261,17 +269,26 @@ impl HarnessRegistry {
     /// runtimes use this signal to retire at their next turn boundary instead
     /// of parking indefinitely while the writer waits.
     pub fn begin_update(&self, id: HarnessId) {
-        self.pending_updates
+        *self
+            .pending_updates
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id);
+            .entry(id)
+            .or_default() += 1;
     }
 
     pub fn end_update(&self, id: HarnessId) {
-        self.pending_updates
+        let mut pending = self
+            .pending_updates
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = pending.get_mut(&id) {
+            *count -= 1;
+            if *count == 0 {
+                pending.remove(&id);
+            }
+        }
+        drop(pending);
         self.update_generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
@@ -280,7 +297,7 @@ impl HarnessRegistry {
         self.pending_updates
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&id)
+            .contains_key(&id)
     }
 
     /// Run a synchronous dispatch-boundary action only if no update has been
@@ -297,7 +314,7 @@ impl HarnessRegistry {
             .pending_updates
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if pending.contains(&id) {
+        if pending.contains_key(&id) {
             None
         } else {
             Some(action())
@@ -473,6 +490,7 @@ impl HarnessRegistry {
                     descriptor,
                     installed,
                     factory,
+                    cached: None,
                 },
             )
             .is_none()
@@ -483,14 +501,27 @@ impl HarnessRegistry {
 
     pub fn resolve(&self, id: HarnessId) -> Result<Arc<dyn Harness>, HarnessError> {
         let mut slots = self.slots();
-        match slots.get(&id) {
+        match slots.get_mut(&id) {
             Some(Slot::Ready(harness)) => Ok(harness.clone()),
-            Some(Slot::Lazy { factory, .. }) => {
+            Some(Slot::Lazy {
+                factory, cached, ..
+            }) => {
+                if let Some(harness) = cached {
+                    return Ok(harness.clone());
+                }
                 let harness = factory()?;
-                slots.insert(id, Slot::Ready(harness.clone()));
+                *cached = Some(harness.clone());
                 Ok(harness)
             }
             None => Err(HarnessError::NotInstalled(format!("{id:?}"))),
+        }
+    }
+
+    /// Called under the exclusive installation lease, including failed mutations.
+    /// Retain configured factories but drop executable-dependent discovery caches.
+    pub(crate) fn invalidate_installation(&self, id: HarnessId) {
+        if let Some(Slot::Lazy { cached, .. }) = self.slots().get_mut(&id) {
+            *cached = None;
         }
     }
 
@@ -503,6 +534,10 @@ impl HarnessRegistry {
             .filter_map(|id| {
                 let mut descriptor = match slots.get(id) {
                     Some(Slot::Ready(harness)) => describe(harness.as_ref()),
+                    Some(Slot::Lazy {
+                        cached: Some(harness),
+                        ..
+                    }) => describe(harness.as_ref()),
                     Some(Slot::Lazy {
                         descriptor,
                         installed,
@@ -761,6 +796,22 @@ pub fn default_registry() -> HarnessRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn installation_invalidation_rebuilds_cached_harness_but_keeps_other_instances() {
+        let registry = super::default_registry();
+        let first = registry.resolve(zeron_proto::HarnessId::Codex).unwrap();
+        let other = registry.resolve(zeron_proto::HarnessId::Cursor).unwrap();
+        let cached = registry.resolve(zeron_proto::HarnessId::Codex).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &cached));
+        registry.invalidate_installation(zeron_proto::HarnessId::Codex);
+        let next = registry.resolve(zeron_proto::HarnessId::Codex).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &next));
+        assert!(std::sync::Arc::ptr_eq(
+            &other,
+            &registry.resolve(zeron_proto::HarnessId::Cursor).unwrap()
+        ));
+    }
+
     use super::*;
 
     #[test]
@@ -1290,6 +1341,40 @@ mod title_tests {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn overlapping_install_and_update_keep_admission_pending() {
+        let registry = HarnessRegistry::new();
+        registry.begin_update(HarnessId::Codex);
+        registry.begin_update(HarnessId::Codex);
+        registry.end_update(HarnessId::Codex);
+        assert!(registry.update_pending(HarnessId::Codex));
+        assert!(
+            registry
+                .while_update_clear(HarnessId::Codex, || ())
+                .is_none()
+        );
+        registry.end_update(HarnessId::Codex);
+        assert!(!registry.update_pending(HarnessId::Codex));
+        let lease = registry.installer_lease().await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                registry.installer_lease()
+            )
+            .await
+            .is_err()
+        );
+        drop(lease);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                registry.installer_lease()
+            )
+            .await
+            .is_ok()
+        );
+    }
 
     struct DiscoveryHarness {
         started: tokio::sync::Notify,

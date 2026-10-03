@@ -24,6 +24,8 @@ use zeron_proto::{
 use crate::now_ms;
 use crate::registry::HarnessRegistry;
 
+mod installation;
+
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_JITTER: u64 = 30 * 60;
 const FIRST_RETRY: Duration = Duration::from_secs(5 * 60);
@@ -97,6 +99,97 @@ impl HomebrewPackage {
             vec!["upgrade", "--formula", self.token.as_str()]
         }
     }
+}
+
+/// Which installation a check described. Apply refuses to act on a different
+/// one: a PATH change, a reinstall through another package manager, or a
+/// retargeted launcher between the check and the click must be re-checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstallIdentity {
+    launcher: PathBuf,
+    resolved: Option<PathBuf>,
+    modified: Option<std::time::SystemTime>,
+    length: Option<u64>,
+    homebrew: Option<HomebrewPackage>,
+    package: Option<installation::Package>,
+}
+
+impl InstallIdentity {
+    /// What Settings shows about the copy Zeron launches.
+    fn evidence(&self) -> zeron_proto::HarnessInstallation {
+        zeron_proto::HarnessInstallation {
+            launcher: self.launcher.display().to_string(),
+            resolved: self.resolved.as_ref().map(|p| p.display().to_string()),
+            installer: self.homebrew.as_ref().map(|p| p.brew.display().to_string()),
+            package: self
+                .homebrew
+                .as_ref()
+                .map(|p| p.token.clone())
+                .or_else(|| self.package.as_ref().map(|p| p.name.clone())),
+        }
+    }
+}
+
+fn install_identity(executable: &Path) -> InstallIdentity {
+    let metadata = executable.metadata().ok();
+    InstallIdentity {
+        launcher: executable.to_path_buf(),
+        resolved: executable.canonicalize().ok(),
+        modified: metadata.as_ref().and_then(|m| m.modified().ok()),
+        length: metadata.as_ref().map(|m| m.len()),
+        homebrew: homebrew_package(executable),
+        package: installation::package_for(executable),
+    }
+}
+
+/// OpenCode picks its own install method by probing every package manager, so
+/// a Homebrew keg installed beside a standalone copy makes the standalone
+/// copy "upgrade" through Homebrew, a successful no-op for the binary that is
+/// actually running. Name the method the running binary's layout implies.
+fn update_args_for(
+    harness: HarnessId,
+    executable: &Path,
+    default: &'static [&'static str],
+) -> &'static [&'static str] {
+    if harness != HarnessId::Opencode {
+        return default;
+    }
+    match opencode_install_method(executable) {
+        Some("curl") => &["upgrade", "--method", "curl"],
+        Some("npm") => &["upgrade", "--method", "npm"],
+        Some("pnpm") => &["upgrade", "--method", "pnpm"],
+        Some("bun") => &["upgrade", "--method", "bun"],
+        _ => default,
+    }
+}
+
+/// The installer that owns the *running* OpenCode binary, from its resolved
+/// location. `None` when the layout does not identify one (Homebrew is
+/// handled by its own plan).
+fn opencode_install_method(executable: &Path) -> Option<&'static str> {
+    let canonical = std::fs::canonicalize(executable).ok()?;
+    let text = canonical
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    if text.contains("/cellar/") || text.contains("/caskroom/") {
+        return None;
+    }
+    if text.contains("/node_modules/") {
+        return Some(if text.contains("/.bun/") {
+            "bun"
+        } else if text.contains("/pnpm/") {
+            "pnpm"
+        } else {
+            "npm"
+        });
+    }
+    // The curl installer's layouts: ~/.opencode/bin, and versioned
+    // directories under the data dir that ~/.local/bin links into.
+    (text.contains("/.opencode/bin/")
+        || text.contains("/opencode/versions/")
+        || text.contains("/.local/bin/"))
+    .then_some("curl")
 }
 
 enum UpdatePlan {
@@ -291,7 +384,7 @@ fn update_plan(harness: HarnessId, executable: &Path) -> Result<UpdatePlan, Stri
     if let Some(args) = provider(harness).update_args {
         return Ok(UpdatePlan::Command {
             executable: executable.to_path_buf(),
-            args,
+            args: update_args_for(harness, executable, args),
         });
     }
     if harness == HarnessId::Codex
@@ -349,6 +442,11 @@ struct Inner {
     /// the registry release the last check reported, installed verbatim by
     /// apply so a registry change in between cannot swap what gets installed.
     antigravity_release: Mutex<Option<zeron_harness::acp::AntigravityRelease>>,
+    /// The installation each provider's last check described.
+    checked_installs: Mutex<HashMap<HarnessId, InstallIdentity>>,
+    /// Shared with runs and terminals: an engine restart must never begin
+    /// under an agent installer, nor one start under a closing restart.
+    restart_gate: std::sync::OnceLock<crate::engine_updates::RestartGate>,
 }
 
 /// Cloneable engine service exposed to RPC and the periodic worker.
@@ -431,6 +529,7 @@ impl HarnessUpdateCoordinator {
                     harness,
                     HarnessUpdateStatus {
                         harness,
+                        installation: None,
                         installed_version: None,
                         latest_version: None,
                         channel: Some("stable".into()),
@@ -463,6 +562,8 @@ impl HarnessUpdateCoordinator {
                 shutdown: CancellationToken::new(),
                 worker: Mutex::new(None),
                 antigravity_release: Mutex::new(None),
+                checked_installs: Mutex::new(HashMap::new()),
+                restart_gate: std::sync::OnceLock::new(),
                 client: reqwest::Client::builder()
                     .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
                     .timeout(COMMAND_TIMEOUT)
@@ -470,6 +571,16 @@ impl HarnessUpdateCoordinator {
                     .unwrap_or_default(),
             }),
         }
+    }
+
+    /// Share the engine's restart admission (first set wins).
+    pub fn set_restart_gate(&self, gate: crate::engine_updates::RestartGate) {
+        let _ = self.inner.restart_gate.set(gate);
+    }
+
+    /// Any agent CLI mid-update: an engine restart would orphan its installer.
+    pub fn any_mutating(&self) -> bool {
+        !lock(&self.inner.cancellations).is_empty()
     }
 
     /// Start the immediate check plus the six-hour jittered/retry loop. Bare
@@ -643,6 +754,10 @@ impl HarnessUpdateCoordinator {
         };
         let source = classify_source(&executable);
         let can_apply = can_apply_update(harness, &executable);
+        let identity = install_identity(&executable);
+        let evidence = identity.evidence();
+        self.mutate(harness, |status| status.installation = Some(evidence));
+        lock(&self.inner.checked_installs).insert(harness, identity);
         if self.settle_if_unmonitored(harness) {
             return Ok(());
         }
@@ -978,10 +1093,30 @@ impl HarnessUpdateCoordinator {
             return Err("this provider requires a manual update".into());
         }
         let executable = self.executable(harness)?;
+        if lock(&self.inner.checked_installs)
+            .get(&harness)
+            .is_some_and(|checked| *checked != install_identity(&executable))
+        {
+            // Never apply a plan made for another copy. The fresh check waits
+            // for this operation slot and republishes what is installed now.
+            let coordinator = self.clone();
+            tokio::spawn(async move {
+                let _ = coordinator.check_one(harness).await;
+            });
+            return Err(
+                "the agent's installation changed since it was checked; checking again".into(),
+            );
+        }
         let plan = update_plan(harness, &executable)?;
         // A request queued behind a check must inherit shutdown even if it
         // reaches this point after shutdown's cancellation-map snapshot.
         let cancel = self.inner.shutdown.child_token();
+        // Held until the operation is in `cancellations`, where the restart's
+        // idle check (`any_mutating`) sees it.
+        let admission = match self.inner.restart_gate.get() {
+            Some(gate) => Some(gate.admit().await?),
+            None => None,
+        };
         {
             let mut cancellations = lock(&self.inner.cancellations);
             if cancellations.contains_key(&harness) {
@@ -999,6 +1134,7 @@ impl HarnessUpdateCoordinator {
                 },
             );
         }
+        drop(admission);
         self.inner.registry.begin_update(harness);
         let mut intent = UpdateIntentGuard {
             coordinator: self.clone(),
@@ -1018,6 +1154,19 @@ impl HarnessUpdateCoordinator {
             }
             lease = self.inner.registry.update_lease(harness) => lease,
         };
+        // Different harnesses may share one brew/npm installation. Serialize
+        // mutations across providers, retaining cancellation while queued.
+        // Taken after this agent's own runs have drained, so a busy agent
+        // never holds up another agent's update or installation.
+        let _installer = tokio::select! {
+            _ = cancel.cancelled() => {
+                drop(lease);
+                self.finish_cancelled(harness);
+                intent.finish();
+                return Err("update cancelled".into());
+            }
+            guard = self.inner.registry.installer_lease() => guard,
+        };
         if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
             drop(lease);
             self.finish_cancelled(harness);
@@ -1034,6 +1183,10 @@ impl HarnessUpdateCoordinator {
             intent.finish();
             return Err("update cancelled".into());
         }
+        // The launcher Zeron must select afterwards. A managed archive installs
+        // each release beside the previous one, so its launcher moves with
+        // the version; every other installer replaces the copy in place.
+        let mut updated = executable.clone();
         let applied = match plan {
             UpdatePlan::Command { executable, args } => {
                 match self.begin_install(harness, &cancel) {
@@ -1049,7 +1202,7 @@ impl HarnessUpdateCoordinator {
                     Some(release) => match self.begin_install(harness, &cancel) {
                         Ok(()) => zeron_harness::acp::install_antigravity_release(&release)
                             .await
-                            .map(drop)
+                            .map(|server| updated = server)
                             .map_err(|error| error.to_string()),
                         Err(error) => Err(error),
                     },
@@ -1075,6 +1228,10 @@ impl HarnessUpdateCoordinator {
                 Err(error) => Err(error),
             },
         };
+        // Wrappers can keep their metadata while replacing their payload.
+        // Verification and the next launch must not reuse discovery caches.
+        zeron_harness::install::invalidate_versions(harness);
+        self.inner.registry.invalidate_installation(harness);
         if let Err(error) = applied {
             drop(lease);
             if cancel.is_cancelled() {
@@ -1090,6 +1247,11 @@ impl HarnessUpdateCoordinator {
             status.phase = HarnessUpdatePhase::Verifying
         });
         let verified = match self.executable(harness) {
+            Ok(resolved) if resolved != updated => Err(format!(
+                "Zeron now launches {} instead of the updated {}",
+                resolved.display(),
+                updated.display()
+            )),
             Ok(executable) => {
                 run_version_command(harness, &executable, provider(harness).version_args)
                     .await
@@ -1117,10 +1279,22 @@ impl HarnessUpdateCoordinator {
                             format!("verification returned {version}, older than expected {latest}")
                         }
                     })
+                } else if let Some(before) = current
+                    .installed_version
+                    .as_deref()
+                    .filter(|before| version_is_newer(before, &version))
+                {
+                    Err(format!(
+                        "the update left {version} installed, older than the previous {before}"
+                    ))
                 } else {
                     lock(&self.inner.prefs).dismissed_versions.remove(&harness);
                     self.persist_preferences();
+                    let after = install_identity(&executable);
+                    let evidence = after.evidence();
+                    lock(&self.inner.checked_installs).insert(harness, after);
                     self.mutate(harness, |status| {
+                        status.installation = Some(evidence);
                         status.installed_version = Some(version.clone());
                         status.phase = HarnessUpdatePhase::Updated;
                         status.checked_at = Some(now_ms());
@@ -1169,6 +1343,14 @@ impl HarnessUpdateCoordinator {
     /// Serialize the final cancellation check and installation commit with
     /// `cancel`: once cancellation is accepted, mutation cannot begin.
     fn begin_install(&self, harness: HarnessId, cancel: &CancellationToken) -> Result<(), String> {
+        let checked = lock(&self.inner.checked_installs).get(&harness).cloned();
+        if let Some(checked) = checked
+            && checked != install_identity(&self.executable(harness)?)
+        {
+            return Err(
+                "the agent installation changed while waiting; check again before updating".into(),
+            );
+        }
         let cancellations = lock(&self.inner.cancellations);
         if cancellations
             .get(&harness)
@@ -1322,6 +1504,7 @@ impl HarnessUpdateCoordinator {
             .cloned()
             .unwrap_or_else(|| HarnessUpdateStatus {
                 harness,
+                installation: None,
                 installed_version: None,
                 latest_version: None,
                 channel: Some("stable".into()),
@@ -1344,6 +1527,7 @@ impl HarnessUpdateCoordinator {
                 .entry(harness)
                 .or_insert_with(|| HarnessUpdateStatus {
                     harness,
+                    installation: None,
                     installed_version: None,
                     latest_version: None,
                     channel: Some("stable".into()),
@@ -1793,11 +1977,39 @@ fn safe_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
 }
 
+/// Whether some link on the launcher's chain goes through `<root>/current`.
+#[cfg(unix)]
+fn follows_codex_current(launcher: &Path, root: &Path) -> bool {
+    let mut candidate = launcher.to_owned();
+    for _ in 0..16 {
+        if candidate.ancestors().any(|ancestor| {
+            ancestor.file_name().is_some_and(|name| name == "current")
+                && ancestor
+                    .parent()
+                    .and_then(|p| p.canonicalize().ok())
+                    .as_deref()
+                    == Some(root)
+        }) {
+            return true;
+        }
+        let Ok(target) = std::fs::read_link(&candidate) else {
+            return false;
+        };
+        candidate = if target.is_absolute() {
+            target
+        } else {
+            candidate.parent().unwrap_or(Path::new(".")).join(target)
+        };
+    }
+    false
+}
+
 /// Recognize only the canonical layout produced by the official Codex
 /// standalone installer. A random executable containing "codex" in its path
 /// must remain manual rather than becoming an update target.
 #[cfg(unix)]
 fn codex_standalone_install(executable: &Path) -> Option<CodexStandaloneInstall> {
+    let launcher = executable;
     let executable = std::fs::canonicalize(executable).ok()?;
     if executable.file_name()?.to_str()? != "codex"
         || executable.parent()?.file_name()?.to_str()? != "bin"
@@ -1810,6 +2022,11 @@ fn codex_standalone_install(executable: &Path) -> Option<CodexStandaloneInstall>
         return None;
     }
     let root = releases.parent()?.to_path_buf();
+    // A launcher that names one release directly is pinned: activating a new
+    // release would not change what it runs.
+    if launcher.starts_with(releases) || !follows_codex_current(launcher, &root) {
+        return None;
+    }
     let active = std::fs::canonicalize(root.join("current")).ok()?;
     if active != release {
         return None;
@@ -2040,6 +2257,10 @@ fn parse_homebrew_version(cask: bool, body: &str) -> Result<String, String> {
 fn classify_source(path: &Path) -> HarnessInstallSource {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let text = format!("{}\n{}", path.display(), canonical.display()).to_ascii_lowercase();
+    // A launcher that merely lives under a Homebrew prefix says nothing about
+    // its owner: `/opt/homebrew/bin/x` can link into any other installation.
+    // Only where the binary really resides counts for Homebrew ownership.
+    let real = canonical.to_string_lossy().to_ascii_lowercase();
     if text.contains("/.cargo/bin/") {
         HarnessInstallSource::Cargo
     } else if text.contains("node_modules")
@@ -2049,7 +2270,7 @@ fn classify_source(path: &Path) -> HarnessInstallSource {
         || text.contains("/pnpm/")
     {
         HarnessInstallSource::Npm
-    } else if text.contains("homebrew") || text.contains("/cellar/") || text.contains("/caskroom/")
+    } else if real.contains("homebrew") || real.contains("/cellar/") || real.contains("/caskroom/")
     {
         HarnessInstallSource::Homebrew
     } else {
@@ -2244,7 +2465,7 @@ async fn run_command_output_env(
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if !output.status.success() {
-        let detail = if stderr.is_empty() { stdout } else { stderr };
+        let detail = bounded_diagnostic(if stderr.is_empty() { &stdout } else { &stderr });
         return Err(format!(
             "{} exited with {}{}",
             executable.display(),
@@ -2255,6 +2476,62 @@ async fn run_command_output_env(
         ));
     }
     Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+/// Package managers can print pages of progress before the actual failure.
+/// Keep the tail, where the cause is, within a status-sized budget.
+fn bounded_diagnostic(detail: &str) -> String {
+    const MAX_LINES: usize = 6;
+    const MAX_CHARS: usize = 600;
+    let detail = without_unrelated_tap_warnings(detail);
+    let lines: Vec<_> = detail
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(MAX_LINES)..].join("\n");
+    let count = tail.chars().count();
+    if count <= MAX_CHARS {
+        return tail;
+    }
+    let kept: String = tail.chars().skip(count - MAX_CHARS).collect();
+    format!("…{kept}")
+}
+
+/// Homebrew 7 warns about every untrusted tap on the machine on each command.
+/// The warning describes packages this update never touches, buries the actual
+/// failure, and reads as if those packages were failing. Drop that block: its
+/// indented tap list and trust commands, and the sentences Homebrew wraps
+/// around them. Anything else ends the block and is kept, so a cause in a
+/// form this does not know is never dropped with it.
+fn without_unrelated_tap_warnings(output: &str) -> String {
+    const HEADER: &str = "Warning: The following taps are not trusted";
+    const SENTENCES: [&str; 8] = [
+        "Homebrew is currently ignoring",
+        "from these taps",
+        "Prefer trusting",
+        "Trust ",
+        "Whole-tap trust",
+        "casks and commands from the listed taps",
+        "Untap them with:",
+        "For more information, see:",
+    ];
+    let mut kept = Vec::new();
+    let mut skipping = false;
+    for line in output.lines() {
+        if line.starts_with(HEADER) {
+            skipping = true;
+            continue;
+        }
+        skipping = skipping
+            && (line.trim().is_empty()
+                || line.starts_with(char::is_whitespace)
+                || SENTENCES.iter().any(|sentence| line.starts_with(sentence)));
+        if !skipping {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
 }
 
 fn version_tokens(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -2597,6 +2874,156 @@ esac
         registry.register(Arc::new(ExecutableHarness(executable, HarnessId::Grok)));
         let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
         (temp, coordinator)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_installs_are_refused_once_a_restart_closed_admission() {
+        let (temp, coordinator) = automatic_fixture();
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        assert_eq!(
+            coordinator.status(HarnessId::Grok).phase,
+            HarnessUpdatePhase::Available
+        );
+        let gate = crate::engine_updates::RestartGate::default();
+        coordinator.set_restart_gate(gate.clone());
+        assert!(gate.close_if(&|| true));
+        let error = coordinator.apply(HarnessId::Grok).await.unwrap_err();
+        assert!(error.contains("restarting"), "{error}");
+        assert!(!coordinator.any_mutating());
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("version")).unwrap(),
+            "1.0.0\n",
+            "the installer never ran"
+        );
+        assert_eq!(
+            coordinator.status(HarnessId::Grok).phase,
+            HarnessUpdatePhase::Available
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_busy_agent_does_not_hold_the_installer_other_agents_share() {
+        let (temp, coordinator) = automatic_fixture();
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let registry = coordinator.inner.registry.clone();
+        // A Grok run is in flight when its update is requested.
+        let run = registry.execution_lease(HarnessId::Grok).await;
+        let update = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.apply(HarnessId::Grok).await }
+        });
+        while coordinator.status(HarnessId::Grok).phase != HarnessUpdatePhase::WaitingForIdle {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Another agent's update or installation proceeds meanwhile.
+        let other = tokio::time::timeout(Duration::from_secs(2), registry.installer_lease())
+            .await
+            .expect("a waiting update held the shared installer lease");
+        drop(other);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("version")).unwrap(),
+            "1.0.0\n"
+        );
+        drop(run);
+        assert_eq!(update.await.unwrap().unwrap(), "2.0.0");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launcher_changed_since_the_check_is_rechecked_not_updated() {
+        let (temp, coordinator) = automatic_fixture();
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let installation = coordinator.status(HarnessId::Grok).installation.unwrap();
+        assert!(installation.launcher.ends_with("agent"));
+        // Another installer rewrote the launcher between the check and the click.
+        let launcher = temp.path().join("agent");
+        let script = std::fs::read_to_string(&launcher).unwrap();
+        std::fs::write(&launcher, format!("{script}\n# reinstalled\n")).unwrap();
+        let error = coordinator.apply(HarnessId::Grok).await.unwrap_err();
+        assert!(error.contains("changed since it was checked"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("version")).unwrap(),
+            "1.0.0\n",
+            "the installer never ran"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_upgrades_with_the_method_of_the_binary_that_runs() {
+        use super::{opencode_install_method, update_args_for};
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let make = |relative: &str| {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap();
+            path
+        };
+        // The reported machine: a launcher under a Homebrew-looking prefix
+        // that links to the standalone install, with a Homebrew keg beside it.
+        let standalone = make(".local/share/opencode/versions/1.18.32/bin/opencode");
+        make("homebrew/Cellar/opencode/1.18.33/bin/opencode");
+        std::fs::create_dir_all(root.join("homebrew/bin")).unwrap();
+        let launcher = root.join("homebrew/bin/opencode");
+        symlink(&standalone, &launcher).unwrap();
+        assert_eq!(opencode_install_method(&launcher), Some("curl"));
+        assert_eq!(
+            update_args_for(HarnessId::Opencode, &launcher, &["upgrade"]),
+            ["upgrade", "--method", "curl"]
+        );
+        // ...and it is not mistaken for a Homebrew install by its location.
+        assert!(super::homebrew_package(&launcher).is_none());
+        assert_ne!(
+            super::classify_source(&launcher),
+            zeron_proto::HarnessInstallSource::Homebrew
+        );
+
+        assert_eq!(
+            opencode_install_method(&make(".opencode/bin/opencode")),
+            Some("curl")
+        );
+        assert_eq!(
+            opencode_install_method(&make("lib/node_modules/opencode-ai/bin/opencode")),
+            Some("npm")
+        );
+        assert_eq!(
+            opencode_install_method(&make(".bun/install/global/node_modules/x/bin/opencode")),
+            Some("bun")
+        );
+        // Unknown layouts and other agents keep the vendor default.
+        assert_eq!(opencode_install_method(&make("opt/custom/opencode")), None);
+        assert_eq!(
+            update_args_for(HarnessId::Codex, &launcher, &["update"]),
+            ["update"]
+        );
+    }
+
+    #[test]
+    fn failures_keep_their_cause_without_unrelated_tap_warnings() {
+        let output = "Warning: The following taps are not trusted:\n  antoniorodr/memo\n  xdevplatform/tap\n\nHomebrew is currently ignoring formulae, casks and commands\nfrom these taps because tap trust is required.\nTrust installed casks from these taps with:\n  brew trust --cask xdevplatform/tap/xurl\nError: anomalyco/tap/opencode: no bottle available!";
+        assert_eq!(
+            super::bounded_diagnostic(output),
+            "Error: anomalyco/tap/opencode: no bottle available!"
+        );
+        // The whole block as Homebrew 7 prints it, then a cause with no
+        // `Error:` prefix.
+        let block = "Warning: The following taps are not trusted:\n  xdevplatform/tap\n\nHomebrew is currently ignoring formulae, casks and commands\nfrom these taps because tap trust is required.\nPrefer trusting only the specific formulae, casks or commands you need.\nTrust installed casks from these taps with:\n  brew trust --cask xdevplatform/tap/xurl\nTrust other specific formulae and commands with:\n  brew trust --formula <user>/<tap>/<formula>\n  brew trust --command <user>/<tap>/<command>\nWhole-tap trust is broader and includes all current and future formulae,\ncasks and commands from the listed taps. Trust whole taps with:\n  brew trust xdevplatform/tap\nUntap them with:\n  brew untap xdevplatform/tap\nFor more information, see:\n  https://docs.brew.sh/Tap-Trust\n";
+        assert_eq!(
+            super::bounded_diagnostic(&format!(
+                "{block}curl: (22) The requested URL returned error: 404\nfatal: download failed"
+            )),
+            "curl: (22) The requested URL returned error: 404\nfatal: download failed"
+        );
+        assert_eq!(super::bounded_diagnostic(block), "");
+        let progress: String = (0..40).map(|line| format!("step {line}\n")).collect();
+        let bounded = super::bounded_diagnostic(&format!("{progress}Error: the cause"));
+        assert!(bounded.ends_with("Error: the cause"));
+        assert_eq!(bounded.lines().count(), 6);
     }
 
     #[test]
@@ -3159,6 +3586,10 @@ esac
         let launcher = temp.path().join("codex");
         symlink(root.join("current/bin/codex"), &launcher).unwrap();
 
+        assert!(codex_standalone_install(&first.join("bin/codex")).is_none());
+        let pinned_alias = temp.path().join("pinned-codex");
+        symlink(first.join("bin/codex"), &pinned_alias).unwrap();
+        assert!(codex_standalone_install(&pinned_alias).is_none());
         let install = codex_standalone_install(&launcher).unwrap();
         assert_eq!(install.root, std::fs::canonicalize(&root).unwrap());
         assert_eq!(install.target, "fixture-target");

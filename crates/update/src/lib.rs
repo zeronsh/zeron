@@ -1,5 +1,6 @@
 //! zeron-update — release checking and self-update, shared by the engine (the
-//! background checker + `ApplyUpdate`), the CLI (`zeron update`), and the UI
+//! background checker and the mechanics behind its update operations), the CLI
+//! (`zeron update`), and the UI
 //! (its own report-only checker, the "Check for Updates…" menu item, the
 //! sidebar update strip, and the desktop install paths).
 //!
@@ -67,9 +68,6 @@ const SCHEDULE_TICK: Duration = Duration::from_secs(60);
 const ENGINE_INITIAL_DELAY: Duration = Duration::from_secs(20);
 /// The desktop checker only needs the window on screen first.
 const DESKTOP_INITIAL_DELAY: Duration = Duration::from_secs(2);
-/// While an auto-apply is deferred behind active sessions, re-probe idleness
-/// this often.
-const IDLE_RECHECK: Duration = Duration::from_secs(5 * 60);
 /// A staged binary must answer `--version` within this window.
 const STAGED_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Release metadata is tiny. Bound both its buffered size and total transfer
@@ -367,6 +365,10 @@ pub enum UpdateBlocker {
     DiskImage,
     /// The directory holding the installation is not writable by this user.
     NotWritable(PathBuf),
+    PackageManaged {
+        installer: PathBuf,
+        package: String,
+    },
 }
 
 impl std::fmt::Display for UpdateBlocker {
@@ -375,6 +377,12 @@ impl std::fmt::Display for UpdateBlocker {
             Self::Translocated | Self::DiskImage => f.write_str(
                 "Zeron is running from a temporary, read-only location. Move Zeron to your \
                  Applications folder and reopen it to turn on updates.",
+            ),
+            Self::PackageManaged { installer, package } => write!(
+                f,
+                "Homebrew owns this app. Use {} upgrade --cask {}. The Zeron release feed does not establish which version this cask can install.",
+                installer.display(),
+                package
             ),
             Self::NotWritable(dir) => write!(
                 f,
@@ -404,7 +412,9 @@ impl InstallKind {
     /// after a wasted download with a raw rename error.
     pub fn desktop_update_blocker(&self) -> Option<UpdateBlocker> {
         match self {
-            Self::MacApp { bundle } => mac_bundle_blocker(bundle, dir_writable),
+            Self::MacApp { bundle } => {
+                desktop_cask_owner(bundle).or_else(|| mac_bundle_blocker(bundle, dir_writable))
+            }
             Self::Managed { app_root } => {
                 (!dir_writable(app_root)).then(|| UpdateBlocker::NotWritable(app_root.clone()))
             }
@@ -511,6 +521,58 @@ fn dir_writable(dir: &Path) -> bool {
     }
 }
 
+/// What an engine may do about its own installation. The desktop app owns
+/// its bundle; a package manager or source checkout owns everything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineInstallSupport {
+    /// Managed install run by its service manager: stage, apply, restart.
+    Managed { app_root: PathBuf },
+    /// Managed install started by hand. Installing is safe; restarting the
+    /// service unit would start a second engine beside this one.
+    ManualRestart { app_root: PathBuf },
+    /// Someone else replaces this binary; the message names who.
+    Unsupported(String),
+}
+
+pub fn engine_install_support() -> EngineInstallSupport {
+    engine_install_support_for(
+        &detect_install(),
+        running_as_installed_service(),
+        dir_writable,
+    )
+}
+
+fn engine_install_support_for(
+    install: &InstallKind,
+    service: bool,
+    writable: impl Fn(&Path) -> bool,
+) -> EngineInstallSupport {
+    match install {
+        InstallKind::Managed { app_root } if !writable(app_root) => {
+            EngineInstallSupport::Unsupported(
+                UpdateBlocker::NotWritable(app_root.clone()).to_string(),
+            )
+        }
+        InstallKind::Managed { app_root } if service => EngineInstallSupport::Managed {
+            app_root: app_root.clone(),
+        },
+        InstallKind::Managed { app_root } => EngineInstallSupport::ManualRestart {
+            app_root: app_root.clone(),
+        },
+        InstallKind::MacApp { .. } => EngineInstallSupport::Unsupported(
+            "This engine is part of the Zeron desktop app, which installs its own updates.".into(),
+        ),
+        #[cfg(windows)]
+        InstallKind::WindowsPortable { .. } => EngineInstallSupport::Unsupported(
+            "This engine is part of the Zeron desktop app, which installs its own updates.".into(),
+        ),
+        InstallKind::Unmanaged => EngineInstallSupport::Unsupported(
+            "This engine is a source build or a copied binary. Update it where it was installed."
+                .into(),
+        ),
+    }
+}
+
 pub fn detect_install() -> InstallKind {
     let Ok(exe) = std::env::current_exe() else {
         return InstallKind::Unmanaged;
@@ -538,8 +600,24 @@ fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> Inst
     if let Some(home) = home {
         // `current_exe` resolves the `current` symlink to the versioned dir.
         let app_root = home.join(".zeron").join("app");
-        if exe.starts_with(&app_root) {
-            return InstallKind::Managed { app_root };
+        let root = app_root.canonicalize().unwrap_or(app_root);
+        let resolved = exe.canonicalize().unwrap_or_else(|_| exe.to_owned());
+        let version_dir = resolved.parent();
+        let current = root.join("current").canonicalize().ok();
+        if resolved.file_name().is_some_and(|n| n == "zeron")
+            && version_dir.is_some_and(|dir| {
+                dir.parent() == Some(root.as_path())
+                    && dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|v| parse_version(v).is_some())
+            })
+            && current.as_ref().is_some_and(|dir| {
+                dir.parent() == Some(root.as_path()) && dir.join("zeron").is_file()
+            })
+            && root.join("current").is_symlink()
+        {
+            return InstallKind::Managed { app_root: root };
         }
     }
     for ancestor in exe.ancestors() {
@@ -698,7 +776,17 @@ pub async fn stage_headless(
     );
     let dest = app_root.join(version);
     if dest.join("zeron").exists() {
-        return Ok(dest);
+        match verify_staged_binary(&dest.join("zeron"), version).await {
+            Ok(()) => return Ok(dest),
+            // A truncated or mislabeled leftover would otherwise block this
+            // release for good. The installation in use is never removed.
+            Err(err) if stage_in_use(app_root, &dest) => return Err(err),
+            Err(err) => {
+                tracing::warn!(error = %err, dir = %dest.display(), "replacing an unusable staged release");
+                std::fs::remove_dir_all(&dest)
+                    .with_context(|| format!("removing {}", dest.display()))?;
+            }
+        }
     }
     let file = headless_artifact(version);
     let stage = app_root.join(format!(".stage-{version}-{}", std::process::id()));
@@ -728,7 +816,9 @@ pub async fn stage_headless(
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("zeron").exists() => {}
+            Err(_) if dest.join("zeron").exists() => {
+                verify_staged_binary(&dest.join("zeron"), version).await?;
+            }
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -740,9 +830,26 @@ pub async fn stage_headless(
     result
 }
 
+/// Whether `dir` is the installation `current` selects or this process runs from.
+fn stage_in_use(app_root: &Path, dir: &Path) -> bool {
+    let Ok(dir) = dir.canonicalize() else {
+        return false;
+    };
+    let current = app_root.join("current").canonicalize().ok();
+    let running = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    current.as_ref() == Some(&dir) || running.as_ref() == Some(&dir)
+}
+
 /// Atomically repoint `app_root/current` at `app_root/<ver>` (symlink to a temp
 /// name, then rename over — never a window with no `current`).
 pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        parse_version(version).is_some() && !version.contains(['/', '\\']),
+        "invalid release version"
+    );
     #[cfg(unix)]
     {
         let target = app_root.join(version);
@@ -761,6 +868,73 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
         require_managed_update_platform()?;
         unreachable!("supported managed-update platforms are Unix")
     }
+}
+
+/// Homebrew retains a versioned app link and a cask JSON receipt even when
+/// the app itself is moved into Applications. Both must agree with this bundle.
+fn desktop_cask_owner(bundle: &Path) -> Option<UpdateBlocker> {
+    let mut prefixes = vec![PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")];
+    if let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX") {
+        prefixes.push(prefix.into());
+    }
+    prefixes
+        .into_iter()
+        .find_map(|prefix| cask_owner_in(bundle, &prefix))
+}
+
+fn cask_owner_in(bundle: &Path, prefix: &Path) -> Option<UpdateBlocker> {
+    let canonical = bundle.canonicalize().ok()?;
+    let bundle_name = bundle.file_name()?;
+    let installer = prefix.join("bin/brew");
+    if !installer.is_file() {
+        return None;
+    }
+    for cask in std::fs::read_dir(prefix.join("Caskroom")).ok()?.flatten() {
+        let root = cask.path();
+        let token = cask.file_name().to_string_lossy().into_owned();
+        let linked = std::fs::read_dir(&root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|version| {
+                version
+                    .path()
+                    .join(bundle_name)
+                    .canonicalize()
+                    .ok()
+                    .as_ref()
+                    == Some(&canonical)
+            });
+        if !linked {
+            continue;
+        }
+        for version in std::fs::read_dir(root.join(".metadata"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for timestamp in std::fs::read_dir(version.path())
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let receipt = timestamp.path().join("Casks").join(format!("{token}.json"));
+                let json = std::fs::read(receipt)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                if json.as_ref().and_then(|json| json["token"].as_str()) == Some(token.as_str()) {
+                    return Some(UpdateBlocker::PackageManaged {
+                        installer,
+                        package: token,
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Whether this process is the engine service [`restart_service`] manages:
@@ -982,7 +1156,7 @@ impl UpdateStatus {
 }
 
 /// `ZERON_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
-fn auto_update_enabled() -> bool {
+pub fn auto_update_enabled() -> bool {
     std::env::var("ZERON_AUTO_UPDATE")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
@@ -996,38 +1170,19 @@ pub fn desktop_auto_update_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// "Nothing would be interrupted by a restart right now" — wired by the engine
-/// to its live-run and open-terminal registries. `None` = no gate.
-pub type QuiescentCheck = Arc<dyn Fn() -> bool + Send + Sync>;
-
-/// Who runs the checker — decides what it may do beyond reporting.
-enum Role {
-    /// The engine: managed installs with `ZERON_AUTO_UPDATE` apply themselves,
-    /// and a service daemon restarts into a binary someone else installed.
-    Engine { quiescent: Option<QuiescentCheck> },
-    /// The desktop app: report only — downloading and installing are UI
-    /// decisions (see `crates/ui/src/app_update.rs`).
-    Desktop,
-}
-
 /// Background release checker: polls `{edge}/releases` hourly on a wall-clock
 /// schedule (so sleep/wake cannot stretch it), backs off on failure, and
-/// publishes [`UpdateStatus`] over a watch channel. In the engine, managed
-/// installs with `ZERON_AUTO_UPDATE` set stage + apply + service restart on
-/// their own — but only in a quiet window: while `quiescent` reports activity,
-/// the apply defers and re-probes every [`IDLE_RECHECK`].
+/// publishes [`UpdateStatus`] over a watch channel. Report only: downloading,
+/// installing and restarting belong to whoever owns the installation — the
+/// engine's update operations, or the desktop UI.
 #[derive(Clone)]
 pub struct Updater {
     edge_url: String,
-    role: Arc<Role>,
     status_tx: Arc<watch::Sender<UpdateStatus>>,
     /// Wakes the loop; `forced` says whether the wake demands a check or only
     /// a fresh look at the wall clock.
     wake_tx: Arc<watch::Sender<u64>>,
     forced: Arc<AtomicBool>,
-    /// Set by `zeron headless`: this process is the installed service and may
-    /// restart itself into a newer installed binary.
-    service: Arc<AtomicBool>,
     /// Flips to true exactly once; the check loop selects against it so
     /// cancellation lands at any await point (no tokio-util in this crate).
     shutdown_tx: Arc<watch::Sender<bool>>,
@@ -1036,31 +1191,24 @@ pub struct Updater {
 
 impl Updater {
     /// Spawn the engine's check loop (must run on a tokio runtime).
-    pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>) -> Self {
-        Self::spawn_role(edge_url, Role::Engine { quiescent })
+    pub fn spawn_engine(edge_url: String) -> Self {
+        Self::spawn(edge_url, ENGINE_INITIAL_DELAY)
     }
 
-    /// Spawn the desktop app's report-only check loop (must run on a tokio
-    /// runtime).
+    /// Spawn the desktop app's check loop (must run on a tokio runtime).
     pub fn spawn_desktop(edge_url: String) -> Self {
-        Self::spawn_role(edge_url, Role::Desktop)
+        Self::spawn(edge_url, DESKTOP_INITIAL_DELAY)
     }
 
-    fn spawn_role(edge_url: String, role: Role) -> Self {
-        let initial_delay = match role {
-            Role::Engine { .. } => ENGINE_INITIAL_DELAY,
-            Role::Desktop => DESKTOP_INITIAL_DELAY,
-        };
+    fn spawn(edge_url: String, initial_delay: Duration) -> Self {
         let (status_tx, _) = watch::channel(UpdateStatus::initial());
         let (wake_tx, _) = watch::channel(0);
         let (shutdown_tx, _) = watch::channel(false);
         let updater = Self {
             edge_url,
-            role: Arc::new(role),
             status_tx: Arc::new(status_tx),
             wake_tx: Arc::new(wake_tx),
             forced: Arc::new(AtomicBool::new(false)),
-            service: Arc::new(AtomicBool::new(false)),
             shutdown_tx: Arc::new(shutdown_tx),
             check_task: Arc::new(std::sync::Mutex::new(None)),
         };
@@ -1075,7 +1223,7 @@ impl Updater {
     }
 
     /// Stop the check loop and wait for it to exit — a replaced runtime must
-    /// not keep polling `{edge}/releases` (or auto-applying) in the background.
+    /// not keep polling `{edge}/releases` in the background.
     /// Idempotent, and callable from any clone.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -1108,18 +1256,6 @@ impl Updater {
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
-    /// Called by `zeron headless`: when this process is the installed engine
-    /// service and something else installs a newer binary, restart into it at
-    /// the next quiet moment. A hand-started `zeron headless` is left alone —
-    /// restarting the service unit would start a second engine beside it.
-    pub fn restart_when_superseded(&self) {
-        if !running_as_installed_service() {
-            return;
-        }
-        self.service.store(true, Ordering::SeqCst);
-        self.poke();
-    }
-
     /// One user-requested check, awaited: publishes the result like a
     /// scheduled check and returns it.
     pub async fn check(&self) -> anyhow::Result<UpdateStatus> {
@@ -1136,18 +1272,11 @@ impl Updater {
         }
     }
 
-    fn quiescent_now(&self) -> bool {
-        match &*self.role {
-            Role::Engine { quiescent } => quiescent.as_ref().is_none_or(|check| check()),
-            Role::Desktop => true,
-        }
-    }
-
     async fn check_loop(&self, mut wakes: watch::Receiver<u64>, initial_delay: Duration) {
         let mut shutdown = self.shutdown_tx.subscribe();
         // Shutdown must cut the loop at ANY await point — including mid
-        // `check_once()` / `auto_apply_when_idle()` HTTP — so the whole body
-        // races the flag rather than checking it between iterations.
+        // `check_once()` HTTP — so the whole body races the flag rather than
+        // checking it between iterations.
         tokio::select! {
             _ = shutdown.wait_for(|stop| *stop) => {}
             _ = async {
@@ -1156,23 +1285,11 @@ impl Updater {
                     _ = wakes.changed() => {}
                 }
                 let mut schedule = Schedule::default();
-                let mut superseded = SupersededRestart::default();
                 loop {
                     let forced = self.forced.swap(false, Ordering::SeqCst);
                     if forced || schedule.due(SystemTime::now()) {
                         let ok = self.check_once().await;
                         schedule.record(SystemTime::now(), ok);
-                        if ok
-                            && self.status_tx.borrow().update_available
-                            && matches!(*self.role, Role::Engine { .. })
-                            && auto_update_enabled()
-                            && let InstallKind::Managed { .. } = detect_install()
-                        {
-                            self.auto_apply_when_idle().await;
-                        }
-                    }
-                    if self.service.load(Ordering::SeqCst) {
-                        superseded.poll(|| self.quiescent_now());
                     }
                     let wait = schedule.wait(SystemTime::now());
                     tokio::select! {
@@ -1181,60 +1298,6 @@ impl Updater {
                     }
                 }
             } => {}
-        }
-    }
-
-    /// Sessions must never die to an update: pre-stage the download now
-    /// (harmless while busy), wait for a quiet window (no live runs, no open
-    /// terminals), then apply — which re-fetches the manifest (so a long defer
-    /// lands on whatever is newest) and reuses the staged dir, keeping the
-    /// idle→restart gap to well under a second.
-    async fn auto_apply_when_idle(&self) {
-        if let InstallKind::Managed { app_root } = detect_install() {
-            match fetch_latest(&self.edge_url).await {
-                Ok(manifest) if version_newer(&manifest.version, current_version()) => {
-                    if let Err(err) = stage_headless(&self.edge_url, &manifest, &app_root).await {
-                        tracing::warn!(error = %err, "auto-update staging failed");
-                        return;
-                    }
-                }
-                Ok(_) => return,
-                Err(err) => {
-                    tracing::warn!(error = %err, "auto-update staging fetch failed");
-                    return;
-                }
-            }
-        }
-        let mut deferred = false;
-        loop {
-            while !self.quiescent_now() {
-                if !deferred {
-                    deferred = true;
-                    tracing::info!("auto-update deferred: sessions or terminals active");
-                }
-                tokio::time::sleep(IDLE_RECHECK).await;
-            }
-            // `apply_inner` fetches and stages again so a long defer lands on
-            // the newest release. Re-check quiescence immediately before the
-            // symlink swap: work can begin while that network/disk I/O runs.
-            match self.apply_inner(true).await {
-                Ok(Some(version)) => {
-                    tracing::info!(%version, "auto-update applied; service restarting");
-                    return;
-                }
-                Ok(None) => {
-                    if !deferred {
-                        deferred = true;
-                        tracing::info!(
-                            "auto-update deferred: activity began while staging the update"
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(error = %err, "auto-update failed");
-                    return;
-                }
-            }
         }
     }
 
@@ -1270,43 +1333,6 @@ impl Updater {
                 false
             }
         }
-    }
-
-    /// Stage + apply the newest release on THIS device (managed installs only),
-    /// then restart the service after a short delay so the caller's RPC reply
-    /// flushes before systemd/launchd kills this process.
-    pub async fn apply(&self) -> anyhow::Result<String> {
-        self.apply_inner(false)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("update became busy before apply"))
-    }
-
-    /// `require_quiescent` is used by automatic updates. It deliberately checks
-    /// after all network and staging I/O and directly before the destructive
-    /// swap/restart boundary; `None` tells the caller to wait and try again.
-    async fn apply_inner(&self, require_quiescent: bool) -> anyhow::Result<Option<String>> {
-        let InstallKind::Managed { app_root } = detect_install() else {
-            bail!(
-                "this install is not update-managed — the desktop app updates from its UI; \
-                 source builds update via git"
-            );
-        };
-        let manifest = fetch_latest(&self.edge_url).await?;
-        if !version_newer(&manifest.version, current_version()) {
-            bail!("already up to date ({})", current_version());
-        }
-        stage_headless(&self.edge_url, &manifest, &app_root).await?;
-        if require_quiescent && !self.quiescent_now() {
-            return Ok(None);
-        }
-        apply_headless(&app_root, &manifest.version)?;
-        tokio::spawn(async {
-            tokio::time::sleep(Duration::from_millis(800)).await;
-            if let Err(err) = restart_service() {
-                tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
-            }
-        });
-        Ok(Some(manifest.version))
     }
 }
 
@@ -1352,57 +1378,6 @@ impl Schedule {
     }
 }
 
-/// Restarts a service daemon into a newer binary that is already installed
-/// (the desktop app swapped the bundle, `zeron update` flipped the symlink).
-/// Waits for quiescence, and tries at most once per installed version so a
-/// broken service manager cannot turn into a restart loop.
-#[derive(Debug, Default)]
-struct SupersededRestart {
-    attempted: Option<String>,
-    deferred_logged: bool,
-}
-
-impl SupersededRestart {
-    fn poll(&mut self, quiescent: impl Fn() -> bool) {
-        let Some(installed) = installed_version(&detect_install()) else {
-            return;
-        };
-        self.poll_installed(&installed, current_version(), quiescent, restart_service);
-    }
-
-    fn poll_installed(
-        &mut self,
-        installed: &str,
-        running: &str,
-        quiescent: impl Fn() -> bool,
-        restart: impl FnOnce() -> anyhow::Result<()>,
-    ) {
-        if !version_newer(installed, running) || self.attempted.as_deref() == Some(installed) {
-            return;
-        }
-        if !quiescent() {
-            if !self.deferred_logged {
-                self.deferred_logged = true;
-                tracing::info!(
-                    installed,
-                    running,
-                    "newer version installed; restart deferred: sessions or terminals active"
-                );
-            }
-            return;
-        }
-        self.attempted = Some(installed.to_owned());
-        tracing::info!(
-            installed,
-            running,
-            "newer version installed; restarting service"
-        );
-        if let Err(err) = restart() {
-            tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
-        }
-    }
-}
-
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1413,6 +1388,36 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_support_names_the_owner_and_the_restart_boundary() {
+        let managed = InstallKind::Managed {
+            app_root: PathBuf::from("/home/u/.zeron/app"),
+        };
+        assert!(matches!(
+            engine_install_support_for(&managed, true, |_| true),
+            EngineInstallSupport::Managed { .. }
+        ));
+        assert!(matches!(
+            engine_install_support_for(&managed, false, |_| true),
+            EngineInstallSupport::ManualRestart { .. }
+        ));
+        assert!(matches!(
+            engine_install_support_for(&managed, true, |_| false),
+            EngineInstallSupport::Unsupported(reason) if reason.contains("permission")
+        ));
+        let app = InstallKind::MacApp {
+            bundle: PathBuf::from("/Applications/Zeron.app"),
+        };
+        assert!(matches!(
+            engine_install_support_for(&app, true, |_| true),
+            EngineInstallSupport::Unsupported(reason) if reason.contains("desktop app")
+        ));
+        assert!(matches!(
+            engine_install_support_for(&InstallKind::Unmanaged, true, |_| true),
+            EngineInstallSupport::Unsupported(reason) if reason.contains("source build")
+        ));
+    }
 
     #[tokio::test]
     async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
@@ -1620,6 +1625,92 @@ mod tests {
         assert!(!version_newer("nightly", "0.1.0"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cask_ownership_requires_both_receipt_and_the_selected_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("Applications/Zeron.app");
+        let prefix = temp.path().join("brew");
+        let cask = prefix.join("Caskroom/zeron");
+        let metadata = cask.join(".metadata/1.0.0/timestamp/Casks");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::create_dir_all(cask.join("1.0.0")).unwrap();
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::write(prefix.join("bin/brew"), "fixture").unwrap();
+        std::os::unix::fs::symlink(&bundle, cask.join("1.0.0/Zeron.app")).unwrap();
+        assert!(cask_owner_in(&bundle, &prefix).is_none());
+        std::fs::write(metadata.join("zeron.json"), r#"{"token":"zeron"}"#).unwrap();
+        assert!(matches!(
+            cask_owner_in(&bundle, &prefix),
+            Some(UpdateBlocker::PackageManaged { .. })
+        ));
+        let other = temp.path().join("Elsewhere/Zeron.app");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(cask_owner_in(&other, &prefix).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_detection_requires_an_actual_current_installation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".zeron/app");
+        let binary = root.join("1.0.0/zeron");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "fixture").unwrap();
+        assert_eq!(
+            detect_install_from_for_os(&binary, Some(temp.path()), "linux"),
+            InstallKind::Unmanaged
+        );
+        std::os::unix::fs::symlink(root.join("1.0.0"), root.join("current")).unwrap();
+        assert!(matches!(
+            detect_install_from_for_os(&binary, Some(temp.path()), "linux"),
+            InstallKind::Managed { .. }
+        ));
+        std::fs::remove_file(root.join("current")).unwrap();
+        std::os::unix::fs::symlink(temp.path(), root.join("current")).unwrap();
+        assert_eq!(
+            detect_install_from_for_os(&binary, Some(temp.path()), "linux"),
+            InstallKind::Unmanaged
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unusable_cached_stage_is_replaced_unless_it_is_in_use() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("1.2.0/zeron");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "#!/bin/sh\necho zeron 1.1.0\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let manifest = Manifest {
+            version: "1.2.0".into(),
+            files: BTreeMap::new(),
+        };
+        // Nothing is served here, so the replacement download fails; the
+        // unusable leftover is gone and the next attempt starts clean.
+        assert!(
+            stage_headless("http://127.0.0.1:1", &manifest, temp.path())
+                .await
+                .is_err()
+        );
+        assert!(!binary.exists());
+        assert!(!temp.path().join("current").exists());
+
+        // The installation `current` selects is never removed.
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "#!/bin/sh\necho zeron 1.1.0\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("1.2.0"), temp.path().join("current")).unwrap();
+        assert!(
+            stage_headless("http://127.0.0.1:1", &manifest, temp.path())
+                .await
+                .is_err()
+        );
+        assert!(binary.exists());
+    }
+
     #[test]
     fn install_kind_detection() {
         assert_eq!(
@@ -1628,9 +1719,7 @@ mod tests {
                 Some(Path::new("/home/u")),
                 "linux",
             ),
-            InstallKind::Managed {
-                app_root: PathBuf::from("/home/u/.zeron/app")
-            }
+            InstallKind::Unmanaged
         );
         assert_eq!(
             detect_install_from_for_os(
@@ -1802,29 +1891,6 @@ mod tests {
         );
         schedule.record(start, true);
         assert_eq!(schedule.failures, 0);
-    }
-
-    #[test]
-    fn superseded_service_restarts_once_when_quiet() {
-        let restarts = std::cell::Cell::new(0);
-        let restart = || {
-            restarts.set(restarts.get() + 1);
-            Ok(())
-        };
-        let mut superseded = SupersededRestart::default();
-        // Same or older installed versions never restart.
-        superseded.poll_installed("0.2.0", "0.2.0", || true, restart);
-        superseded.poll_installed("0.1.9", "0.2.0", || true, restart);
-        assert_eq!(restarts.get(), 0);
-        // Busy: deferred, not attempted.
-        superseded.poll_installed("0.2.1", "0.2.0", || false, restart);
-        assert_eq!(restarts.get(), 0);
-        // Quiet: exactly one attempt per installed version.
-        superseded.poll_installed("0.2.1", "0.2.0", || true, restart);
-        superseded.poll_installed("0.2.1", "0.2.0", || true, restart);
-        assert_eq!(restarts.get(), 1);
-        superseded.poll_installed("0.2.2", "0.2.0", || true, restart);
-        assert_eq!(restarts.get(), 2);
     }
 
     #[test]

@@ -244,9 +244,9 @@ impl Harness for CursorHarness {
             || crate::acp::find_on_paths("cursor-agent", cursor_cli_paths()).is_some()
     }
     fn executable_path(&self) -> Option<PathBuf> {
-        self.executable
-            .clone()
-            .or_else(|| crate::acp::find_on_paths("cursor-agent", cursor_cli_paths()))
+        // with_executable and CURSOR_SDK_SHIM_EXECUTABLE select the SDK shim,
+        // never an independently installed cursor-agent updater.
+        crate::acp::find_on_paths("cursor-agent", cursor_cli_paths())
     }
     /// Done is the SDK run's terminal result, for every turn shape.
     fn deterministic_turn_end(&self) -> bool {

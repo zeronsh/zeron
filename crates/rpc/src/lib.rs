@@ -220,6 +220,16 @@ pub mod methods {
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    /// Engine self-update operations (`engine-updates-v1`). The stream emits
+    /// the complete `EngineUpdateState` initially and after every transition.
+    pub const WATCH_ENGINE_UPDATE: &str = "WatchEngineUpdate";
+    /// Refresh release metadata only; never downloads or installs.
+    pub const CHECK_ENGINE_UPDATE: &str = "CheckEngineUpdate";
+    /// Accept an engine-owned operation and acknowledge it immediately with
+    /// its id. `requestId` makes retries idempotent.
+    pub const START_ENGINE_UPDATE: &str = "StartEngineUpdate";
+    /// Cancel before the apply boundary; refused afterwards.
+    pub const CANCEL_ENGINE_UPDATE: &str = "CancelEngineUpdate";
 }
 
 #[derive(Debug, thiserror::Error)]
