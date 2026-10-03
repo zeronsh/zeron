@@ -1,52 +1,50 @@
 //! Session-owned explorer chrome, independent of the surface tab host.
 
 use super::*;
-use crate::settings::{FILES_PANEL_DEFAULT, FILES_PANEL_MAX, FILES_PANEL_MIN};
+use crate::settings::{FILES_PANEL_MAX, FILES_PANEL_MIN};
 
 pub(super) struct FilesPanelResize;
 
-/// Allocate a real column to Files. Reduce its preferred width before taking
-/// space from the chat/editor minima; below those minima, share the shortage
-/// proportionally so no open panel covers another.
+/// Allocate a real column to Files, reducing its preferred width before the
+/// chat or surface minima. The shell fit policy hides a whole column when its
+/// minimum cannot fit, so no settled column is rendered as a sliver.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct FilesPanelLayout {
     width: f32,
     surface_max: f32,
 }
 
+/// `surface_reveal` is how far the surface host is open, from 0 to 1. Files
+/// yields the host's minimum in step with its open/close tween rather than
+/// all at once when the flag flips.
 fn files_panel_layout(
     viewport: f32,
     sidebar: f32,
     preferred: f32,
     visible: f32,
-    surfaces_open: bool,
+    surface_reveal: f32,
     expanded: bool,
 ) -> FilesPanelLayout {
+    let surfaces_open = surface_reveal > 0.0;
     let available = (viewport - sidebar).max(0.0);
-    let chat_min = if surfaces_open && expanded {
+    // Takeover gives the conversation's space to the surface host. It must
+    // not also widen Files: that would move the seam before the right tween
+    // has painted its first frame, and move it back again on reversal.
+    let surface_chat_min = if surfaces_open && expanded {
         0.0
     } else {
         CHAT_PANEL_MIN
     };
-    let surface_min = if surfaces_open { RIGHT_PANE_MIN } else { 0.0 };
-    let scale = if preferred > 0.0 {
-        (available / (chat_min + surface_min + preferred.min(FILES_PANEL_MIN))).min(1.0)
+    let surface_min = RIGHT_PANE_MIN * surface_reveal.clamp(0.0, 1.0);
+    let max_width = if preferred > 0.0 {
+        (available - CHAT_PANEL_MIN - surface_min).max(0.0)
     } else {
-        // Preserve the existing chat floor when Files is closed.
-        1.0
+        0.0
     };
-    let max_width = (available - (chat_min + surface_min) * scale).max(0.0);
     let width = visible.max(0.0).min(max_width);
-    // As Files animates closed, return its space to the remaining columns
-    // smoothly instead of changing their minima when the tween finishes.
-    let content_scale = if preferred > 0.0 {
-        ((available - width) / (chat_min + surface_min)).min(1.0)
-    } else {
-        1.0
-    };
     FilesPanelLayout {
         width,
-        surface_max: right_pane_max_width(viewport - width, sidebar, chat_min * content_scale),
+        surface_max: right_pane_max_width(viewport - width, sidebar, surface_chat_min),
     }
 }
 
@@ -58,18 +56,41 @@ impl Shell {
     }
 
     fn files_layout(&self, visible: f32, cx: &App) -> FilesPanelLayout {
+        let fit = self.horizontal_fit();
         files_panel_layout(
             self.viewport_width,
             self.sidebar_now(),
-            if self.files_panel_open(cx) || self.tween_active(self.files_tween) {
+            if fit.files && (self.files_panel_open(cx) || self.tween_active(self.files_tween)) {
                 self.settings.files_panel_width
             } else {
                 0.0
             },
-            visible,
-            self.right_pane_open(cx),
-            self.right_pane_expanded,
+            if fit.files { visible } else { 0.0 },
+            if fit.right {
+                self.right_reveal()
+            } else {
+                // A host the fit is hiding still occupies its exit width.
+                self.fit_exit_width(1)
+                    .map_or(0.0, |width| (width / RIGHT_PANE_MIN).clamp(0.0, 1.0))
+            },
+            self.right_pane_expanded && fit.right,
         )
+    }
+
+    /// How far the surface host is open: its open/close tween's progress,
+    /// 1 at rest while open. Width-only tweens between open sizes stay at 1.
+    fn right_reveal(&self) -> f32 {
+        // What the host actually occupies, up to its minimum: continuous
+        // through reversals, which restart the tween from a partial width.
+        match self
+            .right_tween
+            .filter(|tween| self.tween_active(Some(*tween)))
+        {
+            Some(tween) => {
+                (self.eval_tween(Some(tween), tween.to) / RIGHT_PANE_MIN).clamp(0.0, 1.0)
+            }
+            None => 1.0,
+        }
     }
 
     pub(super) fn files_target(&self, cx: &App) -> f32 {
@@ -88,12 +109,49 @@ impl Shell {
         if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
             return 0.0;
         }
-        self.files_layout(self.eval_tween(self.files_tween, self.files_target(cx)), cx)
-            .width
+        if !self.horizontal_fit().files
+            && let Some(exiting) = self.fit_exit_width(2)
+        {
+            // Exits clamp in layout order so the columns never overflow.
+            return exiting.min((self.viewport_width - self.sidebar_now()).max(0.0));
+        }
+        self.files_layout(
+            self.ease_toward(self.files_tween, self.files_target(cx)),
+            cx,
+        )
+        .width
     }
 
     pub(super) fn files_reserved_width(&self, cx: &App) -> f32 {
         self.files_visible_width(cx)
+    }
+
+    /// Files' width once every running open/close has landed. Surface
+    /// targets are fixed when their tween starts, so they must size against
+    /// this final allocation, not the frame Files happens to be at.
+    pub(super) fn files_settled_width(&self, cx: &App) -> f32 {
+        let (fit, sidebar) = self.settled_fit();
+        self.files_width_for(fit, sidebar, cx)
+    }
+
+    /// Files' width for a given fit and sidebar width: its own width, as far
+    /// as the conversation and the surface host's minimums leave room.
+    pub(super) fn files_width_for(&self, fit: HorizontalPanelFit, sidebar: f32, cx: &App) -> f32 {
+        let preferred = if fit.files && self.files_panel_open(cx) {
+            self.settings.files_panel_width
+        } else {
+            0.0
+        };
+        let right = fit.right && self.right_pane_open(cx);
+        files_panel_layout(
+            self.viewport_width,
+            sidebar,
+            preferred,
+            preferred,
+            if right { 1.0 } else { 0.0 },
+            self.right_pane_expanded && right,
+        )
+        .width
     }
 
     pub(super) fn surface_max_width(&self, cx: &App) -> f32 {
@@ -102,15 +160,72 @@ impl Shell {
     }
 
     pub(super) fn right_visible_width(&self, cx: &App) -> f32 {
+        if !self.horizontal_fit().right {
+            let available =
+                (self.viewport_width - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
+            return self
+                .fit_exit_width(1)
+                .map_or(0.0, |width| width.min(available));
+        }
         let available =
             (self.viewport_width - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
-        self.right_now(cx).min(available)
+        // Leaving takeover returns the conversation's width over the same
+        // tween. Applying its settled minimum here jumps the seam by 300px
+        // before that first frame (and breaks mid-flight reversals).
+        let max = if self.tween_active(self.main_takeover_tween) {
+            available
+        } else {
+            self.surface_max_width(cx)
+        };
+        self.right_now(cx).min(available).min(max)
     }
 
-    fn clear_surface_transitions(&mut self) {
-        self.right_tween = None;
-        self.main_takeover_tween = None;
-        self.right_takeover_content_tween = None;
+    pub(super) fn files_content_width(&self, cx: &App) -> f32 {
+        if !self.horizontal_fit().files
+            && let Some(width) = self.fit_exit_content(2)
+        {
+            return width;
+        }
+        let target = self.files_target(cx);
+        let mask = self.files_tween;
+        let content = self
+            .files_content_tween
+            .filter(|content| mask.is_some_and(|mask| mask.started == content.started));
+        // A resize between two open widths (a re-split) has no content tween:
+        // the content follows the column instead of relaying out twice.
+        if content.is_none()
+            && let Some((from, to)) = self.active_tween_endpoints(mask)
+            && from > 0.5
+            && to > 0.5
+        {
+            return self.ease_toward(mask, target);
+        }
+        if let Some(content) = content.filter(|content| self.tween_active(Some(*content))) {
+            // Content bound for the column's destination heads for where the
+            // column is going now, like the column itself.
+            return if mask.is_some_and(|mask| mask.to == content.to) {
+                self.ease_toward(Some(content), target)
+            } else {
+                self.eval_tween(Some(content), target)
+            };
+        }
+        stable_panel_content_width(
+            self.files_target(cx),
+            self.active_tween_endpoints(self.files_tween),
+        )
+    }
+
+    /// Ease Files from what it painted (`from`, its content laid out at
+    /// `content`) to `to`, both read before the action changed anything.
+    pub(super) fn transition_files(&mut self, from: f32, content: f32, to: f32) {
+        let (content_from, content_to) = panel_content_tween(content, from, to);
+        let mask = WidthTween::new(from, to);
+        self.files_tween = Some(mask);
+        self.files_content_tween = Some(WidthTween {
+            from: content_from,
+            to: content_to,
+            ..mask
+        });
     }
 
     pub(super) fn accepts_file_navigation(
@@ -252,12 +367,15 @@ impl Shell {
             self.files.insert(key.clone(), files);
             self.files_subs.insert(key.clone(), sub);
         }
-        let from = self.files_visible_width(cx);
+        let before = self.painted_panels(cx);
+        let from = before.files;
         let was_open = self.files_panel_open(cx);
+        let opening = !was_open || !self.horizontal_fit().files;
         self.panels.update(&key, |p| p.files_open = true);
-        if !was_open {
-            self.clear_surface_transitions();
-            self.files_tween = Some(WidthTween::new(from, self.files_target(cx)));
+        if opening {
+            self.record_panel_open(AuxiliaryPanel::Files, &key);
+            self.resplit_panels(before, Some(AuxiliaryPanel::Files), cx);
+            self.transition_files(from, before.files_content, self.files_settled_width(cx));
         }
         if let Some(files) = self.files.get(&key).cloned() {
             files.update(cx, |files, cx| {
@@ -279,11 +397,11 @@ impl Shell {
         if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
-        let from = self.files_visible_width(cx);
+        let before = self.painted_panels(cx);
         self.panels
             .update(&self.panel_key(cx), |p| p.files_open = false);
-        self.clear_surface_transitions();
-        self.files_tween = Some(WidthTween::new(from, 0.0));
+        self.transition_files(before.files, before.files_content, 0.0);
+        self.resplit_panels(before, Some(AuxiliaryPanel::Files), cx);
         cx.notify();
     }
 
@@ -291,6 +409,10 @@ impl Shell {
     /// pane — opening the pane with just that portion when it was closed.
     pub(super) fn toggle_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.files_panel_open(cx) {
+            self.add_files_surface(window, cx);
+            return;
+        }
+        if self.promote_hidden_panel(AuxiliaryPanel::Files, cx) {
             self.add_files_surface(window, cx);
             return;
         }
@@ -314,7 +436,6 @@ impl Shell {
         self.pane_resize_active = (requested > FILES_PANEL_MIN && requested < FILES_PANEL_MAX)
             .then_some(PaneResizeKind::Files);
         self.files_tween = None;
-        self.clear_surface_transitions();
         self.schedule_save(cx);
         cx.notify();
     }
@@ -325,15 +446,19 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.panel_key(cx);
-        let visible = matches!(self.route, Route::Chat) && self.files_panel_open(cx);
+        let visible = matches!(self.route, Route::Chat)
+            && self.horizontal_fit().files
+            && self.files_panel_open(cx);
         for (key, files) in &self.files {
             if !visible || *key != active {
                 files.update(cx, |files, _| files.release_git_status());
             }
         }
+        let exiting = self.fit_exit_width(2).is_some();
         if !matches!(self.route, Route::Chat)
             || self.active_chat.is_empty()
-            || (!self.files_panel_open(cx) && !self.tween_active(self.files_tween))
+            || (!self.horizontal_fit().files && !exiting)
+            || (!self.files_panel_open(cx) && !self.tween_active(self.files_tween) && !exiting)
         {
             return Empty.into_any_element();
         }
@@ -348,9 +473,7 @@ impl Shell {
             });
         }
         self.sync_explorer_selection(cx);
-        let target = self.files_target(cx);
-        let content_width =
-            stable_panel_content_width(target, self.active_tween_endpoints(self.files_tween));
+        let content_width = self.files_content_width(cx);
         // The explorer is the right pane's rightmost column: its left hairline
         // is the divider from the surface host (or the pane's own edge when
         // that portion is closed), and it carries the CSD window's right
@@ -377,9 +500,10 @@ impl Shell {
             .child(
                 div()
                     .h_full()
+                    .relative()
                     .w(px(self.files_visible_width(cx)))
                     .overflow_hidden()
-                    .child(inner),
+                    .child(inner.absolute().top_0().right_0()),
             )
             .when(
                 self.files_panel_open(cx) && !self.tween_active(self.files_tween),
@@ -389,7 +513,7 @@ impl Shell {
                             "files-panel-resize",
                             PaneResizeKind::Files,
                             || FilesPanelResize,
-                            |shell, _| shell.settings.files_panel_width = FILES_PANEL_DEFAULT,
+                            |shell, cx| shell.reset_panel_widths(PaneResizeKind::Files, cx),
                             cx,
                         )
                         .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH)),
@@ -407,7 +531,7 @@ mod tests {
 
     #[test]
     fn files_layout_shrinks_the_tree_before_the_chat_or_editor() {
-        let docked = files_panel_layout(1400.0, 256.0, 286.0, 286.0, true, false);
+        let docked = files_panel_layout(1400.0, 256.0, 286.0, 286.0, 1.0, false);
         assert_eq!(
             docked,
             FilesPanelLayout {
@@ -415,7 +539,7 @@ mod tests {
                 surface_max: 558.0,
             }
         );
-        let narrow = files_panel_layout(1200.0, 256.0, 440.0, 440.0, true, false);
+        let narrow = files_panel_layout(1200.0, 256.0, 440.0, 440.0, 1.0, false);
         assert_eq!(
             narrow,
             FilesPanelLayout {
@@ -427,17 +551,18 @@ mod tests {
             1200.0 - 256.0 - narrow.width - narrow.surface_max,
             CHAT_PANEL_MIN
         );
-        // Closing the surface or expanding it releases space for the tree.
+        // Closing the surface releases space for the tree. Expanding the
+        // surface keeps the tree's existing allocation stable.
         assert_eq!(
-            files_panel_layout(1200.0, 256.0, 440.0, 440.0, false, false).width,
+            files_panel_layout(1200.0, 256.0, 440.0, 440.0, 0.0, false).width,
             440.0
         );
-        let expanded = files_panel_layout(1100.0, 256.0, 286.0, 286.0, true, true);
-        assert_eq!(expanded.width, 286.0);
-        assert_eq!(expanded.surface_max, 558.0);
+        let expanded = files_panel_layout(1100.0, 256.0, 286.0, 286.0, 1.0, true);
+        assert_eq!(expanded.width, 184.0);
+        assert_eq!(expanded.surface_max, 660.0);
         // Growing the viewport restores the preferred width.
         assert_eq!(
-            files_panel_layout(1600.0, 256.0, 440.0, 440.0, true, false).width,
+            files_panel_layout(1600.0, 256.0, 440.0, 440.0, 1.0, false).width,
             440.0
         );
     }
@@ -446,40 +571,43 @@ mod tests {
     fn files_layout_returns_space_smoothly_during_close() {
         let mut previous_chat = 0.0;
         for visible in [186.0, 140.0, 84.0, 40.0, 0.0] {
-            let layout = files_panel_layout(1000.0, 256.0, 286.0, visible, true, false);
-            let chat = 744.0 - layout.width - layout.surface_max;
-            assert!(chat >= previous_chat && chat <= CHAT_PANEL_MIN);
+            let layout = files_panel_layout(1200.0, 256.0, 286.0, visible, 1.0, false);
+            let chat = 944.0 - layout.width - layout.surface_max;
+            assert!(chat >= previous_chat && chat >= CHAT_PANEL_MIN);
             previous_chat = chat;
         }
         assert_eq!(
-            files_panel_layout(1000.0, 256.0, 286.0, 0.0, true, false),
-            files_panel_layout(1000.0, 256.0, 0.0, 0.0, true, false),
+            files_panel_layout(1200.0, 256.0, 286.0, 0.0, 1.0, false),
+            files_panel_layout(1200.0, 256.0, 0.0, 0.0, 1.0, false),
         );
     }
 
     #[test]
-    fn files_layout_shares_tight_windows_without_covering_any_column() {
-        let compact = files_panel_layout(1000.0, 256.0, 440.0, 440.0, true, false);
-        let chat = 1000.0 - 256.0 - compact.width - compact.surface_max;
-        assert!((compact.width / FILES_PANEL_MIN - chat / CHAT_PANEL_MIN).abs() < 0.001);
-        assert!((compact.surface_max / RIGHT_PANE_MIN - chat / CHAT_PANEL_MIN).abs() < 0.001);
+    fn files_layout_never_takes_space_reserved_for_the_chat_or_surface() {
         for viewport in [0.0, 120.0, 280.0, 600.0, 1000.0, 1200.0, 1600.0] {
             for sidebar in [0.0, 256.0, 400.0] {
                 for surfaces in [false, true] {
                     for expanded in [false, true] {
                         for visible in [0.0, 1.0, 140.0, 440.0] {
                             let layout = files_panel_layout(
-                                viewport, sidebar, 440.0, visible, surfaces, expanded,
+                                viewport,
+                                sidebar,
+                                440.0,
+                                visible,
+                                if surfaces { 1.0 } else { 0.0 },
+                                expanded,
                             );
                             let available = (viewport - sidebar).max(0.0);
                             assert!(layout.width >= 0.0 && layout.width <= visible);
                             assert!(layout.surface_max >= 0.0);
                             assert!(layout.width + layout.surface_max <= available + 0.001);
-                            if available > 0.0 && surfaces {
-                                assert!(layout.surface_max > 0.0, "the editor must remain visible");
-                                if visible > 0.0 {
-                                    assert!(layout.width > 0.0, "the tree must remain visible");
-                                }
+                            if available
+                                >= CHAT_PANEL_MIN + if surfaces { RIGHT_PANE_MIN } else { 0.0 }
+                            {
+                                assert!(
+                                    available - layout.width - layout.surface_max >= CHAT_PANEL_MIN
+                                        || surfaces && expanded
+                                );
                             }
                         }
                     }
