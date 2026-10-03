@@ -225,7 +225,8 @@ impl MermaidCache {
         }
     }
 
-    #[cfg(test)]
+    // Used by the transcript tests, which only run on Linux.
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn ready_count(&self) -> usize {
         self.entries
             .values()
@@ -233,7 +234,7 @@ impl MermaidCache {
             .count()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn ready_media(&self) -> Option<MediaImage> {
         self.entries.values().find_map(|entry| match &entry.state {
             State::Ready(media) => Some(media.clone()),
