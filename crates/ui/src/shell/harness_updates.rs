@@ -27,6 +27,8 @@ const LIST_WIDTH: f32 = 360.0;
 const MARK_SIZE: f32 = 22.0;
 const MARK_STEP: f32 = 14.0;
 const MAX_MARKS: usize = 3;
+const DISMISS_SIZE: f32 = 22.0;
+const DISMISS_GAP: f32 = 4.0;
 
 #[derive(Default)]
 pub(super) struct DeviceUpdates {
@@ -125,6 +127,13 @@ fn action(status: &HarnessUpdateStatus) -> Option<(&'static str, Option<&'static
         Phase::Failed => Some(("Check again", Some(methods::CHECK_HARNESS_UPDATES))),
         _ => None,
     }
+}
+
+/// Rows the user can wave away: a discovered release (remembered per version
+/// by the engine) or a failure. In-flight work has Cancel instead, and
+/// "Updated" clears itself.
+fn dismissable(status: &HarnessUpdateStatus) -> bool {
+    matches!(status.phase, Phase::Available | Phase::Failed)
 }
 
 fn right_inset(has_button: bool) -> f32 {
@@ -349,6 +358,68 @@ impl Shell {
         )
     }
 
+    fn dismiss_harness_updates(&mut self, targets: &[(String, HarnessId)], cx: &mut Context<Self>) {
+        for (device, harness) in targets {
+            self.run_harness_update_action(
+                device.clone(),
+                methods::DISMISS_HARNESS_UPDATE,
+                *harness,
+                cx,
+            );
+        }
+    }
+
+    /// The ✕ that hides `targets`' notices. The engine remembers a dismissed
+    /// release, so the notice only returns for a newer version.
+    fn render_harness_update_dismiss(
+        &mut self,
+        id: SharedString,
+        label: String,
+        targets: Vec<(String, HarnessId)>,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).for_settings_surface();
+        let key_targets = targets.clone();
+        div()
+            .id(id)
+            .size(px(DISMISS_SIZE))
+            .flex_none()
+            .rounded_full()
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .flex()
+            .items_center()
+            .justify_center()
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .opacity(if enabled { 1.0 } else { 0.45 })
+            .tab_index(if enabled { 0 } else { -1 })
+            .focus_visible(move |el| el.border_color(theme.accent))
+            .when(enabled, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(theme.element_hover))
+                    .tooltip(crate::settings::widgets::text_tooltip("Dismiss"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_harness_updates(&targets, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                            this.dismiss_harness_updates(&key_targets, cx);
+                        }
+                    }))
+            })
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(11.0))
+                    .text_color(theme.text_muted),
+            )
+            .into_any_element()
+    }
+
     /// One surface, anchored by the Home mount. The bottom edge never moves;
     /// width, height, corner radius and row reveal share the shell resize clock.
     pub(super) fn render_harness_update_card(
@@ -463,10 +534,32 @@ impl Shell {
         } else {
             self.render_harness_update_action(row, true, cx)
         };
+        // Compact ✕: dismisses this chip's one row, or every dismissable row
+        // when the chip summarises several.
+        let dismiss_targets: Vec<(String, HarnessId)> = statuses
+            .iter()
+            .filter(|row| row.connected && dismissable(&row.status))
+            .map(|row| (row.device_id.clone(), row.status.harness))
+            .collect();
+        let any_dismissable = statuses.iter().any(|row| dismissable(&row.status));
+        let compact_dismiss = any_dismissable.then(|| {
+            let enabled = !dismiss_targets.is_empty();
+            self.render_harness_update_dismiss(
+                "home-harness-update-dismiss".into(),
+                if multiple {
+                    "Dismiss agent updates".into()
+                } else {
+                    format!("Dismiss · {name}")
+                },
+                dismiss_targets,
+                enabled,
+                cx,
+            )
+        });
         let trailing = if multiple {
             8.0
         } else {
-            right_inset(action_label.is_some())
+            right_inset(any_dismissable || action_label.is_some())
         };
         let marks_width =
             MARK_SIZE + MARK_STEP * marks.len().min(MAX_MARKS).saturating_sub(1) as f32;
@@ -484,6 +577,11 @@ impl Shell {
             + text_width(&title, 12.0, window, &theme)
             + if has_activity { 22.0 } else { 0.0 }
             + controls_width
+            + if any_dismissable {
+                DISMISS_SIZE + DISMISS_GAP
+            } else {
+                0.0
+            }
             + trailing
             + 2.0)
             .min(max_width);
@@ -566,6 +664,9 @@ impl Shell {
             .when_some(compact_action, |el, action| {
                 el.child(div().flex_none().ml(px(8.0)).child(action))
             })
+            .when_some(compact_dismiss, |el, dismiss| {
+                el.child(div().flex_none().ml(px(DISMISS_GAP)).child(dismiss))
+            })
             .when(multiple, |el| {
                 el.child(
                     div()
@@ -612,8 +713,24 @@ impl Shell {
                         agent_name(status.harness),
                         row.device_name
                     ));
-                    let row_action =
-                        self.render_harness_update_action(row, expanded && row_reveal >= 0.95, cx);
+                    let row_interactive = expanded && row_reveal >= 0.95;
+                    let row_action = self.render_harness_update_action(row, row_interactive, cx);
+                    let row_dismiss = dismissable(status).then(|| {
+                        self.render_harness_update_dismiss(
+                            SharedString::from(format!(
+                                "harness-update-dismiss-{}-{:?}",
+                                row.device_id, status.harness
+                            )),
+                            format!(
+                                "Dismiss · {} · {}",
+                                agent_name(status.harness),
+                                row.device_name
+                            ),
+                            vec![(row.device_id.clone(), status.harness)],
+                            row_interactive && row.connected,
+                            cx,
+                        )
+                    });
                     div()
                         .id(SharedString::from(format!(
                             "harness-update-row-{}-{:?}",
@@ -687,6 +804,7 @@ impl Shell {
                             el.child(icon(icons::CHECK).size(px(14.0)).text_color(theme.success))
                         })
                         .children(row_action)
+                        .children(row_dismiss)
                         .when_some(tooltip, |el, text| {
                             el.tooltip(move |_, cx| {
                                 cx.new(|_| SurfaceTabTooltip {
