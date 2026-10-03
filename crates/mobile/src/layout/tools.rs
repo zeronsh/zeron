@@ -152,43 +152,6 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<String> {
     line.chars().collect::<Vec<_>>().chunks(cols).map(|c| c.iter().collect()).collect()
 }
 
-/// The full invocation the header truncates (desktop `call_block`).
-fn call_text(call: &ToolCall) -> String {
-    match call {
-        ToolCall::Exec { command } => command.clone(),
-        ToolCall::ReadFile { path } => path.clone(),
-        ToolCall::WriteFile { path, content } => match content {
-            Some(c) => format!("{path}\n{c}"),
-            None => path.clone(),
-        },
-        ToolCall::EditFile { path, .. } => path.clone(),
-        ToolCall::ApplyPatch { path } => path.clone().unwrap_or_else(|| "workspace".into()),
-        ToolCall::Search { pattern, path } => match path {
-            Some(p) => format!("{pattern} in {p}"),
-            None => pattern.clone(),
-        },
-        ToolCall::Glob { pattern } => pattern.clone(),
-        ToolCall::WebFetch { url, prompt } => match prompt {
-            Some(p) => format!("{url}\n{p}"),
-            None => url.clone(),
-        },
-        ToolCall::WebSearch { query } => query.clone(),
-        ToolCall::Todo { items } => items
-            .iter()
-            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        ToolCall::Mcp { server, tool, input } => match input {
-            Some(i) => format!("{server} · {tool}\n{}", serde_json::to_string_pretty(i).unwrap_or_default()),
-            None => format!("{server} · {tool}"),
-        },
-        ToolCall::Unknown { name, input } => match input {
-            Some(i) => format!("{name}\n{}", serde_json::to_string_pretty(i).unwrap_or_default()),
-            None => name.clone(),
-        },
-    }
-}
-
 struct Styles {
     label: super::style::Resolved,
     mono: super::style::Resolved,
@@ -808,7 +771,7 @@ impl RowBuilder {
                         let open = !agents && self.detail_open.get(&dkey).copied().unwrap_or(false);
                         let mut body = Vec::new();
                         if open {
-                            body.extend(lines_block(ctx, &st, &call_text(call), Some(CALL_WRAP_COLS)));
+                            body.extend(lines_block(ctx, &st, &zeron_proto::view::tool_call_text(call), Some(CALL_WRAP_COLS)));
                             body.extend(result_block(ctx, &st, part));
                         }
                         lines.push(ToolLine {
