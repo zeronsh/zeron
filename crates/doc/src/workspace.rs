@@ -282,6 +282,11 @@ impl WorkspaceDoc {
             "harnessSessionCwd",
             chat.harness_session_cwd.as_deref(),
         )?;
+        set_opt_str(
+            &row,
+            "harnessSessionHarness",
+            chat.harness_session_harness.as_deref(),
+        )?;
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
@@ -430,12 +435,14 @@ impl WorkspaceDoc {
         chat_id: &str,
         session_id: &str,
         cwd: &str,
+        harness: Option<&str>,
     ) -> Result<bool, DocError> {
         let Some(row) = self.existing_row("chats", chat_id) else {
             return Ok(false);
         };
         row.insert("harnessSessionId", session_id)?;
         row.insert("harnessSessionCwd", cwd)?;
+        set_opt_str(&row, "harnessSessionHarness", harness)?;
         self.doc.commit();
         Ok(true)
     }
@@ -709,6 +716,8 @@ pub(crate) struct RawChat {
     #[serde(default)]
     harness_session_cwd: Option<String>,
     #[serde(default)]
+    harness_session_harness: Option<String>,
+    #[serde(default)]
     space_id: Option<String>,
     #[serde(default)]
     last_seen_at: Option<i64>,
@@ -753,6 +762,7 @@ impl From<RawChat> for Chat {
             created_at: dt(raw.created_at),
             harness_session_id: raw.harness_session_id,
             harness_session_cwd: raw.harness_session_cwd,
+            harness_session_harness: raw.harness_session_harness,
             space_id: raw.space_id,
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
@@ -862,6 +872,7 @@ mod tests {
             created_at: ts(2_000),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             parent_chat_id: Some("parent-chat".into()),
             space_id: None,
             last_seen_at: None,

@@ -418,6 +418,11 @@ impl RowBuilder {
                             let text = format!("Forked from {source_title}");
                             rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.triangle.branch", ColorRole::TextTertiary, &text)), gap });
                         }
+                        MessagePart::Switch { id, from, to, .. } => {
+                            let gap = gap_for(&rows, false);
+                            let text = format!("Switched from {from} to {to}");
+                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.left.arrow.right", ColorRole::TextTertiary, &text)), gap });
+                        }
                         _ => {}
                     }
                 }

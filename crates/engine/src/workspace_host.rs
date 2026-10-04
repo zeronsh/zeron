@@ -27,7 +27,7 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
-use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
+use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
@@ -188,6 +188,18 @@ pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A chat row's stored harness-native session (see
+/// [`WorkspaceHost::chat_harness_session`]).
+#[derive(Debug, Clone)]
+pub struct StoredHarnessSession {
+    /// Empty = the "do not resume" tombstone.
+    pub session_id: String,
+    pub cwd: Option<String>,
+    /// The harness that minted `session_id`. `None` on rows that predate
+    /// the tag.
+    pub harness: Option<HarnessId>,
 }
 
 #[derive(Clone)]
@@ -844,8 +856,18 @@ impl WorkspaceHost {
     /// of its latest run and the cwd it was created under. An empty `session_id`
     /// tombstones the row ("do not resume" after a rejected resume). Best-effort:
     /// a missing chat row (claim happens on first command) just returns.
-    pub fn set_chat_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
-        match self.mutate(|doc| doc.set_chat_harness_session(chat_id, session_id, cwd)) {
+    ///
+    /// `harness` names the provider that minted `session_id`: an id is only
+    /// meaningful to that harness, and resume checks the tag.
+    pub fn set_chat_harness_session(
+        &self,
+        chat_id: &str,
+        session_id: &str,
+        cwd: &str,
+        harness: Option<HarnessId>,
+    ) {
+        let slug = harness.map(HarnessId::as_str);
+        match self.mutate(|doc| doc.set_chat_harness_session(chat_id, session_id, cwd, slug)) {
             Ok(_) => {}
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "registry harness-session write failed");
@@ -853,15 +875,22 @@ impl WorkspaceHost {
         }
     }
 
-    /// The chat row's stored harness session `(session_id, cwd)`, if stamped.
-    /// The empty-string tombstone passes through — callers must treat it as
-    /// "explicitly no resume" (and must NOT fall back to older sources).
-    pub fn chat_harness_session(&self, chat_id: &str) -> Option<(String, Option<String>)> {
+    /// The chat row's stored harness session, if stamped. The empty-string
+    /// tombstone passes through — callers must treat it as "explicitly no
+    /// resume" (and must NOT fall back to older sources).
+    pub fn chat_harness_session(&self, chat_id: &str) -> Option<StoredHarnessSession> {
         match self.read(|doc| doc.chat(chat_id)) {
             Ok(chat) => {
                 let chat = chat?;
                 let id = chat.harness_session_id?;
-                Some((id, chat.harness_session_cwd))
+                Some(StoredHarnessSession {
+                    session_id: id,
+                    cwd: chat.harness_session_cwd,
+                    harness: chat
+                        .harness_session_harness
+                        .as_deref()
+                        .and_then(HarnessId::from_slug),
+                })
             }
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "registry chat read failed");
@@ -950,6 +979,7 @@ impl WorkspaceHost {
                 // go through the seed+flip path (the host migration sweep).
                 room_gen: Some(2),
                 harness_session_cwd: None,
+                harness_session_harness: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),

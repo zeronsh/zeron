@@ -27,6 +27,43 @@ pub enum HarnessId {
     Mock,
 }
 
+impl HarnessId {
+    /// Every harness, in declaration order.
+    pub const ALL: [HarnessId; 10] = [
+        HarnessId::ClaudeCode,
+        HarnessId::Codex,
+        HarnessId::Cursor,
+        HarnessId::Devin,
+        HarnessId::Grok,
+        HarnessId::Hermes,
+        HarnessId::Pi,
+        HarnessId::Opencode,
+        HarnessId::Antigravity,
+        HarnessId::Mock,
+    ];
+
+    /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HarnessId::ClaudeCode => "claude-code",
+            HarnessId::Codex => "codex",
+            HarnessId::Cursor => "cursor",
+            HarnessId::Devin => "devin",
+            HarnessId::Grok => "grok",
+            HarnessId::Hermes => "hermes",
+            HarnessId::Pi => "pi",
+            HarnessId::Opencode => "opencode",
+            HarnessId::Antigravity => "antigravity",
+            HarnessId::Mock => "mock",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`]; `None` for a slug this build does not know.
+    pub fn from_slug(slug: &str) -> Option<HarnessId> {
+        Self::ALL.into_iter().find(|id| id.as_str() == slug)
+    }
+}
+
 /// Durable user preference for one agent's independently-installed CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

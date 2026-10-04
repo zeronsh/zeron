@@ -98,6 +98,17 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// Provider switch seam (`kind: "switch"`, additive): display names of
+    /// the provider before and after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_provider: Option<String>,
+    /// Harness slugs of the same two providers, for their logos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_harness: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,6 +235,21 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_title: Some(source_title.clone()),
             ..Default::default()
         },
+        MessagePart::Switch {
+            id,
+            from,
+            to,
+            from_harness,
+            to_harness,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "switch".into(),
+            from_provider: Some(from.clone()),
+            to_provider: Some(to.clone()),
+            from_harness: from_harness.clone(),
+            to_harness: to_harness.clone(),
+            ..Default::default()
+        },
     })
 }
 
@@ -278,6 +304,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             source_chat_id: p.source_chat_id.unwrap_or_default(),
             source_title: p.source_title.unwrap_or_default(),
+        },
+        "switch" => MessagePart::Switch {
+            id: p.id,
+            from: p.from_provider.unwrap_or_default(),
+            to: p.to_provider.unwrap_or_default(),
+            from_harness: p.from_harness,
+            to_harness: p.to_harness,
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -389,6 +422,25 @@ impl SessionDoc {
             self.doc
                 .get_map("meta")
                 .insert("forkHistorySession", session_id)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
+    /// Whether this chat has ever changed provider. Its transcript then holds
+    /// turns the current provider session never saw, so a fresh session is
+    /// owed the history. A cheap meta read: the warm-send path checks it on
+    /// every message, and must not decode the transcript to do so.
+    pub fn provider_switched(&self) -> bool {
+        matches!(
+            self.doc.get_map("meta").get("providerSwitched"),
+            Some(loro::ValueOrContainer::Value(LoroValue::Bool(true)))
+        )
+    }
+
+    pub fn mark_provider_switched(&self) -> Result<(), DocError> {
+        if !self.provider_switched() {
+            self.doc.get_map("meta").insert("providerSwitched", true)?;
             self.doc.commit();
         }
         Ok(())
@@ -868,6 +920,10 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
         ("sourceTitle", &doc_part.source_title),
+        ("fromProvider", &doc_part.from_provider),
+        ("toProvider", &doc_part.to_provider),
+        ("fromHarness", &doc_part.from_harness),
+        ("toHarness", &doc_part.to_harness),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1434,6 +1490,33 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    #[test]
+    fn provider_switch_seam_round_trips_and_flags_the_doc() {
+        let doc = SessionDoc::init("switch").unwrap();
+        assert!(!doc.provider_switched());
+        let seam = MessagePart::Switch {
+            id: "switch:1".into(),
+            from: "Claude Code".into(),
+            to: "Codex".into(),
+            from_harness: Some("claude-code".into()),
+            to_harness: Some("codex".into()),
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "switch:1".into(),
+            role: MessageRole::System,
+            parts: vec![seam.clone()],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        doc.mark_provider_switched().unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, vec![seam]);
+        assert!(doc.provider_switched());
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

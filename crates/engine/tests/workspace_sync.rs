@@ -714,6 +714,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 room_gen: None,
                 parent_chat_id: None,
                 harness_session_cwd: Some("/tmp/legacy".into()),
+                harness_session_harness: None,
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),
             })

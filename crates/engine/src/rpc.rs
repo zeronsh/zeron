@@ -1187,11 +1187,29 @@ impl EngineRpc {
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
-            MutateParams::SetChatConfig { chat_id, config } => self
-                .workspace
-                .set_chat_config(&chat_id, &config)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatConfig { chat_id, config } => {
+                // A chat may change provider between turns, never during one:
+                // the live run belongs to the old harness and would keep
+                // writing into the transcript the new one is about to read.
+                // (Only a hosting engine knows about the turn; on any other
+                // device the row simply syncs to the host, which turns the
+                // stale session away at dispatch.)
+                let switching = self
+                    .workspace
+                    .chat(&chat_id)
+                    .map_err(failed)?
+                    .and_then(|chat| chat.config)
+                    .is_some_and(|current| current.harness != config.harness);
+                if switching && self.sessions.turn_in_flight(&chat_id) {
+                    return Err(RpcError::Failed(
+                        "Wait for the current turn to finish before switching provider".into(),
+                    ));
+                }
+                self.workspace
+                    .set_chat_config(&chat_id, &config)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);

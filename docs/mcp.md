@@ -46,9 +46,10 @@ The creation result includes the effective `kind`, `chatId`, `deviceId`,
 `project` and `parentChatId`. Kind is derived from the parent; it is not persisted.
 
 Children record `Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry
-row (`Mutate createChat { parentChatId? }`). Chats with a parent cannot create
-chats through MCP, including standalone and batch creation or an explicit parent
-override. A side chat cannot be selected as a parent; only one level is supported.
+row (`Mutate createChat { parentChatId? }`). Any chat may delegate to any provider.
+Children may themselves delegate, up to 3 levels below a top-level chat.
+`create_chat` and `create_chats` reject a parent already at that depth, including
+an explicit `parent` override. Standalone sessions have no parent.
 
 For children, `parent` (id, prefix, or title) overrides the origin (`ZERON_CHAT_ID`).
 `list_chats { parent }` returns children, and chat summaries carry `parentChatId`.
@@ -112,7 +113,7 @@ name (default: the local engine's device).
 | `whoami`           | `LocalDevice`, `EngineInfo`, origin chat summary          |
 | `list_devices`     | `WatchDevices` snapshot                                   |
 | `list_projects`    | `WatchSpaces` snapshot                                    |
-| `list_harnesses`   | `ListHarnesses {targetDeviceId?}`                          |
+| `list_harnesses`   | `ListHarnesses` + `ListAgentAccounts` (`targetDeviceId?`) |
 | `list_models`      | `ListModels {harness, targetDeviceId?}`                                    |
 | `list_chats`       | `WatchChats` + `WatchSessions` snapshots (status merged)  |
 | `get_chat`         | above + `WatchDocMessages` opening frame (pending input)  |
@@ -180,8 +181,9 @@ Neither argument means a projectless session on the local engine. Repeated names
 or paths are errors with candidate ids and devices; use ids from discovery.
 
 Before writing, creation checks the chosen engine's harness catalog, chooses
-its available default (Claude Code when available, otherwise the first available
-non-mock harness), and validates any explicit model against that host's catalog.
+its connected default (Claude Code when connected, otherwise the first connected
+non-mock harness, falling back to an available provider), and validates any
+explicit model against that host's catalog.
 An explicit harness must be offered, installed and enabled. Catalog failures,
 including model lookup failures, are returned with the device id; there is no
 fallback to the local catalog. A successful remote query checks reachability;
@@ -233,6 +235,46 @@ prompt. If completion arrives before the transcript, the wait allows the new
 assistant response to arrive within the **same timeout**. A previous response
 is never substituted for a missing response to a new send. An unfinished
 transcript or missing response at the deadline returns `timedOut`.
+
+## Delegating across providers
+
+The `zeron` server is injected into every real harness (table above), and
+`create_chat` takes any `harness`, so every provider agent can hand work to any
+other: Claude Code → Codex and the reverse, or to Cursor, OpenCode, and so on.
+`list_harnesses` marks each provider:
+
+- `available` — installed and enabled on this device.
+- `signedIn` — whether a login for it is present on the selected host
+  (`ListAgentAccounts`), or `null` when that could not be determined.
+- `connected` — available and not known to be signed out. This is what a
+  delegating agent should choose from; `create_chat` without a `harness` also
+  prefers a connected provider (claude-code first).
+
+`signedIn` is advisory: credential detection does not see every source (an API
+key in the environment, say), so only an explicit `false` counts against a
+provider. `create_chat` still creates the chat but returns a `warning` when the
+chosen provider looks signed out, rather than refusing.
+
+## Switching a chat's provider
+
+A chat is not tied to the provider it started on. Picking another provider in
+the composer (or `Mutate setChatConfig` with a different `harness`) moves the
+conversation between turns; it is refused while a turn is running.
+
+- A harness-native resume id only means something to the harness that minted
+  it, so the chat row stores which one that was
+  (`Chat.harness_session_harness`). `resume_for` turns away an id owned by a
+  different harness; rows from before the tag are attributed from the run
+  journal on first use.
+- On the first run after a switch the host writes a `switch` part (a system
+  entry: `from`, `to` display names) into the transcript, sets the session doc's
+  `providerSwitched` flag, and hands the new provider's fresh session the prior
+  conversation once (`Inner::fork_history_prompt`, the side-chat bootstrap,
+  generalised). That replay is capped (about 80k characters, newest messages
+  win; long messages and tool output are clipped), so a long chat continues
+  with its recent context and a note that earlier messages were omitted.
+- Later turns on the new provider resume its own session natively; switching
+  back starts a fresh session there and replays again.
 
 ## Parallel side chats
 

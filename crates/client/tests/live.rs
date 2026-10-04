@@ -88,6 +88,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         created_at: now,
         harness_session_id: None,
         harness_session_cwd: None,
+        harness_session_harness: None,
         space_id: Some(SPACE.into()),
         last_seen_at: Some(now),
         room_gen: Some(2),
