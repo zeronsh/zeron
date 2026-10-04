@@ -231,6 +231,8 @@ pub struct PullRequestsPage {
     filter_fades: crate::motion::HoverFades,
     load_state: PullRequestsLoadState,
     last_loaded_at: Option<Instant>,
+    /// Whether the first page bypassed the engine's cache.
+    refreshed: bool,
     generation: u64,
     request_task: Option<Task<()>>,
     visible: bool,
@@ -321,6 +323,7 @@ impl PullRequestsPage {
             filter_fades,
             load_state: PullRequestsLoadState::Idle,
             last_loaded_at: None,
+            refreshed: false,
             generation: 0,
             request_task: None,
             // The entity is created lazily only while this route is active.
@@ -532,7 +535,9 @@ impl PullRequestsPage {
             .snapshots
             .iter()
             .position(|((target, repo, filter), ..)| {
-                target == &self.target_device && repo == repository && filter == &self.filter
+                target == &self.target_device
+                    && repo.eq_ignore_ascii_case(repository)
+                    && filter == &self.filter
             })
         {
             let snapshot = self.snapshots.remove(index);
@@ -566,7 +571,12 @@ impl PullRequestsPage {
             settings.last_pull_request_repository = Some(saved_repository);
             settings.last_pull_request_device = saved_device;
         });
-        if self.repository.as_deref() != Some(&repository) {
+        // GitHub's casing, adopted after a load, names the same repository.
+        if !self
+            .repository
+            .as_deref()
+            .is_some_and(|current| current.eq_ignore_ascii_case(&repository))
+        {
             self.repository = Some(repository);
             self.reset_for_target(self.target_device.clone());
         }
@@ -1036,6 +1046,7 @@ impl PullRequestsPage {
         params["repository"] = self.repository.clone().unwrap().into();
         params["refresh"] = refresh.into();
         params["filter"] = serde_json::to_value(self.filter).unwrap();
+        self.refreshed = refresh;
         self.load_state = PullRequestsLoadState::Loading;
         // A reload starts over from the first page.
         self.more_task = None;
@@ -1043,7 +1054,7 @@ impl PullRequestsPage {
         self.request_task = Some(cx.spawn(async move |this, cx| {
             let result = fetch_page(&engine, params).await;
             this.update(cx, |page, cx| {
-                if !response_is_current(page.generation, generation) {
+                if page.generation != generation {
                     return;
                 }
 
@@ -1098,7 +1109,9 @@ impl PullRequestsPage {
             return;
         };
         let key = (self.target_device.clone(), repository, self.filter);
-        self.snapshots.retain(|(existing, ..)| existing != &key);
+        self.snapshots.retain(|((target, repo, filter), ..)| {
+            !(target == &key.0 && repo.eq_ignore_ascii_case(&key.1) && filter == &key.2)
+        });
         self.snapshots
             .push((key, self.items.clone(), at, self.paging.clone()));
         if self.snapshots.len() > 12 {
@@ -1129,18 +1142,13 @@ impl PullRequestsPage {
         params["repository"] = self.repository.clone().unwrap().into();
         params["filter"] = serde_json::to_value(self.filter).unwrap();
         params["after"] = cursor.into();
+        // Pages after a refreshed first page must be as fresh as it is.
+        params["refresh"] = self.refreshed.into();
         self.more_error = None;
         self.more_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_CHANGE_REQUEST_PAGE, params)
-                .await
-                .and_then(|value| {
-                    serde_json::from_value::<ChangeRequestPage>(value)
-                        .map_err(|error| RpcError::Failed(error.to_string()))
-                });
+            let result = fetch_page(&engine, params).await;
             this.update(cx, |page, cx| {
-                if !response_is_current(page.generation, generation) {
+                if page.generation != generation {
                     return;
                 }
                 page.more_task = None;
@@ -1531,19 +1539,20 @@ impl Render for PullRequestsPage {
                     .items_center()
                     .flex_wrap()
                     .gap(px(12.0))
-                    .child(widgets::page_header(&theme, "Pull requests", count).when(
-                        self.paging.next_cursor.is_some(),
-                        |el| {
-                            el.child(
-                                div()
-                                    .id("pull-requests-loaded-count")
-                                    .debug_selector(|| "pull-requests-loaded-count".into())
-                                    .text_size(px(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(format!("{} loaded", self.items.len())),
-                            )
-                        },
-                    ))
+                    .child(
+                        widgets::page_header(&theme, "Pull requests", count)
+                            .items_center()
+                            .when(self.paging.next_cursor.is_some(), |el| {
+                                el.child(
+                                    div()
+                                        .id("pull-requests-loaded-count")
+                                        .debug_selector(|| "pull-requests-loaded-count".into())
+                                        .text_size(px(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(format!("{} loaded", self.items.len())),
+                                )
+                            }),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -2510,10 +2519,6 @@ fn format_compact_count(value: u64) -> String {
 
 fn single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn response_is_current(current: u64, response: u64) -> bool {
-    current == response
 }
 
 async fn fetch_page(
@@ -3679,12 +3684,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_responses_cannot_replace_a_new_target_snapshot() {
-        assert!(response_is_current(7, 7));
-        assert!(!response_is_current(8, 7));
-    }
-
-    #[test]
     fn successful_empty_refresh_replaces_the_previous_snapshot() {
         let mut snapshot = vec![1, 2];
         let state = settle_snapshot(&mut snapshot, Ok(Vec::new()));
@@ -3714,7 +3713,7 @@ mod tests {
         );
         assert_eq!(
             map_rpc_error(
-                &RpcError::UnknownMethod("ListOpenChangeRequests".into()),
+                &RpcError::UnknownMethod(methods::LIST_CHANGE_REQUEST_PAGE.into()),
                 "Studio Mac"
             ),
             PullRequestsPageError::UpdateRequired("Studio Mac".into())
@@ -3731,9 +3730,11 @@ mod tests {
         assert_eq!(single_line(&"a".repeat(200)), "a".repeat(200));
     }
 
-    /// Serves two pages from the paged method.
+    /// Serves two pages and records each request's cursor and `refresh` flag.
+    /// The `reviewing` filter never answers until `release` fires.
     struct PagedRpc {
-        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>,
+        release: std::sync::Arc<tokio::sync::Notify>,
     }
 
     #[async_trait::async_trait]
@@ -3743,32 +3744,37 @@ mod tests {
             method: &str,
             params: serde_json::Value,
         ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            assert_eq!(method, methods::LIST_CHANGE_REQUEST_PAGE);
             let after = params["after"].as_str().map(str::to_owned);
             self.calls
                 .lock()
                 .unwrap()
-                .push((method.into(), after.clone()));
-            match (method, after.as_deref()) {
-                (methods::LIST_CHANGE_REQUEST_PAGE, None) => {
-                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
-                        items: (1..=50)
-                            .map(|n| pull_request("owner/repo", n, 1, 1, 1))
-                            .collect(),
-                        next_cursor: Some("Y3Vyc29yOjUw".into()),
-                        total_count: Some(52),
-                    })
-                }
-                (methods::LIST_CHANGE_REQUEST_PAGE, Some("Y3Vyc29yOjUw")) => {
-                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
-                        // #50 moved onto the second page; it must not repeat.
-                        items: [50, 51, 52]
-                            .map(|n| pull_request("owner/repo", n, 1, 1, 1))
-                            .into(),
-                        next_cursor: None,
-                        total_count: Some(52),
-                    })
-                }
-                _ => panic!("unexpected request {method} {after:?}"),
+                .push((after.clone(), params["refresh"] == true));
+            if params["filter"] == "reviewing" {
+                self.release.notified().await;
+                return zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                    items: vec![pull_request("owner/repo", 99, 1, 1, 1)],
+                    next_cursor: None,
+                    total_count: Some(1),
+                });
+            }
+            match after.as_deref() {
+                None => zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                    items: (1..=50)
+                        .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
+                        .collect(),
+                    next_cursor: Some("Y3Vyc29yOjUw".into()),
+                    total_count: Some(52),
+                }),
+                Some("Y3Vyc29yOjUw") => zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                    // #50 moved onto the second page; it must not repeat.
+                    items: [50, 51, 52]
+                        .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
+                        .into(),
+                    next_cursor: None,
+                    total_count: Some(52),
+                }),
+                other => panic!("unexpected cursor {other:?}"),
             }
         }
     }
@@ -3785,12 +3791,15 @@ mod tests {
     ) -> (
         Entity<PullRequestsPage>,
         &mut gpui::VisualTestContext,
-        std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>,
+        std::sync::Arc<tokio::sync::Notify>,
     ) {
         cx.update(|cx| cx.set_global(Theme::default()));
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let client = zeron_rpc::memory_client(std::sync::Arc::new(PagedRpc {
             calls: calls.clone(),
+            release: release.clone(),
         }));
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| {
@@ -3804,7 +3813,7 @@ mod tests {
             page.repository = Some("owner/repo".into());
             page.load(false, cx);
         });
-        (page, cx, calls)
+        (page, cx, calls, release)
     }
 
     fn settle(
@@ -3826,7 +3835,7 @@ mod tests {
     fn pull_request_board_loads_more_pages_without_repeating_items(cx: &mut gpui::TestAppContext) {
         let runtime = runtime();
         let _guard = runtime.enter();
-        let (page, cx, calls) = paged_page(cx);
+        let (page, cx, calls, _) = paged_page(cx);
         settle(
             cx,
             &runtime,
@@ -3883,13 +3892,67 @@ mod tests {
         );
         assert_eq!(
             *calls.lock().unwrap(),
-            [
-                (methods::LIST_CHANGE_REQUEST_PAGE.to_owned(), None),
-                (
-                    methods::LIST_CHANGE_REQUEST_PAGE.to_owned(),
-                    Some("Y3Vyc29yOjUw".to_owned())
-                ),
-            ]
+            [(None, false), (Some("Y3Vyc29yOjUw".to_owned()), false)]
         );
+
+        // GitHub's casing was adopted; reselecting the repository as typed
+        // reuses the loaded board instead of fetching it again.
+        page.update(cx, |page, cx| {
+            assert_eq!(page.repository.as_deref(), Some("Owner/Repo"));
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("owner/repo", cx));
+            page.select_repository(cx);
+            assert_eq!(page.items.len(), 52);
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+        });
+        cx.run_until_parked();
+        assert_eq!(calls.lock().unwrap().len(), 2);
+
+        // Refresh restarts from the first page, and later pages stay as fresh.
+        page.update(cx, |page, cx| page.refresh(cx));
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+        );
+        page.update(cx, |page, cx| page.load_more(cx));
+        settle(cx, &runtime, |page| page.more_task.is_none(), &page);
+        assert_eq!(
+            calls.lock().unwrap()[2..],
+            [(None, true), (Some("Y3Vyc29yOjUw".to_owned()), true)]
+        );
+    }
+
+    #[gpui::test]
+    fn pull_request_board_drops_a_reply_for_a_filter_it_has_left(cx: &mut gpui::TestAppContext) {
+        let runtime = runtime();
+        let _guard = runtime.enter();
+        let (page, cx, calls, release) = paged_page(cx);
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+        );
+        page.update(cx, |page, cx| {
+            page.select_filter(ChangeRequestFilter::Reviewing, cx)
+        });
+        settle(cx, &runtime, |_| calls.lock().unwrap().len() == 2, &page);
+        page.update(cx, |page, cx| {
+            assert_eq!(page.load_state, PullRequestsLoadState::Loading);
+            page.select_filter(ChangeRequestFilter::Authored, cx);
+            assert_eq!(page.items.len(), 50, "the loaded filter comes back at once");
+        });
+        release.notify_one();
+        for _ in 0..20 {
+            cx.run_until_parked();
+            runtime.block_on(async { tokio::task::yield_now().await });
+        }
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.filter, ChangeRequestFilter::Authored);
+            assert_eq!(page.items.len(), 50, "the late Reviewing reply is ignored");
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+        });
     }
 }
