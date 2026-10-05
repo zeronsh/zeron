@@ -12,7 +12,7 @@
  * Test controls (plain HTTP from inside the tests):
  *   GET  https://boat.test/__state            sandboxes + call log
  *   POST https://boat.test/__fail             {sandboxId?, op, status, code, action?, times?}
- *   POST https://boat.test/__set              {sandboxId, rate?, state?, runningReads?}
+ *   POST https://boat.test/__set              {sandboxId, rate?, state?, runningReads?, quiesceExit?}
  *   POST https://boat.test/__extra            {id, state, createdAt}: a sandbox nobody created via the API
  */
 import { Response, type Request } from "miniflare";
@@ -29,6 +29,8 @@ interface FakeSandbox {
   rate: number;
   /** Usage reads that still report `running: true` after a stop (meter lag). */
   runningReads: number;
+  /** Exit status of `zeron quiesce` (75 = the engine is busy). */
+  quiesceExit?: number;
 }
 
 interface Call {
@@ -109,7 +111,7 @@ export const createBoatFake = () => {
     if (url.pathname === "/__set") {
       const s = sandboxes.get(body.sandboxId);
       if (!s) return reply(404, { ok: false });
-      Object.assign(s, body.rate === undefined ? {} : { rate: body.rate }, body.state === undefined ? {} : { state: body.state }, body.runningReads === undefined ? {} : { runningReads: body.runningReads });
+      Object.assign(s, body.rate === undefined ? {} : { rate: body.rate }, body.state === undefined ? {} : { state: body.state }, body.runningReads === undefined ? {} : { runningReads: body.runningReads }, body.quiesceExit === undefined ? {} : { quiesceExit: body.quiesceExit });
       return reply(200, { ok: true });
     }
     if (url.pathname === "/__extra") {
@@ -187,8 +189,12 @@ export const createBoatFake = () => {
         sandbox.state = "provisioning";
         if (body?.ttlSeconds !== undefined) sandbox.ttlSeconds = body.ttlSeconds;
         return reply(202, { ok: true, type: "sandbox.resuming", status: "resuming", sandbox: view(sandbox) });
-      case "POST commands":
-        return reply(200, { ok: true, type: "command.finished", success: true, exitCode: 0, stdout: "ok", stderr: "", timedOut: false });
+      case "POST commands": {
+        const quiesce = typeof body?.command === "string" && body.command.includes(" quiesce");
+        const exitCode = quiesce ? (sandbox.quiesceExit ?? 0) : 0;
+        // As Boat answers a command that ran but failed: ok, not success.
+        return reply(200, { ok: true, type: "command.finished", success: exitCode === 0, exitCode, stdout: "ok", stderr: exitCode === 0 ? "" : "busy: a turn is in flight", timedOut: false });
+      }
       case "GET usage": {
         const since = Math.max(
           Date.parse(url.searchParams.get("since") ?? sandbox.createdAt),

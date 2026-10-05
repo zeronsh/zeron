@@ -205,3 +205,14 @@ export const installCommand = (env: SessionEnv): string => {
 
 /** Wake fallback when the engine doesn't come back on its own after resume. */
 export const RESTART_ENGINE_COMMAND = `sudo systemctl restart ${CLOUD_UNIT_NAME}`;
+
+/** A sleep's first step: the engine starts no new work, so nothing begins that
+ * the stop would cut off; what arrives meanwhile waits for the woken machine.
+ * Exits {@link QUIESCE_BUSY_EXIT} when a turn is in flight or a message is
+ * waiting (mirrors `zeron quiesce`, apps/zeron/src/main.rs). */
+export const QUIESCE_ENGINE_COMMAND = `"$HOME/.zeron/app/current/zeron" quiesce`;
+export const QUIESCE_BUSY_EXIT = 75;
+
+/** Before a sleep's stop: systemd delivers SIGTERM and the engine drains. The
+ * unit stays enabled, so it starts again when the sandbox resumes. */
+export const STOP_ENGINE_COMMAND = `sudo systemctl stop ${CLOUD_UNIT_NAME}`;

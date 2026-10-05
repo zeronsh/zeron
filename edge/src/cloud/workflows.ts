@@ -19,7 +19,14 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Env } from "../env";
 import type { LifecycleParams, ProvisionParams } from "./cloud-account";
-import { RESTART_ENGINE_COMMAND, installCommand, type SessionEnv } from "./install-script";
+import {
+  QUIESCE_BUSY_EXIT,
+  QUIESCE_ENGINE_COMMAND,
+  RESTART_ENGINE_COMMAND,
+  STOP_ENGINE_COMMAND,
+  installCommand,
+  type SessionEnv
+} from "./install-script";
 import { cloudAccountName, parseMachine, parseTemplate, parseTtlSeconds } from "./policy";
 import { sandboxProvider } from "./providers";
 import {
@@ -322,13 +329,60 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
   }
 }
 
-/** SleepWorkflow — stop the session's sandbox; the session reads `sleeping`. */
+/**
+ * SleepWorkflow — quiesce the session's engine, stop it, then its sandbox;
+ * the session reads `sleeping`.
+ *
+ * Quiesce first: the engine starts no new work from here on (a send arriving
+ * now waits in its chat for the woken machine instead of starting a turn the
+ * stop would kill — the engine marks a command handled before running it, so
+ * a killed turn is never retried). A turn in flight or a message already
+ * waiting declines the sleep: the session stays `ready`. An engine that
+ * can't answer (gone, or too old for the handshake) doesn't block the sleep.
+ *
+ * The engine goes first. A provider reports the sandbox stopped once its disk
+ * snapshot is taken, and the machine may run on a moment longer: an engine
+ * still connected then accepts a send (acknowledging its nudge) and writes
+ * that the snapshot never sees — the woken machine knew nothing of the
+ * message, and its document missed changes other devices already had. A
+ * stopped engine has drained to disk, and its device room has no host, so
+ * sends queue there until the woken engine joins. Best effort: a sandbox
+ * that won't run the command still sleeps.
+ */
 export class SleepWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
   async run(event: WorkflowEvent<LifecycleParams>, step: WorkflowStep): Promise<void> {
     const p = event.payload;
     const account = accountStub(this.env, p);
     try {
       const provider = requireProvider(this.env, p.provider);
+      const quiesce = await step.do(
+        "quiesce-engine",
+        { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "2 minutes" },
+        async () => {
+          try {
+            const result = await provider.exec(p.sandboxId, { command: QUIESCE_ENGINE_COMMAND, timeoutSeconds: 60 });
+            return { exitCode: result.exitCode, output: tail(result.stderr || result.stdout) };
+          } catch (e) {
+            return { exitCode: null, output: failureMessage(e) };
+          }
+        }
+      );
+      if (quiesce.exitCode === QUIESCE_BUSY_EXIT) {
+        await step.do("decline-sleep", DO_STEP, () => account.wfSleepDeclined(p.chatId, p.generation, quiesce.output));
+        return;
+      }
+      if (quiesce.exitCode !== 0) {
+        console.warn("cloud sleep: the engine didn't quiesce; stopping it anyway", quiesce.exitCode, quiesce.output);
+      }
+      await step.do("stop-engine", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "2 minutes" }, async () => {
+        try {
+          const result = await provider.exec(p.sandboxId, { command: STOP_ENGINE_COMMAND, timeoutSeconds: 60 });
+          return { exitCode: result.exitCode };
+        } catch (e) {
+          console.warn("cloud sleep: stopping the engine failed; stopping the sandbox anyway", failureMessage(e));
+          return { exitCode: null };
+        }
+      });
       if ((await stopSandbox(step, provider, p.sandboxId, "put Cloud to sleep")) === "error") {
         throw new NonRetryableError("The Cloud sandbox is in an error state.");
       }

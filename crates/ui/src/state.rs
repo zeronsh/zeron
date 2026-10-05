@@ -1573,15 +1573,35 @@ impl AppState {
             self.prepared_transcripts.remove(id);
         }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        // Doc frames supersede optimistic echoes carrying the same id.
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
-        }
         self.transcript = entries;
+        self.settle_echoes();
         self.transcript_replayed = true;
         self.ack_pending_send_from_transcript();
+    }
+
+    /// Doc frames supersede optimistic echoes carrying the same id. A Cloud
+    /// setup placeholder also goes once the doc moved past its message
+    /// without the machine's setup entry (the machine was already up).
+    fn settle_echoes(&mut self) {
+        let Some(chat_id) = self.selected_chat.as_deref() else {
+            return;
+        };
+        let Some(echoes) = self.echoes.get_mut(chat_id) else {
+            return;
+        };
+        let transcript = &self.transcript;
+        echoes.retain(|echo| {
+            if transcript.iter().any(|e| e.id == echo.id) {
+                return false;
+            }
+            let Some(message_id) = zeron_proto::cloud_setup_message_id(&echo.id) else {
+                return true;
+            };
+            transcript
+                .iter()
+                .position(|e| e.id == message_id)
+                .is_none_or(|ix| ix + 1 == transcript.len())
+        });
     }
 
     /// Apply a `WatchDocMessages` delta frame in place. `Err` = this copy has
@@ -1599,12 +1619,7 @@ impl AppState {
         if is_reset {
             self.transcript_replayed = true;
         }
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            let transcript = &self.transcript;
-            echoes.retain(|echo| !transcript.iter().any(|e| e.id == echo.id));
-        }
+        self.settle_echoes();
         self.ack_pending_send_from_transcript();
         Ok(())
     }
@@ -1757,6 +1772,62 @@ impl AppState {
             echoes.push(entry);
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
         }
+    }
+
+    /// The send of `message_id` brings `chat_id`'s Cloud machine up (`waking`
+    /// a sleeping one): show the first setup step under it right away. The
+    /// machine's own setup entry replaces it in place once it boots
+    /// (`zeron_proto::cloud_setup_entry_id`), with the steps that follow.
+    pub fn push_cloud_setup_echo(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        created_at: i64,
+        waking: bool,
+    ) {
+        let (name, step) = if waking {
+            ("Waking the Cloud machine", "wake")
+        } else {
+            ("Starting a Cloud machine", "start")
+        };
+        self.push_echo(
+            chat_id,
+            SessionMessageEntry {
+                id: zeron_proto::cloud_setup_entry_id(message_id),
+                role: zeron_doc::MessageRole::Assistant,
+                parts: vec![zeron_doc::MessagePart::Tool {
+                    id: zeron_proto::cloud_setup_part_id(message_id, "machine"),
+                    call: zeron_proto::ToolCall::Unknown {
+                        name: name.into(),
+                        input: Some(serde_json::json!({ zeron_proto::CLOUD_SETUP_KEY: step })),
+                    },
+                    is_error: false,
+                    resolved: false,
+                    output: None,
+                    diff: None,
+                    output_ref: None,
+                    output_bytes: None,
+                    diff_ref: None,
+                    diff_stats: None,
+                    subagent_ref: None,
+                    subagent_status: None,
+                    subagent_tail: None,
+                }],
+                created_at: created_at + 1,
+                device_id: "local".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            },
+        );
+    }
+
+    /// The selected chat shows a Cloud setup placeholder (it says what the
+    /// send waits on; the working trailer stays out of its way).
+    pub fn cloud_setup_echo_pending(&self) -> bool {
+        self.pending_echoes()
+            .iter()
+            .any(|echo| zeron_proto::cloud_setup_message_id(&echo.id).is_some())
     }
 
     /// Drop an echo (send failed — the prompt returns to the draft).
@@ -5999,6 +6070,52 @@ mod tests {
             },
         );
         assert!(state.pending_echoes().is_empty());
+    }
+
+    #[test]
+    fn a_cloud_setup_placeholder_hands_off_to_the_machine_entry_or_goes() {
+        let entry = |id: &str, role| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![],
+            created_at: 0,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let user = zeron_doc::MessageRole::User;
+        let assistant = zeron_doc::MessageRole::Assistant;
+        let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        state.push_echo("c1", entry("m1", user));
+        state.push_cloud_setup_echo("c1", "m1", 0, false);
+        assert!(state.cloud_setup_echo_pending());
+        let placeholder = &state.pending_echoes()[1];
+        assert_eq!(placeholder.id, "m1.cloud-setup");
+        let zeron_doc::MessagePart::Tool {
+            id, call, resolved, ..
+        } = &placeholder.parts[0]
+        else {
+            panic!("{:?}", placeholder.parts)
+        };
+        assert_eq!(id, "m1.cloud-machine");
+        assert_eq!(zeron_proto::cloud_setup_step(call), Some("start"));
+        assert!(!resolved);
+        // The host wrote the message: the machine is still coming up.
+        state.apply_transcript(vec![entry("m1", user)]);
+        assert!(state.cloud_setup_echo_pending());
+        // Its setup entry takes over (same ids).
+        state.apply_transcript(vec![entry("m1", user), entry("m1.cloud-setup", assistant)]);
+        assert!(!state.cloud_setup_echo_pending());
+        // A machine that was already up answers without one: the
+        // placeholder still goes.
+        state.push_echo("c1", entry("m2", user));
+        state.push_cloud_setup_echo("c1", "m2", 0, true);
+        state.apply_transcript(vec![entry("m2", user)]);
+        assert!(state.cloud_setup_echo_pending());
+        state.apply_transcript(vec![entry("m2", user), entry("a2", assistant)]);
+        assert!(!state.cloud_setup_echo_pending());
     }
 
     #[test]

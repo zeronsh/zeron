@@ -985,6 +985,15 @@ impl RegistryDoc {
         self.pending.iter().flat_map(|b| &b.ops)
     }
 
+    /// The row with pending ops applied, tombstones included.
+    fn overlay_row_or_tombstone(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+        replay_row(
+            self.authoritative.get(kind).and_then(|m| m.get(id)),
+            self.pending_ops()
+                .filter(|op| op.kind == kind && op.id == id),
+        )
+    }
+
     /// The row as this device should display it: authoritative + pending ops.
     fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
         overlay(
@@ -1091,6 +1100,14 @@ impl RegistryDoc {
             fields([("lastSeenAt", json!(at.timestamp_millis()))]),
         );
         Ok(true)
+    }
+
+    /// Whether `id`'s device row was deleted — a tombstone, not merely an
+    /// unknown id (a Cloud session's machine leaves with its sandbox). A
+    /// device that comes back revives its row with a newer write.
+    pub fn device_deleted(&self, id: &str) -> bool {
+        self.overlay_row_or_tombstone(KIND_DEVICES, id)
+            .is_some_and(|r| r.deleted)
     }
 
     pub fn read_devices(&self) -> Result<Vec<Device>, DocError> {
@@ -1709,6 +1726,14 @@ fn overlay<'a>(
     base: Option<&RegistryRow>,
     ops: impl IntoIterator<Item = &'a RowOp>,
 ) -> Option<RegistryRow> {
+    replay_row(base, ops).filter(|r| !r.deleted)
+}
+
+/// [`overlay`] keeping a tombstone (`None` only when the row is missing).
+fn replay_row<'a>(
+    base: Option<&RegistryRow>,
+    ops: impl IntoIterator<Item = &'a RowOp>,
+) -> Option<RegistryRow> {
     let mut row = base.cloned();
     for op in ops {
         let (next, _) = apply_op(row.as_ref(), op);
@@ -1716,7 +1741,7 @@ fn overlay<'a>(
             row = Some(next);
         }
     }
-    row.filter(|r| !r.deleted)
+    row
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────

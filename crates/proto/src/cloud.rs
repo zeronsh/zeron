@@ -47,6 +47,27 @@ pub fn cloud_setup_step(call: &crate::ToolCall) -> Option<&str> {
     }
 }
 
+const CLOUD_SETUP_ENTRY_SUFFIX: &str = ".cloud-setup";
+
+/// The assistant entry holding the setup steps of the machine that
+/// `message_id` brought up. The sender's placeholder chip ("Starting a Cloud
+/// machine") uses the same entry id and [`cloud_setup_part_id`]`(.., "machine")`,
+/// so the machine's own entry replaces it in place.
+pub fn cloud_setup_entry_id(message_id: &str) -> String {
+    format!("{message_id}{CLOUD_SETUP_ENTRY_SUFFIX}")
+}
+
+/// The message a [`cloud_setup_entry_id`] belongs to.
+pub fn cloud_setup_message_id(entry_id: &str) -> Option<&str> {
+    entry_id.strip_suffix(CLOUD_SETUP_ENTRY_SUFFIX)
+}
+
+/// One setup chip of that entry: `slot` is `machine` (start or wake),
+/// `clone` or `branch`.
+pub fn cloud_setup_part_id(message_id: &str, slot: &str) -> String {
+    format!("{message_id}.cloud-{slot}")
+}
+
 pub fn is_cloud_device(device_id: &str, platform: &str) -> bool {
     platform == CLOUD_PLATFORM || device_id.starts_with(CLOUD_DEVICE_PREFIX)
 }

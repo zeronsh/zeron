@@ -19,8 +19,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use zeron_proto::{
-    CloudSession, CloudSessions, CloudStatus, CloudUsage, GithubConnectProgress,
-    GithubDeviceFlow, GithubRepo, HarnessId, VaultProvider, VaultStatus,
+    CloudSession, CloudSessions, CloudStatus, CloudUsage, GithubConnectProgress, GithubDeviceFlow,
+    GithubRepo, HarnessId, VaultProvider, VaultStatus,
 };
 use zeron_rpc::{RpcError, RpcReply, TokenError, TokenSource, methods, parse_params};
 

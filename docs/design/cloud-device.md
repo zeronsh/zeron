@@ -183,13 +183,27 @@ Linux release from `{edge}/releases/`, writes `~/.zeron/env` (0600) from the per
 runner's first token after resume); on timeout it runs one idempotent
 `sudo systemctl restart zeron-cloud` before failing.
 
-**SleepWorkflow** — `stop` → poll until stopped. A refused stop is retried (the provider bills
-nothing while a stop is refused); it is never forced.
+**SleepWorkflow** — `zeron quiesce` → `sudo systemctl stop zeron-cloud` → `stop` → poll until
+stopped. A refused stop is retried (the provider bills nothing while a stop is refused); it is
+never forced.
+- *Quiesce* (headless IPC `QuiesceForSleep`): the engine starts no new work from here on, so a
+  send arriving now waits in its chat for the woken machine instead of starting a turn the stop
+  would kill (the engine marks a command handled before running it, so a killed turn is never
+  retried). A turn in flight or a message already waiting makes it exit 75: the sleep is
+  declined and the session stays `ready` (idle sleep retries a full idle window later). A
+  quiesce the stop never follows lifts itself after 3 minutes. An engine that can't answer
+  (gone, or older than the handshake) doesn't block the sleep.
+- *Stop the engine*: Boat reports a sandbox stopped once its disk snapshot is taken while the
+  machine may run on a moment; an engine still connected then acknowledged a send's nudge and
+  wrote changes the snapshot never saw. Stopped first, it has drained to disk and its device
+  room has no host, so sends queue there until the woken engine joins.
 
 **DeleteWorkflow** — revoke the runner and its vault enrollment → `stop` → wait until stopped →
 read and persist final usage (it must report `running: false`; usage is unreadable after
 deletion) → `delete` → `off`. A refused stop leaves `error` + `failedAction: "delete"`; a
-second DELETE resumes.
+second DELETE resumes. The finished delete tombstones the session's device row in its user's
+registry: no device lists it, and the dial gate (`WorkspaceHost::peer_liveness`) reads a deleted
+device as dark, so nothing dials it again.
 
 Idle policy: the runner posts `POST /runner/heartbeat {activeRuns, clients}` every 60 s, where
 `clients` counts relay requests it served since the previous heartbeat (open links and watch
@@ -377,18 +391,24 @@ refresh contract changes is caught within a day, before users' grants start fail
   for the runner's `{orgId, userId}`. Platform comes from `ZERON_DEVICE_PLATFORM` (`cloud`).
   The runner posts heartbeats and restricts its harness catalog to Codex + Claude Code.
 - **Session machines** (`ZERON_CLOUD_*`, persisted to `cloud-session.json`): the device row
-  carries `cloud-session`; at boot the engine holds command execution, clones the project into
-  `ZERON_CLOUD_PATH` (with the GitHub grant's credential store; retried with backoff) and checks
-  out `zeron/cloud-{12 alphanumerics of the chat id}` — one branch per session, so neighbours on
-  one repository never push the same branch — then releases execution and drains whatever was
-  queued meanwhile. A wake or restart keeps the existing checkout. A Cloud machine writes no
-  viewport rows (sidebar pins) and no legacy diff sidecar. What the boot did ("Started a
-  machine" / "Woke the machine", "Cloned owner/repo", "Checked out zeron/cloud-…") opens the
-  first answer after it, as resolved tool chips (`ToolCall::Unknown` tagged `cloudSetup`; the
-  start/wake chip says how long the message waited), grouped as "Set up the Cloud machine" /
-  "Woke the Cloud machine". Before the machine can write anything, the sender's trailer reads
-  "Starting a Cloud machine" / "Waking the Cloud machine", and the send is not "Not
-  delivered" while the session is provisioning, starting or asleep.
+  carries `cloud-session`; at boot the engine clones the project into `ZERON_CLOUD_PATH` (with
+  the GitHub grant's credential store; retried with backoff) and checks out
+  `zeron/cloud-{12 alphanumerics of the chat id}` — one branch per session, so neighbours on one
+  repository never push the same branch. A run dispatched meanwhile starts its harness only
+  once the checkout is ready. A wake or restart keeps the existing checkout. A Cloud machine
+  writes no viewport rows (sidebar pins) and no legacy diff sidecar. Every boot also schedules
+  a reconcile of the chats it hosts (`DocHost::enqueue_wakeup("*")`): a machine stopped without
+  warning (provider auto-stop, crash) after accepting a send still finds the message in its
+  chat's room.
+- **Setup steps, live**: the boot's steps ("Started a machine" / "Woke the machine", "Cloning
+  owner/repo" → "Cloned owner/repo", "Checking out zeron/cloud-…") open the first answer after
+  it as tool chips (`ToolCall::Unknown` tagged `cloudSetup`; the start/wake chip says how long
+  the message waited), each spinning until its step finishes, grouped as "Set up the Cloud
+  machine" / "Woke the Cloud machine". Before the machine can write anything, the sender shows
+  the first chip itself ("Starting a Cloud machine" / "Waking the Cloud machine", an optimistic
+  echo); the machine's entry (`{messageId}.cloud-setup`, chip `{messageId}.cloud-machine`)
+  replaces it in place. The send is not "Not delivered" while the session is provisioning,
+  starting or asleep.
 - **No keychain on Cloud**: a Cloud device never calls macOS `security` (Providers-page
   account code), and git's helper list for github.com starts with an empty entry, so no system
   helper (Apple git's `osxkeychain`, libsecret) also stores the App token.

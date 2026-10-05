@@ -28,6 +28,7 @@
 # chat there, and send.
 #
 # Run: scripts/cloud-dev.sh  |  MODE=boat scripts/cloud-dev.sh   (Ctrl-C stops)
+# The window logs at RUST_LOG=warn ($STATE/gui/ui.log); GUI_RUST_LOG overrides.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -164,7 +165,7 @@ fi
 log "Zeron window as $USER_ID (data: $STATE/gui)"
 gui_env=(ZERON_DATA_DIR="$STATE/gui/data" ZERON_IPC_PORT="$GUI_PORT" ZERON_EDGE_URL="$EDGE"
   ZERON_EDGE_TOKEN="$BEARER" ZERON_ORG_ID="$ORG_ID" ZERON_DEVICE_NAME="Cloud dev"
-  ZERON_OPEN_ROUTE=settings/cloud ZERON_NO_LOGIN_SHELL=1 RUST_LOG=warn)
+  ZERON_OPEN_ROUTE=settings/cloud ZERON_NO_LOGIN_SHELL=1 RUST_LOG="${GUI_RUST_LOG:-warn}")
 (cd "$STATE/gui" && env "${gui_env[@]}" "$ROOT/target/debug/zeron" > "$STATE/gui/ui.log" 2>&1 &
   echo $! > "$STATE/gui/pid")
 GUI_PID="$(cat "$STATE/gui/pid")"

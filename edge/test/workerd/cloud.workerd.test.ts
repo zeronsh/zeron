@@ -2,6 +2,7 @@ import { SELF, env, introspectWorkflow, runDurableObjectAlarm, runInDurableObjec
 import { describe, expect, it } from "vitest";
 import { authenticate } from "../../src/auth";
 import { handleAuthRoute } from "../../src/auth-routes";
+import { QUIESCE_ENGINE_COMMAND, STOP_ENGINE_COMMAND } from "../../src/cloud/install-script";
 import { listLedger, listSandboxes, listUsage } from "../../src/cloud/metering";
 import { cloudAccountName } from "../../src/cloud/policy";
 import type { Env } from "../../src/env";
@@ -169,7 +170,33 @@ describe("sessions get their own machines", () => {
     expect((await call("POST", "/cloud/org1/sessions/chat-a/sleep", userBearer(u), {})).status).toBe(200);
     await waitForSession(u, "chat-a", "sleeping");
     expect((await session(u, "chat-b"))?.state).toBe("ready");
-    expect((await boatState()).sandboxes.find((s) => s.id === b.sandboxId)?.state).not.toBe("archived");
+    const boat = await boatState();
+    expect(boat.sandboxes.find((s) => s.id === b.sandboxId)?.state).not.toBe("archived");
+    // Its engine quiesced, then stopped, before the sandbox did: nothing it
+    // starts or accepts after the provider's snapshot can be lost.
+    const calls = boat.calls.filter((c) => c.sandboxId === a.sandboxId && c.method === "POST");
+    const quiesce = calls.findIndex((c) => c.path.endsWith("/commands") && c.body?.command === QUIESCE_ENGINE_COMMAND);
+    const stopEngine = calls.findIndex((c) => c.path.endsWith("/commands") && c.body?.command === STOP_ENGINE_COMMAND);
+    const stop = calls.findIndex((c) => c.path.endsWith("/stop"));
+    expect(quiesce).toBeGreaterThanOrEqual(0);
+    expect(stopEngine).toBeGreaterThan(quiesce);
+    expect(stop).toBeGreaterThan(stopEngine);
+  });
+
+  it("keeps a machine awake when its engine is busy, and sleeps it once idle", async () => {
+    const u = newUser();
+    const { sandboxId } = await readySession(u, "chat-busy", await enableCloud(u));
+    await boatControl("__set", { sandboxId, quiesceExit: 75 }); // a turn in flight
+    expect((await call("POST", "/cloud/org1/sessions/chat-busy/sleep", userBearer(u), {})).status).toBe(200);
+    await waitForSession(u, "chat-busy", "ready");
+    const posts = async () => (await boatState()).calls.filter((c) => c.sandboxId === sandboxId && c.method === "POST");
+    expect((await posts()).some((c) => c.path.endsWith("/stop"))).toBe(false);
+    expect((await posts()).some((c) => c.body?.command === STOP_ENGINE_COMMAND)).toBe(false);
+
+    await boatControl("__set", { sandboxId, quiesceExit: 0 });
+    expect((await call("POST", "/cloud/org1/sessions/chat-busy/sleep", userBearer(u), {})).status).toBe(200);
+    await waitForSession(u, "chat-busy", "sleeping");
+    expect((await posts()).some((c) => c.path.endsWith("/stop"))).toBe(true);
   });
 });
 
@@ -399,6 +426,26 @@ describe("delete", () => {
       await m.disableSleeps();
     });
     await boatControl("__set", { sandboxId, runningReads: 1 }); // meter lag right after the stop
+    // Session engines' own device rows, as they write them at boot — plus a
+    // machine deleted before deletes cleaned up after themselves.
+    const hlc = `${String(Date.now()).padStart(13, "0")}-000001-laptop`;
+    const sessionRow = (id: string) => ({
+      kind: "devices",
+      id,
+      op: "upsert",
+      set: { name: "Cloud session", platform: "cloud", capabilities: ["cloud-session"] },
+      hlc
+    });
+    const wrote = await call("POST", "/registry/org1/push?device=laptop", userBearer(u), {
+      batch: `b-${crypto.randomUUID()}`,
+      ops: [
+        sessionRow(deviceId),
+        sessionRow(keep.deviceId),
+        sessionRow("cloud-ghost"),
+        { kind: "devices", id: "laptop-1", op: "upsert", set: { name: "Laptop", platform: "macos" }, hlc }
+      ]
+    });
+    expect(wrote.status).toBe(200);
 
     const deleting = (await (await call("DELETE", `/cloud/org1/sessions/${chatId}`, userBearer(u))).json()) as SessionView;
     expect(deleting.state).toBe("deleting");
@@ -425,6 +472,14 @@ describe("delete", () => {
       expect(ledger).toEqual(expect.arrayContaining(["create", "ready", "delete"]));
     });
     expect((await vaultCalls("revokeDevice")).some((c) => c.args[1] === deviceId)).toBe(true);
+    // Its device left the registry (so did the older ghost): nothing lists or
+    // dials them again. Live sessions' devices and laptops stay.
+    const devices = (await registryRows(u)).filter((r) => r.kind === "devices");
+    const deleted = (id: string) => devices.find((r) => r.id === id)?.deleted;
+    expect(deleted(deviceId)).toBe(true);
+    expect(deleted("cloud-ghost")).toBe(true);
+    expect(deleted(keep.deviceId)).toBe(false);
+    expect(deleted("laptop-1")).toBe(false);
     expect((await session(u, "chat-keep"))?.state).toBe("ready");
     expect((await boatState()).sandboxes.find((s) => s.id === keep.sandboxId)?.deleted).toBe(false);
 

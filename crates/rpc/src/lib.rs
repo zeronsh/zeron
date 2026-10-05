@@ -133,6 +133,10 @@ pub mod methods {
     /// Headed IPC owners do not implement this method: closing another app's
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
+    /// Headless IPC only: stop starting work ahead of a Cloud sleep (the
+    /// edge runs `zeron quiesce` before stopping the machine). Replies
+    /// `{"quiesced":true}` or `{"quiesced":false,"busy":"<why>"}`.
+    pub const QUIESCE_FOR_SLEEP: &str = "QuiesceForSleep";
     pub const AUTH_STATUS: &str = "AuthStatus";
     // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";

@@ -923,8 +923,8 @@ impl EngineRpc {
                 cwd: existing.cwd,
             }));
         }
-        let space_id = space_id
-            .ok_or_else(|| RpcError::Failed("Cloud sessions run in a project.".into()))?;
+        let space_id =
+            space_id.ok_or_else(|| RpcError::Failed("Cloud sessions run in a project.".into()))?;
         let space = self
             .workspace
             .space(space_id)

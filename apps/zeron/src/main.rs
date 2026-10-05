@@ -41,6 +41,11 @@ enum Command {
     /// Live sync introspection from the running engine: per-room connection
     /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
     Sync,
+    /// Cloud sleep handshake: ask the running engine to start no new work.
+    /// Exits 0 when quiesced, 75 when busy (a turn in flight, a message
+    /// waiting) — the edge then keeps the machine awake.
+    #[command(hide = true)]
+    Quiesce,
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
@@ -256,6 +261,11 @@ fn main() -> anyhow::Result<()> {
             let config = engine_config_from_env();
             runtime.block_on(sync_cli(config.ipc_port, &config.data_dir))
         }
+        Some(Command::Quiesce) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let config = engine_config_from_env();
+            runtime.block_on(quiesce_cli(config.ipc_port, &config.data_dir))
+        }
         Some(Command::Mcp) => {
             // One bridge per agent session, and it only relays: stdio
             // requests out to the engine over IPC and replies back. Two
@@ -379,6 +389,29 @@ fn harness_from_env() -> zeron_engine::HarnessId {
 /// `zeron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
+/// `zeron quiesce`'s exit status when the engine is busy (EX_TEMPFAIL); the
+/// edge's sleep workflow reads it (`QUIESCE_BUSY_EXIT`).
+const QUIESCE_BUSY_EXIT: i32 = 75;
+
+async fn quiesce_cli(ipc_port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let client = zeron_rpc::connect_ipc(ipc_port, Some(data_dir))
+        .await
+        .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
+    let reply = client
+        .call(zeron_rpc::methods::QUIESCE_FOR_SLEEP, serde_json::json!({}))
+        .await
+        .map_err(|e| anyhow::anyhow!("QuiesceForSleep failed: {e}"))?;
+    if reply["quiesced"].as_bool() == Some(true) {
+        println!("quiesced");
+        return Ok(());
+    }
+    eprintln!(
+        "busy: {}",
+        reply["busy"].as_str().unwrap_or("the engine is busy")
+    );
+    std::process::exit(QUIESCE_BUSY_EXIT);
+}
+
 async fn sync_cli(ipc_port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ipc(ipc_port, Some(data_dir))
         .await

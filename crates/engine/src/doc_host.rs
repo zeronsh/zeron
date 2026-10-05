@@ -75,6 +75,8 @@ const SYNC_QUANTUM_MS: i64 = 30_000;
 const ACTIVE_SYNC_CAP: usize = 28;
 const SYNC_ADMISSION_BATCH: usize = 4;
 const SYNC_CATCH_UP_QUANTUM_MS: i64 = 300_000;
+/// A quiesce for a Cloud sleep the stop never followed lifts after this.
+const QUIESCE_LEASE: std::time::Duration = std::time::Duration::from_secs(180);
 
 // All live-transport scenarios share the process budget, including tests in
 // sibling modules. Hold through shutdown so one fixture cannot rotate another.
@@ -251,9 +253,14 @@ struct DocHostInner {
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
     sessions: Mutex<Option<SessionsEngine>>,
-    /// Command execution held (a Cloud session machine preparing its
-    /// checkout): drains return early; `release_execution` re-drains.
-    execution_held: AtomicBool,
+    /// Quiesced for a Cloud sleep ([`DocHost::quiesce_for_sleep`]): drains
+    /// leave new work pending in the room, for the machine once it wakes.
+    quiesced: AtomicBool,
+    /// Bumped per quiesce: only the newest one's lease lifts it.
+    quiesce_generation: AtomicU64,
+    /// Drains between their quiesce check and the end of their dispatch (a
+    /// run they start is registered — and Working — by then).
+    dispatching: Arc<AtomicUsize>,
     workspace: OnceLock<WorkspaceHost>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
@@ -656,6 +663,14 @@ impl Drop for ResetFlag {
     }
 }
 
+/// One drain counted in [`DocHostInner::dispatching`] until dropped.
+struct DispatchGuard(Arc<AtomicUsize>);
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct DocWriter {
     doc: Arc<SessionDoc>,
     writers: Arc<AtomicUsize>,
@@ -976,7 +991,9 @@ impl DocHost {
                 store,
                 config,
                 sessions: Mutex::new(None),
-                execution_held: AtomicBool::new(false),
+                quiesced: AtomicBool::new(false),
+                quiesce_generation: AtomicU64::new(0),
+                dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
@@ -1052,21 +1069,63 @@ impl DocHost {
         lock(&self.inner.sessions).clone()
     }
 
-    fn execution_held(&self) -> bool {
-        self.inner.execution_held.load(Ordering::Acquire)
+    /// Entered by a drain that may start work; `None` while quiesced. Count
+    /// first, check second (both SeqCst): a quiesce that set its flag then
+    /// either sees this drain counted or this drain sees the flag.
+    fn dispatch_guard(&self) -> Option<DispatchGuard> {
+        self.inner.dispatching.fetch_add(1, Ordering::SeqCst);
+        let guard = DispatchGuard(self.inner.dispatching.clone());
+        (!self.inner.quiesced.load(Ordering::SeqCst)).then_some(guard)
     }
 
-    /// Hold command execution: queued commands stay pending (their nudges and
-    /// rows are kept) until [`release_execution`](Self::release_execution).
-    /// A Cloud session machine holds while it clones its project, so the
-    /// first send can't run before its working tree exists.
-    pub fn hold_execution(&self) {
-        self.inner.execution_held.store(true, Ordering::Release);
+    /// Before a Cloud sleep stops this engine: start nothing the stop would
+    /// cut off. Commands arriving from here on stay pending in their chat's
+    /// room and run on the woken machine (its boot reconcile finds them).
+    /// `Err(why)` when a turn is in flight or a command is already waiting:
+    /// the sleep is declined and work resumes at once. A quiesce the stop
+    /// never follows lifts itself after [`QUIESCE_LEASE`].
+    pub async fn quiesce_for_sleep(&self) -> Result<(), String> {
+        let generation = self.inner.quiesce_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner.quiesced.store(true, Ordering::SeqCst);
+        // Drains already past their check finish dispatching first.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.inner.dispatching.load(Ordering::SeqCst) > 0 {
+            if tokio::time::Instant::now() >= deadline {
+                self.lift_quiesce();
+                return Err("work is still being dispatched".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let running = self
+            .sessions()
+            .map_or(0, |sessions| sessions.active_count());
+        let busy = if running > 0 {
+            Some(format!("{running} chat(s) have a turn in flight"))
+        } else if self.has_waiting_commands() {
+            Some("a message is waiting to run".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = busy {
+            self.lift_quiesce();
+            return Err(why);
+        }
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(QUIESCE_LEASE).await;
+            if host.inner.quiesce_generation.load(Ordering::SeqCst) == generation {
+                tracing::warn!(
+                    "quiesced for a sleep that never stopped this engine; resuming work"
+                );
+                host.lift_quiesce();
+            }
+        });
+        Ok(())
     }
 
-    /// End a hold and drain everything that queued meanwhile.
-    pub fn release_execution(&self) {
-        if !self.inner.execution_held.swap(false, Ordering::AcqRel) {
+    /// End a quiesce and run everything that queued meanwhile.
+    pub fn lift_quiesce(&self) {
+        if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
             return;
         }
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
@@ -1077,6 +1136,20 @@ impl DocHost {
                 host.drain_queue(&handle).await;
             });
         }
+    }
+
+    /// A hosted chat has a command no drain has executed yet.
+    fn has_waiting_commands(&self) -> bool {
+        let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
+        let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
+        handles.iter().any(|handle| {
+            self.is_host(&handle.chat_id)
+                && handle.doc.read_commands().is_ok_and(|commands| {
+                    commands
+                        .iter()
+                        .any(|c| c.status == SessionCommandStatus::Pending && !is_processed(&c.id))
+                })
+        })
     }
 
     /// Wire the sessions engine (engine assembly; see `SessionsEngine::set_doc_host`).
@@ -1686,6 +1759,9 @@ impl DocHost {
                 let weak_push = Arc::downgrade(&handle);
                 let publication_store = self.inner.store.clone();
                 let publication_chat = chat_id.to_string();
+                // Concurrent commits can run their hooks out of order; this
+                // device's ops still go out in commit order (OwnOpsOrder).
+                let own_order = Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc()));
                 let sub = doc
                     .doc()
                     .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
@@ -1694,15 +1770,17 @@ impl DocHost {
                             // lock (verify pass: releasing it between the None
                             // check and the push let the join's store+drain
                             // slip between, orphaning the update forever).
-                            let batch_id = uuid::Uuid::new_v4().to_string();
                             let client_guard = lock(&handle.chat2);
-                            if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, bytes) {
-                                handle.publication_failed.store(true, Ordering::Release);
-                                lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
-                                tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
-                            }
-                            if let Some(client) = &*client_guard {
-                                client.enqueue_batch(batch_id, bytes.clone());
+                            for bytes in lock(&own_order).order(handle.doc.doc(), bytes) {
+                                let batch_id = uuid::Uuid::new_v4().to_string();
+                                if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, &bytes) {
+                                    handle.publication_failed.store(true, Ordering::Release);
+                                    lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
+                                    tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
+                                }
+                                if let Some(client) = &*client_guard {
+                                    client.enqueue_batch(batch_id, bytes);
+                                }
                             }
                         }
                         true
@@ -4071,9 +4149,9 @@ impl DocHost {
     ///
     /// One at a time by design: each send changes the status this reads.
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
-        if self.execution_held() {
-            return; // release_execution re-drains
-        }
+        let Some(_dispatch) = self.dispatch_guard() else {
+            return; // quiesced for a Cloud sleep; lifting it re-drains
+        };
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet; the set_sessions kick re-drains
         };
@@ -5034,11 +5112,16 @@ impl DocHost {
     }
 
     async fn drain_command_kind(&self, handle: &Arc<ChatDocHandle>, controls_only: bool) {
-        // A held executor still serves controls (interrupt, answers): only
-        // new work waits for the release.
-        if self.execution_held() && !controls_only {
-            return; // release_execution re-drains
-        }
+        // A quiesced engine still serves controls (interrupt, answers): only
+        // new work waits for the machine to wake.
+        let _dispatch = if controls_only {
+            None
+        } else {
+            match self.dispatch_guard() {
+                Some(guard) => Some(guard),
+                None => return, // quiesced for a Cloud sleep; lifting it re-drains
+            }
+        };
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };

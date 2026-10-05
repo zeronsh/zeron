@@ -2275,6 +2275,73 @@ async fn drive_run(
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.
+    let doc_ref: &SessionDoc = &doc;
+    let mut folded: Vec<MessagePart> = Vec::new();
+    // Every tool id this run has folded, across segment resets. Adapters
+    // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
+    // long-running completions) as full ToolCall events; once the fold has
+    // reset at a steer/park boundary those ids are gone from `folded`, and
+    // folding the echo would mint an orphan chip mid-text in the NEXT
+    // segment — the mid-word transcript splits.
+    let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_images = std::collections::HashSet::new();
+    for entry in doc_ref.read_entries().unwrap_or_default() {
+        for part in entry.parts {
+            if let MessagePart::Image { id, .. } = part {
+                seen_images.insert(format!("{chat_id}\0{id}"));
+                if let Some(tool_id) = id.strip_suffix(":image") {
+                    seen_tools.insert(tool_id.to_owned());
+                }
+            }
+        }
+    }
+    let mut prepared_events = std::collections::VecDeque::new();
+    let mut entry_id = new_id();
+    let mut segment_started = now_ms();
+    let mut writer: Option<SegmentWriter<'_>> = None;
+    // A Cloud session machine's own setup (started or woke, cloning,
+    // checked out) opens its first answer after it boots, as tool chips
+    // under the message that brought it up, updated live while the clone
+    // runs; the harness starts once the checkout is ready. The entry id is
+    // derived from that message so the sender's placeholder chip (its
+    // optimistic echo) is replaced in place.
+    if crate::runner::setup_pending() {
+        let user_id = resume_state.user_message_id.clone();
+        entry_id = zeron_proto::cloud_setup_entry_id(&user_id);
+        let waited = doc_ref.read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.id == user_id)
+                .map(|entry| {
+                    std::time::Duration::from_millis(
+                        now_ms().saturating_sub(entry.created_at).max(0) as u64,
+                    )
+                })
+        });
+        let mut changes = crate::runner::watch_setup();
+        loop {
+            let (parts, done) = crate::runner::setup_snapshot(&user_id, waited);
+            folded = parts;
+            if let Err(err) = sync_segment(
+                doc_ref,
+                &mut writer,
+                &entry_id,
+                &device_id,
+                segment_started,
+                &folded,
+            ) {
+                tracing::warn!(chat = %chat_id, error = %err, "cloud setup steps write failed");
+            }
+            if done {
+                break;
+            }
+            tokio::select! {
+                changed = changes.changed() => if changed.is_err() { break },
+                _ = controls.interrupt.cancelled() => break,
+            }
+        }
+        crate::runner::mark_setup_shown();
+    }
     let prepared = if harness_id == HarnessId::Cursor {
         cursor_unstarted_history(
             &doc,
@@ -2347,16 +2414,24 @@ async fn drive_run(
             // The journal alone is live-only: without an entry the transcript
             // shows "Run failed" with no reason (an OpenCode server that never
             // booted looked exactly like that).
-            let parts = [MessagePart::Error {
+            // After a Cloud machine's setup chips, the error closes that
+            // same entry.
+            let mut parts = std::mem::take(&mut folded);
+            parts.push(MessagePart::Error {
                 id: "e0".into(),
                 message: message.clone(),
-            }];
+            });
+            let started_at = if writer.is_some() {
+                segment_started
+            } else {
+                now_ms()
+            };
             if let Err(err) = finish_segment(
-                &doc,
-                None,
-                &new_id(),
+                doc_ref,
+                writer.take(),
+                &entry_id,
                 &device_id,
-                now_ms(),
+                started_at,
                 &parts,
                 MessageStatus::Complete,
             ) {
@@ -2383,56 +2458,6 @@ async fn drive_run(
         }
     };
 
-    let doc_ref: &SessionDoc = &doc;
-    let mut folded: Vec<MessagePart> = Vec::new();
-    // Every tool id this run has folded, across segment resets. Adapters
-    // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
-    // long-running completions) as full ToolCall events; once the fold has
-    // reset at a steer/park boundary those ids are gone from `folded`, and
-    // folding the echo would mint an orphan chip mid-text in the NEXT
-    // segment — the mid-word transcript splits.
-    let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut seen_images = std::collections::HashSet::new();
-    for entry in doc_ref.read_entries().unwrap_or_default() {
-        for part in entry.parts {
-            if let MessagePart::Image { id, .. } = part {
-                seen_images.insert(format!("{chat_id}\0{id}"));
-                if let Some(tool_id) = id.strip_suffix(":image") {
-                    seen_tools.insert(tool_id.to_owned());
-                }
-            }
-        }
-    }
-    let mut prepared_events = std::collections::VecDeque::new();
-    let mut entry_id = new_id();
-    let mut segment_started = now_ms();
-    let mut writer: Option<SegmentWriter<'_>> = None;
-    // A Cloud session machine's own setup (started or woke, cloned, checked
-    // out) opens the first answer after it boots, as tool chips right under
-    // the message that brought it up — with how long that message waited.
-    if crate::runner::has_setup_steps() {
-        let waited = doc_ref.read_entries().ok().and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.id == resume_state.user_message_id)
-                .map(|entry| {
-                    std::time::Duration::from_millis(
-                        now_ms().saturating_sub(entry.created_at).max(0) as u64,
-                    )
-                })
-        });
-        folded.extend(crate::runner::take_setup_parts(waited));
-        if let Err(err) = sync_segment(
-            doc_ref,
-            &mut writer,
-            &entry_id,
-            &device_id,
-            segment_started,
-            &folded,
-        ) {
-            tracing::warn!(chat = %chat_id, error = %err, "cloud setup steps write failed");
-        }
-    }
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
     // Set when the engine interrupts the run: the harness gets this long to end its own

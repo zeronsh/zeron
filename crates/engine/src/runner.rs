@@ -24,9 +24,10 @@
 //!   60 s, feeding the CloudAccount DO's per-session idle sleep.
 //! - **Session**: every Cloud session runs in its own sandbox, provisioned with
 //!   `ZERON_CLOUD_{ACCOUNT,CHAT,REPO,PATH,BRANCH}` (persisted to
-//!   `cloud-session.json` for restarts). Before the engine executes anything
-//!   it clones the project's repository and checks out the session's branch
-//!   ([`prepare_checkout`]); its device row carries the `cloud-session`
+//!   `cloud-session.json` for restarts). At boot it clones the project's
+//!   repository and checks out the session's branch ([`prepare_checkout`]);
+//!   runs wait for that, showing its steps live ([`setup_snapshot`]); its
+//!   device row carries the `cloud-session`
 //!   capability so device lists show the account's one Cloud device instead.
 //!
 //! The device's platform string comes from `ZERON_DEVICE_PLATFORM` (`cloud`
@@ -178,24 +179,50 @@ async fn prepare_checkout_with(
     credentials: Option<&crate::credentials::CredentialBroker>,
     retry_base: Duration,
 ) -> Result<(), EngineError> {
+    // Whatever happens below, a run waiting on the checkout may start.
+    struct Finished;
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            finish_setup();
+        }
+    }
+    let _finished = Finished;
     let (Some(repo), Some(path)) = (session.repo.as_deref(), session.path.as_deref()) else {
         return Ok(());
     };
     let path = Path::new(path);
     if path.join(".git").exists() {
         // The disk survived a stop: this boot is a wake.
-        record_setup("wake", "Woke the machine".into(), None, None, true);
+        record_setup("wake", "Woke the machine".into());
         return Ok(());
     }
-    record_setup("start", "Started a machine".into(), None, None, true);
+    record_setup("start", "Started a machine".into());
     let full_name = github_full_name(repo).unwrap_or_else(|| repo.to_string());
+    let clone_command = format!(
+        "git clone{} {repo} {}",
+        session
+            .branch
+            .as_deref()
+            .map(|b| format!(" --branch {b}"))
+            .unwrap_or_default(),
+        path.display()
+    );
+    let clone_step = begin_step("clone", format!("Cloning {full_name}"), Some(clone_command));
     let clone_started = std::time::Instant::now();
     let no_credentials = match credentials {
         Some(broker) => broker.ensure_git_credentials().await.err(),
         None => None,
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            finish_step(
+                clone_step,
+                format!("Couldn't clone {full_name}"),
+                Some(err.to_string()),
+                false,
+            );
+            return Err(err.into());
+        }
     }
     let mut delay = retry_base;
     let mut last = String::new();
@@ -224,119 +251,184 @@ async fn prepare_checkout_with(
             delay *= 2;
         }
     }
-    let clone_command = format!(
-        "git clone{} {repo} {}",
-        session
-            .branch
-            .as_deref()
-            .map(|b| format!(" --branch {b}"))
-            .unwrap_or_default(),
-        path.display()
-    );
     if !last.is_empty() {
         let github = no_credentials
             .map(|reason| format!(" (no GitHub access: {reason})"))
             .unwrap_or_default();
         let message = format!("couldn't clone {repo}: {last}{github}");
-        record_setup(
-            "clone",
+        finish_step(
+            clone_step,
             format!("Couldn't clone {full_name}"),
-            Some(clone_command),
             Some(message.clone()),
             false,
         );
         return Err(EngineError::Other(message));
     }
-    record_setup(
-        "clone",
+    finish_step(
+        clone_step,
         format!("Cloned {full_name}"),
-        Some(clone_command),
         Some(format!("in {}", format_wait(clone_started.elapsed()))),
         true,
     );
     let branch = session.session_branch();
+    let branch_step = begin_step(
+        "branch",
+        format!("Checking out {branch}"),
+        Some(format!("git checkout -B {branch}")),
+    );
     let checkout = tokio::process::Command::new("git")
         .arg("-C")
         .arg(path)
         .args(["checkout", "-B", &branch])
         .kill_on_drop(true)
         .output()
-        .await?;
-    let checkout_command = format!("git checkout -B {branch}");
-    if checkout.status.success() {
-        record_setup(
-            "branch",
-            format!("Checked out {branch}"),
-            Some(checkout_command),
-            None,
-            true,
-        );
-    } else {
-        let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
-        tracing::warn!(branch, error = %stderr,
-            "runner: couldn't create the session branch; staying on the default branch");
-        record_setup(
-            "branch",
-            format!("Couldn't check out {branch}"),
-            Some(checkout_command),
-            Some(stderr),
-            false,
-        );
+        .await;
+    match checkout {
+        Ok(out) if out.status.success() => {
+            finish_step(branch_step, format!("Checked out {branch}"), None, true);
+        }
+        failed => {
+            let error = match failed {
+                Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                Err(err) => err.to_string(),
+            };
+            tracing::warn!(branch, error = %error,
+                "runner: couldn't create the session branch; staying on the default branch");
+            finish_step(
+                branch_step,
+                format!("Couldn't check out {branch}"),
+                Some(error),
+                false,
+            );
+        }
     }
     tracing::info!(repo, path = %path.display(), branch, "runner: session checkout ready");
     Ok(())
 }
 
-/// One setup step this boot performed, waiting for the first run to show it
-/// ([`take_setup_parts`]).
+/// One setup step of this boot (live: `running` until it finishes).
 struct SetupStep {
     step: &'static str,
     name: String,
     command: Option<String>,
     output: Option<String>,
     ok: bool,
+    running: bool,
 }
 
-static SETUP: Mutex<Vec<SetupStep>> = Mutex::new(Vec::new());
+/// This boot's setup, as the first run after it shows it ([`setup_snapshot`]).
+#[derive(Default)]
+struct SetupState {
+    /// A checkout is being prepared (set before any step is recorded, so a
+    /// run dispatched in between still waits for it).
+    active: bool,
+    steps: Vec<SetupStep>,
+    done: bool,
+    /// A run showed it; later runs don't.
+    shown: bool,
+}
 
-fn record_setup(
-    step: &'static str,
-    name: String,
-    command: Option<String>,
-    output: Option<String>,
-    ok: bool,
-) {
-    SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(SetupStep {
+static SETUP: Mutex<SetupState> = Mutex::new(SetupState {
+    active: false,
+    steps: Vec::new(),
+    done: false,
+    shown: false,
+});
+static SETUP_CHANGED: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::OnceLock::new();
+
+fn setup_changed() -> &'static tokio::sync::watch::Sender<u64> {
+    SETUP_CHANGED.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
+fn update_setup<T>(change: impl FnOnce(&mut SetupState) -> T) -> T {
+    let out = change(&mut SETUP.lock().unwrap_or_else(PoisonError::into_inner));
+    setup_changed().send_modify(|n| *n = n.wrapping_add(1));
+    out
+}
+
+/// A checkout is about to be prepared: runs wait for it (and show it).
+pub fn begin_setup() {
+    update_setup(|setup| {
+        *setup = SetupState {
+            active: true,
+            ..SetupState::default()
+        };
+    });
+}
+
+/// Record a step; `running` until [`finish_step`]. Returns its index.
+fn begin_step(step: &'static str, name: String, command: Option<String>) -> usize {
+    update_setup(|setup| {
+        setup.steps.push(SetupStep {
             step,
             name,
             command,
-            output,
-            ok,
+            output: None,
+            ok: true,
+            running: true,
         });
+        setup.steps.len() - 1
+    })
 }
 
-/// Whether this boot has setup steps no run has shown yet.
-pub fn has_setup_steps() -> bool {
-    !SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .is_empty()
+fn finish_step(index: usize, name: String, output: Option<String>, ok: bool) {
+    update_setup(|setup| {
+        if let Some(step) = setup.steps.get_mut(index) {
+            step.name = name;
+            step.output = output;
+            step.ok = ok;
+            step.running = false;
+        }
+    });
 }
 
-/// This boot's setup steps as tool chips (taken once: they open the first
-/// answer after the machine came up). `waited` — how long the message that
-/// brought the machine up waited for it — goes on the start/wake step.
-pub fn take_setup_parts(waited: Option<Duration>) -> Vec<zeron_doc::MessagePart> {
-    let steps = std::mem::take(&mut *SETUP.lock().unwrap_or_else(PoisonError::into_inner));
-    setup_parts(steps, waited)
+/// A step that is over as soon as it is recorded.
+fn record_setup(step: &'static str, name: String) {
+    let index = begin_step(step, name.clone(), None);
+    finish_step(index, name, None, true);
 }
 
-fn setup_parts(steps: Vec<SetupStep>, waited: Option<Duration>) -> Vec<zeron_doc::MessagePart> {
+/// The checkout is ready (or failed): a waiting run starts.
+fn finish_setup() {
+    update_setup(|setup| setup.done = true);
+}
+
+/// Whether this boot's setup still has to be shown by a run.
+pub fn setup_pending() -> bool {
+    let setup = SETUP.lock().unwrap_or_else(PoisonError::into_inner);
+    setup.active && !setup.shown
+}
+
+/// Fires on every setup change.
+pub fn watch_setup() -> tokio::sync::watch::Receiver<u64> {
+    setup_changed().subscribe()
+}
+
+/// A run showed the setup: later runs don't repeat it.
+pub fn mark_setup_shown() {
+    update_setup(|setup| setup.shown = true);
+}
+
+/// This boot's setup as tool chips (ids scoped to `scope`, the message that
+/// brought the machine up — its sender's placeholder chip shares the first
+/// one's id) and whether it is finished. `waited` — how long that message
+/// waited for the machine — goes on the start/wake chip.
+pub fn setup_snapshot(
+    scope: &str,
+    waited: Option<Duration>,
+) -> (Vec<zeron_doc::MessagePart>, bool) {
+    let setup = SETUP.lock().unwrap_or_else(PoisonError::into_inner);
+    (setup_parts(scope, &setup.steps, waited), setup.done)
+}
+
+fn setup_parts(
+    scope: &str,
+    steps: &[SetupStep],
+    waited: Option<Duration>,
+) -> Vec<zeron_doc::MessagePart> {
     steps
-        .into_iter()
+        .iter()
         .map(|step| {
             let mut input = serde_json::json!({ zeron_proto::CLOUD_SETUP_KEY: step.step });
             if let Some(command) = &step.command {
@@ -346,16 +438,21 @@ fn setup_parts(steps: Vec<SetupStep>, waited: Option<Duration>) -> Vec<zeron_doc
                 ("start" | "wake", Some(waited)) => {
                     Some(format!("ready after {}", format_wait(waited)))
                 }
-                _ => step.output,
+                _ => step.output.clone(),
+            };
+            // The start and wake chips share an id: either is "the machine".
+            let slot = match step.step {
+                "start" | "wake" => "machine",
+                other => other,
             };
             zeron_doc::MessagePart::Tool {
-                id: format!("cloud-setup-{}", crate::new_id()),
+                id: zeron_proto::cloud_setup_part_id(scope, slot),
                 call: zeron_proto::ToolCall::Unknown {
-                    name: step.name,
+                    name: step.name.clone(),
                     input: Some(input),
                 },
                 is_error: !step.ok,
-                resolved: true,
+                resolved: !step.running,
                 output,
                 diff: None,
                 output_ref: None,
@@ -1068,22 +1165,26 @@ mod tests {
     }
 
     #[test]
-    fn setup_steps_become_resolved_cloud_tool_chips() {
-        let step = |step, name: &str, command: Option<&str>, output: Option<&str>, ok| SetupStep {
-            step,
-            name: name.into(),
-            command: command.map(str::to_string),
-            output: output.map(str::to_string),
-            ok,
+    fn setup_steps_become_cloud_tool_chips() {
+        let step = |step, name: &str, command: Option<&str>, output: Option<&str>, ok, running| {
+            SetupStep {
+                step,
+                name: name.into(),
+                command: command.map(str::to_string),
+                output: output.map(str::to_string),
+                ok,
+                running,
+            }
         };
         let steps = vec![
-            step("start", "Started a machine", None, None, true),
+            step("start", "Started a machine", None, None, true, false),
             step(
                 "clone",
                 "Cloned acme/app",
                 Some("git clone https://github.com/acme/app.git /home/user/app"),
                 Some("in 3.2s"),
                 true,
+                false,
             ),
             step(
                 "branch",
@@ -1091,51 +1192,89 @@ mod tests {
                 Some("git checkout -B zeron/cloud-x"),
                 Some("fatal: nope"),
                 false,
+                false,
+            ),
+            step(
+                "branch",
+                "Checking out zeron/cloud-y",
+                None,
+                None,
+                true,
+                true,
             ),
         ];
-        let parts = setup_parts(steps, Some(Duration::from_secs(72)));
-        let summary: Vec<(String, Option<String>, bool, Option<String>)> = parts
+        let parts = setup_parts("m1", &steps, Some(Duration::from_secs(72)));
+        let summary: Vec<(String, String, Option<String>, bool, bool, Option<String>)> = parts
             .iter()
             .map(|part| match part {
                 zeron_doc::MessagePart::Tool {
+                    id,
                     call,
                     output,
                     is_error,
                     resolved,
                     ..
                 } => {
-                    assert!(resolved);
                     let zeron_proto::ToolCall::Unknown { name, .. } = call else {
                         panic!("{call:?}")
                     };
                     (
+                        id.clone(),
                         name.clone(),
                         zeron_proto::cloud_setup_step(call).map(str::to_string),
                         *is_error,
+                        *resolved,
                         output.clone(),
                     )
                 }
                 other => panic!("{other:?}"),
             })
             .collect();
-        let row = |name: &str, step: &str, error, output: &str| {
+        let row = |id: &str, name: &str, step: &str, error, resolved, output: Option<&str>| {
             (
+                id.to_string(),
                 name.to_string(),
                 Some(step.to_string()),
                 error,
-                Some(output.to_string()),
+                resolved,
+                output.map(str::to_string),
             )
         };
         assert_eq!(
             summary,
             [
-                row("Started a machine", "start", false, "ready after 1m 12s"),
-                row("Cloned acme/app", "clone", false, "in 3.2s"),
+                // The machine chip shares its id with the sender's placeholder.
                 row(
+                    "m1.cloud-machine",
+                    "Started a machine",
+                    "start",
+                    false,
+                    true,
+                    Some("ready after 1m 12s")
+                ),
+                row(
+                    "m1.cloud-clone",
+                    "Cloned acme/app",
+                    "clone",
+                    false,
+                    true,
+                    Some("in 3.2s")
+                ),
+                row(
+                    "m1.cloud-branch",
                     "Couldn't check out zeron/cloud-x",
                     "branch",
                     true,
-                    "fatal: nope"
+                    true,
+                    Some("fatal: nope")
+                ),
+                row(
+                    "m1.cloud-branch",
+                    "Checking out zeron/cloud-y",
+                    "branch",
+                    false,
+                    false,
+                    None
                 ),
             ]
         );
@@ -1242,6 +1381,42 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("couldn't clone"), "{err}");
         assert!(!dir.path().join("other").exists());
+        // Each boot recorded its steps for the first run to show (this test
+        // is the only one here preparing checkouts, and never resets them:
+        // `begin_setup` would make the module's runs wait on it).
+        let (parts, done) = setup_snapshot("m", None);
+        assert!(done);
+        let steps: Vec<(String, bool, bool)> = parts
+            .iter()
+            .map(|part| match part {
+                zeron_doc::MessagePart::Tool {
+                    call: zeron_proto::ToolCall::Unknown { name, .. },
+                    is_error,
+                    resolved,
+                    ..
+                } => (name.clone(), *is_error, *resolved),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let step = |name: &str, error| (name.to_string(), error, true);
+        let origin_name = origin.to_string_lossy();
+        assert_eq!(
+            steps,
+            [
+                step("Started a machine", false),
+                step(&format!("Cloned {origin_name}"), false),
+                step("Checked out zeron/cloud-abcdef0123", false),
+                step("Woke the machine", false),
+                step("Started a machine", false),
+                step(
+                    &format!(
+                        "Couldn't clone {}",
+                        dir.path().join("missing").to_string_lossy()
+                    ),
+                    true
+                ),
+            ]
+        );
     }
 
     fn identity(dir: &Path) -> RunnerIdentity {

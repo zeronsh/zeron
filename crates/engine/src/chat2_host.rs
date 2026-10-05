@@ -623,3 +623,125 @@ pub(crate) fn publication_updates(doc: &loro::LoroDoc) -> Result<Vec<Vec<u8>>, S
     }
     Ok(out)
 }
+
+/// Puts this device's own local updates back in commit order for
+/// publication. Loro runs local-update hooks after the commit, outside its
+/// lock, so two tasks committing at once (a run writing its first entry
+/// while a steered message lands) can see their hooks run in either order.
+/// Published as they come, the later commit reaches the room first and
+/// every reader parks it on missing causal history. Ops of one peer are a
+/// contiguous counter range, so: when a hook starts past what went out,
+/// publish the missing range from the doc first; when the late hook comes,
+/// its ops already went out.
+pub(crate) struct OwnOpsOrder {
+    peer: loro::PeerID,
+    next: loro::Counter,
+}
+
+impl OwnOpsOrder {
+    pub(crate) fn new(doc: &loro::LoroDoc) -> Self {
+        let peer = doc.peer_id();
+        Self {
+            peer,
+            next: doc.oplog_vv().get(&peer).copied().unwrap_or(0),
+        }
+    }
+
+    /// The batches one local-update hook publishes, in order.
+    pub(crate) fn order(&mut self, doc: &loro::LoroDoc, bytes: &[u8]) -> Vec<Vec<u8>> {
+        let Ok(meta) = loro::LoroDoc::decode_import_blob_meta(bytes, false) else {
+            return vec![bytes.to_vec()];
+        };
+        let mut own = meta.partial_end_vv.iter();
+        let (Some((&peer, &end)), None) = (own.next(), own.next()) else {
+            return vec![bytes.to_vec()]; // not a single-peer local update
+        };
+        let start = meta.partial_start_vv.get(&peer).copied().unwrap_or(0);
+        if peer != self.peer {
+            // A new peer id counts from its own start.
+            self.peer = peer;
+            self.next = start;
+        }
+        if end <= self.next {
+            return Vec::new();
+        }
+        let range = |from, to| {
+            doc.export(loro::ExportMode::updates_in_range(vec![loro::IdSpan::new(
+                peer, from, to,
+            )]))
+        };
+        let mut out = Vec::new();
+        if start != self.next {
+            // Ahead: an earlier commit's hook hasn't run yet. Behind: part of
+            // this batch went out with a gap fill. Either way the doc has
+            // exactly the ops from `next`.
+            match range(self.next, end) {
+                Ok(missing) => out.push(missing),
+                Err(err) => {
+                    tracing::warn!(%err, "chat2: couldn't reorder a local update; publishing it as is");
+                    out.push(bytes.to_vec());
+                }
+            }
+        } else {
+            out.push(bytes.to_vec());
+        }
+        self.next = end;
+        out
+    }
+}
+
+#[cfg(test)]
+mod own_ops_order_tests {
+    use super::OwnOpsOrder;
+    use std::sync::{Arc, Mutex};
+
+    /// Three local commits and the bytes each one's hook received.
+    fn three_commits() -> (loro::LoroDoc, OwnOpsOrder, Vec<Vec<u8>>) {
+        let doc = loro::LoroDoc::new();
+        let hooks: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let log = hooks.clone();
+        let sub = doc.subscribe_local_update(Box::new(move |bytes| {
+            log.lock().unwrap().push(bytes.clone());
+            true
+        }));
+        let order = OwnOpsOrder::new(&doc);
+        for text in ["first entry", "a steered message", "its reply"] {
+            doc.get_list("messages").push(text).unwrap();
+            doc.commit();
+        }
+        drop(sub);
+        let hooks = hooks.lock().unwrap().clone();
+        assert_eq!(hooks.len(), 3);
+        (doc, order, hooks)
+    }
+
+    #[test]
+    fn hooks_that_ran_out_of_commit_order_still_publish_in_it() {
+        let (doc, mut order, hooks) = three_commits();
+        // The third commit's hook runs first, then the first's, then the second's.
+        let published: Vec<Vec<u8>> = [2, 0, 1]
+            .into_iter()
+            .flat_map(|i| order.order(&doc, &hooks[i]))
+            .collect();
+        assert_eq!(
+            published.len(),
+            1,
+            "the early hook carries the missing range"
+        );
+        let reader = loro::LoroDoc::new();
+        for batch in &published {
+            assert!(
+                reader.import(batch).unwrap().pending.is_none(),
+                "a reader parked a batch"
+            );
+        }
+        assert_eq!(reader.oplog_vv(), doc.oplog_vv());
+    }
+
+    #[test]
+    fn hooks_in_commit_order_publish_their_own_bytes() {
+        let (doc, mut order, hooks) = three_commits();
+        let published: Vec<Vec<u8>> = hooks.iter().flat_map(|h| order.order(&doc, h)).collect();
+        assert_eq!(published, hooks);
+    }
+}

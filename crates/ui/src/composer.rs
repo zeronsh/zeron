@@ -9088,6 +9088,17 @@ impl Composer {
             }
             if should_publish_optimistic_echo(queue) {
                 s.push_echo(&chat_id, echo);
+                // A send that brings a Cloud machine up shows its first setup
+                // step at once; the machine adds the rest as it gets there.
+                let boot = if is_new {
+                    matches!(plan, crate::pickers::CheckoutPlan::Cloud { .. }).then_some(false)
+                } else {
+                    s.cloud_machine_booting(&chat_id)
+                        .map(|state| state != zeron_proto::CloudState::Provisioning)
+                };
+                if let Some(waking) = boot {
+                    s.push_cloud_setup_echo(&chat_id, &message_id, created_at, waking);
+                }
                 // Working overlay until the host executes the queued command —
                 // without it a remote send flashed Completed (and could ring
                 // the done-chime) in the queue→drain→sync gap.
@@ -9625,6 +9636,10 @@ impl Composer {
                     composer.failure_key = Some(restore_key.clone());
                     composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
+                        s.remove_echo(
+                            &err_chat_id,
+                            &zeron_proto::cloud_setup_entry_id(&err_message_id),
+                        );
                         s.end_pending_send(&err_chat_id, &err_message_id);
                         if is_new && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
                             // Back to the canvas; the navigation draft-swap

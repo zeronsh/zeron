@@ -616,12 +616,20 @@ pub struct EngineRuntime {
 /// attached to another headed process cannot shut down that process's engine.
 struct HeadlessRpc {
     inner: Arc<dyn RpcService>,
+    doc_host: DocHost,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 #[async_trait]
 impl RpcService for HeadlessRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method == methods::QUIESCE_FOR_SLEEP {
+            // Local IPC only (never relayed): a Cloud sleep's last check.
+            return RpcReply::value(&match self.doc_host.quiesce_for_sleep().await {
+                Ok(()) => serde_json::json!({ "quiesced": true }),
+                Err(busy) => serde_json::json!({ "quiesced": false, "busy": busy }),
+            });
+        }
         if method != methods::STOP_ENGINE {
             return self.inner.handle(method, params).await;
         }
@@ -890,13 +898,22 @@ impl Engine {
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
             );
-            // A session machine runs nothing before its project is checked
-            // out: hold the executor, clone, release (queued sends drain then).
+            // A session machine can stop without warning (a provider
+            // auto-stop, a crash) after accepting a send: the message is in
+            // its chat's room, but the nudge that said so is spent. Look at
+            // every chat it hosts once the registry has synced.
+            if runner::session().is_some()
+                && let Err(err) = core.doc_host.enqueue_wakeup("*")
+            {
+                tracing::warn!(error = %err, "runner: couldn't schedule the hosted chats' reconcile");
+            }
+            // Check the session's project out. Runs dispatched meanwhile
+            // show the setup steps live and start once it is done
+            // (`runner::setup_pending`).
             if let Some(session) = runner::session()
                 && session.repo.is_some()
             {
-                core.doc_host.hold_execution();
-                let doc_host = core.doc_host.clone();
+                runner::begin_setup();
                 let broker = broker.clone();
                 tokio::spawn(async move {
                     if let Err(err) = runner::prepare_checkout(session, Some(&broker)).await {
@@ -904,7 +921,6 @@ impl Engine {
                         // agent and the user see the failure in the chat.
                         tracing::error!(error = %err, "runner: session checkout failed");
                     }
-                    doc_host.release_execution();
                 });
             }
             core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
@@ -1039,6 +1055,7 @@ impl Engine {
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
         let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
             inner: runtime.core().rpc_service(),
+            doc_host: runtime.core().doc_host.clone(),
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, &config.data_dir, service).await?;

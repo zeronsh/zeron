@@ -4,6 +4,9 @@
 //!   cargo run -p zeron-rpc --example rpc_probe -- ws://127.0.0.1:27801 LocalDevice '{}'
 //!   cargo run -p zeron-rpc --example rpc_probe -- ws://127.0.0.1:27801 WatchSessions '{}' --stream 3
 //!
+//! A stream gives up after 30 s without an item (`RPC_PROBE_TIMEOUT_SECS`
+//! overrides — a watcher meant to keep a chat viewed needs longer).
+//!
 //! The engine's IPC bearer comes from `$ZERON_IPC_TOKEN`, `$ZERON_IPC_TOKEN_FILE`,
 //! or `$ZERON_DATA_DIR/ipc-token` (default `~/.zeron/ipc-token`) — point
 //! `ZERON_DATA_DIR` at the probed engine's data dir.
@@ -30,9 +33,13 @@ async fn main() {
     let client = connect_ws(url, token.as_deref()).await.expect("connect");
     if rest.first().map(String::as_str) == Some("--stream") {
         let count: usize = rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(1);
+        let timeout = std::env::var("RPC_PROBE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
         let mut rx = client.subscribe(method, params).await.expect("subscribe");
         for _ in 0..count {
-            match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout), rx.recv()).await {
                 Ok(Some(item)) => println!("{item}"),
                 Ok(None) => {
                     eprintln!("stream ended");

@@ -1144,7 +1144,10 @@ mod tests {
 
         // Unknown rows report false, never invent rows.
         assert!(!ws.rename_space("nope", Some("x")).unwrap());
-        assert!(!ws.set_space_git("nope", true, None, None, None, ts(1)).unwrap());
+        assert!(
+            !ws.set_space_git("nope", true, None, None, None, ts(1))
+                .unwrap()
+        );
     }
 
     #[test]

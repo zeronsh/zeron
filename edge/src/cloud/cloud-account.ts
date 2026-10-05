@@ -30,6 +30,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { AUTH_USER_HEADER, type Env } from "../env";
+import { encodeHlc } from "../registry-core";
 import { mintRunnerToken, type RunnerToken } from "../runner-token";
 import { cloudIndexStub } from "./cloud-index";
 import {
@@ -217,6 +218,9 @@ interface AccountRecord {
   /** Alarm multiplexing: the metering reconcile shares the DO's one alarm
    * with every session's idle check. */
   nextReconcileAt?: number;
+  /** A failed sweep of deleted sessions' devices retries then
+   * (`sweepStaleDevices`). */
+  sweepDevicesAt?: number;
 }
 
 interface SessionRecord {
@@ -265,6 +269,11 @@ const ACCOUNT_KEY = "account";
 const SESSION_PREFIX = "session:";
 /** A delete that crashed mid-way may be retried after this long. */
 const DELETE_STUCK_MS = 5 * 60_000;
+/** The writer the edge's own registry ops are attributed to (and clocked by). */
+const REGISTRY_WRITER = "cloud-edge";
+/** Mirrors `zeron_proto::CLOUD_SESSION_CAPABILITY` (a session machine's device). */
+const CLOUD_SESSION_CAPABILITY = "cloud-session";
+const SWEEP_RETRY_MS = 5 * 60_000;
 const FULL_NAME_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 /** Where a session machine checks its repository out (one per machine;
  * `CLOUD_PROJECTS_ROOT` overrides it for a local stack). */
@@ -340,6 +349,7 @@ export class CloudAccount extends DurableObject<Env> {
       if (s.state === "ready" && s.idleCheckAt !== undefined) due.push(s.idleCheckAt);
     }
     if (this.acct.nextReconcileAt !== undefined) due.push(this.acct.nextReconcileAt);
+    if (this.acct.sweepDevicesAt !== undefined) due.push(this.acct.sweepDevicesAt);
     if (due.length === 0) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(Math.min(...due));
   }
@@ -731,6 +741,48 @@ export class CloudAccount extends DurableObject<Env> {
     return this.beginProvision(caller, s, edgeUrl);
   }
 
+  /**
+   * Tombstone every Cloud session device in the user's registry that no
+   * session of this account owns any more — a deleted machine's engine wrote
+   * its row and is gone for good (its chat keeps its row). Nothing lists,
+   * polls or dials it again: the dial gate reads a deleted device as dark.
+   * Runs after each delete; a failure retries on the alarm.
+   */
+  private async sweepStaleDevices(): Promise<void> {
+    const { orgId, userId } = this.acct;
+    if (!orgId || !userId) return;
+    const room = this.env.REGISTRY_ROOMS.get(this.env.REGISTRY_ROOMS.idFromName(`reg1/${orgId}/${userId}`));
+    const headers = { [AUTH_USER_HEADER]: userId };
+    try {
+      const res = await room.fetch(new Request("https://registry/rows?cursor=0", { headers }));
+      if (!res.ok) throw new Error(`reading the registry: HTTP ${res.status}`);
+      const { rows } = (await res.json()) as { rows: { kind: string; id: string; deleted: boolean; fields: Record<string, unknown> }[] };
+      const stale = rows
+        .filter((r) => r.kind === "devices" && !r.deleted && !this.byDevice.has(r.id))
+        .filter((r) => Array.isArray(r.fields.capabilities) && r.fields.capabilities.includes(CLOUD_SESSION_CAPABILITY))
+        .map((r) => r.id)
+        .slice(0, 500); // one push batch; the next delete sweeps the rest
+      if (stale.length > 0) {
+        const hlc = encodeHlc(Date.now(), 0, REGISTRY_WRITER);
+        const push = await room.fetch(
+          new Request(`https://registry/push?device=${REGISTRY_WRITER}`, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify({
+              batch: `cloud-sweep-${crypto.randomUUID()}`,
+              ops: stale.map((id) => ({ kind: "devices", id, op: "delete", hlc }))
+            })
+          })
+        );
+        if (!push.ok) throw new Error(`removing ${stale.length} device rows: HTTP ${push.status}`);
+      }
+      this.acct.sweepDevicesAt = undefined;
+    } catch (e) {
+      console.warn("cloud: sweeping deleted sessions' devices failed; retrying", String(e));
+      this.acct.sweepDevicesAt = Date.now() + SWEEP_RETRY_MS;
+    }
+  }
+
   /** Claim the session device's room for its user (see DeviceRoom `/claim`). */
   private async claimDeviceRoom(deviceId: string, userId: string): Promise<void> {
     const ns = this.env.DEVICE_ROOMS;
@@ -915,6 +967,7 @@ export class CloudAccount extends DurableObject<Env> {
   /** The session is gone; its metering rows stay (its month is still billed). */
   private async finishSessionDelete(s: SessionRecord): Promise<void> {
     await this.dropSession(s);
+    await this.sweepStaleDevices();
     const sql = this.sql();
     const now = Date.now();
     this.acct.nextReconcileAt = meteringOpen(listSandboxes(sql), listUsage(sql), now)
@@ -1105,6 +1158,9 @@ export class CloudAccount extends DurableObject<Env> {
         await this.saveSession(s);
       }
     }
+    if (this.acct.sweepDevicesAt !== undefined && now >= this.acct.sweepDevicesAt) {
+      await this.sweepStaleDevices();
+    }
     if (this.acct.nextReconcileAt !== undefined && now >= this.acct.nextReconcileAt) {
       try {
         await this.reconcile(now);
@@ -1245,6 +1301,26 @@ export class CloudAccount extends DurableObject<Env> {
       await this.saveSession(s);
       await this.saveAccount();
     }
+    return true;
+  }
+
+  /**
+   * SleepWorkflow: the engine declined the sleep (a turn in flight or a
+   * message waiting) before anything stopped. The machine stays up; idle
+   * sleep tries again a full idle window later.
+   */
+  async wfSleepDeclined(chatId: string, generation: number, why: string): Promise<boolean> {
+    const s = this.current(chatId, generation);
+    if (!s || s.state !== "stopping") return false;
+    const now = Date.now();
+    s.state = "ready";
+    s.pendingWake = false;
+    s.lastActiveAt = now;
+    s.idleCheckAt = now + this.idleMs();
+    console.info("cloud sleep declined by the engine", chatId, why);
+    this.scheduleReconcile();
+    await this.saveSession(s);
+    await this.saveAccount();
     return true;
   }
 

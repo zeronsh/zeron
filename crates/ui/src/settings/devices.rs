@@ -335,28 +335,30 @@ impl Render for DevicesPage {
             }
             // Presence only says something about other devices.
             if !is_local {
-                meta.push(if matches!(
-                    presence,
-                    crate::cloud::Presence::Online | crate::cloud::Presence::Available
-                ) {
-                    div()
-                        .text_color(theme.success_muted)
-                        .child(SharedString::from(presence.label()))
-                        .into_any_element()
-                } else if !presence.warns() {
-                    // A Cloud machine that is asleep or starting answers on
-                    // its own; its last heartbeat is not news.
-                    div()
-                        .child(SharedString::from(presence.label()))
-                        .into_any_element()
-                } else {
-                    div()
-                        .child(SharedString::from(format!(
-                            "Last seen {}",
-                            format_last_seen(device.last_seen_at, now)
-                        )))
-                        .into_any_element()
-                });
+                meta.push(
+                    if matches!(
+                        presence,
+                        crate::cloud::Presence::Online | crate::cloud::Presence::Available
+                    ) {
+                        div()
+                            .text_color(theme.success_muted)
+                            .child(SharedString::from(presence.label()))
+                            .into_any_element()
+                    } else if !presence.warns() {
+                        // A Cloud machine that is asleep or starting answers on
+                        // its own; its last heartbeat is not news.
+                        div()
+                            .child(SharedString::from(presence.label()))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .child(SharedString::from(format!(
+                                "Last seen {}",
+                                format_last_seen(device.last_seen_at, now)
+                            )))
+                            .into_any_element()
+                    },
+                );
             }
             widgets::card_row(&theme, first)
                 .child(
