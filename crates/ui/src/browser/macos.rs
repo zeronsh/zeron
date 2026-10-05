@@ -149,6 +149,8 @@ pub(super) enum NativeEvent {
     NewTab(String),
     Key(gpui::Keystroke),
     Favicon { page: String, url: String },
+    /// A script's string result (`None` for any other value or a failure).
+    Evaluated(Option<String>),
 }
 
 struct ObserverState {
@@ -495,6 +497,27 @@ impl NativePage {
             }
         }
     }
+    /// Run `script` in the page; a string result arrives as
+    /// [`NativeEvent::Evaluated`].
+    pub fn evaluate(&self, script: &str) {
+        let host = self.0.borrow();
+        let tx = host.tx.clone();
+        let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let result = if error.is_null() {
+                unsafe { value.as_ref() }
+                    .and_then(|value| value.downcast_ref::<NSString>())
+                    .map(|text| text.to_string())
+            } else {
+                None
+            };
+            let _ = tx.try_send(NativeEvent::Evaluated(result));
+        });
+        unsafe {
+            host.view
+                .evaluateJavaScript_completionHandler(&NSString::from_str(script), Some(&completion));
+        }
+    }
+
     pub fn discover_favicon(&self, page: String) {
         let host = self.0.borrow();
         let tx = host.tx.clone();

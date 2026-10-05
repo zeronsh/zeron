@@ -1407,7 +1407,7 @@ pub(crate) fn selectable_text_wrap() -> Div {
     div().relative().cursor(CursorStyle::IBeam)
 }
 
-fn selectable_text_element(
+pub(crate) fn selectable_text_element(
     key: std::sync::Arc<str>,
     text: SharedString,
     runs: Vec<TextRun>,

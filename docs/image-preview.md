@@ -21,6 +21,16 @@ The existing transport limits remain: at most 8 MiB of image bytes, 384 KiB chun
 
 Each Files image surface admits at most 64 MiB of retained image resources, including its panel rendering variants. A generation guard rejects obsolete work. Collapsing the right panel or switching files, tabs or chats suspends image loads, clears media and schedules asset/atlas eviction. Resuming reloads from the owning workspace. Watcher updates do not reload hidden images; modifications, deletion and renaming invalidate the relevant image. Changing the target suspends the old view before clearing documents. Closing/disposal releases the image preview resources. Text documents retain their existing cache and editing lifecycle. Renaming an edited text file to an image extension preserves its buffer and pending save; image conversion waits until those edits are resolved. Watcher events continue through text conflict handling while edits remain.
 
+## Tool-call image previews
+
+A tool chip whose call or output names an image file (PNG, JPEG, GIF, WebP, BMP, SVG, TIFF; at most four per chip) previews it when the chip is expanded. Relative paths resolve against the chat's cwd on the owning host. Bytes arrive through `ReadAttachmentChunk`, so its jail applies: the uploads directory and chat working directories only; other paths show *Image unavailable*.
+
+`tool_images.rs` decodes one static frame on the background executor, downsamples it to at most 1120×440 and hands BGRA pixels straight to GPUI as a `RenderImage` (no re-encode, no asset cache). Nothing is read or decoded for collapsed chips or hidden groups. Collapsing starts a 600 ms grace; then the CPU frame and the sprite-atlas tiles are released. Reopening inside the grace reuses the texture, so rapid toggling never re-reads or re-decodes. Previews that are expanded but unpainted for 2 s count against a 64 MiB budget; painted ones are never evicted. Chat switches and transcript disposal release everything.
+
+Right-clicking a tool preview, a user attachment thumbnail or a generated image opens **Copy path** / **Copy image**. Copy image fetches the original file from its owning device, not the preview.
+
+`cargo run --locked -p zeron-ui --example tool-images-fixture --features appshots-fixture` opens an isolated session with mock images. `-- --capture <dir>` runs the automated expand / toggle-spam / collapse / copy check instead.
+
 ## Verification
 
 Automated coverage includes image format selection, owner-routed loading with and without synced checkout metadata, malformed/repeated/inconsistent/oversized chunks, bounded decoding, SVG sanitization, animation flattening, stale completion rejection, cancellation, disposal, and zoom geometry. A headless GPUI test dispatches actual wheel, pinch, drag, click and Escape events through the rendered lightbox. A rendered Files test loads through the owning-device client and verifies that clicking the image retains panel focus and that subsequent zoom still targets the file panel. Existing Markdown lightbox tests also verify opening and focus restoration. Regression coverage checks edited text renamed to an image extension across reopen, watcher and pending-save paths; suspension during panel collapse; wheel direction; and reuse of an unrelated cached view during zoom.

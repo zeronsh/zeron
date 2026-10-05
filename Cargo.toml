@@ -173,3 +173,27 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# Windows scene-overlay plane (zeronsh/zui#15). Drop this patch and bump the zui
+# rev above once it merges.
+[patch."https://github.com/zeronsh/zui"]
+collections = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+derive_refineable = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_linux = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_macos = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_macros = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_platform = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_shared_string = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_tokio = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_util = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_web = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_wgpu = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+gpui_windows = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+http_client = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+media = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+perf = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+refineable = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+scheduler = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+sum_tree = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
+util_macros = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }

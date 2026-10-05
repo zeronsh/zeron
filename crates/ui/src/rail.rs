@@ -50,7 +50,7 @@ fn user_text(entry: &SessionMessageEntry) -> String {
     // Attachment refs ride the message text — the rail shows the visible
     // prompt, or "Attached image(s)" for image-only sends
     // (message-attachments.ts `userMessageRailText`).
-    crate::attachments::user_message_rail_text(&raw)
+    crate::attachments::user_message_rail_text(&zeron_proto::annotation::annotation_display(&raw))
 }
 
 fn first_reply_text(entries: &[SessionMessageEntry]) -> Option<String> {

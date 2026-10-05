@@ -7,6 +7,10 @@ mod macos;
 use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
+#[cfg(windows)]
+mod windows_webview;
+#[cfg(windows)]
+use windows_webview as native;
 pub mod model;
 mod view;
 
@@ -65,17 +69,38 @@ pub enum BrowserEvent {
     Changed,
     NewTab(Option<String>),
     Close,
+    /// An element the user picked; `last` ends the pick (focus the composer).
+    Annotation {
+        annotation: zeron_proto::annotation::BrowserAnnotation,
+        /// The page's marker for the element, labelled once numbered.
+        marker: u32,
+        last: bool,
+    },
+}
+
+/// The in-page picker (`annotate.js`), injected only while annotating.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+const ANNOTATE_SCRIPT: &str = include_str!("annotate.js");
+/// How often an active pick is polled. Nothing polls otherwise.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+const ANNOTATION_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// While the user picks elements on the page. Dropping it stops the poll.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+struct AnnotationSession {
+    nonce: u32,
+    _poll: gpui::Task<()>,
 }
 
 /// A window/profile's ephemeral website data, allocated on first navigation.
 #[derive(Clone, Default)]
 pub struct BrowserContext {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     data: native::BrowserData,
 }
 
 pub struct BrowserSurface {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     context: BrowserContext,
     address: Entity<ComposerInput>,
     focus: FocusHandle,
@@ -90,21 +115,26 @@ pub struct BrowserSurface {
     #[cfg(feature = "browser-fixture")]
     fixture_preview_open: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
     presentation: Presentation,
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    annotation: Option<AnnotationSession>,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     right_occlusion: gpui::Pixels,
     _input_sub: Subscription,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     native: Option<native::NativePage>,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     native_tx: tokio::sync::mpsc::Sender<native::NativeEvent>,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     _native_task: gpui::Task<()>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     favicon_task: Option<gpui::Task<()>>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     favicon_generation: u64,
+    /// The page's pointer cursor (Windows: GPUI owns the cursor).
+    #[cfg(windows)]
+    page_cursor: gpui::CursorStyle,
 }
 
 impl EventEmitter<BrowserEvent> for BrowserSurface {}
@@ -135,9 +165,9 @@ impl BrowserSurface {
                 cx.notify();
             }
         });
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         let (native_tx, mut events) = tokio::sync::mpsc::channel(64);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         let native_task = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.recv().await {
                 if this
@@ -150,10 +180,10 @@ impl BrowserSurface {
                 }
             }
         });
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let _ = (window, context);
         Self {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             context,
             address,
             focus: cx.focus_handle(),
@@ -168,21 +198,25 @@ impl BrowserSurface {
             #[cfg(feature = "browser-fixture")]
             fixture_preview_open: Default::default(),
             presentation: Presentation::Hidden,
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+            annotation: None,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             right_occlusion: gpui::px(0.0),
             _input_sub: input_sub,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             native: None,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             native_tx,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             _native_task: native_task,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             favicon_task: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             favicon_generation: 0,
+            #[cfg(windows)]
+            page_cursor: gpui::CursorStyle::Arrow,
         }
     }
 
@@ -193,7 +227,7 @@ impl BrowserSurface {
         self.remote = remote;
     }
     pub fn set_shortcuts(&mut self, keymap: &crate::settings::KeymapConfig) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(native) = &self.native {
             native.set_shortcuts(
                 crate::settings::ShortcutId::ALL
@@ -203,12 +237,12 @@ impl BrowserSurface {
                     .collect(),
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         let _ = keymap;
     }
 
     pub fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(native) = &self.native {
             native.focus_chrome();
         }
@@ -226,7 +260,7 @@ impl BrowserSurface {
     }
 
     /// Crop a GPUI overlay out of both native painting and native hit testing.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub fn set_right_occlusion(&mut self, width: gpui::Pixels, cx: &mut Context<Self>) {
         if self.right_occlusion != width {
             self.right_occlusion = width;
@@ -238,8 +272,11 @@ impl BrowserSurface {
         if self.presentation == presentation {
             return;
         }
+        if presentation == Presentation::Hidden {
+            self.stop_annotation(cx);
+        }
         self.presentation = presentation;
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         if let Some(native) = &mut self.native {
             native.present(presentation);
         }
@@ -331,9 +368,9 @@ impl BrowserSurface {
         self.page.title.clear();
         self.page.error = None;
         self.clear_favicon(cx);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             {
                 self.favicon_generation += 1;
                 self.favicon_task = None;
@@ -354,7 +391,7 @@ impl BrowserSurface {
             }
             window.focus(&self.focus, cx);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
             let _ = window;
             cx.open_url(&url);
@@ -369,7 +406,7 @@ impl BrowserSurface {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         if let Some(native) = &self.native {
             if self.page.error.is_some() {
                 if let Some(url) = &self.page.url {
@@ -380,7 +417,7 @@ impl BrowserSurface {
             }
             self.page.error = None;
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         self.open_external(cx);
         cx.notify();
     }
@@ -396,12 +433,192 @@ impl BrowserSurface {
         }
     }
 
+    /// Return the OS keyboard from the page to GPUI (the pick finished and
+    /// the composer takes over).
+    pub fn release_keyboard(&self) {
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(native) = &self.native {
+            native.focus_chrome();
+        }
+    }
+
+    pub fn annotating(&self) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
+            self.annotation.is_some()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            false
+        }
+    }
+
+    /// Annotation needs an embedded, loaded page.
+    pub fn can_annotate(&self) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
+            self.native.is_some() && self.page.url.is_some() && self.page.error.is_none()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            false
+        }
+    }
+
+    pub fn toggle_annotation(&mut self, cx: &mut Context<Self>) {
+        if self.annotating() {
+            self.stop_annotation(cx);
+        } else {
+            self.start_annotation(cx);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn start_annotation(&mut self, cx: &mut Context<Self>) {
+        if !self.can_annotate() {
+            return;
+        }
+        // Below 2^32, so the page's JavaScript numbers hold it exactly.
+        let nonce = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(1)
+            ^ 0x5a17_c0de)
+            .max(1);
+        let accent: gpui::Rgba = crate::theme::Theme::of(cx).accent.into();
+        let accent = format!(
+            "#{:02x}{:02x}{:02x}",
+            (accent.r * 255.0).round() as u8,
+            (accent.g * 255.0).round() as u8,
+            (accent.b * 255.0).round() as u8
+        );
+        self.evaluate(&format!(
+            "{ANNOTATE_SCRIPT}\n;window.__zeronAnnotator.start({nonce}, {accent:?}); 'started'"
+        ));
+        #[cfg(windows)]
+        if let Some(native) = &self.native {
+            native.focus_page();
+        }
+        let poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(ANNOTATION_POLL).await;
+                let polling = this.update(cx, |this, _| {
+                    let live = this
+                        .annotation
+                        .as_ref()
+                        .is_some_and(|session| session.nonce == nonce);
+                    if live {
+                        this.evaluate(&format!(
+                            "(() => {{ const a = window.__zeronAnnotator; return a ? a.take({nonce}) : null; }})()"
+                        ));
+                    }
+                    live
+                });
+                if !matches!(polling, Ok(true)) {
+                    return;
+                }
+            }
+        });
+        self.annotation = Some(AnnotationSession { nonce, _poll: poll });
+        cx.emit(BrowserEvent::Changed);
+        cx.notify();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    fn start_annotation(&mut self, _cx: &mut Context<Self>) {}
+
+    pub fn stop_annotation(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        if self.annotation.take().is_some() {
+            self.evaluate("(() => { window.__zeronAnnotator?.stop(); return 'stopped'; })()");
+            cx.emit(BrowserEvent::Changed);
+            cx.notify();
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        let _ = cx;
+    }
+
+    /// Picks arrive as the poll's string result. `None` means the picker is
+    /// gone (the page navigated or closed), which ends the session.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn on_evaluated(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        #[derive(serde::Deserialize)]
+        struct Pick {
+            #[serde(flatten)]
+            annotation: zeron_proto::annotation::BrowserAnnotation,
+            #[serde(default)]
+            marker: u32,
+        }
+        #[derive(serde::Deserialize)]
+        struct Poll {
+            state: String,
+            #[serde(default)]
+            picks: Vec<Pick>,
+        }
+        if self.annotation.is_none() {
+            return;
+        }
+        let Some(text) = value else {
+            self.annotation = None;
+            cx.emit(BrowserEvent::Changed);
+            cx.notify();
+            return;
+        };
+        let Ok(poll) = serde_json::from_str::<Poll>(&text) else {
+            return; // the start/stop acknowledgements
+        };
+        let finished = poll.state != "active";
+        let count = poll.picks.len();
+        for (index, pick) in poll.picks.into_iter().enumerate() {
+            cx.emit(BrowserEvent::Annotation {
+                annotation: pick.annotation.bounded(),
+                marker: pick.marker,
+                last: finished && index + 1 == count,
+            });
+        }
+        if finished {
+            self.annotation = None;
+            cx.emit(BrowserEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    /// Number a picked element's marker like its composer chip.
+    pub fn label_marker(&self, marker: u32, number: u32) {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        self.evaluate(&format!(
+            "(() => {{ window.__zeronAnnotator?.label({marker}, {number}); return 'ok'; }})()"
+        ));
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        let _ = (marker, number);
+    }
+
+    /// Keep only the markers whose chips are still in the draft.
+    pub fn keep_markers(&self, numbers: &[u32]) {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        self.evaluate(&format!(
+            "(() => {{ window.__zeronAnnotator?.keep({numbers:?}); return 'ok'; }})()"
+        ));
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        let _ = numbers;
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn evaluate(&self, script: &str) {
+        if let Some(native) = &self.native {
+            #[cfg(target_os = "linux")]
+            native.run_script(script);
+            #[cfg(not(target_os = "linux"))]
+            native.evaluate(script);
+        }
+    }
+
     fn history(&mut self, forward: bool) {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         if let Some(native) = &self.native {
             native.history(forward);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let _ = forward;
     }
 
@@ -413,9 +630,10 @@ impl BrowserSurface {
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.stop_annotation(cx);
         self.set_presentation(Presentation::Hidden, cx);
         self.clear_favicon(cx);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
             if let Some(native) = &mut self.native {
                 native.present(Presentation::Hidden);
@@ -425,7 +643,7 @@ impl BrowserSurface {
                 cx.defer(move |cx| gpui::ImageSource::Render(image).evict(None, cx));
             }
             self.native = None;
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             {
                 self.favicon_task = None;
                 self.favicon_generation += 1;
@@ -434,7 +652,7 @@ impl BrowserSurface {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl BrowserSurface {
     fn on_native_event(
         &mut self,
@@ -495,6 +713,14 @@ impl BrowserSurface {
                     });
                 }
             }
+            #[cfg(windows)]
+            native::NativeEvent::Cursor(style) => {
+                if self.page_cursor != style {
+                    self.page_cursor = style;
+                    cx.notify();
+                }
+            }
+            native::NativeEvent::Evaluated(value) => self.on_evaluated(value, cx),
             native::NativeEvent::Favicon { page, url } => {
                 if self.page.url.as_deref() != Some(&page) || !model::allowed_navigation(&url) {
                     return;
@@ -607,7 +833,11 @@ impl BrowserSurface {
             self.presentation != Presentation::Hidden
                 && self.native.as_ref().is_some_and(|n| n.image.is_some())
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(windows)]
+        {
+            self.presentation != Presentation::Hidden && self.native.is_some()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
             false
         }
@@ -637,7 +867,11 @@ impl BrowserSurface {
         if let Some(native) = &self.native {
             native.evaluate(script);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(windows)]
+        if let Some(native) = &self.native {
+            native.evaluate(script);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let _ = script;
     }
 }

@@ -22,6 +22,8 @@ pub enum NativeEvent {
     NewTab(String),
     Clipboard(String),
     Menu(Value),
+    /// A script's string result (`None` for any other value or a failure).
+    Evaluated(Option<String>),
 }
 
 #[derive(Clone, Default)]
@@ -140,8 +142,12 @@ impl BrowserData {
                         b'M' => {let Ok(menu)=serde_json::from_slice(&data) else {continue;};NativeEvent::Menu(menu)}
                         b'C' => NativeEvent::Clipboard(String::from_utf8_lossy(&data).into_owned()),
                         b'N' => NativeEvent::NewTab(String::from_utf8_lossy(&data).into_owned()),
-                        #[cfg(feature = "browser-fixture")]
-                        b'J' => { *route.evaluation.lock().unwrap() = serde_json::from_slice(&data).ok(); continue; }
+                        b'J' => {
+                            let value: Option<Value> = serde_json::from_slice(&data).ok();
+                            #[cfg(feature = "browser-fixture")]
+                            { *route.evaluation.lock().unwrap() = value.clone(); }
+                            NativeEvent::Evaluated(value.and_then(|v| v.as_str().map(str::to_owned)))
+                        }
                         _ => continue,
                     };
                     // At most one latest frame is retained per page. A busy UI
@@ -288,6 +294,11 @@ impl NativePage {
     pub fn command(&self, value: Value) {
         let _ = self.worker.send(self.id, value);
     }
+    /// Run `script` in the page; a string result arrives as
+    /// [`NativeEvent::Evaluated`].
+    pub fn run_script(&self, script: &str) {
+        self.command(json!({"cmd":"eval","script":script}));
+    }
     #[cfg(feature = "browser-fixture")]
     pub fn evaluate(&self, script: &str) {
         *self.route.evaluation.lock().unwrap() = None;
@@ -341,6 +352,7 @@ impl super::BrowserSurface {
             NativeEvent::Clipboard(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
+            NativeEvent::Evaluated(value) => self.on_evaluated(value, cx),
             NativeEvent::Frame | NativeEvent::Changed => {
                 let mut page = native.state();
                 if page.url.is_none() {

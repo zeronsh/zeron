@@ -207,9 +207,10 @@ pub fn validate_harness_invocations(text: &str, harness: crate::HarnessId) -> Re
 /// Keep selected skill identity intact until Codex builds native input blocks.
 /// Other providers receive readable Markdown and their advertised command text.
 pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
-    let text = crate::file_mentions::file_mention_prompt(
+    // Browser annotations become plain text blocks for every provider.
+    let text = crate::annotation::annotation_prompt(&crate::file_mentions::file_mention_prompt(
         &crate::attachment_mentions::attachment_mention_prompt(text),
-    );
+    ));
     if harness == crate::HarnessId::Codex {
         return text;
     }
@@ -252,7 +253,9 @@ pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
 }
 
 pub fn invocation_prompt(text: &str) -> String {
-    let text = &crate::attachment_mentions::attachment_mention_prompt(text);
+    let text = &crate::annotation::annotation_prompt(
+        &crate::attachment_mentions::attachment_mention_prompt(text),
+    );
     let mut result = String::new();
     let mut at = 0;
     for (range, invocation) in invocation_links(text) {

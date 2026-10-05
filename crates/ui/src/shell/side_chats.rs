@@ -224,7 +224,8 @@ impl Shell {
                         // mounts, and it inherits its parent's checkout, so it
                         // never runs worktree setup of its own.
                         ComposerEvent::NewThreadTransitionStarted
-                        | ComposerEvent::WorktreeSetup { .. } => {}
+                        | ComposerEvent::WorktreeSetup { .. }
+                        | ComposerEvent::AnnotationsChanged(_) => {}
                         ComposerEvent::Sent {
                             chat_id,
                             message_id,

@@ -63,6 +63,30 @@ shutdown/drop log failures. Processes started through external services or
 brokers are outside this ownership. Closing a terminal or exiting its shell also
 terminates processes detached inside that job (including `start` children).
 
+## Embedded browser
+
+Browser tabs embed Microsoft Edge WebView2 (the Evergreen runtime ships with
+Windows 10/11) in visual-hosting mode. Each page is a DirectComposition visual
+mounted in the zui overlay plane's native layer: GPUI's base content, then the
+page, then deferred GPUI content (menus, tooltips, prompts) in a second swap
+chain. DWM composites the page directly, without copies or child windows. A
+frame without deferred content detaches the overlay and draws nothing extra.
+
+GPUI receives all pointer input, so anything drawn above the page occludes it
+naturally; presses, moves and wheel events that reach the page element are
+forwarded with `SendMouseInput`. The page owns the keyboard while focused;
+browser and app shortcuts are intercepted with `AcceleratorKeyPressed` and
+dispatched to GPUI. A press on GPUI content, or an interactive overlay opening,
+returns keyboard focus to the window.
+
+All tabs of a window share one InPrivate environment (one browser process).
+Hidden tabs are unmounted and set invisible, so Chromium throttles them. The
+user-data folder (`%TEMP%\zeron-webview2`) holds only runtime caches; when
+another process still holds it (a second Zeron, or one shutting down after a
+quick restart), the window falls back to its own folder, and stale ones are
+swept in the background. Per-frame updates touch WebView2 only when geometry
+or visibility changed.
+
 Frosted window chrome uses native Acrylic and requires Windows **Settings >
 Personalization > Colors > Transparency effects**. Content cards and popovers
 remain opaque because in-app backdrop blur is not supported. The pinned
@@ -103,5 +127,5 @@ captures only its synthetic window. Results go to ignored
 `target/windows-lifecycle-*` and `target/windows-render-*` directories.
 
 Remaining acceptance work includes authenticated provider runs and shutdown,
-broader GPU/DPI coverage, accessibility, native browser and cross-device parity,
+broader GPU/DPI coverage, accessibility, cross-device parity,
 concurrent-launch log rotation, and invalid-window teardown diagnostics.

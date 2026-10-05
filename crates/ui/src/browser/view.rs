@@ -78,6 +78,11 @@ impl BrowserSurface {
         }
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
+        if key == "escape" && self.annotating() {
+            self.stop_annotation(cx);
+            cx.stop_propagation();
+            return;
+        }
         let primary = if cfg!(target_os = "macos") {
             mods.platform
         } else {
@@ -284,7 +289,7 @@ impl BrowserSurface {
         if self.page.url.is_none() && self.previews_task.is_some() {
             return self.preview_body(theme, cx);
         }
-        let external = !cfg!(any(target_os = "macos", target_os = "linux"));
+        let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_error = self.page.error.is_some();
         let title = if has_error {
             "Couldn’t load this page"
@@ -399,11 +404,140 @@ impl BrowserSurface {
     }
 }
 
+#[cfg(windows)]
+impl BrowserSurface {
+    /// The page composites natively beneath GPUI's overlay plane; this
+    /// element only positions it and forwards pointer input that GPUI's hit
+    /// testing delivers here, so popovers above the page occlude naturally.
+    fn windows_page(
+        &self,
+        body: gpui::Stateful<gpui::Div>,
+        host: std::rc::Rc<super::native::Host>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        use super::native::{PointerKind, wheel_units};
+        let entity = cx.entity().downgrade();
+        let forward = |kind: PointerKind| {
+            move |this: &mut Self,
+                  position: gpui::Point<gpui::Pixels>,
+                  button: Option<MouseButton>,
+                  modifiers: gpui::Modifiers,
+                  clicks: usize| {
+                if let Some(native) = &this.native {
+                    native.pointer(kind, position, button, modifiers, clicks);
+                }
+            }
+        };
+        let right_occlusion = self.right_occlusion;
+        let mut body = body.cursor(self.page_cursor).child(
+            gpui::canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    // The Files panel slides over the page from the right.
+                    let mut mask = window.content_mask().bounds;
+                    let right = (window.viewport_size().width - right_occlusion).max(mask.left());
+                    mask.size.width = mask.size.width.min(right - mask.left());
+                    let scale = window.scale_factor();
+                    let composition = window.native_composition();
+                    let page = std::rc::Rc::downgrade(&host);
+                    window.on_present(move || {
+                        if let Some(page) = page.upgrade() {
+                            page.sync(bounds, mask, scale, composition);
+                        }
+                    });
+                    // A drag that began in the page keeps extending its
+                    // selection outside the page, like a native child.
+                    let capture = entity.clone();
+                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble
+                            && !bounds.contains(&event.position)
+                            && !cx.has_active_drag()
+                        {
+                            let _ = capture.update(cx, |this, _| {
+                                if let Some(native) =
+                                    this.native.as_ref().filter(|native| native.pressed())
+                                {
+                                    native.pointer(
+                                        PointerKind::Move,
+                                        event.position,
+                                        None,
+                                        event.modifiers,
+                                        0,
+                                    );
+                                }
+                            });
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0(),
+        );
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let down = forward(PointerKind::Down);
+            let up = forward(PointerKind::Up);
+            let up_out = forward(PointerKind::Up);
+            body = body
+                .on_mouse_down(
+                    button,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        if cx.has_active_drag() {
+                            return;
+                        }
+                        window.focus(&this.focus, cx);
+                        down(
+                            this,
+                            event.position,
+                            Some(event.button),
+                            event.modifiers,
+                            event.click_count,
+                        );
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_up(
+                    button,
+                    cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                        up(this, event.position, Some(event.button), event.modifiers, 0);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_up_out(
+                    button,
+                    cx.listener(move |this, event: &gpui::MouseUpEvent, _, _| {
+                        if this.native.as_ref().is_some_and(|native| native.pressed()) {
+                            up_out(this, event.position, Some(event.button), event.modifiers, 0);
+                        }
+                    }),
+                );
+        }
+        let moved = forward(PointerKind::Move);
+        body.on_mouse_move(
+            cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                if !cx.has_active_drag() {
+                    moved(this, event.position, None, event.modifiers, 0);
+                }
+            }),
+        )
+        .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+            if let Some(native) = &this.native {
+                native.wheel(event.position, wheel_units(event.delta), event.modifiers);
+                cx.stop_propagation();
+            }
+        }))
+        .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+            if !*hovered && let Some(native) = &this.native {
+                native.leave();
+            }
+        }))
+    }
+}
+
 impl Render for BrowserSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let focused = self.address.focus_handle(cx).is_focused(window);
-        let external = !cfg!(any(target_os = "macos", target_os = "linux"));
+        let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_page = self.page.url.is_some();
         let back = button(
             "browser-back",
@@ -446,11 +580,11 @@ impl Render for BrowserSurface {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", windows))]
                     if let Some(native) = &this.native {
                         native.focus_chrome();
                     }
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(not(any(target_os = "macos", windows)))]
                     let _ = this;
                 }),
             )
@@ -503,9 +637,35 @@ impl Render for BrowserSurface {
         .when(has_page, |el| {
             el.on_click(cx.listener(|this, _, _, cx| this.open_external(cx)))
         });
+        // Annotation picks an element on the page into the composer.
+        let annotating = self.annotating();
+        let can_annotate = self.can_annotate();
+        let annotate = crate::files::toolbar_button(
+            "browser-annotate",
+            if annotating {
+                "Stop annotating"
+            } else {
+                "Annotate an element"
+            },
+        )
+        .when(!can_annotate, |el| el.cursor_default().opacity(0.35))
+        .when(annotating, |el| el.bg(crate::theme::wash(0.10)))
+        .child(
+            icons::icon(icons::CURSOR_SQUARE)
+                .size(px(surface_chrome::ICON_SIZE))
+                .text_color(if annotating {
+                    theme.accent
+                } else {
+                    theme.text_muted
+                }),
+        )
+        .when(can_annotate, |el| {
+            el.on_click(cx.listener(|this, _, _, cx| this.toggle_annotation(cx)))
+        });
         let toolbar = surface_chrome::toolbar(&theme)
             .when(!external, |el| el.child(back).child(forward).child(reload))
             .child(address)
+            .when(!external, |el| el.child(annotate))
             .child(open);
 
         let body = div()
@@ -613,7 +773,17 @@ impl Render for BrowserSurface {
         } else {
             body.child(self.empty_body(&theme, cx))
         };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(windows)]
+        let body = if let Some(native) = &self.native {
+            if self.page.error.is_some() {
+                body.child(self.empty_body(&theme, cx))
+            } else {
+                self.windows_page(body, native.handle(), cx)
+            }
+        } else {
+            body.child(self.empty_body(&theme, cx))
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let body = body.child(self.empty_body(&theme, cx));
 
         #[cfg(target_os = "linux")]
