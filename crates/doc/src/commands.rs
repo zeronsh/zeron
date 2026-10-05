@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{RunRequest, UserInputAnswer};
+use zeron_proto::{GoalCommand, RunRequest, UserInputAnswer};
 
 use crate::constants::COMMAND_DEFAULT_TTL_MS;
 
@@ -21,6 +21,9 @@ pub enum SessionCommandKind {
     Steer,
     Interrupt,
     RespondInput,
+    /// Goal-mode mutation (`/goal`); additive — hosts that predate it skip
+    /// the entry as unreadable and the goal simply never changes there.
+    Goal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +57,14 @@ pub enum SessionCommandPayload {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
+    Goal {
+        command: GoalCommand,
+        /// The agent chat that issued it through its tools; absent when a
+        /// person did (the composer's `/goal`, the tray). The host gives agents
+        /// a narrower set of goal actions than people.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        issuer: Option<String>,
+    },
 }
 
 impl SessionCommandPayload {
@@ -63,6 +74,7 @@ impl SessionCommandPayload {
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
+            SessionCommandPayload::Goal { .. } => SessionCommandKind::Goal,
         }
     }
 }

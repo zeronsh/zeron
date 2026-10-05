@@ -125,6 +125,11 @@ name (default: the local engine's device).
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `get_goal`         | `WatchDocMessages` opening frame (`goal`)                 |
+| `set_goal`         | `QueueCommand` Goal `set`, then waits for the host        |
+| `pause_goal`       | `QueueCommand` Goal `pause`                               |
+| `resume_goal`      | `QueueCommand` Goal `resume`                              |
+| `clear_goal`       | `QueueCommand` Goal `clear`                               |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
@@ -233,6 +238,54 @@ prompt. If completion arrives before the transcript, the wait allows the new
 assistant response to arrive within the **same timeout**. A previous response
 is never substituted for a missing response to a new send. An unfinished
 transcript or missing response at the deadline returns `timedOut`.
+
+## Goals
+
+`set_goal {objective, chat?, max_rounds?, token_budget?, time_budget_seconds?,
+replace?}` gives a chat a goal: it keeps working turn after turn until an
+independent verifier chat judges the objective met (`docs/goal-mode.md`). `chat`
+defaults to the chat this server speaks for (`ZERON_CHAT_ID`); another chat is
+named like in `send_message`. The tool queues the command and waits a few seconds
+for the host to apply it, then returns the goal; a host that is offline applies it
+when it returns (the result says `queued`). `get_goal` returns the goal with its
+verdict history, budgets and stop reason, or `null`.
+
+Trust rules: there is **no tool that completes a goal** — only the verifier
+child chat can. Goal commands from these tools carry the calling chat as their
+issuer, and the chat's host applies narrower rules to them than to a person's
+(`agent_goal_permission`), so relaying a request through another chat changes
+nothing:
+
+- an agent cannot give **its own chat** a goal, and sets at most the default
+  number of rounds;
+- a goal still in play can be paused, resumed, replaced or cleared only by the
+  agent that set it, so **no agent can change a goal a person set** (a finished
+  goal may be cleared or followed by a new one);
+- only a person extends a goal **past its limit**.
+
+The tools check the same rules before queuing, so a refusal returns at once with
+its reason. A process that bypasses the tools and writes commands to the engine's
+local port directly is outside this model (see the ask profile below).
+
+## The ask profile
+
+The engine injects a restricted server into the hidden child chat of a *child
+ask* (goal verifiers today, workflow agents next) by adding `ZERON_ASK_ID`. That
+server lists only `whoami`, `get_chat` and `read_chat` plus the run-scoped
+`submit_result`, whose input schema is the ask's JSON Schema (fetched with
+`GetAskSpec`; a non-object schema travels under a `result` key). `submit_result`
+posts to `SubmitAskResult`: an accepted result completes the ask, a rejected one
+returns the path-level violations as an error result so the model repairs and calls
+again (three repair rounds, then the ask fails).
+
+Only the child's own server can answer. The engine also puts a per-ask secret in
+that server's environment (`ZERON_ASK_TOKEN`), keeps it in memory (never in the
+synced doc, where `meta.askChild` is a bare marker), and refuses any
+`SubmitAskResult` without it. Both RPCs are machine-local: the device relay refuses
+them, so another device on the account cannot answer for a verifier. The token
+guards against a stray or curious process that learned the ids; a process running
+as the same OS user can still read another process's environment, so it is not a
+sandbox boundary.
 
 ## Parallel side chats
 

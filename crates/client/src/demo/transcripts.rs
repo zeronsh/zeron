@@ -79,7 +79,7 @@ pub(crate) fn entry(
     created_at: i64,
     parts: Vec<MessagePart>,
 ) -> SessionMessageEntry {
-    SessionMessageEntry {
+    SessionMessageEntry { origin: None,
         id: id.into(),
         role,
         parts,

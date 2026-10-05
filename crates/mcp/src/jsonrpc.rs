@@ -43,7 +43,13 @@ Discover hosts with `list_devices`, then `list_projects {device}`, \
 `list_harnesses {device}` and `list_models {device, harness}`. A project fixes \
 its host; with both project and device it must belong to that device. Use listed \
 ids when names/paths repeat. Without project or device, creation uses the local engine. \
-If a chat is `awaitingInput`, answer it with `respond_to_input`.";
+If a chat is `awaitingInput`, answer it with `respond_to_input`.\n\
+\n\
+`set_goal` makes a chat keep working until an independent verifier chat \
+judges the objective met; `get_goal` reads its progress. A goal can only be \
+completed by its verifier. You cannot give your own chat a goal, change a goal \
+a person set, or extend a goal past its limit; only the agent that set a goal \
+can pause, resume, replace or clear it.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -161,7 +167,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
             )
         }
         "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, json!({ "tools": tools.list() })),
+        "tools/list" => ok_response(id, json!({ "tools": tools.list().await })),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return error_response(id, INVALID_PARAMS, "tools/call needs a tool name");

@@ -59,15 +59,20 @@ it("drains 300 queued wakes through a bounded acknowledgment window", async () =
     seen.add(receipt.chatId);
     ws.send(encodeDeviceFrame({s:receipt.chatId,k:"nudgeAck"},frame.payload));
   });
-  await runInDurableObject(room, async (_i, state) => {
-    for (let i=0;i<300;i++) enqueueNudge(state.storage.sql, `chat-${i}`);
-    await state.storage.setAlarm(Date.now()+5000);
-  });
-  await runDurableObjectAlarm(room);
-  await expect.poll(() => seen.size, {timeout:5000}).toBe(300);
-  await expect.poll(() => runInDurableObject(room, (_i, state) => pendingNudges(state.storage.sql).length)).toBe(0);
-  ws.close();
-});
+  try {
+    await runInDurableObject(room, async (_i, state) => {
+      for (let i=0;i<300;i++) enqueueNudge(state.storage.sql, `chat-${i}`);
+      await state.storage.setAlarm(Date.now()+5000);
+    });
+    await runDurableObjectAlarm(room);
+    await expect.poll(() => seen.size, {timeout:10_000}).toBe(300);
+    await expect.poll(() => runInDurableObject(room, (_i, state) => pendingNudges(state.storage.sql).length), {timeout:5_000}).toBe(0);
+  } finally {
+    ws.close();
+  }
+// Leave time for setup and acknowledgment persistence outside the polling
+// deadlines. The default five-second test deadline raced the original poll.
+}, 20_000);
 
 it("keeps legacy hosts usable without acknowledgment support", async () => {
   const room = env.DEVICE_ROOMS.get(env.DEVICE_ROOMS.idFromName(crypto.randomUUID()));

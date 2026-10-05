@@ -225,6 +225,7 @@ mod tests {
 
     fn entry(id: &str, role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
         SessionMessageEntry {
+            origin: None,
             duration_ms: None,
             id: id.into(),
             role,

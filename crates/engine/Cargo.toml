@@ -28,6 +28,8 @@ chrono.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
+# JSON Schema validation of child-ask results (pure Rust).
+boon = "0.6"
 toml = "0.8"
 libc.workspace = true
 gethostname.workspace = true

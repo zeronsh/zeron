@@ -49,6 +49,12 @@ pub struct QueuedMessage {
     /// `ReviewRequired`; they never silently become sendable again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_gate: Option<QueueDeliveryGate>,
+    /// Set for rows the engine queued on someone's behalf (a goal-mode round
+    /// prompt). It becomes the transcript entry's origin on delivery, so UIs
+    /// can render a marker instead of a user bubble. Absent on every row a
+    /// person typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<zeron_proto::MessageOrigin>,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -96,6 +102,7 @@ impl QueuedMessage {
             issued_at: 0,
             edited_at: None,
             delivery_gate: None,
+            origin: None,
         }
     }
 }
@@ -359,6 +366,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
             crate::schema::loro_value_from_json(&serde_json::to_value(gate)?),
         )?;
     }
+    if let Some(origin) = &item.origin {
+        map.insert(
+            "origin",
+            crate::schema::loro_value_from_json(&serde_json::to_value(origin)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -402,6 +415,9 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
                 })
             }),
         },
+        origin: v
+            .get("origin")
+            .and_then(|origin| serde_json::from_value(origin.clone()).ok()),
     })
 }
 
@@ -415,6 +431,7 @@ mod tests {
 
     fn item(id: &str, text: &str) -> QueuedMessage {
         QueuedMessage {
+            origin: None,
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),

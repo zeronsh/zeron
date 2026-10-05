@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
         Origin {
             chat_id: Some("smoke-origin".into()),
             device_id: Some("smoke-device".into()),
+            ..Default::default()
         },
     )));
     zeron_mcp::serve_stdio(Arc::new(tools)).await?;
