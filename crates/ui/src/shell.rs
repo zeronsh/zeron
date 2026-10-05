@@ -1112,7 +1112,7 @@ struct RightTabDragState {
     prev_over: usize,
 }
 
-/// Sidebar-only drag payload. Regular sessions never acquire a manual order.
+/// Sidebar session drag: reorder inside the list, attach context over a chat.
 #[derive(Clone)]
 struct SidebarSessionDrag {
     chat_id: String,
@@ -7599,7 +7599,10 @@ impl Shell {
                         shell.begin_sidebar_session_transfer(payload, point, window, cx);
                     });
                     cx.stop_propagation();
-                    cx.new(|_| DragGhost)
+                    cx.new(|_| chat_dropzone::ChatContextDragGhost {
+                        shell: shell.downgrade(),
+                        chat_id: payload.chat_id.clone(),
+                    })
                 })
             })
             // A row revealed for an inline rename reports where it painted,
@@ -10509,6 +10512,7 @@ impl Shell {
                     .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
             .child(Self::attachment_drop_overlay(theme))
+            .child(self.chat_context_drop_overlay(&self.composer, cx))
             .into_any_element()
     }
 

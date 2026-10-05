@@ -357,8 +357,9 @@ impl Shell {
                     )
                     .children(pill),
             )
-            .child(div().flex_none().child(composer))
+            .child(div().flex_none().child(composer.clone()))
             .child(Self::attachment_drop_overlay(Theme::of(cx)))
+            .child(self.chat_context_drop_overlay(&composer, cx))
             .into_any_element()
     }
 }

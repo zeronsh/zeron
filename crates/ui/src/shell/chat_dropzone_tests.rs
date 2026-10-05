@@ -4,11 +4,33 @@ use gpui::{AppContext, TestAppContext, VisualTestContext};
 struct DropHost {
     shell: Entity<Shell>,
     full_shell: bool,
+    direct_sidebar: bool,
     _data_dir: tempfile::TempDir,
 }
 
 impl Render for DropHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Direct rows retain debug bounds between frames; the native fixture
+        // exercises the full shell with its cached sidebar.
+        if self.direct_sidebar {
+            return self.shell.update(cx, |shell, cx| {
+                let sidebar = shell.render_chat_sidebar(&Theme::of(cx).clone(), cx);
+                let main = shell.render_main(window, 600., 600., cx);
+                let right = shell.render_right_pane(window, cx);
+                div()
+                    .size_full()
+                    .flex()
+                    .child(
+                        div()
+                            .w(px(shell.settings.sidebar_width))
+                            .h_full()
+                            .child(sidebar),
+                    )
+                    .child(div().w(px(600.)).h_full().child(main))
+                    .child(right)
+                    .into_any_element()
+            });
+        }
         if self.full_shell {
             return div()
                 .size_full()
@@ -80,6 +102,14 @@ fn setup_with_shell(
     cx: &mut TestAppContext,
     full_shell: bool,
 ) -> (Entity<Shell>, &mut VisualTestContext) {
+    setup_options(cx, full_shell, false)
+}
+
+fn setup_options(
+    cx: &mut TestAppContext,
+    full_shell: bool,
+    direct_sidebar: bool,
+) -> (Entity<Shell>, &mut VisualTestContext) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -126,7 +156,13 @@ fn setup_with_shell(
                     .unwrap(),
                 ];
                 state.selected_chat = Some("parent".into());
+                let mut reference = state.chats[0].clone();
+                reference.id = "reference".into();
+                reference.title = Some("Authentication design".into());
+                state.chats.push(reference);
             });
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.settings.sidebar_collapsed = false;
             shell.active_chat = "parent".into();
             shell.splash = SplashPhase::Gone;
             shell.reduced_motion = true;
@@ -135,6 +171,7 @@ fn setup_with_shell(
         DropHost {
             shell,
             full_shell,
+            direct_sidebar,
             _data_dir: dir,
         }
     });
@@ -207,11 +244,14 @@ fn full_shell_file_tab_drops_reach_side_chat_body(cx: &mut TestAppContext) {
 }
 
 fn drag(cx: &mut VisualTestContext, source: &'static str, to: Point<Pixels>) {
-    let from = cx.debug_bounds(source).unwrap().center();
+    let from = cx
+        .debug_bounds(source)
+        .unwrap_or_else(|| panic!("missing drag source {source}"))
+        .center();
     cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
     cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
     cx.update(|window, cx| {
-        assert!(cx.has_active_drag());
+        assert!(cx.has_active_drag(), "drag did not start from {source}");
         window.draw(cx).clear();
     });
     cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
@@ -222,6 +262,83 @@ fn drag(cx: &mut VisualTestContext, source: &'static str, to: Point<Pixels>) {
 
 fn text(composer: &Entity<Composer>, cx: &App) -> String {
     composer.read(cx).input.read(cx).text().to_owned()
+}
+
+fn drag_chat(cx: &mut VisualTestContext, source: &'static str, to: Point<Pixels>) {
+    cx.update(|window, cx| window.draw(cx).clear());
+    let from = cx.debug_bounds(source).unwrap().center();
+    cx.simulate_mouse_move(from, None, gpui::Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_move(
+        from + gpui::point(px(8.), px(0.)),
+        Some(MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    cx.update(|window, cx| {
+        assert!(cx.has_active_drag(), "{source}");
+        window.draw(cx).clear();
+    });
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
+    cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear());
+}
+
+#[gpui::test]
+fn sidebar_chat_drops_add_context_to_the_target_pane_once(cx: &mut TestAppContext) {
+    let (shell, cx) = setup_options(cx, false, true);
+    cx.simulate_resize(gpui::size(px(1400.), px(900.)));
+    cx.update(|window, cx| window.draw(cx).clear());
+    let pins = shell.read_with(cx, |shell, cx| shell.active_sidebar_pins(cx));
+    let selected = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+    let to = cx.debug_bounds("chat-dropzone").unwrap().center();
+    drag_chat(cx, "chat-reference", to);
+    drag_chat(cx, "chat-reference", to);
+    shell.read_with(cx, |shell, cx| {
+        let raw = text(&shell.composer, cx);
+        let links = zeron_proto::chat_mentions::chat_mention_links(&raw);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].1.chat_id, "reference");
+        assert_eq!(links[0].1.title, "Authentication design");
+        assert_eq!(shell.active_sidebar_pins(cx), pins);
+        assert_eq!(shell.state.read(cx).selected_chat, selected);
+        assert!(shell.sidebar_session_transfer.is_none());
+        assert!(text(&shell.side_chats[&2].composer, cx).is_empty());
+    });
+    // Main self-drops are ignored, including drops over the composer itself.
+    let before = shell.read_with(cx, |shell, cx| text(&shell.composer, cx));
+    drag_chat(cx, "chat-parent", to);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(text(&shell.composer, cx), before)
+    });
+    for id in [1, 2] {
+        let to = cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.activate_right_surface(RightSurface::SideChat(id), window, cx)
+            });
+            window.draw(cx).clear();
+            shell.read(cx).side_chats[&id]
+                .composer
+                .read(cx)
+                .surface_bounds()
+                .get()
+                .unwrap()
+                .center()
+        });
+        drag_chat(cx, "chat-reference", to);
+        shell.read_with(cx, |shell, cx| {
+            let raw = text(&shell.side_chats[&id].composer, cx);
+            assert_eq!(
+                zeron_proto::chat_mentions::chat_mention_links(&raw)[0]
+                    .1
+                    .chat_id,
+                "reference"
+            );
+            assert_eq!(text(&shell.composer, cx), before);
+        });
+    }
 }
 
 #[gpui::test]

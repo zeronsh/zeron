@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub mod capabilities {
     /// The host decodes durable composer references at the harness boundary.
     pub const COMPOSER_REFERENCES_V1: &str = "composer-references-v1";
+    /// The host converts chat context chips into MCP-readable identities.
+    pub const CHAT_CONTEXT_V1: &str = "chat-context-v1";
     pub const MESSAGE_QUEUE_V1: &str = "message-queue-v1";
     pub const MESSAGE_QUEUE_ACTIONS_V1: &str = "message-queue-actions-v1";
     pub const MESSAGE_QUEUE_ATTACHMENTS_V1: &str = "message-queue-attachments-v1";
@@ -18,6 +20,7 @@ pub mod capabilities {
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
+        CHAT_CONTEXT_V1,
         MESSAGE_QUEUE_V1,
         MESSAGE_QUEUE_ACTIONS_V1,
         MESSAGE_QUEUE_ATTACHMENTS_V1,
@@ -98,6 +101,7 @@ mod tests {
                 "cursorSdkVersion": "1.0.31",
                 "capabilities": [
                     "composer-references-v1",
+                    "chat-context-v1",
                     "message-queue-v1",
                     "message-queue-actions-v1",
                     "message-queue-attachments-v1",

@@ -902,16 +902,8 @@ fn reference_suffix(next: Option<char>) -> (&'static str, usize) {
     }
 }
 
-fn dropped_file_mention(
-    content: &str,
-    range: Range<usize>,
-    path: &str,
-    is_dir: bool,
-) -> Option<(String, usize)> {
-    if range.start > range.end
-        || !local_path_is_safe(path)
-        || !content.is_char_boundary(range.start)
-    {
+fn dropped_reference(content: &str, range: Range<usize>, link: &str) -> Option<(String, usize)> {
+    if range.start > range.end || !content.is_char_boundary(range.start) {
         return None;
     }
     let suffix = content.get(range.end..)?;
@@ -927,9 +919,21 @@ fn dropped_file_mention(
         ""
     };
     let (trailing, advance) = reference_suffix(suffix.chars().next());
-    let inserted = format!("{prefix}{}{trailing}", local_file_link(path, is_dir));
+    let inserted = format!("{prefix}{link}{trailing}");
     let cursor_advance = inserted.len() + advance;
     Some((inserted, cursor_advance))
+}
+
+fn dropped_file_mention(
+    content: &str,
+    range: Range<usize>,
+    path: &str,
+    is_dir: bool,
+) -> Option<(String, usize)> {
+    if !local_path_is_safe(path) {
+        return None;
+    }
+    dropped_reference(content, range, &local_file_link(path, is_dir))
 }
 
 fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
@@ -1176,6 +1180,17 @@ impl TextProjection {
     fn project(raw: &str, active: Option<Range<usize>>, compact: bool) -> Self {
         let mut links = file_mention_links(raw);
         links.extend(
+            zeron_proto::chat_mentions::chat_mention_links(raw)
+                .into_iter()
+                .map(|(range, reference)| FileMentionLink {
+                    range,
+                    basename: reference.title,
+                    path: format!("Chat · {}", reference.chat_id),
+                    is_dir: false,
+                    prefix: '#',
+                }),
+        );
+        links.extend(
             zeron_proto::invocation::invocation_links(raw)
                 .into_iter()
                 .map(|(range, invocation)| FileMentionLink {
@@ -1394,6 +1409,7 @@ pub struct SentMentionSpan {
 pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)> {
     if !raw.contains(FILE_MENTION_SCHEME)
         && !raw.contains(zeron_proto::invocation::INVOCATION_SCHEME)
+        && !raw.contains(zeron_proto::chat_mentions::CHAT_MENTION_SCHEME)
     {
         return None;
     }
@@ -2172,6 +2188,46 @@ impl ComposerInput {
         self.content =
             self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
         let cursor = range.start + cursor_advance;
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.caret_affinity = CaretAffinity::Downstream;
+        self.preferred_column = None;
+        self.refresh_projection();
+        self.follow_cursor = true;
+        self.reset_blink();
+        self.needs_measure = true;
+        cx.emit(ComposerInputEvent::Edited);
+        cx.notify();
+        true
+    }
+
+    fn insert_chat_reference(
+        &mut self,
+        reference: &zeron_proto::chat_mentions::ChatReference,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.read_only || self.marked_range.is_some() {
+            return false;
+        }
+        // A repeated drop reuses the existing reference, including a title snapshot.
+        if zeron_proto::chat_mentions::chat_mention_links(&self.content)
+            .iter()
+            .any(|(_, existing)| existing.chat_id == reference.chat_id)
+        {
+            return false;
+        }
+        let range = self.selected_range.clone();
+        let Some((inserted, advance)) =
+            dropped_reference(&self.content, range.clone(), &reference.link())
+        else {
+            return false;
+        };
+        self.invalidate_mention_tooltip();
+        self.record_edit(&range, &inserted);
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.content =
+            self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
+        let cursor = range.start + advance;
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.caret_affinity = CaretAffinity::Downstream;
@@ -6290,6 +6346,28 @@ impl Composer {
         }
     }
 
+    /// A sidebar chat drop edits only this composer's durable draft.
+    pub(crate) fn add_chat_reference(
+        &mut self,
+        reference: &zeron_proto::chat_mentions::ChatReference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .input
+            .update(cx, |input, cx| input.insert_chat_reference(reference, cx))
+        {
+            self.reset_mention(None, cx);
+            self.reset_slash(None, cx);
+            window.focus(&self.input.read(cx).focus_handle.clone(), cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn context_chat_id(&self, cx: &App) -> Option<String> {
+        self.state.read(cx).selected_chat.clone()
+    }
+
     fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.queue_edit_finishing {
             return;
@@ -7905,6 +7983,21 @@ impl Composer {
 
     /// Check before consuming drafts, attachments, or an edited queue row.
     pub(crate) fn check_reference_delivery(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if !zeron_proto::chat_mentions::chat_mention_links(text).is_empty() {
+            let state = self.state.read(cx);
+            let target = state
+                .selected_chat_row()
+                .map(|chat| chat.device_id.clone())
+                .or_else(|| state.effective_device_id());
+            if !target
+                .is_some_and(|device| state.device_supports(&device, capabilities::CHAT_CONTEXT_V1))
+            {
+                self.failure = Some("Update the selected device’s Zeron to send chat context. Your draft is preserved.".into());
+                self.failure_key = Some(self.current_key.clone());
+                cx.notify();
+                return false;
+            }
+        }
         if references_require_update(text, self.reference_delivery_supported(cx)) {
             self.failure = Some("Update the selected device’s Zeron to send file, command, or skill references. Your draft is preserved.".into());
             self.failure_key = Some(self.current_key.clone());
@@ -12697,6 +12790,59 @@ mod tests {
             assert_eq!(input.selected_range, start..before.len());
             assert!(input.selection_reversed);
         });
+    }
+
+    #[gpui::test]
+    fn chat_context_chips_are_atomic_undoable_and_preserve_identity(cx: &mut gpui::TestAppContext) {
+        with_composer_input(cx, |input, window, cx| {
+            let reference =
+                zeron_proto::chat_mentions::ChatReference::new("chat-id", "Auth design").unwrap();
+            input.set_text("Compare now", cx);
+            input.selected_range = 8..8;
+            assert!(input.insert_chat_reference(&reference, cx));
+            let raw = input.text().to_owned();
+            assert!(raw.starts_with("Compare "));
+            assert!(raw.ends_with(" now"));
+            assert_eq!(input.projection.mentions.len(), 1);
+            assert!(input.projection.display.contains("#Auth"));
+            assert!(!input.projection.display.contains("zeron-chat:"));
+            assert!(!input.insert_chat_reference(&reference, cx));
+            let (display, spans) = sent_mention_display(&raw).unwrap();
+            assert!(display.contains("#Auth"));
+            assert_eq!(spans.len(), 1);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "Compare now");
+            input.redo(&Redo, window, cx);
+            assert_eq!(input.text(), raw);
+            let chip = input.projection.mentions[0].0.range.clone();
+            input.selected_range = chip;
+            input.replace_text_in_range(None, "", window, cx);
+            assert!(zeron_proto::chat_mentions::chat_mention_links(input.text()).is_empty());
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), raw);
+            input.marked_range = Some(0..0);
+            let other = zeron_proto::chat_mentions::ChatReference::new("other", "Other").unwrap();
+            assert!(!input.insert_chat_reference(&other, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn older_host_preserves_chat_context_draft(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle.update(cx, |composer, _, cx| {
+            let draft = zeron_proto::chat_mentions::ChatReference::new("source", "Source").unwrap().link();
+            composer.input.update(cx, |input, cx| input.set_text(draft.clone(), cx));
+            composer.state.update(cx, |state, _| {
+                state.selected_device = Some("peer".into());
+                state.devices = vec![serde_json::from_value(serde_json::json!({
+                    "id": "peer", "name": "Peer", "platform": "linux", "capabilities": [capabilities::COMPOSER_REFERENCES_V1]
+                })).unwrap()];
+            });
+            assert!(!composer.check_reference_delivery(&draft, cx));
+            assert_eq!(composer.input.read(cx).text(), draft);
+            composer.state.update(cx, |state, _| state.devices[0].capabilities.push(capabilities::CHAT_CONTEXT_V1.into()));
+            assert!(composer.check_reference_delivery(&draft, cx));
+        }).unwrap();
     }
 
     #[gpui::test]

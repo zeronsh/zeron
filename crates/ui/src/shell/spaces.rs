@@ -2833,7 +2833,9 @@ impl Shell {
             &mut self.sidebar_session_return.as_mut().unwrap().transfer
         };
         let origin = f32::from(transfer.origin.get().y - viewport.top()) + scroll_top;
-        let target = if returning {
+        let outside_sidebar = transfer.pointer.x > viewport.right()
+            || transfer.pointer.x < viewport.left();
+        let target = if returning || outside_sidebar {
             origin
         } else {
             f32::from(transfer.pointer.y - transfer.cursor_offset.y - viewport.top()) + scroll_top
