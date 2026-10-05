@@ -128,12 +128,11 @@ export class RegistryRoom implements DurableObject {
   /** The newest seq ever issued, derived from the table itself. `MAX` rides
    * the `rows_seq` index; rows only ever leave through tombstone GC, which
    * raises `gcFloor` to the purged max, so the head never moves backward. The
-   * stored `seq` is a lower bound on top: reissuing a seq a client already
-   * holds would make it skip the new rows.
-   *
-   * Reading this way is what makes it safe to STOP storing `seq` (a row
-   * write per push) in a later release: this release is that one's rollback
-   * target, and it reads correctly whether or not the stored copy kept up. */
+   * seq is not stored — that cost a row write per push. Rooms from releases
+   * that stored it keep their last `seq` as a lower bound: reissuing a seq a
+   * client already holds would make it skip the new rows. Roll back no
+   * further than the first release that READ this way (#746); anything older
+   * trusts only the stored copy, which no longer keeps up. */
   private seq(): number {
     const max = [...this.ctx.storage.sql.exec("SELECT MAX(seq) AS m FROM rows")][0]?.m as
       | number
@@ -480,10 +479,7 @@ export class RegistryRoom implements DurableObject {
     }
     if (applied > 0) {
       for (const row of touched.values()) this.saveRow(row);
-      // Still stored for releases that read ONLY this key (everything before
-      // the derived `seq()`): rolling back to one must not reissue a seq.
-      this.setMeta("seq", String(nextSeq));
-      this.markBackupDirty();
+      this.armBackupAlarm();
     }
     this.recordPush(device, true);
     const seq = applied > 0 ? nextSeq : this.seq();
@@ -597,11 +593,9 @@ export class RegistryRoom implements DurableObject {
     this.pushOutcomes.record(device, ok);
   }
 
-  /** `backupDirty` is written only when it flips (once per backup cycle, not
-   * once per push) and only for releases whose alarm still gates on it —
-   * this one's alarm decides from `seq > backupSeq`. */
-  private markBackupDirty(): void {
-    if (this.getMeta("backupDirty") !== "1") this.setMeta("backupDirty", "1");
+  /** Arm the daily alarm if it isn't already. Whether there is anything to
+   * do is `seq > backupSeq`, decided when the alarm fires. */
+  private armBackupAlarm(): void {
     void this.ctx.storage.getAlarm().then((existing) => {
       if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
     });
@@ -609,11 +603,7 @@ export class RegistryRoom implements DurableObject {
 
   /** Daily alarm: tombstone GC + nightly R2 backup of the full table. Not
    * re-armed here: an idle room stops the chain, and the next applied push
-   * re-arms it.
-   *
-   * Gated on the seq, not on `backupDirty`, so a later release may stop
-   * writing the flag and still roll back to this one without skipping a
-   * backup. */
+   * re-arms it. */
   async alarm(): Promise<void> {
     const seq = this.seq();
     if (seq <= Number(this.getMeta("backupSeq") ?? "0")) return; // idle: stop the chain
@@ -644,9 +634,6 @@ export class RegistryRoom implements DurableObject {
       JSON.stringify({ seq, at: Date.now(), rows })
     );
     this.setMeta("backupSeq", String(seq));
-    // Cleared only if nothing landed while the R2 put was in flight — a push
-    // in that window saw the flag already set and left it for us.
-    if (this.getMeta("backupDirty") === "1" && this.seq() <= seq) this.setMeta("backupDirty", "0");
   }
 }
 

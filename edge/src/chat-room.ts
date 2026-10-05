@@ -132,7 +132,7 @@ export class ChatRoom implements DurableObject {
       if (body.byteLength > MAX_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
       const outcome = commitCheckpoint(sql, this.blobs, seqCovered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
-      this.markBackupDirty();
+      this.armBackupAlarm();
       return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
     }
 
@@ -266,7 +266,7 @@ export class ChatRoom implements DurableObject {
       }
       this.recordPush(device, true);
       if (!outcome.dup) {
-        this.markBackupDirty();
+        this.armBackupAlarm();
         // Live relay to every ready socket — a same-device socket would
         // re-import its own bytes as a Loro no-op, so no exclusion needed.
         for (const socket of this.ctx.getWebSockets()) {
@@ -453,7 +453,7 @@ export class ChatRoom implements DurableObject {
     }
     this.recordPush(state.device, true);
     if (!outcome.dup) {
-      this.markBackupDirty();
+      this.armBackupAlarm();
       // Live relay to every OTHER ready socket — the sender has its own
       // bytes; it gets the ack (contrast RegistryRoom, whose LWW merge means
       // the sender must see the merged truth — here bytes are opaque and
@@ -518,12 +518,9 @@ export class ChatRoom implements DurableObject {
     this.pushOutcomes.record(device, ok);
   }
 
-  /** `backupDirty` is written only when it flips (once per backup cycle, not
-   * once per push) and only for releases whose alarm still gates on it —
-   * this one's alarm decides from `headSeq > backupSeq`. */
-  private markBackupDirty(): void {
-    const sql = this.ctx.storage.sql;
-    if (getMeta(sql, "backupDirty") !== "1") setMeta(sql, "backupDirty", "1");
+  /** Arm the nightly backup if it isn't already. Whether there is anything
+   * to back up is `headSeq > backupSeq`, decided when the alarm fires. */
+  private armBackupAlarm(): void {
     void this.ctx.storage.getAlarm().then((existing) => {
       if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
     });
@@ -531,11 +528,7 @@ export class ChatRoom implements DurableObject {
 
   /** Daily alarm: nightly R2 backup, seq-monotonic so a reset-and-reseeding
    * room can never replace the last good copy with a hollow one. Not re-armed
-   * here: an idle room stops the chain, and the next push re-arms it.
-   *
-   * Gated on the head, not on `backupDirty`, so a later release may stop
-   * writing the flag and still roll back to this one without skipping a
-   * backup. */
+   * here: an idle room stops the chain, and the next push re-arms it. */
   async alarm(): Promise<void> {
     const sql = this.ctx.storage.sql;
     const head = headSeq(sql);
@@ -559,11 +552,6 @@ export class ChatRoom implements DurableObject {
         })
       );
       setMeta(sql, "backupSeq", String(head));
-    }
-    // Cleared only if nothing landed while the R2 put was in flight — a push
-    // in that window saw the flag already set and left it for us.
-    if (getMeta(sql, "backupDirty") === "1" && headSeq(sql) <= Number(getMeta(sql, "backupSeq") ?? "0")) {
-      setMeta(sql, "backupDirty", "0");
     }
   }
 }

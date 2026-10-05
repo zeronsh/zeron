@@ -8,12 +8,12 @@ import type { Op } from "../../src/registry-core";
  * (2026-10 bill: ~10M/day, ~94% ChatRoom + RegistryRoom pushes). Counts come
  * from the runtime's own cursors, not from a model of SQLite.
  *
- * Rollout is two-stage so every deploy keeps a safe rollback target:
- * - this release derives the head from the log and gates backups on it, but
- *   still STORES `headSeq`/`seq` and the `backupDirty` flag that earlier
- *   releases read — a push costs 3 rows (data 2 + stored head 1);
- * - the next release stops storing them (2 rows) with this one as its
- *   rollback target. The "rollback" cases below pin both directions. */
+ * Rollout was two-stage so every deploy keeps a safe rollback target: #746
+ * derived the head from the log and gated backups on it while still storing
+ * `headSeq`/`seq` and `backupDirty` for older releases; this release stops
+ * storing them, so a push pays for its data only (2 rows). Its rollback
+ * floor is #746, which reads state written here correctly — the "readable
+ * by the rollback target" cases pin that. */
 
 /** Wrap `sql.exec` to sum what every statement in `fn` wrote. */
 const rowsWrittenBy = async (sql: SqlStorage, fn: () => Promise<unknown>): Promise<number> => {
@@ -58,7 +58,7 @@ const unstoredAppend = (sql: SqlStorage, batchId: string): number => {
 };
 
 describe("chat log", () => {
-  it("an append writes the row, its batch_id index entry and the stored head", async () => {
+  it("an append writes only the row and its batch_id index entry", async () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("append-writes"));
     await runInDurableObject(stub, async (_instance, state) => {
       const sql = state.storage.sql;
@@ -67,25 +67,24 @@ describe("chat log", () => {
       const written = await rowsWrittenBy(sql, async () => {
         appendRow(sql, "dev", "b2", new Uint8Array([2]), 1);
       });
-      expect(written).toBe(3);
+      expect(written).toBe(2);
     });
   });
 
-  it("rollback: old → this → old keeps seqs dense and unique", async () => {
-    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("rollback-old"));
+  it("no longer stores the head (rollback floor: #746, which derives it)", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("unstored-head"));
     await runInDurableObject(stub, (_instance, state) => {
       const sql = state.storage.sql;
       ensureChatLog(sql);
       expect(legacyAppend(sql, "o1")).toBe(1);
-      expect(appendRow(sql, "dev", "n1", new Uint8Array([1]), 0)).toMatchObject({ seq: 2 });
-      expect(appendRow(sql, "dev", "n2", new Uint8Array([1]), 0)).toMatchObject({ seq: 3 });
-      // Had this release stopped storing `headSeq`, it would still read 1
-      // and the old release would reissue seq 2 (UNIQUE constraint failed).
-      expect(legacyAppend(sql, "o2")).toBe(4);
+      appendRow(sql, "dev", "n1", new Uint8Array([1]), 0);
+      appendRow(sql, "dev", "n2", new Uint8Array([1]), 0);
+      expect(getMeta(sql, "headSeq")).toBe("1");
+      expect(headSeq(sql)).toBe(3);
     });
   });
 
-  it("rollback: next → this reads a head the stored copy never saw", async () => {
+  it("readable by the rollback target: a head the stored copy never saw", async () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("rollback-next"));
     await runInDurableObject(stub, (_instance, state) => {
       const sql = state.storage.sql;
@@ -93,7 +92,6 @@ describe("chat log", () => {
       appendRow(sql, "dev", "a", new Uint8Array([1]), 0);
       expect(unstoredAppend(sql, "b")).toBe(2);
       expect(unstoredAppend(sql, "c")).toBe(3);
-      expect(getMeta(sql, "headSeq")).toBe("1");
       expect(appendRow(sql, "dev", "d", new Uint8Array([1]), 0)).toMatchObject({ seq: 4 });
     });
   });
@@ -106,7 +104,7 @@ describe("ChatRoom push", () => {
       body: new Uint8Array([1, 2, 3])
     });
 
-  it("a steady-state HTTP push writes its row and the stored head — no bookkeeping", async () => {
+  it("a steady-state HTTP push writes only its row", async () => {
     const stub = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName("push-writes"));
     await runInDurableObject(stub, async (instance, state) => {
       expect((await instance.fetch(push("warm"))).status).toBe(200);
@@ -114,7 +112,7 @@ describe("ChatRoom push", () => {
         const response = await instance.fetch(push("b2"));
         expect(await response.json()).toEqual({ batchId: "b2", seq: 2, dup: false });
       });
-      expect(written).toBe(3);
+      expect(written).toBe(2);
     });
   });
 
@@ -127,21 +125,7 @@ describe("ChatRoom push", () => {
     expect(stats.pushOutcomes.dev).toMatchObject({ ok: 3, rejected: 0 });
   });
 
-  it("rollback: the stored flag still marks unbacked rows for an old alarm", async () => {
-    const stub = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName("backup-flag"));
-    await runInDurableObject(stub, async (instance, state) => {
-      const sql = state.storage.sql;
-      await instance.fetch(push("a"));
-      expect(getMeta(sql, "backupDirty")).toBe("1");
-      await instance.alarm();
-      expect(getMeta(sql, "backupDirty")).toBe("0");
-      await instance.fetch(push("b"));
-      // An old release's alarm gates on exactly this.
-      expect(getMeta(sql, "backupDirty")).toBe("1");
-    });
-  });
-
-  it("rollback: next → this backs up rows the flag never marked", async () => {
+  it("the nightly alarm backs up once per new head, with no dirty flag", async () => {
     const stub = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName("backup-next"));
     await runInDurableObject(stub, async (instance, state) => {
       const sql = state.storage.sql;
@@ -153,9 +137,8 @@ describe("ChatRoom push", () => {
       // Nothing new since the last backup: no rewrite.
       await instance.alarm();
       expect(await env.BLOBS.head(key)).toBeNull();
-      // The next release appends without touching backupDirty.
-      unstoredAppend(sql, "b");
-      expect(getMeta(sql, "backupDirty")).toBe("0");
+      await instance.fetch(push("b"));
+      expect(getMeta(sql, "backupDirty")).toBeUndefined();
       await instance.alarm();
       expect(await env.BLOBS.head(key)).not.toBeNull();
     });
@@ -175,10 +158,8 @@ describe("RegistryRoom push", () => {
       method: "POST",
       body: JSON.stringify({ batch: crypto.randomUUID(), ops: [op(tick)] })
     });
-  const meta = (sql: SqlStorage, key: string) =>
-    [...sql.exec("SELECT value FROM meta WHERE key = ?", key)][0]?.value as string | undefined;
 
-  it("a steady-state one-row push writes that row and the stored seq — no bookkeeping", async () => {
+  it("a steady-state one-row push writes only that row", async () => {
     const stub = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName("push-writes"));
     await runInDurableObject(stub, async (instance, state) => {
       expect((await instance.fetch(push(1))).status).toBe(200);
@@ -186,31 +167,17 @@ describe("RegistryRoom push", () => {
         const response = await instance.fetch(push(2));
         expect(await response.json()).toMatchObject({ seq: 2, applied: 1 });
       });
-      expect(written).toBe(3);
+      expect(written).toBe(2);
     });
   });
 
-  it("rollback: the stored seq and flag keep tracking for an old release", async () => {
-    const stub = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName("rollback-old"));
-    await runInDurableObject(stub, async (instance, state) => {
-      const sql = state.storage.sql;
-      await instance.fetch(push(1));
-      await instance.fetch(push(2));
-      // An old release reads ONLY these: its next push must be seq 3, and its
-      // alarm must see the unbacked change.
-      expect(meta(sql, "seq")).toBe("2");
-      expect(meta(sql, "backupDirty")).toBe("1");
-    });
-  });
-
-  it("rollback: next → this continues past a seq the stored copy never saw", async () => {
+  it("readable by the rollback target: a seq the stored copy never saw", async () => {
     const stub = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName("rollback-next"));
     await runInDurableObject(stub, async (instance, state) => {
       const sql = state.storage.sql;
       await instance.fetch(push(1));
-      // The next release applied a batch at seq 2 without storing it.
+      // A batch at seq 2 that the stored copy never recorded.
       sql.exec("UPDATE rows SET seq = 2");
-      expect(meta(sql, "seq")).toBe("1");
       // Trusting the stored seq alone would reissue seq 2, and a client
       // already at cursor 2 would get an empty incremental response.
       const response = await instance.fetch(push(3));

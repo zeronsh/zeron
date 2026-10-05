@@ -51,12 +51,11 @@ export const setMeta = (sql: SqlStorage, key: string, value: string): void => {
 /** The newest seq ever issued, derived from the log itself. `seq` is the
  * rowid, so `MAX` is one b-tree probe; rows only ever leave through a
  * checkpoint, which records the floor, so an empty log's head is `seqFloor`.
- * The stored `headSeq` is a lower bound on top: reissuing a seq a client
- * already holds would make it skip the new row.
- *
- * Reading this way is what makes it safe to STOP storing `headSeq` (a row
- * write per append) in a later release: this release is that one's rollback
- * target, and it reads correctly whether or not the stored copy kept up. */
+ * Not stored — that cost a row write per append. Rooms from releases that
+ * stored it keep their last `headSeq` as a lower bound: reissuing a seq a
+ * client already holds would make it skip the new row. Roll back no further
+ * than the first release that READ this way (#746); anything older trusts
+ * only the stored copy, which no longer keeps up. */
 export const headSeq = (sql: SqlStorage): number => {
   const max = [...sql.exec("SELECT MAX(seq) AS m FROM rows")][0]?.m as number | null;
   return Math.max(max ?? 0, seqFloor(sql), Number(getMeta(sql, "headSeq") ?? "0"));
@@ -96,9 +95,6 @@ export const appendRow = (
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     receivedAt
   );
-  // Still stored for releases that read ONLY this key (everything before
-  // the derived `headSeq`): rolling back to one must not reissue a seq.
-  setMeta(sql, "headSeq", String(seq));
   return { ok: true, seq, dup: false };
 };
 
