@@ -837,6 +837,7 @@ async fn target_device_id_routes_over_the_relay() {
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
     let command = serde_json::to_value(SessionCommandPayload::Run {
         request: RunRequest {
+            policy: Default::default(),
             mcp: None,
             prompt: "run remotely".into(),
             harness: None,
@@ -1938,6 +1939,7 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
         Origin {
             chat_id: Some("coordinator".into()),
             device_id: Some("device-a".into()),
+            ask_id: None,
         },
     )));
     a.workspace

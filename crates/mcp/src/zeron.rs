@@ -34,6 +34,9 @@ const RESUBSCRIBE_DELAY: Duration = Duration::from_millis(300);
 pub struct Origin {
     pub chat_id: Option<String>,
     pub device_id: Option<String>,
+    /// Set on the server injected into a child ask's chat: it then serves the
+    /// restricted ask toolset plus `submit_result`.
+    pub ask_id: Option<String>,
 }
 
 impl Origin {
@@ -47,6 +50,7 @@ impl Origin {
         Self {
             chat_id: read("ZERON_CHAT_ID"),
             device_id: read("ZERON_DEVICE_ID"),
+            ask_id: read(zeron_proto::ASK_ID_ENV),
         }
     }
 }
@@ -68,6 +72,10 @@ pub struct HarnessInfo {
     pub installed: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// The permission modes the harness honours on the listing device
+    /// (bypass-only from engines predating policies).
+    #[serde(default)]
+    pub policy: zeron_proto::PolicyCaps,
 }
 
 fn default_true() -> bool {
@@ -264,6 +272,20 @@ impl Zeron {
         })
     }
 
+    /// The permission mode new chats on `device` start in (Bypass when the
+    /// device can't say — an engine predating the setting).
+    pub async fn default_mode(&self, device: &str) -> zeron_proto::PermissionMode {
+        self.call(
+            methods::GET_POLICY_SETTINGS,
+            json!({ "targetDeviceId": device }),
+        )
+        .await
+        .ok()
+        .and_then(|value| value.get("defaultMode").cloned())
+        .and_then(|mode| serde_json::from_value(mode).ok())
+        .unwrap_or_default()
+    }
+
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
         self.models_on(harness, None).await
     }
@@ -329,6 +351,64 @@ impl Zeron {
             if is_reset {
                 return Ok(entries);
             }
+        }
+    }
+
+    /// The chat's goal, from the opening frame of its transcript watch.
+    pub async fn goal(&self, chat_id: &str) -> anyhow::Result<Option<zeron_proto::Goal>> {
+        let mut rx = self
+            .subscribe(methods::WATCH_DOC_MESSAGES, json!({ "chatId": chat_id }))
+            .await?;
+        let first = match tokio::time::timeout(SNAPSHOT_TIMEOUT, rx.recv()).await {
+            Ok(Some(item)) => item,
+            Ok(None) => bail!("WatchDocMessages: stream ended before its first frame"),
+            Err(_) => bail!(
+                "WatchDocMessages: no frame within {}s",
+                SNAPSHOT_TIMEOUT.as_secs()
+            ),
+        };
+        match first.get("goal") {
+            None | Some(Value::Null) => Ok(None),
+            Some(goal) => serde_json::from_value(goal.clone())
+                .map(Some)
+                .context("WatchDocMessages: bad goal"),
+        }
+    }
+
+    /// The ask this server serves: what `submit_result` must advertise.
+    pub async fn ask_spec(&self) -> anyhow::Result<zeron_proto::AskSpecInfo> {
+        let (chat_id, ask_id) = self.ask_ids()?;
+        let value = self
+            .call(
+                methods::GET_ASK_SPEC,
+                json!({ "chatId": chat_id, "askId": ask_id }),
+            )
+            .await?;
+        serde_json::from_value(value).context("GetAskSpec: unexpected shape")
+    }
+
+    /// `submit_result`: the engine validates and answers.
+    pub async fn submit_ask_result(
+        &self,
+        result: Value,
+    ) -> anyhow::Result<zeron_proto::AskSubmitReply> {
+        let (chat_id, ask_id) = self.ask_ids()?;
+        // The engine accepts a result only with the ask's secret, which it
+        // put in this server's environment alone.
+        let token = std::env::var(zeron_proto::ASK_TOKEN_ENV).unwrap_or_default();
+        let value = self
+            .call(
+                methods::SUBMIT_ASK_RESULT,
+                json!({ "chatId": chat_id, "askId": ask_id, "token": token, "result": result }),
+            )
+            .await?;
+        serde_json::from_value(value).context("SubmitAskResult: unexpected shape")
+    }
+
+    fn ask_ids(&self) -> anyhow::Result<(&str, &str)> {
+        match (&self.origin.chat_id, &self.origin.ask_id) {
+            (Some(chat), Some(ask)) => Ok((chat, ask)),
+            _ => bail!("this server is not serving a child ask"),
         }
     }
 

@@ -486,16 +486,20 @@ pub(crate) fn parse_commands(value: Option<&Value>) -> Vec<SlashCommand> {
 }
 
 /// `session/request_permission` options (`{optionId, name, kind}`) → the
-/// preferred auto-approve choice: `allow_always` > `allow_once` > first.
+/// preferred auto-approve choice: `allow_always` > `allow_once` > the first
+/// option that isn't a reject. Never a `reject_*` option: with nothing to
+/// allow with, the caller answers `cancelled`.
 pub(crate) fn preferred_allow_option(options: &[Value]) -> Option<String> {
-    let by_kind = |kind: &str| {
-        options
-            .iter()
-            .find(|o| o.get("kind").and_then(Value::as_str) == Some(kind))
+    let kind = |o: &Value| {
+        o.get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
     };
+    let by_kind = |wanted: &str| options.iter().find(|o| kind(o) == wanted);
     by_kind("allow_always")
         .or_else(|| by_kind("allow_once"))
-        .or_else(|| options.first())
+        .or_else(|| options.iter().find(|o| !kind(o).starts_with("reject")))
         .map(|o| str_field(o, "optionId"))
         .filter(|id| !id.is_empty())
 }
@@ -730,8 +734,17 @@ mod tests {
             json!({ "optionId": "no", "name": "Reject", "kind": "reject_once" }),
         ];
         assert_eq!(preferred_allow_option(&options), Some("always".into()));
-        let only_reject = vec![json!({ "optionId": "no", "kind": "reject_once" })];
-        assert_eq!(preferred_allow_option(&only_reject), Some("no".into()));
+        // A reject is never the "allow": nothing to allow with → cancelled.
+        let only_reject = vec![
+            json!({ "optionId": "no", "kind": "reject_once" }),
+            json!({ "optionId": "never", "kind": "reject_always" }),
+        ];
+        assert_eq!(preferred_allow_option(&only_reject), None);
+        let reject_first = vec![
+            json!({ "optionId": "no", "kind": "reject_once" }),
+            json!({ "optionId": "go", "name": "Proceed" }),
+        ];
+        assert_eq!(preferred_allow_option(&reject_first), Some("go".into()));
         assert_eq!(preferred_allow_option(&[]), None);
     }
 

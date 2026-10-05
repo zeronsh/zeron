@@ -1261,6 +1261,7 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            policy: Default::default(),
         };
         window
             .update(cx, |page, _, cx| {

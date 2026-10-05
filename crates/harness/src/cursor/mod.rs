@@ -236,6 +236,12 @@ impl Harness for CursorHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
     }
+    /// Bypass only: the @cursor/sdk hard-codes `ignoreApprovals`, so the
+    /// agent never asks before a tool and no policy can answer for it. The
+    /// stricter modes wait for an OS sandbox that confines the process.
+    fn policy_caps(&self) -> zeron_proto::PolicyCaps {
+        zeron_proto::PolicyCaps::bypass_only()
+    }
     /// "Installed" means the user's own cursor-agent CLI is present — the
     /// user-visible signal they use Cursor (the SDK itself is a managed
     /// install zeron performs on demand).
@@ -1021,6 +1027,19 @@ mod tests {
                     text: "sub says".into()
                 }),
             }]
+        );
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_offers_only_bypass() {
+        assert_eq!(
+            CursorHarness::new().policy_caps(),
+            zeron_proto::PolicyCaps::bypass_only()
         );
     }
 }

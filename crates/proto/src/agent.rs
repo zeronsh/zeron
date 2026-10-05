@@ -227,6 +227,10 @@ pub struct RunRequest {
     pub sandbox: SandboxLevel,
     #[serde(default)]
     pub auto_approve: bool,
+    /// What the agent may do (mode, sandbox, standing rules). Absent from an
+    /// old sender = `Bypass`, which is what every run did before policies.
+    #[serde(default)]
+    pub policy: crate::AgentPolicy,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Absolute paths of image attachments already staged on the run device

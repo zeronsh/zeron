@@ -18,6 +18,8 @@ struct TurnWire {
     steering: Option<mpsc::Sender<crate::SteerMessage>>,
     polls: Arc<std::sync::atomic::AtomicUsize>,
     command_failure_release: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Approval questions the run asked (answered from `answers` overrides).
+    approvals: Arc<std::sync::Mutex<Vec<UserInputQuestion>>>,
     server: tokio::task::JoinHandle<()>,
     run: tokio::task::JoinHandle<()>,
 }
@@ -198,6 +200,7 @@ impl TurnWire {
                         match path.as_str() {
                             "/api/health" => ("200 OK", health.as_str()),
                             "/api/session" => ("200 OK", r#"{"data":{"id":"fixture"}}"#),
+                            "/api/agent" => ("200 OK", r#"{"data":[{"id":"build","name":"Build","mode":"primary"},{"id":"plan","name":"Plan","mode":"primary"}]}"#),
                             "/api/command" => ("200 OK", r#"{"data":[]}"#),
                             // Non-empty: the catalog-sync retry loop must not stall tests.
                             "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true},{"providerID":"opencode","id":"long-context","name":"Long Context","limit":{"context":2000},"enabled":true}]}"#),
@@ -207,6 +210,7 @@ impl TurnWire {
                         match path.as_str() {
                             "/global/health" => ("200 OK", r#"{"healthy":true,"version":"1.18.31"}"#),
                             "/session" => ("200 OK", r#"{"id":"fixture"}"#),
+                            "/agent" => ("200 OK", r#"[{"name":"build","mode":"primary"},{"name":"plan","mode":"primary"}]"#),
                             "/command" => (
                                 "200 OK",
                                 if native_command_reply.is_some() {
@@ -251,12 +255,46 @@ impl TurnWire {
             .as_object_mut()
             .unwrap()
             .extend(overrides.as_object().unwrap().clone());
+        // Approval answers, in order; any approval beyond them fails the run.
+        let approval_answers: Arc<std::sync::Mutex<VecDeque<String>>> =
+            Arc::new(std::sync::Mutex::new(
+                overrides["answers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+            ));
+        let approvals = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked = approvals.clone();
         let run = tokio::spawn(run_session(Session {
             server: Server::attached(base),
             event_tx,
             controls: RunControls {
                 execution_lease: None,
                 request_input: Box::new(move |questions| {
+                    if questions.first().is_some_and(|q| {
+                        q.id.starts_with(zeron_proto::policy::APPROVAL_QUESTION_PREFIX)
+                    }) {
+                        let label = approval_answers
+                            .lock()
+                            .unwrap()
+                            .pop_front()
+                            .expect("fixture got an unexpected approval question");
+                        asked.lock().unwrap().extend(questions.iter().cloned());
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(
+                            questions
+                                .into_iter()
+                                .map(|q| UserInputAnswer {
+                                    question_id: q.id,
+                                    labels: vec![label.clone()],
+                                })
+                                .collect(),
+                        );
+                        return rx;
+                    }
                     let answer = answer.expect("fixture must not ask for input");
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(
@@ -301,6 +339,7 @@ impl TurnWire {
                 Some(NativeCommandReply::DelayedHttp404)
             )
             .then_some(command_failure_release),
+            approvals,
             server,
             run,
         }
@@ -1744,6 +1783,314 @@ async fn permissions_always_approve_without_user_input() {
             }
         }
     }
+}
+
+/// A run under `policy` on either wire, past its first prompt. `answers` are
+/// the user's answers to approval questions, in order.
+async fn policy_wire(v2: bool, policy: Value, answers: Value) -> TurnWire {
+    let mut wire = TurnWire::start_config(
+        false,
+        v2,
+        false,
+        None,
+        "2.0.11",
+        json!({"policy": policy, "answers": answers}),
+        false,
+    )
+    .await;
+    if v2 {
+        wire.request("/api/model").await;
+    }
+    wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+        .await;
+    wire
+}
+
+impl TurnWire {
+    /// opencode asks permission: 1.x `{permission, patterns, metadata}`,
+    /// 2.x `{action, resources, metadata}`.
+    fn ask_permission(&self, v2: bool, id: &str, kind: &str, subjects: &[&str], metadata: Value) {
+        if v2 {
+            self.v2(
+                "permission.asked",
+                json!({"id":id, "sessionID":"fixture", "action":kind, "resources":subjects, "metadata":metadata}),
+            );
+        } else {
+            self.bus
+                .send(json!({"type":"permission.asked", "properties":{
+                    "id":id, "sessionID":"fixture", "permission":kind, "patterns":subjects,
+                    "metadata":metadata, "always":[]}}))
+                .unwrap();
+        }
+    }
+
+    /// The reply to permission `id`, as `(decision, message)`.
+    async fn permission_reply(&self, id: &str) -> (String, Option<String>) {
+        let body = self.posted(&format!("/permission/{id}/reply")).await;
+        let decision = body
+            .get("decision")
+            .or_else(|| body.get("reply"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        (decision, body["message"].as_str().map(str::to_owned))
+    }
+
+    fn approvals(&self) -> Vec<UserInputQuestion> {
+        self.approvals.lock().unwrap().clone()
+    }
+}
+
+#[tokio::test]
+async fn bypass_answers_every_permission_once_without_asking() {
+    for v2 in [false, true] {
+        let wire = policy_wire(v2, json!({"mode": "bypass"}), json!([])).await;
+        wire.ask_permission(
+            v2,
+            "push",
+            "bash",
+            &["git push --force origin main"],
+            json!({}),
+        );
+        assert_eq!(wire.permission_reply("push").await, ("once".into(), None));
+        assert!(wire.approvals().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn ask_mode_routes_permissions_to_the_user_and_honours_the_answer() {
+    for v2 in [false, true] {
+        let wire = policy_wire(
+            v2,
+            json!({"mode": "ask"}),
+            json!(["Allow once", "Deny", "Always allow"]),
+        )
+        .await;
+        // Reading never asks.
+        wire.ask_permission(v2, "read", "read", &["/etc/hosts"], json!({}));
+        assert_eq!(wire.permission_reply("read").await, ("once".into(), None));
+        // Allow once allows only this one.
+        wire.ask_permission(v2, "deploy-1", "bash", &["make deploy"], json!({}));
+        assert_eq!(
+            wire.permission_reply("deploy-1").await,
+            ("once".into(), None)
+        );
+        let asked = wire.approvals();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].question, "Allow the agent to run `make deploy`?");
+        assert_eq!(asked[0].options, vec!["Allow once", "Always allow", "Deny"]);
+        // ... so the same command asks again; Deny rejects with feedback.
+        wire.ask_permission(v2, "deploy-2", "bash", &["make deploy"], json!({}));
+        let (decision, message) = wire.permission_reply("deploy-2").await;
+        assert_eq!(decision, "reject");
+        assert!(message.unwrap().contains("denied"));
+        // Always allow is remembered for the run (and never sent to
+        // opencode as its durable "always").
+        let edit = json!({"filepath": "/w/src/a.rs"});
+        wire.ask_permission(v2, "edit-1", "edit", &["src/a.rs"], edit.clone());
+        assert_eq!(wire.permission_reply("edit-1").await, ("once".into(), None));
+        wire.ask_permission(v2, "edit-2", "edit", &["src/a.rs"], edit);
+        assert_eq!(wire.permission_reply("edit-2").await, ("once".into(), None));
+        let asked = wire.approvals();
+        assert_eq!(asked.len(), 3, "the remembered edit asked again");
+        assert_eq!(asked[2].question, "Allow the agent to edit /w/src/a.rs?");
+    }
+}
+
+#[tokio::test]
+async fn auto_mode_runs_dev_commands_and_refuses_force_pushes_without_asking() {
+    for v2 in [false, true] {
+        let wire = policy_wire(v2, json!({"mode": "auto"}), json!([])).await;
+        wire.ask_permission(
+            v2,
+            "test",
+            "bash",
+            &["cargo test -p zeron-engine"],
+            json!({}),
+        );
+        assert_eq!(wire.permission_reply("test").await, ("once".into(), None));
+        // 1.x lists each simple command of a pipeline as its own pattern.
+        wire.ask_permission(
+            v2,
+            "push",
+            "bash",
+            &["git status", "git push --force origin main"],
+            json!({}),
+        );
+        let (decision, message) = wire.permission_reply("push").await;
+        assert_eq!(decision, "reject");
+        assert!(message.unwrap().contains("published history"));
+        // Internal bookkeeping is never a question.
+        wire.ask_permission(v2, "todo", "todowrite", &["*"], json!({}));
+        assert_eq!(wire.permission_reply("todo").await, ("once".into(), None));
+        assert!(wire.approvals().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn plan_mode_selects_the_plan_agent_and_refuses_edits() {
+    for v2 in [false, true] {
+        let wire = policy_wire(v2, json!({"mode": "plan"}), json!([])).await;
+        let agent = if v2 {
+            wire.posted("/api/session").await["agent"].clone()
+        } else {
+            wire.posted("/prompt_async").await["agent"].clone()
+        };
+        assert_eq!(agent, "plan");
+        wire.ask_permission(v2, "edit", "edit", &["src/main.rs"], json!({}));
+        let (decision, message) = wire.permission_reply("edit").await;
+        assert_eq!(decision, "reject");
+        assert!(message.unwrap().contains("Plan mode"));
+        wire.ask_permission(v2, "log", "bash", &["git log --oneline"], json!({}));
+        assert_eq!(wire.permission_reply("log").await, ("once".into(), None));
+        // The plan agent's own plan file is the one edit Plan allows.
+        let plan = crate::executable::home_dir()
+            .unwrap()
+            .join(".opencode/plan/feature.md");
+        wire.ask_permission(
+            v2,
+            "plan-file",
+            "edit",
+            &[plan.to_str().unwrap()],
+            json!({"filepath": plan}),
+        );
+        assert_eq!(
+            wire.permission_reply("plan-file").await,
+            ("once".into(), None)
+        );
+        assert!(wire.approvals().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn leaving_plan_never_selects_the_plan_agent() {
+    for v2 in [false, true] {
+        let wire = policy_wire(v2, json!({"mode": "auto"}), json!([])).await;
+        let posted = if v2 {
+            wire.posted("/api/session").await
+        } else {
+            wire.posted("/prompt_async").await
+        };
+        assert!(posted.get("agent").is_none(), "{posted}");
+    }
+}
+
+#[test]
+fn permission_requests_map_to_policy_actions() {
+    let v1 = |kind: &str, patterns: Value, metadata: Value| {
+        permission_action(&json!({"permission":kind, "patterns":patterns, "metadata":metadata}))
+    };
+    let exec = v1("bash", json!(["cargo test"]), json!({})).unwrap();
+    assert_eq!(exec.kind, ActionKind::Exec);
+    assert_eq!(exec.command.as_deref(), Some("cargo test"));
+    let edit = v1(
+        "edit",
+        json!(["src/a.rs"]),
+        json!({"filepath":"/w/src/a.rs"}),
+    )
+    .unwrap();
+    assert_eq!(edit.kind, ActionKind::Edit);
+    assert_eq!(edit.paths, vec![PathBuf::from("/w/src/a.rs")]);
+    let outside = v1("external_directory", json!(["/tmp/*"]), json!({})).unwrap();
+    assert_eq!(outside.kind, ActionKind::Read);
+    assert_eq!(outside.paths, vec![PathBuf::from("/tmp")]);
+    let fetch =
+        permission_action(&json!({"action":"webfetch", "resources":["https://docs.rs/serde"]}))
+            .unwrap();
+    assert_eq!(fetch.kind, ActionKind::Network);
+    assert_eq!(fetch.host.as_deref(), Some("docs.rs"));
+    let mcp = v1("zeron_list_chats", json!(["*"]), json!({})).unwrap();
+    assert_eq!(mcp.kind, ActionKind::Mcp);
+    assert!(v1("question", json!(["*"]), json!({})).is_none());
+    // The pre-1.1 shape.
+    let legacy =
+        permission_action(&json!({"type":"bash", "pattern":"ls", "metadata":{"command":"ls -la"}}))
+            .unwrap();
+    assert_eq!(legacy.command.as_deref(), Some("ls -la"));
+}
+
+#[test]
+fn asking_config_overlays_the_users_permissions() {
+    let mut config = inline_config(Some(
+        r#"{"model":"keep", "permission":{"bash":{"*":"allow","rm *":"deny"},"edit":"allow","webfetch":"deny"},
+            "agent":{"build":{"permission":{"bash":"allow"}, "model":"x/y"}}}"#,
+    ))
+    .unwrap();
+    ask_for_permissions(&mut config);
+    assert_eq!(config["model"], "keep");
+    let global = &config["permission"];
+    assert_eq!(global["*"], "ask");
+    assert_eq!(global["bash"], json!({"*":"ask","rm *":"deny"}));
+    assert_eq!(global["edit"], "ask");
+    assert_eq!(global["webfetch"], "deny");
+    assert_eq!(global["question"], "allow");
+    assert_eq!(global["todowrite"], "allow");
+    let first = global.as_object().unwrap().keys().next().unwrap();
+    assert_eq!(first, "*", "the wildcard must come first (last match wins)");
+    assert_eq!(config["agent"]["build"]["permission"]["bash"], "ask");
+    assert_eq!(config["agent"]["build"]["model"], "x/y");
+    assert_eq!(config["agent"]["plan"]["permission"]["*"], "ask");
+    // A blanket string rule is the wildcard.
+    let mut config = inline_config(Some(r#"{"permission":"allow"}"#)).unwrap();
+    ask_for_permissions(&mut config);
+    assert_eq!(config["permission"]["*"], "ask");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_server_asks_outside_bypass_and_is_untouched_in_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let exe = fixture.path().join("opencode");
+    std::fs::write(
+        &exe,
+        r#"#!/usr/bin/env node
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('2.0.21'); process.exit(0); }
+const config = process.env.OPENCODE_CONFIG_CONTENT ?? null;
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  if (req.url === '/config-probe') { res.end(JSON.stringify({config})); return; }
+  if (req.url === '/api/info') { res.end(JSON.stringify({version: '2.0.21'})); return; }
+  res.statusCode = 404; res.end('{}');
+}).listen(port, '127.0.0.1');
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for ask in [false, true] {
+        let mut server = Server::spawn(
+            &exe,
+            fixture.path().to_str(),
+            Duration::from_secs(5),
+            None,
+            ask,
+        )
+        .await
+        .unwrap();
+        let probe = server.get_json("/config-probe", None).await.unwrap();
+        server.shutdown(Duration::from_millis(100)).await;
+        if ask {
+            let config: Value = serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+            assert_eq!(config["permission"]["*"], "ask");
+            assert_eq!(config["agent"]["plan"]["permission"]["*"], "ask");
+        } else if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
+            assert_eq!(
+                probe["config"],
+                Value::Null,
+                "Bypass must not configure opencode"
+            );
+        }
+    }
+}
+
+#[test]
+fn opencode_offers_every_mode_with_its_own_plan_agent() {
+    let caps = OpencodeHarness::new().policy_caps();
+    assert_eq!(caps.modes, PermissionMode::ALL.to_vec());
+    assert!(caps.native_plan);
+    assert_eq!(caps.sandboxes, vec![zeron_proto::SandboxMode::Off]);
 }
 
 #[tokio::test]

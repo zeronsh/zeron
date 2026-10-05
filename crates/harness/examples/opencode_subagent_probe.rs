@@ -50,6 +50,7 @@ async fn main() {
             .into()
     });
     let request = RunRequest {
+        policy: Default::default(),
         mcp: None,
         prompt,
         harness: None,

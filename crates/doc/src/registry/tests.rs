@@ -261,6 +261,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         checkout_id: None,
         source_context: None,
         config: Some(ChatConfig {
+            policy: Default::default(),
             harness: HarnessId::Mock,
             model: Some("mock-1".into()),
             reasoning: None,

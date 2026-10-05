@@ -16,6 +16,7 @@ fn main() {
 
     // User message.
     doc.push_message(&SessionMessageEntry {
+        origin: None,
         id: "m-user-1".into(),
         role: MessageRole::User,
         parts: vec![MessagePart::Text {

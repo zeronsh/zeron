@@ -82,6 +82,8 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    /// Settings → General's default permission mode card.
+    default_mode: Entity<crate::settings::permissions::DefaultModeCard>,
     _state: Entity<AppState>,
 }
 
@@ -124,6 +126,10 @@ impl ShortcutsPage {
             thread_naming: {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
+            },
+            default_mode: {
+                let state = state.clone();
+                cx.new(|cx| crate::settings::permissions::DefaultModeCard::new(state, cx))
             },
             _state: state,
         }
@@ -905,6 +911,7 @@ impl Render for ShortcutsPage {
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
                                     )
+                                    .child(self.default_mode.clone())
                                     .child(self.thread_naming.clone()),
                             ),
                     )

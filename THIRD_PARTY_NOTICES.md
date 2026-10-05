@@ -23,6 +23,16 @@ Zeron also uses the following editor foundations from the pinned `zeronsh/gpui-c
 
 Zeron's own source code is licensed under the terms in `LICENSE`. Bundled third-party components retain their respective licenses and notices.
 
+## ZCode goal prompts
+
+The goal-mode verifier and continuation prompts in `crates/engine/src/goal.rs` are
+adapted from the goal-verification prompts of
+[ZCode](https://github.com/zai-org/ZCode) (Apache-2.0, zai-org), which are in part
+reproduced in substance and several phrases verbatim (the completion-audit and
+"fail if any requirement is missing…" wording). They are modified for Zeron: the
+verifier is a read-only child chat that inspects the workspace, and the objective is
+wrapped in an escaped `<untrusted_objective>` block.
+
 ## Symbols
 
 Zeron bundles the SVG icon set and filename/folder associations from

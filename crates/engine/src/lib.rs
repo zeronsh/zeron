@@ -16,17 +16,20 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
+pub mod ask;
 pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod goal;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 mod model_catalogs;
+pub mod policy_rules;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -224,6 +227,9 @@ impl EngineCore {
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        // Standing permission rules: this device user's file, merged with each
+        // project's at dispatch.
+        sessions.set_policy_rules(policy_rules::PolicyRules::new(data_dir));
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -246,12 +252,27 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        doc_host.set_asks(ask::AskService::new(
+            sessions.clone(),
+            workspace.clone(),
+            doc_host.clone(),
+        ));
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
+        // Dev knob: a scripted verifier for demos with the mock harness. Debug
+        // builds only: it fakes passing verdicts for every goal, so a stray
+        // value in a release user's environment must not switch it on.
+        if cfg!(debug_assertions)
+            && std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0")
+        {
+            doc_host.set_ask_backend(ask::demo_verifier());
+        }
+        // Goals that were running when the engine last stopped resume here.
+        doc_host.set_goal_index(profile.store_root().join("goals.json"));
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
         let change_requests = CheckoutChangeRequests::start(repos.clone(), &device_id);
@@ -430,7 +451,8 @@ impl EngineCore {
             .map_err(|e| EngineError::Other(e.to_string()))
     }
 
-    /// Start hosting our device room: serve the full RPC surface to relay clients and
+    /// Start hosting our device room: serve the RPC surface (minus the
+    /// machine-local ask methods, see `rpc::RelayRpc`) to relay clients and
     /// warm-open chat docs on nudges (§7 cold-chat command delivery). The token source
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> zeron_rpc::HostRelay {
@@ -447,7 +469,11 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        zeron_rpc::HostRelay::spawn(
+            config,
+            Arc::new(rpc::RelayRpc(self.rpc_service())),
+            on_nudge,
+        )
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {

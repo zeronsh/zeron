@@ -772,6 +772,11 @@ pub struct ChatConfig {
     /// Model option id → choice id (`contextWindow` → `1m`).
     pub model_options: HashMap<String, String>,
     pub sandbox: SandboxLevel,
+    /// Permission mode: `bypass`, `auto`, `acceptEdits`, `ask` or `plan`.
+    /// Read: the chat's mode. Written: `None` keeps the chat's current mode
+    /// (Bypass for a new chat).
+    #[uniffi(default = None)]
+    pub permission_mode: Option<String>,
 }
 
 fn wire<T: serde::Serialize>(value: &T) -> String {
@@ -808,6 +813,7 @@ impl From<&zc::ChatConfig> for ChatConfig {
                 zeron_proto::SandboxLevel::WorkspaceWrite => SandboxLevel::WorkspaceWrite,
                 zeron_proto::SandboxLevel::DangerFullAccess => SandboxLevel::DangerFullAccess,
             },
+            permission_mode: Some(wire(&c.policy.mode)),
         }
     }
 }
@@ -817,6 +823,13 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
 
     fn try_from(c: ChatConfig) -> CoreResult<Self> {
         Ok(zc::ChatConfig {
+            policy: zeron_proto::AgentPolicy::with_mode(
+                c.permission_mode
+                    .as_deref()
+                    .map(|m| from_wire(m, "permission mode"))
+                    .transpose()?
+                    .unwrap_or_default(),
+            ),
             harness: from_wire(&c.harness, "harness")?,
             model: c.model,
             reasoning: c

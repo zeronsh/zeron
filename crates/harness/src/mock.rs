@@ -565,6 +565,79 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        // Dev/testing knob: `ZERON_MOCK_GOAL=1` makes each mock turn one round of
+        // a goal demo: its own checklist items appear (so the goal tray's
+        // rounds list each show the items that first appeared in them) and a
+        // shell command runs (real work, for the no-progress guard). Pair with
+        // the engine's `ZERON_MOCK_GOAL` verifier script.
+        let goal_events = std::env::var("ZERON_MOCK_GOAL")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0")
+            .then(|| {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static ROUND: AtomicUsize = AtomicUsize::new(0);
+                const ITEMS: [&str; 6] = [
+                    "Reproduce the failing build",
+                    "Fix the manifest parser",
+                    "Add a regression test",
+                    "Run the full test suite",
+                    "Update the changelog",
+                    "Re-check the objective",
+                ];
+                let round = ROUND.fetch_add(1, Ordering::Relaxed) + 1;
+                let shown = (round * 2).min(ITEMS.len());
+                let done = shown.saturating_sub(2);
+                let list = zeron_proto::ToolCall::Todo {
+                    items: ITEMS[..shown]
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, text)| {
+                            zeron_proto::TodoItem::new(
+                                *text,
+                                if ix < done {
+                                    zeron_proto::TodoStatus::Completed
+                                } else if ix == done {
+                                    zeron_proto::TodoStatus::InProgress
+                                } else {
+                                    zeron_proto::TodoStatus::Pending
+                                },
+                            )
+                        })
+                        .collect(),
+                };
+                vec![
+                    AgentEvent::TextDelta {
+                        text: format!("\nRound {round}: working through the checklist.\n\n"),
+                    },
+                    AgentEvent::ToolCall {
+                        id: format!("mock-goal-todo-{round}"),
+                        call: list,
+                    },
+                    AgentEvent::ToolResult {
+                        id: format!("mock-goal-todo-{round}"),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                    AgentEvent::ToolCall {
+                        id: format!("mock-goal-exec-{round}"),
+                        call: zeron_proto::ToolCall::Exec {
+                            command: "cargo test".into(),
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id: format!("mock-goal-exec-{round}"),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                    AgentEvent::TextDelta {
+                        text: "Done with this step.\n".into(),
+                    },
+                ]
+            })
+            .into_iter()
+            .flatten();
         let events: Vec<Result<AgentEvent, HarnessError>> = body
             .iter()
             .cycle()
@@ -574,6 +647,7 @@ impl Harness for MockHarness {
             .chain(code_tool_events)
             .chain(subagent_events)
             .chain(todo_events)
+            .chain(goal_events)
             .chain(code_event)
             .chain(table_event)
             .chain(mend_event)

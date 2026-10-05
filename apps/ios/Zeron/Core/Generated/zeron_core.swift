@@ -4137,6 +4137,12 @@ public struct ChatConfig: Equatable, Hashable {
      */
     public var modelOptions: [String: String]
     public var sandbox: SandboxLevel
+    /**
+     * Permission mode: `bypass`, `auto`, `acceptEdits`, `ask` or `plan`.
+     * Read: the chat's mode. Written: `None` keeps the chat's current mode
+     * (Bypass for a new chat).
+     */
+    public var permissionMode: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -4149,12 +4155,18 @@ public struct ChatConfig: Equatable, Hashable {
          */reasoning: String?, 
         /**
          * Model option id → choice id (`contextWindow` → `1m`).
-         */modelOptions: [String: String], sandbox: SandboxLevel) {
+         */modelOptions: [String: String], sandbox: SandboxLevel, 
+        /**
+         * Permission mode: `bypass`, `auto`, `acceptEdits`, `ask` or `plan`.
+         * Read: the chat's mode. Written: `None` keeps the chat's current mode
+         * (Bypass for a new chat).
+         */permissionMode: String? = nil) {
         self.harness = harness
         self.model = model
         self.reasoning = reasoning
         self.modelOptions = modelOptions
         self.sandbox = sandbox
+        self.permissionMode = permissionMode
     }
 
     
@@ -4177,7 +4189,8 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
                 model: FfiConverterOptionString.read(from: &buf), 
                 reasoning: FfiConverterOptionString.read(from: &buf), 
                 modelOptions: FfiConverterDictionaryStringString.read(from: &buf), 
-                sandbox: FfiConverterTypeSandboxLevel.read(from: &buf)
+                sandbox: FfiConverterTypeSandboxLevel.read(from: &buf), 
+                permissionMode: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -4187,6 +4200,7 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.reasoning, into: &buf)
         FfiConverterDictionaryStringString.write(value.modelOptions, into: &buf)
         FfiConverterTypeSandboxLevel.write(value.sandbox, into: &buf)
+        FfiConverterOptionString.write(value.permissionMode, into: &buf)
     }
 }
 
