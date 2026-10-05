@@ -22,10 +22,15 @@
 # Needs edge/vault/.dev.vars: VAULT_KEK, and GITHUB_APP_* for GitHub (see
 # edge/vault/README.md, "The GitHub App").
 #
-# In the window: Settings → Cloud → turn Cloud on, connect GitHub and sign in
-# to Codex / Claude for Cloud; then add a project whose GitHub repository the
-# Zeron GitHub App is installed on, pick Cloud in the checkout menu of a new
-# chat there, and send.
+# In the window: Settings → Cloud → turn Cloud on and connect GitHub; sign in
+# to Codex / Claude in Settings → Providers with Cloud picked; then add a
+# project whose GitHub repository the Zeron GitHub App is installed on, pick
+# Cloud in the device menu of a new chat there, and send.
+#
+# Credits: a new dev account starts with 600. Grant more with the run's admin
+# token (random per run, in $STATE/admin-token):
+#   curl -X POST "$EDGE/admin/cloud/credits" -H "authorization: Bearer $(cat $STATE/admin-token)" \
+#     -d '{"orgId":"org_clouddev","userId":"…","credits":600,"reason":"dev"}'
 #
 # Run: scripts/cloud-dev.sh  |  MODE=boat scripts/cloud-dev.sh   (Ctrl-C stops)
 # The window logs at RUST_LOG=warn ($STATE/gui/ui.log); GUI_RUST_LOG overrides.
@@ -145,6 +150,9 @@ fi
 # Local session machines are processes here: no /home/user to clone into.
 local_vars=()
 [[ "$MODE" == local ]] && local_vars=(--var "CLOUD_PROJECTS_ROOT:$STATE/projects")
+# The tunnel is public: the operator token is random per run.
+(umask 077 && openssl rand -hex 24 > "$STATE/admin-token")
+local_vars+=(--var "ADMIN_TOKEN:$(cat "$STATE/admin-token")" --var "CLOUD_STARTING_CREDITS:600")
 log "edge + vault on :$EDGE_PORT ($PROVIDER sandboxes)"
 (cd "$ROOT/edge" && npx wrangler dev -c wrangler.jsonc -c vault/wrangler.jsonc --port "$EDGE_PORT" \
   --ip 127.0.0.1 --var AUTH_MODE:dev --var "SANDBOX_PROVIDER:$PROVIDER" --var "CLOUD_EDGE_URL:$SANDBOX_EDGE" \

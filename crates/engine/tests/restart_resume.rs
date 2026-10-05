@@ -567,6 +567,67 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     core.shutdown().await;
 }
 
+/// A Cloud device's credential broker whose answer the test changes.
+struct SwitchableCredential(Arc<Mutex<String>>);
+
+#[async_trait]
+impl zeron_engine::registry::RunEnvironment for SwitchableCredential {
+    async fn prepare(&self, _harness: HarnessId, _request: &mut RunRequest) -> Result<(), String> {
+        Ok(())
+    }
+    async fn credential(&self, _harness: HarnessId) -> Option<String> {
+        Some(self.0.lock().unwrap().clone())
+    }
+}
+
+/// Switching the Cloud account between turns replaces the parked child, so
+/// the next turn runs with the new login; an unchanged one keeps it warm.
+#[tokio::test]
+async fn a_switched_credential_replaces_the_parked_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let credential = Arc::new(Mutex::new("claude:1".to_string()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+    }));
+    registry.set_run_environment(Arc::new(SwitchableCredential(credential.clone())));
+    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    pre_title(&core);
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn on the warm child",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "same account: same child");
+
+    *credential.lock().unwrap() = "claude:2".into();
+    queue_run(&core, "third", "/tmp", "msg-user-3");
+    wait_for(
+        || complete_assistant_count(&core) == 3,
+        "third turn after the switch",
+    )
+    .await;
+    assert_eq!(
+        *runs_started.lock().unwrap(),
+        2,
+        "a switched account starts a new child"
+    );
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
     let tmp = tempfile::tempdir().unwrap();

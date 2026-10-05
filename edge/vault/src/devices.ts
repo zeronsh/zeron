@@ -41,6 +41,8 @@ export type AuditEvent =
   | "upload"
   | "authorize"
   | "disconnect"
+  | "activate"
+  | "forget"
   | "grant"
   | "grant_denied"
   | "refresh"

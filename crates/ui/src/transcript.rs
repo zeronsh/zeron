@@ -120,6 +120,9 @@ const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
 const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
 const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
+/// A send waiting on its Cloud machine names that in the working line only
+/// after this long: a send from this device shows its setup chip by then.
+const CLOUD_BOOT_WORD_AFTER_MS: i64 = 1_500;
 const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
 /// The connector draws briskly, then eases into the branch tip so its arrival
 /// remains visible without feeling mechanically linear.
@@ -7069,39 +7072,51 @@ impl Transcript {
                     if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                         return None;
                     }
-                    // The Cloud setup chip already says what the send waits on.
+                    // The Cloud setup chip says what the send waits on; the
+                    // line under it is the turn's working word (untimed: the
+                    // timer starts with the machine's turn).
                     if state.cloud_setup_echo_pending() {
-                        return None;
-                    }
-                    // During the send→turn window the session row's `started_at`
-                    // still belongs to the PREVIOUS turn — a timer based on the
-                    // send counted the round-trip and then restarted when the
-                    // turn actually began (user report). Bridge it as "Sending…"
-                    // with no timer instead; the word + timer start with the
-                    // turn.
-                    let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-                    let send_started = state.pending_send_started(&chat_id, now);
-                    let sending = sending_bridge(send_started, turn_started);
-                    // Degraded delivery path: the send is a durable local write
-                    // waiting on connectivity — say so instead of faking
-                    // progress. (The overlay holds while degraded, so this line
-                    // owns the surface until the ack or the failed state.)
-                    let queued = sending && state.chat_delivery_degraded(&chat_id);
-                    let elapsed = turn_started
-                        .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-                        .unwrap_or(0);
-                    // While sending, the session row still carries the PREVIOUS
-                    // turn: the bridge keys on its own send instead, so it never
-                    // rolls out of that turn's word or an earlier send's.
-                    let turn = if sending { send_started } else { turn_started }
-                        .map_or(0, |t| t.timestamp_millis());
-                    // The send waits for the chat's own Cloud machine to come up.
-                    let booting = if sending {
-                        state.cloud_machine_booting(&chat_id)
+                        let turn = state
+                            .pending_send_started(&chat_id, now)
+                            .map_or(0, |t| t.timestamp_millis());
+                        (false, false, 0, turn, None)
                     } else {
-                        None
-                    };
-                    (sending, queued, elapsed, turn, booting)
+                        // During the send→turn window the session row's `started_at`
+                        // still belongs to the PREVIOUS turn — a timer based on the
+                        // send counted the round-trip and then restarted when the
+                        // turn actually began (user report). Bridge it as "Sending…"
+                        // with no timer instead; the word + timer start with the
+                        // turn.
+                        let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
+                        let send_started = state.pending_send_started(&chat_id, now);
+                        let sending = sending_bridge(send_started, turn_started);
+                        // Degraded delivery path: the send is a durable local write
+                        // waiting on connectivity — say so instead of faking
+                        // progress. (The overlay holds while degraded, so this line
+                        // owns the surface until the ack or the failed state.)
+                        let queued = sending && state.chat_delivery_degraded(&chat_id);
+                        let elapsed = turn_started
+                            .map(|t| now.signed_duration_since(t).num_seconds().max(0))
+                            .unwrap_or(0);
+                        // While sending, the session row still carries the PREVIOUS
+                        // turn: the bridge keys on its own send instead, so it never
+                        // rolls out of that turn's word or an earlier send's.
+                        let turn = if sending { send_started } else { turn_started }
+                            .map_or(0, |t| t.timestamp_millis());
+                        // The send waits for the chat's own Cloud machine to come up.
+                        // (Past the beat in which this device's own send puts
+                        // up its setup chip, so the words never flash twice.)
+                        let booting = if sending
+                            && send_started.is_some_and(|t| {
+                                now.signed_duration_since(t).num_milliseconds()
+                                    >= CLOUD_BOOT_WORD_AFTER_MS
+                            }) {
+                            state.cloud_machine_booting(&chat_id)
+                        } else {
+                            None
+                        };
+                        (sending, queued, elapsed, turn, booting)
+                    }
                 };
                 (
                     sending,
@@ -7112,6 +7127,8 @@ impl Transcript {
                     booting,
                 )
             };
+        let setup_chip =
+            self.doc_override.is_none() && self.state.read(cx).cloud_setup_echo_pending();
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
@@ -7181,7 +7198,7 @@ impl Transcript {
                             cx.reduce_motion(),
                         )),
                 )
-                .when(!sending, |el| {
+                .when(!sending && !setup_chip, |el| {
                     // The timer ticks every second; its digits roll in place
                     // (the unit suffix holds).
                     el.child(

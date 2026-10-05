@@ -97,7 +97,7 @@ pub enum CloudState {
 }
 
 /// `CloudStatus` / `CloudEnable` / `CloudDelete` reply: the account.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudStatus {
     pub state: CloudState,
@@ -125,6 +125,10 @@ pub struct CloudStatus {
     /// out, local-only profile). The UI hides the enable button then.
     #[serde(default)]
     pub available: bool,
+    /// Credits left — a minute of a small machine each. Sessions don't start
+    /// or wake at zero or below. `None` from an edge that predates credits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<f64>,
 }
 
 /// One Cloud session: a top-level chat run on Cloud and its sandbox.
@@ -161,44 +165,35 @@ pub struct CloudSessions {
     pub available: bool,
 }
 
-/// Metered machine time of one sandbox within a month, as last reconciled
-/// against the provider's meter (billable seconds already carry the machine
-/// type's multiplier).
+/// Credits used on one UTC day.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CloudSandboxUsage {
-    /// Sandbox provider (`boat`, …).
-    #[serde(default)]
-    pub provider: String,
-    pub sandbox_id: String,
-    /// The session (chat) this sandbox ran, when it was a session sandbox.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_id: Option<String>,
-    /// `small` · `default` · `large`.
-    pub sandbox_type: String,
-    pub seconds: u64,
-    /// Provider list price for `seconds`, USD.
-    pub dollars: f64,
-    /// Whether the sandbox was running when last reconciled.
-    pub running: bool,
-    /// Unix ms of the reconciliation that produced these numbers.
-    pub reconciled_at: i64,
+pub struct CloudUsageDay {
+    /// `YYYY-MM-DD` (UTC).
+    pub day: String,
+    pub credits: f64,
 }
 
-/// `CloudUsage` reply: one user's metered Cloud usage for a UTC month.
+/// `CloudUsage` reply: the signed-in user's Cloud credits — what's left, and
+/// what was used per UTC day over `[from, to]`. A credit is a minute of a
+/// small machine (larger machines use more per minute).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudUsage {
-    /// `YYYY-MM` (UTC).
-    pub month: String,
-    pub seconds: u64,
-    pub dollars: f64,
+    /// `YYYY-MM-DD`, inclusive.
     #[serde(default)]
-    pub sandboxes: Vec<CloudSandboxUsage>,
-    /// True once the month has closed and every sandbox was reconciled
-    /// against the provider after month end — the billable figure.
+    pub from: String,
     #[serde(default)]
-    pub closed: bool,
+    pub to: String,
+    /// Every day of the range, oldest first (zero when nothing ran).
+    #[serde(default)]
+    pub days: Vec<CloudUsageDay>,
+    /// Credits used in the range.
+    #[serde(default)]
+    pub credits: f64,
+    /// Credits left (negative when machines ran past zero).
+    #[serde(default)]
+    pub balance: f64,
     #[serde(default)]
     pub available: bool,
 }
@@ -221,6 +216,10 @@ pub enum VaultProvider {
 }
 
 impl VaultProvider {
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.as_str() == value)
+    }
+
     pub const ALL: [VaultProvider; 5] = [
         VaultProvider::Codex,
         VaultProvider::Claude,
@@ -262,6 +261,60 @@ pub struct VaultConnection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     pub updated_at: i64,
+    /// How many logins the provider holds.
+    #[serde(default)]
+    pub accounts: u32,
+    /// Whether one of them is active (grants come from it).
+    #[serde(default)]
+    pub has_active: bool,
+}
+
+/// The `targetDeviceId` the Providers page uses for Cloud: account calls
+/// (list, switch, forget, sign in) aimed at it are answered by this device's
+/// engine from the vault — Cloud's logins live there, not on a machine.
+pub const CLOUD_ACCOUNTS_DEVICE: &str = "cloud";
+
+/// One stored login of a vault provider (`edge/vault/src/api.ts`
+/// `VaultAccountView`). A provider holds any number; grants come from the
+/// active one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultAccount {
+    pub slot: String,
+    pub status: VaultConnectionStatus,
+    pub active: bool,
+    /// `oauth` · `setup-token` · `api-key` · `github`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub authorized_devices: Vec<String>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// A login's identity sent with its upload (display + de-duplication only).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultAccountProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
 }
 
 /// A device enrolled with the vault.

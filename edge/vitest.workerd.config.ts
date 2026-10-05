@@ -57,6 +57,7 @@ export default defineConfig({
           SANDBOX_PROVIDER: "boat",
           CLOUD_TTL_SECONDS: "7200",
           CLOUD_IDLE_MINUTES: "20",
+          CLOUD_STARTING_CREDITS: "1000",
           CLOUD_MAX_AWAKE: "2",
           ADMIN_TOKEN: "test-admin-token",
           RUNNER_JWT_PRIVATE_KEY: JSON.stringify(runnerKeys.privateKey.export({ format: "jwk" })),

@@ -588,6 +588,12 @@ impl SettingsSection {
         self != Self::Agents && (self != Self::Appshots || crate::appshots::is_desktop())
     }
 
+    /// [`Self::visible_in_nav`], plus what depends on the account: Cloud
+    /// only while signed in.
+    fn shown_in_nav(self, signed_in: bool) -> bool {
+        self.visible_in_nav() && (self != Self::Cloud || signed_in)
+    }
+
     /// Where a generic "open Settings" lands for a remembered section: legacy
     /// aliases resolve to their page, and a section this build does not show
     /// (Appshots off macOS/Linux) falls back to General.
@@ -5371,15 +5377,22 @@ impl Shell {
     }
 
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        let section = section.canonical();
+        let mut section = section.canonical();
+        // Signed out there is no Cloud to manage.
+        if section == SettingsSection::Cloud && !self.state.read(cx).signed_in() {
+            section = SettingsSection::General;
+        }
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
-        // Cloud status is read once per visit.
-        if section == SettingsSection::Cloud {
+        // Cloud status is read once per visit (re-picking the page it already
+        // shows is not a new visit: it would only flash).
+        if section == SettingsSection::Cloud
+            && self.route != Route::Settings(SettingsSection::Cloud)
+        {
             self.cloud_page = None;
         }
         if !matches!(self.route, Route::Settings(_)) {
@@ -7915,6 +7928,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let signed_in = self.state.read(cx).signed_in();
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Cloud => icons::CLOUD,
@@ -7952,7 +7966,7 @@ impl Shell {
                         .children(
                             SettingsSection::ALL
                                 .into_iter()
-                                .filter(|item| item.visible_in_nav())
+                                .filter(|item| item.shown_in_nav(signed_in))
                                 .map(|item| {
                                     let index = SettingsSection::ALL
                                         .iter()
@@ -7992,7 +8006,7 @@ impl Shell {
                                         move |this, event: &gpui::KeyDownEvent, window, cx| {
                                             let items: Vec<_> = SettingsSection::ALL
                                                 .into_iter()
-                                                .filter(|s| s.visible_in_nav())
+                                                .filter(|s| s.shown_in_nav(signed_in))
                                                 .collect();
                                             let current =
                                                 items.iter().position(|s| *s == item).unwrap_or(0);
@@ -17287,7 +17301,10 @@ mod exit_regressions {
                 });
                 shell.settings.space_filter = None;
                 shell.open_chat("elsewhere".into(), cx);
-                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("other"));
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("other")
+                );
                 shell.open_new_session(None, cx);
                 let state = shell.state.read(cx);
                 assert!(state.selected_chat.is_none());
@@ -18705,6 +18722,11 @@ mod settings_modal_regressions {
         });
         window
             .update(cx, |shell, _, cx| {
+                // Signed out, Cloud has nothing to manage: its link opens General.
+                shell.open_settings(SettingsSection::Cloud, cx);
+                assert_eq!(shell.route, Route::Settings(SettingsSection::General));
+                shell.close_settings(cx);
+                sign_in(&shell.state, cx);
                 let history = shell.nav.current().clone();
                 let selected = shell.state.read(cx).selected_chat.clone();
                 for section in SettingsSection::ALL {
@@ -19075,6 +19097,20 @@ mod settings_modal_regressions {
         });
     }
 
+    /// Signed in to an organization (Cloud's settings need one).
+    fn sign_in(state: &Entity<AppState>, cx: &mut App) {
+        state.update(cx, |state, _| {
+            state.auth = Some(zeron_proto::AuthState::SignedIn {
+                user: zeron_proto::UserProfile {
+                    id: "user-a".into(),
+                    email: "user@example.com".into(),
+                    name: None,
+                },
+                org_id: Some("org-a".into()),
+            });
+        });
+    }
+
     /// Settings → Cloud is rebuilt per visit and dropped on leaving, which is
     /// what stops its GitHub polling and status re-checks.
     #[gpui::test]
@@ -19084,6 +19120,7 @@ mod settings_modal_regressions {
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
+            sign_in(&shell.state, cx);
             shell.open_settings(SettingsSection::Cloud, cx)
         });
         cx.run_until_parked();
@@ -19103,11 +19140,23 @@ mod settings_modal_regressions {
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
-        shell.read_with(cx, |shell, _| {
+        let second = shell.read_with(cx, |shell, _| {
             let second = shell.cloud_page.clone().expect("Cloud page remounts");
             assert_ne!(first.entity_id(), second.entity_id());
+            second
         });
-        drop(first);
+        // Picking Cloud again while it shows keeps the page (no flash).
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::Cloud, cx)
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.cloud_page.as_ref().map(|page| page.entity_id()),
+                Some(second.entity_id())
+            );
+        });
+        drop((first, second));
         shell.update(cx, |shell, cx| shell.close_settings(cx));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());

@@ -593,6 +593,9 @@ struct DeviceRow {
     space: Option<Space>,
     /// The checkout's path, when the device holds several of the project.
     detail: Option<String>,
+    /// Cloud: the session gets a machine of its own (not a device the
+    /// project lives on).
+    cloud: bool,
 }
 
 /// What names the selected model, shared by the composer chip and the
@@ -1000,7 +1003,8 @@ impl Pickers {
                 } else {
                     this.harnesses = Loadable::Idle;
                 }
-                this.models.retain(|_, slot| matches!(slot, Loadable::Ready(_)));
+                this.models
+                    .retain(|_, slot| matches!(slot, Loadable::Ready(_)));
                 this.stale_models = this.models.keys().copied().collect();
                 this.revalidating.clear();
                 this.model_refresh_errors.clear();
@@ -1312,8 +1316,8 @@ impl Pickers {
             return ModelName::Named(label.into());
         }
         // A list still from the previous device is loading for this one.
-        let catalog_loading = self.harnesses_stale
-            || matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
+        let catalog_loading =
+            self.harnesses_stale || matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
         let models_loading = self.effective_harness(cx).is_some_and(|harness| {
             !matches!(
                 self.models.get(&harness),
@@ -1526,6 +1530,10 @@ impl Pickers {
         }
         self.open.open(kind);
         self.focus_on_mount = true;
+        // The device menu offers Cloud: re-read whether it's on and its credits.
+        if kind == PickerKind::Device {
+            self.state.update(cx, |state, cx| state.refresh_cloud(cx));
+        }
         // The plain-div menus (branch / project / device) share one scroll
         // handle; a fresh open starts at the top. The model list resets its
         // own virtualized handle below. Sync the rail baselines so the jump
@@ -2079,35 +2087,43 @@ impl Pickers {
         cx.notify();
     }
 
+    /// Move the draft onto Cloud or off it (the device menu's Cloud row).
+    /// Cloud branches are GitHub's, the others this folder's: the pick
+    /// doesn't carry over, and the list reloads. So do the agent catalogs
+    /// (Cloud runs the agents it has accounts for), and an agent Cloud
+    /// doesn't run is dropped.
+    fn switch_cloud(&mut self, kind: CheckoutKind, cx: &mut Context<Self>) {
+        if (kind == CheckoutKind::Cloud) == (self.config.checkout == CheckoutKind::Cloud) {
+            return;
+        }
+        self.config.branch = None;
+        self.refs = Loadable::Idle;
+        self.refs_space = None;
+        if kind == CheckoutKind::Cloud
+            && self
+                .config
+                .harness
+                .is_some_and(|h| !matches!(h, HarnessId::Codex | HarnessId::ClaudeCode))
+        {
+            self.config.harness = None;
+            self.config.model = None;
+            self.config.reasoning = None;
+        }
+        self.target_generation = self.target_generation.wrapping_add(1);
+        self.load_task = None;
+        self.harnesses = Loadable::Idle;
+        self.models.clear();
+        self.model_refresh_errors.clear();
+        self.catalog_rev += 1;
+        self.config.checkout = kind;
+        self.ensure_refs(true, cx);
+        cx.notify();
+    }
+
     fn pick_checkout(&mut self, kind: CheckoutKind, cx: &mut Context<Self>) {
         if (kind == CheckoutKind::Cloud) != (self.config.checkout == CheckoutKind::Cloud) {
-            // Cloud branches are GitHub's, the others this folder's: the
-            // pick doesn't carry over, and the list reloads. So do the agent
-            // catalogs (Cloud runs Codex and Claude Code), and an agent Cloud
-            // doesn't run is dropped.
-            self.config.branch = None;
-            self.refs = Loadable::Idle;
-            self.refs_space = None;
-            if kind == CheckoutKind::Cloud
-                && self
-                    .config
-                    .harness
-                    .is_some_and(|h| !matches!(h, HarnessId::Codex | HarnessId::ClaudeCode))
-            {
-                self.config.harness = None;
-                self.config.model = None;
-                self.config.reasoning = None;
-            }
-            self.target_generation = self.target_generation.wrapping_add(1);
-            self.load_task = None;
-            self.harnesses = Loadable::Idle;
-            self.models.clear();
-            self.model_refresh_errors.clear();
-            self.catalog_rev += 1;
-            self.config.checkout = kind;
-            self.ensure_refs(true, cx);
+            self.switch_cloud(kind, cx);
             self.animate_close(cx);
-            cx.notify();
             return;
         }
         if kind == CheckoutKind::Local
@@ -2645,26 +2661,22 @@ impl Pickers {
         self.config.checkout == CheckoutKind::Cloud && self.cloud_repo(cx).is_some()
     }
 
-    /// The checkout menu's rows: this folder, a new worktree — and Cloud when
-    /// the project's repository is one Cloud reaches.
-    fn checkout_options(&self, cx: &App) -> Vec<(CheckoutKind, &'static str, &'static str)> {
+    /// The checkout menu's rows: this folder or a new worktree (Cloud is a
+    /// device-menu pick).
+    fn checkout_options(&self, _cx: &App) -> Vec<(CheckoutKind, &'static str, &'static str)> {
         let (local_label, local_icon) = if self.selected_ref_worktree().is_some() {
             ("Current worktree", crate::icons::WORKTREE)
         } else {
             ("Current checkout", crate::icons::FOLDER)
         };
-        let mut options = vec![
+        vec![
             (CheckoutKind::Local, local_label, local_icon),
             (
                 CheckoutKind::NewWorktree,
                 "New worktree",
                 crate::icons::WORKTREE,
             ),
-        ];
-        if self.cloud_repo(cx).is_some() {
-            options.push((CheckoutKind::Cloud, "Cloud", crate::icons::CLOUD));
-        }
-        options
+        ]
     }
 
     /// The on-send checkout action for a new session in the selected
@@ -2889,8 +2901,19 @@ impl Pickers {
                         name: device_name(&member.device_id),
                         space: Some((*member).clone()),
                         detail: shared.then(|| member.path.clone()),
+                        cloud: false,
                     }
                 })
+                .chain(
+                    // Cloud, while it's on and reaches the project's repository.
+                    state.cloud_repo_for(space).map(|_| DeviceRow {
+                        device_id: zeron_proto::CLOUD_ACCOUNTS_DEVICE.to_string(),
+                        name: crate::cloud::CLOUD_LABEL.to_string(),
+                        space: None,
+                        detail: None,
+                        cloud: true,
+                    }),
+                )
                 .collect();
         }
         // Cloud's per-session machines are not pickable.
@@ -2909,6 +2932,7 @@ impl Pickers {
                 name: device.name.clone(),
                 space: None,
                 detail: None,
+                cloud: false,
             })
             .collect()
     }
@@ -2932,6 +2956,7 @@ impl Pickers {
     }
 
     fn selected_device_index(&self, cx: &App) -> usize {
+        let on_cloud = self.runs_on_cloud(cx);
         let (selected, effective) = {
             let state = self.state.read(cx);
             (
@@ -2942,6 +2967,7 @@ impl Pickers {
         self.device_rows(cx)
             .iter()
             .position(|row| match &row.space {
+                _ if on_cloud || row.cloud => on_cloud && row.cloud,
                 Some(space) => selected.as_deref() == Some(space.id.as_str()),
                 None => effective.as_deref() == Some(row.device_id.as_str()),
             })
@@ -2949,8 +2975,17 @@ impl Pickers {
     }
 
     /// A device row picks the project's checkout there, or — without a
-    /// project — the device itself.
+    /// project — the device itself. Cloud runs the session on a machine of
+    /// its own.
     fn pick_device_row(&mut self, row: DeviceRow, cx: &mut Context<Self>) {
+        if row.cloud {
+            self.switch_cloud(CheckoutKind::Cloud, cx);
+            self.close(cx);
+            return;
+        }
+        if self.config.checkout == CheckoutKind::Cloud {
+            self.switch_cloud(CheckoutKind::Local, cx);
+        }
         match row.space {
             Some(space) => self.pick_space(space.id, cx),
             None => self.pick_device(row.device_id, cx),
@@ -2964,11 +2999,13 @@ impl Pickers {
         let theme = Theme::of(cx).for_popup();
         let now = chrono::Utc::now();
         let rows = self.filtered_device_rows(cx);
-        let (selected_space, effective, local, presence): (
+        let on_cloud = self.runs_on_cloud(cx);
+        let (selected_space, effective, local, presence, out_of_credits): (
             Option<String>,
             Option<String>,
             Option<String>,
             Vec<crate::cloud::Presence>,
+            bool,
         ) = {
             let state = self.state.read(cx);
             (
@@ -2976,8 +3013,18 @@ impl Pickers {
                 state.effective_device_id(),
                 state.local_device_id.clone(),
                 rows.iter()
-                    .map(|row| state.device_presence(&row.device_id, now))
+                    .map(|row| {
+                        if row.cloud {
+                            crate::cloud::Presence::Available
+                        } else {
+                            state.device_presence(&row.device_id, now)
+                        }
+                    })
                     .collect(),
+                state
+                    .cloud_status
+                    .as_ref()
+                    .is_some_and(crate::cloud::out_of_credits),
             )
         };
         let active = self.active;
@@ -3004,12 +3051,17 @@ impl Pickers {
                                 let is_local = local.as_deref() == Some(row.device_id.as_str());
                                 let label: SharedString = row.name.clone().into();
                                 let is_selected = match &row.space {
+                                    _ if on_cloud || row.cloud => on_cloud && row.cloud,
                                     Some(space) => {
                                         selected_space.as_deref() == Some(space.id.as_str())
                                     }
                                     None => effective.as_deref() == Some(row.device_id.as_str()),
                                 };
-                                let detail = row.detail.clone().map(SharedString::from);
+                                let detail = if row.cloud && out_of_credits {
+                                    Some(SharedString::from("Out of credits"))
+                                } else {
+                                    row.detail.clone().map(SharedString::from)
+                                };
                                 popover::picker_row(
                                     &theme,
                                     is_selected,
@@ -3817,6 +3869,7 @@ impl Pickers {
             }
             _ => None,
         };
+        let on_cloud = self.runs_on_cloud(cx);
         let (device_label, project_label, offline, device_glyph) = {
             let state = self.state.read(cx);
             let device_id = state.effective_device_id();
@@ -3839,7 +3892,16 @@ impl Pickers {
                 .map(|s| s.display_name().to_string())
                 .unwrap_or_else(|| "No project".to_string())
                 .into();
-            (device_label, project_label, offline, device_glyph)
+            if on_cloud {
+                (
+                    SharedString::from(crate::cloud::CLOUD_LABEL),
+                    project_label,
+                    false,
+                    crate::icons::CLOUD,
+                )
+            } else {
+                (device_label, project_label, offline, device_glyph)
+            }
         };
         let device_chip = self
             .footer_chip(
@@ -3915,14 +3977,17 @@ impl Pickers {
             (CheckoutKind::Local, false) => crate::icons::FOLDER,
             _ => crate::icons::WORKTREE,
         };
-        let checkout_chip = self.footer_chip(
-            PickerKind::Checkout,
-            "picker-checkout",
-            kind_icon,
-            SharedString::from(self.checkout_label()),
-            &theme,
-            cx,
-        );
+        // On Cloud the machine clones the branch fresh: no checkout to pick.
+        let checkout_chip = (!self.runs_on_cloud(cx)).then(|| {
+            self.footer_chip(
+                PickerKind::Checkout,
+                "picker-checkout",
+                kind_icon,
+                SharedString::from(self.checkout_label()),
+                &theme,
+                cx,
+            )
+        });
         let branch_chip = self.footer_chip(
             PickerKind::Branch,
             "picker-branch",
@@ -3934,19 +3999,21 @@ impl Pickers {
         Some(
             workspace_footer_row()
                 .child(attach_overlay_below(
-                    checkout_chip,
-                    &mut overlay,
-                    PickerKind::Checkout,
-                    "checkout-popover",
-                    closing,
-                ))
-                .child(attach_overlay_below(
                     branch_chip,
                     &mut overlay,
                     PickerKind::Branch,
                     "branch-popover",
                     closing,
                 ))
+                .children(checkout_chip.map(|chip| {
+                    attach_overlay_below(
+                        chip,
+                        &mut overlay,
+                        PickerKind::Checkout,
+                        "checkout-popover",
+                        closing,
+                    )
+                }))
                 .into_any_element(),
         )
     }
@@ -6491,8 +6558,8 @@ impl Render for Pickers {
             }
         };
         // A list still from the previous device is loading for this one.
-        let catalog_loading = self.harnesses_stale
-            || matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
+        let catalog_loading =
+            self.harnesses_stale || matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
         // Harness unknown while the catalog resolves: the pixel-glyph loader
         // instead of guessing a brand mark.
         let chip_icon_loading = self.title.is_none()
@@ -7441,7 +7508,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cloud_is_a_checkout_option_when_cloud_reaches_the_projects_repository(
+    fn cloud_is_a_device_option_while_on_and_reaching_the_projects_repository(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| cx.set_global(Theme::dark()));
@@ -7457,10 +7524,21 @@ mod tests {
             github_repo: repo.map(str::to_string),
             created_at: chrono::Utc::now(),
         };
+        let cloud_on = |credits: f64| zeron_proto::CloudStatus {
+            state: zeron_proto::CloudState::Ready,
+            device_id: Some("cloud-1".into()),
+            available: true,
+            credits: Some(credits),
+            ..Default::default()
+        };
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| {
                 let mut state = AppState::new();
                 state.local_device_id = Some("mac".into());
+                state.devices = serde_json::from_value(serde_json::json!([
+                    {"id": "mac", "name": "Studio", "platform": "macos", "lastSeenAt": null},
+                ]))
+                .unwrap();
                 state.spaces = vec![
                     project("app", Some("Acme/App")),
                     project("other", Some("someone/else")),
@@ -7480,26 +7558,35 @@ mod tests {
         });
         handle
             .update(cx, |pickers, _, cx| {
-                let kinds = |pickers: &Pickers, cx: &App| {
+                let devices = |pickers: &Pickers, cx: &App| {
                     pickers
-                        .checkout_options(cx)
+                        .device_rows(cx)
                         .into_iter()
-                        .map(|(kind, label, _)| (kind, label))
+                        .map(|row| (row.name, row.cloud))
                         .collect::<Vec<_>>()
                 };
-                // The origin names a repository Cloud reaches (any case).
+                // Off: no Cloud anywhere, even with its repositories known.
+                assert_eq!(devices(pickers, cx), [("Studio".to_string(), false)]);
+                pickers
+                    .state
+                    .update(cx, |state, _| state.cloud_status = Some(cloud_on(120.0)));
+                // On, and the origin names a repository Cloud reaches (any
+                // case): a device row, never a checkout kind.
                 assert_eq!(
-                    kinds(pickers, cx),
-                    [
-                        (CheckoutKind::Local, "Current checkout"),
-                        (CheckoutKind::NewWorktree, "New worktree"),
-                        (CheckoutKind::Cloud, "Cloud"),
-                    ]
+                    devices(pickers, cx),
+                    [("Studio".to_string(), false), ("Cloud".to_string(), true)]
                 );
-                pickers.pick_checkout(CheckoutKind::Cloud, cx);
+                assert!(
+                    pickers
+                        .checkout_options(cx)
+                        .iter()
+                        .all(|(kind, ..)| *kind != CheckoutKind::Cloud)
+                );
+                let cloud_row = pickers.device_rows(cx).pop().unwrap();
+                pickers.pick_device_row(cloud_row, cx);
                 pickers.config.branch = Some("dev".into());
                 assert!(pickers.runs_on_cloud(cx));
-                assert_eq!(pickers.checkout_label(), "Cloud");
+                assert_eq!(pickers.selected_device_index(cx), 1);
                 assert_eq!(pickers.ref_label(), SharedString::from("From dev"));
                 assert_eq!(
                     pickers.session_checkout_plan(cx),
@@ -7507,12 +7594,19 @@ mod tests {
                         branch: Some("dev".into())
                     }
                 );
+                // Back to the project's own device: off Cloud, branch dropped.
+                let mac = pickers.device_rows(cx).remove(0);
+                pickers.pick_device_row(mac, cx);
+                assert!(!pickers.runs_on_cloud(cx));
+                assert_eq!(pickers.config.checkout, CheckoutKind::Local);
+                assert_eq!(pickers.config.branch, None);
                 // A project Cloud can't reach offers no Cloud, and a Cloud
                 // pick that lost its repository runs here instead.
+                pickers.switch_cloud(CheckoutKind::Cloud, cx);
                 pickers.state.update(cx, |state, _| {
                     state.selected_space = Some("other".into());
                 });
-                assert_eq!(kinds(pickers, cx).len(), 2);
+                assert_eq!(devices(pickers, cx).len(), 1);
                 assert!(!pickers.runs_on_cloud(cx));
                 assert_eq!(
                     pickers.session_checkout_plan(cx),
@@ -7700,7 +7794,9 @@ mod tests {
                 Loadable::Ready(vec![bare_model("gpt", "GPT")]),
                 cx,
             );
-            pickers.models.insert(HarnessId::ClaudeCode, Loadable::Loading);
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Loading);
         });
         state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
         cx.run_until_parked();
@@ -9192,7 +9288,10 @@ mod tests {
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude"));
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.model_rows(cx)[picker.active].harness, HarnessId::ClaudeCode);
+                assert_eq!(
+                    picker.model_rows(cx)[picker.active].harness,
+                    HarnessId::ClaudeCode
+                );
             })
             .unwrap();
     }
@@ -9306,7 +9405,10 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(
                     picker.compact_groups(cx),
-                    vec![(Some(HarnessId::Codex), 0), (Some(HarnessId::ClaudeCode), 2)]
+                    vec![
+                        (Some(HarnessId::Codex), 0),
+                        (Some(HarnessId::ClaudeCode), 2)
+                    ]
                 );
                 picker.toggle_model_favorite(HarnessId::Codex, "gpt-a", cx);
                 assert_eq!(
@@ -9367,7 +9469,9 @@ mod tests {
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
                 assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
                 // Searching must also find another provider's model.
-                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
                 picker.activate_model_index(0, cx);
@@ -9397,14 +9501,13 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
-                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 0);
                 picker.search.update(cx, |input, cx| input.set_text("", cx));
                 // A chat's provider is fixed: one tab, its own.
-                assert_eq!(
-                    picker.compact_groups(cx),
-                    vec![(Some(HarnessId::Codex), 0)]
-                );
+                assert_eq!(picker.compact_groups(cx), vec![(Some(HarnessId::Codex), 0)]);
                 picker.compact_model_list = false;
                 picker.focus_on_mount = true;
             })

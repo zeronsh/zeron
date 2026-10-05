@@ -6,13 +6,15 @@ note in the encrypted-sync RFC for the Cloud device only.
 ## Product shape
 
 **Cloud is a place a session runs, and every Cloud session gets its own machine.** It is a
-checkout option, next to "Current checkout" and "New worktree": the checkout picker offers
-**Cloud** for any project whose GitHub repository (the folder's `origin`) the Zeron GitHub App
-reaches. A session started there runs in its own sandbox — which clones the repository, sleeps
+row of the composer's device menu, after the devices holding the project: offered while Cloud
+is on, for any project whose GitHub repository (the folder's `origin`) the Zeron GitHub App
+reaches. Picked, the composer drops the checkout menu (the machine clones the picked branch
+fresh), and the model menu offers only the agents Cloud has an active account for. A session started there runs in its own sandbox — which clones the repository, sleeps
 when the session is idle and wakes when the chat is sent to — instead of on the computer the
 project lives on, which may then be offline. Cloud has its own providers: a provider works there
-only once it has been connected *for Cloud* (Settings → Cloud). Cloud is not a device: no device
-list shows it.
+only once an account has been connected *for Cloud* (Settings → Providers, with Cloud picked in
+the device switcher). Cloud is listed there as one entry, never its session machines; no other
+device list shows it.
 
 - v1 providers on Cloud: **Codex** and **Claude Code** only.
 - v1 repositories on Cloud: **GitHub repositories** the user installed the Zeron GitHub App on.
@@ -250,11 +252,19 @@ from our lifecycle events.
 - A `CloudIndex` DO lists every Cloud user so an hourly cron can reconcile all of them, and a
   daily scan of Boat's sandbox list reports **orphans** (sandboxes no user owns, usually a
   crashed provision) — those are Zeron's cost, not a user's.
-- Users see their month in Settings → Cloud (`GET /cloud/{orgId}/usage`). Operators bill from
+- Rows are per **UTC day** and sandbox (a month is the sum of its days), so users see credits
+  per day: Settings → Cloud → Usage, a range (last 7/30/90 days, this or last month) and a bar
+  per day (`GET /cloud/{orgId}/usage?from&to`). Operators bill from
   `GET /admin/cloud/usage?month=YYYY-MM[&format=csv]` (`ADMIN_TOKEN`), and each closed month
   is written to R2 at `usage/{YYYY-MM}.json`.
-- Pricing (markup, included hours) is a separate business decision; the meter records raw
-  seconds and Boat list-price dollars only.
+- **Credits.** One credit is one minute of a small machine: 60 of Boat's billable seconds
+  (which already carry the machine-size multiplier, so larger machines use more per minute).
+  The balance is credits granted (a one-time `CLOUD_STARTING_CREDITS` on first enable; operator
+  grants via `POST /admin/cloud/credits {orgId, userId, credits, reason}`) minus credits used,
+  less awake machines' time since their meters were last read. At zero or below, new sessions
+  and wakes are refused (`402 no_credits`), the composer holds Cloud sends, and the account's
+  reconcile — every 5 minutes while a machine is awake (awake machines only; everything
+  hourly) — puts awake machines to sleep. `CloudStatus.credits` carries the balance.
 
 ## Credential vault — `zeron-vault` Worker
 
@@ -266,10 +276,32 @@ binding from the main Worker, which passes the **verified** identity. It has its
 
 - **VaultDevices** `dev1/{userId}` — enrolled device keys `{deviceId, kind: laptop|cloud,
   publicKey, enrolledAt, revokedAt?}`, an append-only audit log, and the per-user disable flag.
-- **VaultAccount** `acct1/{userId}/{provider}` — one encrypted credential record, its
-  `authorizedDevices`, `generation`, `status` (`connected` · `needs_reconnect`) and refresh
-  bookkeeping. **Single-threaded per id, so at most one refresh is ever in flight per
-  account.** That is the property that fixes refresh-token races.
+- **VaultAccount** `acct1/{userId}/{provider}` — the provider's accounts (up to 20 encrypted
+  credentials, one row per slot), each with its `authorizedDevices`, `generation`, `status`
+  (`connected` · `needs_reconnect`) and refresh bookkeeping, and which one is **active**.
+  **Single-threaded per id, and refreshes are single-flighted per slot, so at most one refresh
+  is ever in flight per account.** That is the property that fixes refresh-token races.
+
+### Multiple accounts
+
+A provider holds several accounts; grants always come from the active one, and every Cloud
+machine uses it from its next turn (the engine re-checks a cached grant older than 30 s before
+a run). Uploading the same login again replaces its own account instead of adding one —
+identity is never secret material: Claude's profile `email|organization` (sent beside the
+blob), Codex's `id_token` email + `account_id`, an API key's key id (a hash), GitHub's login. A
+new upload becomes active. Forgetting the active account leaves none active (grants answer
+`no {provider} account is active`); the generation counter is per provider, so AADs stay
+unique across accounts. The daily canary refreshes every account. A pre-accounts single
+`record` row migrates into one active account with the same generation and envelope.
+
+Settings → Providers shows Cloud's Claude Code and Codex cards like any device's: each card's
+accounts are its subscription logins plus its API keys (`anthropic-key` / `openai-key`), one of
+them active. The engine answers account calls aimed at `targetDeviceId: "cloud"` from the vault
+(`cloud_accounts`); activating a key clears the active subscription login, since machines
+prefer a subscription. Usage meters come from the vault, which alone holds the tokens: it calls
+the provider's usage endpoint (Claude `api.anthropic.com/api/oauth/usage`, Codex
+`chatgpt.com/backend-api/wham/usage`) and returns the body for the engine to parse; a 401/403
+there never marks the account.
 
 ### Encryption
 
@@ -343,7 +375,7 @@ retries on the next grant; the DO persists a new generation before returning it.
 The standard GitHub App model: sessions act as the App, never as the user.
 
 - The **user token** (device flow) stays in the vault. It lists the user's repositories for
-  the checkout picker's Cloud option and proves which App installations the user can reach.
+  the device menu's Cloud row and proves which App installations the user can reach.
 - A `github` grant names the session repository (`repo: "owner/name"`, required). The vault
   lists `/user/installations` with the user token, picks the installation on `owner` (not
   suspended), and mints `POST /app/installations/{id}/access_tokens` with an RS256 App JWT
@@ -367,7 +399,11 @@ The standard GitHub App model: sessions act as the App, never as the user.
 | `GET /vault/{orgId}` | Providers `{provider, status, authorizedDevices, updatedAt, account?}` + devices |
 | `PUT /vault/{orgId}/credentials/{provider}` | Upload `{material, authorizedDevices}` |
 | `PATCH /vault/{orgId}/credentials/{provider}` | Change `authorizedDevices` |
-| `DELETE /vault/{orgId}/credentials/{provider}` | Disconnect (wipe record) |
+| `DELETE /vault/{orgId}/credentials/{provider}` | Disconnect (wipe every account) |
+| `GET /vault/{orgId}/accounts/{provider}` | `{accounts}`: slot, status, active, kind, identity fields, devices |
+| `POST /vault/{orgId}/accounts/{provider}/active` | `{slot \| null}` → pick the active account (null: none) |
+| `DELETE /vault/{orgId}/accounts/{provider}/{slot}` | Forget one account |
+| `GET /vault/{orgId}/accounts/{provider}/{slot}/usage` | `{body, fetchedAt}`: the provider's usage reply |
 | `POST /vault/{orgId}/devices/enroll` | Enroll the caller's device key (laptops) |
 | `POST /vault/{orgId}/devices/{deviceId}/revoke` | Per-device revoke |
 | `POST /vault/{orgId}/github/device` | Start GitHub device flow → `{userCode, verificationUri, interval, flowId}` |
@@ -453,7 +489,9 @@ refresh contract changes is caught within a day, before users' grants start fail
   `VaultAuthorize`, `VaultDisconnect`, `VaultRevokeDevice`, `GithubConnectStart` /
   `GithubConnectPoll` — RPCs that call the edge with the user's bearer and are never routed by
   `targetDeviceId`. The two sign-ins reply `AgentLoginStart` immediately and are driven with
-  the existing `PollAgentLogin` / `CompleteAgentLogin` / `CancelAgentLogin`.
+  the existing `PollAgentLogin` / `CompleteAgentLogin` / `CancelAgentLogin`. The account calls
+  (`ListAgentAccounts`, `ActivateAgentAccount`, `ForgetAgentAccount`, `StartAgentLogin` and the
+  login trio) aimed at `targetDeviceId: "cloud"` are answered from the vault the same way.
 
 ## HTTP contract (main Worker)
 
@@ -499,12 +537,13 @@ base64url). After enrollment the engine persists `{data_dir}/runner.json`
 
 | Route | Auth | Reply |
 | --- | --- | --- |
-| `GET /cloud/{orgId}/usage?month=YYYY-MM` | user (own usage only; runner refused); `month` defaults to the current UTC month | `CloudUsage`: `{month, seconds, dollars, sandboxes: [{provider, sandboxId, sandboxType, seconds, dollars, running, reconciledAt}], closed, available: true}` |
+| `GET /cloud/{orgId}/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | user (own usage only; runner refused); default the last 30 days, at most 366 | `CloudUsage`: `{from, to, days: [{day, credits}], credits, balance, available: true}` — every day of the range |
+| `POST /admin/cloud/credits` | `Authorization: Bearer $ADMIN_TOKEN` | `{orgId, userId, credits, reason}` (negative corrects) → `{balance}` |
 | `GET /admin/cloud/usage?month=YYYY-MM[&format=csv]` | `Authorization: Bearer $ADMIN_TOKEN` (header only; constant-time compare; the route is `404` when the secret is unset) | `{month, generatedAt, closed, totals: {seconds, dollars, users, orphans}, users: [{orgId, userId, deviceId, month, seconds, dollars, closed, errors, sandboxes}], orphans: [{provider, sandboxId, state, firstSeenAt, lastSeenAt}]}`; CSV: `kind,month,orgId,userId,deviceId,provider,sandboxId,sandboxType,seconds,dollars,running,reconciledAt,closed,note`, one line per (user, sandbox) and per orphan |
 
 `seconds` are the provider's billable seconds (machine-size multiplier applied), `dollars` its
 list price, `reconciledAt` Unix ms. A month is `closed` once it has ended (plus a one-hour
-grace for the provider's meter) and every sandbox that existed in it has a closed row; closed
+grace for the provider's meter) and every day of every sandbox that existed in it has a closed row; closed
 figures never change and are the billable ones. Each closed month is also written once to R2
 `BLOBS` at `usage/{YYYY-MM}.json` (same JSON as the admin export) by the hourly cron
 (`17 * * * *`), which also pokes every user's reconcile and, at 00:17 UTC, scans each

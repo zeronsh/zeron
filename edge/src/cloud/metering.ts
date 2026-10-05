@@ -14,14 +14,21 @@
  *   sandboxes — every sandbox the user ever had (delete + re-enable makes more)
  *   ledger    — append-only lifecycle events (create, ready, wake, sleep, stop,
  *               delete, ttl_extend, error), for disputes and debugging
- *   usage     — one row per (UTC month, sandbox): the last reconciled figure.
- *               `closed` rows are final and never change again.
+ *   usage_days — one row per (UTC day, sandbox): the last reconciled figure.
+ *               `closed` rows are final and never change again. A month is
+ *               the sum of its days (the operator export).
+ *   credit_grants — credits added to the account (starting grant, operator
+ *               grants). The balance is grants minus credits used.
  *
- * Month M is reconciled with since = M start, until = min(now, M end). Once M
+ * Day D is reconciled with since = D start, until = min(now, D end). Once D
  * has ended (plus a grace hour for the provider's meter to settle) one more
- * reconcile with until = M end closes the row. A deleted sandbox's figure is
+ * reconcile with until = D end closes the row. A deleted sandbox's figure is
  * read after it stopped and before the DELETE (providers stop serving usage
  * for deleted sandboxes), and its rows are closed right then.
+ *
+ * Credits: one credit is one minute of a small machine — 60 of the
+ * provider's billable seconds, which already carry the machine-size
+ * multiplier.
  *
  * The planning and month math are pure (unit-tested in Node); the SQL
  * helpers take the DO's `SqlStorage`.
@@ -32,6 +39,40 @@ export const CLOSE_GRACE_MS = 60 * 60_000;
 export const RECONCILE_EVERY_MS = 60 * 60_000;
 
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
+const DAY_RE = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+export const DAY_MS = 24 * 60 * 60_000;
+
+/** Billable seconds per credit: a minute of a small machine. */
+export const CREDIT_SECONDS = 60;
+
+export const creditsOf = (seconds: number): number => Math.round((seconds / CREDIT_SECONDS) * 100) / 100;
+
+export const isDayKey = (value: string): boolean => DAY_RE.test(value) && dayKey(Date.parse(`${value}T00:00:00Z`)) === value;
+
+/** `YYYY-MM-DD` (UTC) of a Unix-ms instant. */
+export const dayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+
+export const dayStart = (day: string): number => {
+  if (!DAY_RE.test(day)) throw new Error(`bad day ${day}`);
+  return Date.parse(`${day}T00:00:00Z`);
+};
+
+/** Exclusive end: the first instant of the next day. */
+export const dayEnd = (day: string): number => dayStart(day) + DAY_MS;
+
+/** Days `[from, to]` inclusive, oldest first. */
+export const daysBetween = (from: number, to: number): string[] => {
+  const out: string[] = [];
+  const last = dayKey(Math.max(from, to));
+  for (let d = dayKey(from); ; d = dayKey(dayEnd(d))) {
+    out.push(d);
+    if (d === last) return out;
+  }
+};
+
+/** Days whose figures are final once reconciled after they end. */
+export const dayClosable = (day: string, now: number, graceMs = CLOSE_GRACE_MS): boolean =>
+  now >= dayEnd(day) + graceMs;
 
 export const isMonthKey = (value: string): boolean => MONTH_RE.test(value);
 
@@ -72,7 +113,8 @@ export interface SandboxRecord {
 }
 
 export interface UsageRow {
-  readonly month: string;
+  /** UTC day, `YYYY-MM-DD`. */
+  readonly day: string;
   readonly provider: string;
   readonly sandboxId: string;
   readonly sandboxType: string;
@@ -86,7 +128,7 @@ export interface UsageRow {
 }
 
 export interface ReconcileTask {
-  readonly month: string;
+  readonly day: string;
   readonly provider: string;
   readonly sandboxId: string;
   readonly sandboxType: string;
@@ -100,8 +142,8 @@ export interface ReconcileTask {
   readonly deleted: boolean;
 }
 
-const rowKey = (month: string, provider: string, sandboxId: string) =>
-  `${month}\u0000${provider}\u0000${sandboxId}`;
+const rowKey = (day: string, provider: string, sandboxId: string) =>
+  `${day}\u0000${provider}\u0000${sandboxId}`;
 
 /** Months `[from, to]` inclusive, oldest first. */
 export const monthsBetween = (from: number, to: number): string[] => {
@@ -114,9 +156,9 @@ export const monthsBetween = (from: number, to: number): string[] => {
 };
 
 /**
- * Every (month, sandbox) window that still needs the provider's figure, or just a
+ * Every (day, sandbox) window that still needs the provider's figure, or just a
  * close. Closed rows are skipped for good. Pure: `now` is a parameter so the
- * month-boundary math is testable.
+ * day-boundary math is testable.
  */
 export const planReconcile = (
   sandboxes: readonly SandboxRecord[],
@@ -124,27 +166,27 @@ export const planReconcile = (
   now: number,
   graceMs = CLOSE_GRACE_MS
 ): ReconcileTask[] => {
-  const byKey = new Map(rows.map((row) => [rowKey(row.month, row.provider, row.sandboxId), row]));
+  const byKey = new Map(rows.map((row) => [rowKey(row.day, row.provider, row.sandboxId), row]));
   const tasks: ReconcileTask[] = [];
   for (const sandbox of sandboxes) {
     const lastAt = Math.min(now, sandbox.deletedAt ?? now);
-    for (const month of monthsBetween(sandbox.createdAt, lastAt)) {
-      const row = byKey.get(rowKey(month, sandbox.provider, sandbox.sandboxId));
+    for (const day of daysBetween(sandbox.createdAt, lastAt)) {
+      const row = byKey.get(rowKey(day, sandbox.provider, sandbox.sandboxId));
       if (row?.closed) continue;
-      const since = monthStart(month);
-      const until = Math.min(now, monthEnd(month), sandbox.deletedAt ?? Infinity);
-      const close = monthClosable(month, now, graceMs);
+      const since = dayStart(day);
+      const until = Math.min(now, dayEnd(day), sandbox.deletedAt ?? Infinity);
+      const close = dayClosable(day, now, graceMs);
       const deleted = sandbox.deletedAt !== undefined;
       const final =
         sandbox.finalAt !== undefined && row !== undefined && row.reconciledAt >= sandbox.finalAt;
       if (final) {
         if (close) {
-          tasks.push({ month, provider: sandbox.provider, sandboxId: sandbox.sandboxId, sandboxType: row.sandboxType, since, until, fetch: false, close, deleted });
+          tasks.push({ day, provider: sandbox.provider, sandboxId: sandbox.sandboxId, sandboxType: row.sandboxType, since, until, fetch: false, close, deleted });
         }
         continue;
       }
       if (until <= since) continue;
-      tasks.push({ month, provider: sandbox.provider, sandboxId: sandbox.sandboxId, sandboxType: row?.sandboxType ?? sandbox.type, since, until, fetch: true, close, deleted });
+      tasks.push({ day, provider: sandbox.provider, sandboxId: sandbox.sandboxId, sandboxType: row?.sandboxType ?? sandbox.type, since, until, fetch: true, close, deleted });
     }
   }
   return tasks;
@@ -169,8 +211,8 @@ export interface CloudSandboxUsage {
   readonly reconciledAt: number;
 }
 
-/** Wire shape of `CloudUsage` (crates/proto/src/cloud.rs). */
-export interface CloudUsage {
+/** One user's month (the operator export). */
+export interface MonthUsage {
   readonly month: string;
   readonly seconds: number;
   readonly dollars: number;
@@ -190,43 +232,71 @@ export const summarizeMonth = (
   sandboxes: readonly SandboxRecord[],
   rows: readonly UsageRow[],
   now: number
-): CloudUsage & { readonly errors: readonly string[] } => {
-  const inMonth = rows.filter((row) => row.month === month);
+): MonthUsage & { readonly errors: readonly string[] } => {
+  const inMonth = rows.filter((row) => row.day.startsWith(`${month}-`));
   const start = monthStart(month);
   const end = monthEnd(month);
-  const expected = sandboxes.filter(
-    (s) => s.createdAt < end && (s.deletedAt ?? Infinity) > start && s.createdAt < now
+  // Closed once the month (plus grace) is over and none of its days is
+  // still open for any sandbox that existed in it.
+  const pending = planReconcile(sandboxes, rows, Math.min(now, end + CLOSE_GRACE_MS)).filter(
+    (task) => task.day.startsWith(`${month}-`) && task.since < end && task.until > start
   );
+  const closed = monthClosable(month, now) && pending.length === 0 && inMonth.every((row) => row.closed);
   const chatOf = new Map(sandboxes.map((s) => [`${s.provider}/${s.sandboxId}`, s.chatId]));
-  const closedIds = new Set(inMonth.filter((row) => row.closed).map((row) => `${row.provider}/${row.sandboxId}`));
-  const closed =
-    monthClosable(month, now) &&
-    expected.every((s) => closedIds.has(`${s.provider}/${s.sandboxId}`)) &&
-    inMonth.every((row) => row.closed);
-  return {
-    month,
-    seconds: inMonth.reduce((sum, row) => sum + row.seconds, 0),
-    dollars: roundDollars(inMonth.reduce((sum, row) => sum + row.dollars, 0)),
-    sandboxes: inMonth.map((row) => {
-      const chatId = chatOf.get(`${row.provider}/${row.sandboxId}`);
-      return {
+  // One figure per sandbox: the sum of its days.
+  const perSandbox = new Map<string, CloudSandboxUsage>();
+  for (const row of inMonth) {
+    const key = `${row.provider}/${row.sandboxId}`;
+    const prev = perSandbox.get(key);
+    const chatId = chatOf.get(key);
+    perSandbox.set(key, {
       provider: row.provider,
       sandboxId: row.sandboxId,
       ...(chatId ? { chatId } : {}),
       sandboxType: row.sandboxType,
-      seconds: row.seconds,
-      dollars: row.dollars,
-      running: row.running,
-      reconciledAt: row.reconciledAt
-      };
-    }),
+      seconds: (prev?.seconds ?? 0) + row.seconds,
+      dollars: roundDollars((prev?.dollars ?? 0) + row.dollars),
+      running: (prev?.running ?? false) || row.running,
+      reconciledAt: Math.max(prev?.reconciledAt ?? 0, row.reconciledAt)
+    });
+  }
+  return {
+    month,
+    seconds: inMonth.reduce((sum, row) => sum + row.seconds, 0),
+    dollars: roundDollars(inMonth.reduce((sum, row) => sum + row.dollars, 0)),
+    sandboxes: [...perSandbox.values()],
     closed,
     available: true,
     errors: inMonth.flatMap((row) =>
-      row.reconcileError ? [`${row.provider}/${row.sandboxId}: ${row.reconcileError}`] : []
+      row.reconcileError ? [`${row.provider}/${row.sandboxId} ${row.day}: ${row.reconcileError}`] : []
     )
   };
 };
+
+/** Credits used per day over `[from, to]` (UTC days, inclusive): every day
+ * present, zero when nothing ran. */
+export const creditsPerDay = (
+  from: string,
+  to: string,
+  rows: readonly UsageRow[]
+): { readonly day: string; readonly credits: number }[] => {
+  const seconds = new Map<string, number>();
+  for (const row of rows) seconds.set(row.day, (seconds.get(row.day) ?? 0) + row.seconds);
+  return daysBetween(dayStart(from), dayStart(to)).map((day) => ({ day, credits: creditsOf(seconds.get(day) ?? 0) }));
+};
+
+/** Wire shape of `CloudUsage` (crates/proto/src/cloud.rs): the caller's
+ * credits — balance, and use per day over a range. */
+export interface CloudUsage {
+  readonly from: string;
+  readonly to: string;
+  readonly days: readonly { readonly day: string; readonly credits: number }[];
+  /** Credits used in the range. */
+  readonly credits: number;
+  /** Credits left (may be negative: machines that ran past zero). */
+  readonly balance: number;
+  readonly available: true;
+}
 
 // ── SQLite (CloudAccount DO) ─────────────────────────────────────────────────
 
@@ -259,12 +329,37 @@ export const ensureMeteringTables = (sql: SqlStorage): void => {
   sql.exec(`CREATE TABLE IF NOT EXISTS ledger (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, event TEXT NOT NULL,
     chat_id TEXT, provider TEXT, sandbox_id TEXT, type TEXT, workflow_id TEXT, detail TEXT)`);
-  sql.exec(`CREATE TABLE IF NOT EXISTS usage (
-    month TEXT NOT NULL, provider TEXT NOT NULL, sandbox_id TEXT NOT NULL, sandbox_type TEXT NOT NULL,
+  sql.exec(`CREATE TABLE IF NOT EXISTS usage_days (
+    day TEXT NOT NULL, provider TEXT NOT NULL, sandbox_id TEXT NOT NULL, sandbox_type TEXT NOT NULL,
     seconds INTEGER NOT NULL, dollars REAL NOT NULL, running INTEGER NOT NULL,
     reconciled_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, reconcile_error TEXT,
-    PRIMARY KEY (month, provider, sandbox_id))`);
+    PRIMARY KEY (day, provider, sandbox_id))`);
+  sql.exec(`CREATE TABLE IF NOT EXISTS credit_grants (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, credits REAL NOT NULL, reason TEXT NOT NULL)`);
 };
+
+export interface CreditGrant {
+  readonly at: number;
+  readonly credits: number;
+  readonly reason: string;
+}
+
+export const addCredits = (sql: SqlStorage, grant: CreditGrant): void => {
+  sql.exec("INSERT INTO credit_grants (at, credits, reason) VALUES (?, ?, ?)", grant.at, grant.credits, grant.reason.slice(0, 200));
+};
+
+/** The reason the one-time starting grant is recorded under. */
+export const STARTING_CREDITS = "starting credits";
+
+export const hasGrant = (sql: SqlStorage, reason: string): boolean =>
+  [...sql.exec("SELECT 1 FROM credit_grants WHERE reason = ? LIMIT 1", reason)].length > 0;
+
+export const creditsGranted = (sql: SqlStorage): number =>
+  ([...sql.exec("SELECT COALESCE(SUM(credits), 0) AS total FROM credit_grants")][0]?.total as number) ?? 0;
+
+/** Every credit used so far (reconciled figures). */
+export const creditsUsed = (sql: SqlStorage): number =>
+  creditsOf(([...sql.exec("SELECT COALESCE(SUM(seconds), 0) AS total FROM usage_days")][0]?.total as number) ?? 0);
 
 export interface SandboxRef {
   readonly provider: string;
@@ -336,14 +431,14 @@ export const listLedger = (sql: SqlStorage, limit = 500): LedgerEntry[] =>
  * WHERE on the conflict branch), which is what makes closed months immutable. */
 export const upsertUsage = (sql: SqlStorage, row: UsageRow): void => {
   sql.exec(
-    `INSERT INTO usage (month, provider, sandbox_id, sandbox_type, seconds, dollars, running, reconciled_at, closed, reconcile_error)
+    `INSERT INTO usage_days (day, provider, sandbox_id, sandbox_type, seconds, dollars, running, reconciled_at, closed, reconcile_error)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-     ON CONFLICT (month, provider, sandbox_id) DO UPDATE SET
+     ON CONFLICT (day, provider, sandbox_id) DO UPDATE SET
        sandbox_type = excluded.sandbox_type, seconds = excluded.seconds, dollars = excluded.dollars,
        running = excluded.running, reconciled_at = excluded.reconciled_at, closed = excluded.closed,
        reconcile_error = NULL
-     WHERE usage.closed = 0`,
-    row.month,
+     WHERE usage_days.closed = 0`,
+    row.day,
     row.provider,
     row.sandboxId,
     row.sandboxType,
@@ -359,17 +454,17 @@ export const upsertUsage = (sql: SqlStorage, row: UsageRow): void => {
  * close (a sandbox the provider no longer knows can never be re-read). */
 export const recordUsageFailure = (
   sql: SqlStorage,
-  task: Pick<ReconcileTask, "month" | "provider" | "sandboxId" | "sandboxType">,
+  task: Pick<ReconcileTask, "day" | "provider" | "sandboxId" | "sandboxType">,
   message: string,
   close: boolean
 ): void => {
   sql.exec(
-    `INSERT INTO usage (month, provider, sandbox_id, sandbox_type, seconds, dollars, running, reconciled_at, closed, reconcile_error)
+    `INSERT INTO usage_days (day, provider, sandbox_id, sandbox_type, seconds, dollars, running, reconciled_at, closed, reconcile_error)
      VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, ?)
-     ON CONFLICT (month, provider, sandbox_id) DO UPDATE SET
+     ON CONFLICT (day, provider, sandbox_id) DO UPDATE SET
        reconcile_error = excluded.reconcile_error, closed = excluded.closed
-     WHERE usage.closed = 0`,
-    task.month,
+     WHERE usage_days.closed = 0`,
+    task.day,
     task.provider,
     task.sandboxId,
     task.sandboxType,
@@ -378,22 +473,28 @@ export const recordUsageFailure = (
   );
 };
 
-export const closeUsageRow = (sql: SqlStorage, month: string, ref: SandboxRef): void => {
+export const closeUsageRow = (sql: SqlStorage, day: string, ref: SandboxRef): void => {
   sql.exec(
-    "UPDATE usage SET closed = 1 WHERE month = ? AND provider = ? AND sandbox_id = ? AND closed = 0",
-    month,
+    "UPDATE usage_days SET closed = 1 WHERE day = ? AND provider = ? AND sandbox_id = ? AND closed = 0",
+    day,
     ref.provider,
     ref.sandboxId
   );
 };
 
-export const listUsage = (sql: SqlStorage, month?: string): UsageRow[] =>
+/** Day rows, optionally only days in `[from, to]` (`YYYY-MM-DD`, inclusive;
+ * a month's days are `[M-01, M-31]`). */
+export const listUsage = (sql: SqlStorage, range?: { readonly from: string; readonly to: string }): UsageRow[] =>
   [
-    ...(month === undefined
-      ? sql.exec("SELECT * FROM usage ORDER BY month, provider, sandbox_id")
-      : sql.exec("SELECT * FROM usage WHERE month = ? ORDER BY provider, sandbox_id", month))
+    ...(range === undefined
+      ? sql.exec("SELECT * FROM usage_days ORDER BY day, provider, sandbox_id")
+      : sql.exec(
+          "SELECT * FROM usage_days WHERE day >= ? AND day <= ? ORDER BY day, provider, sandbox_id",
+          range.from,
+          range.to
+        ))
   ].map((row) => ({
-    month: row.month as string,
+    day: row.day as string,
     provider: row.provider as string,
     sandboxId: row.sandbox_id as string,
     sandboxType: row.sandbox_type as string,

@@ -30,7 +30,9 @@ import {
   type VaultProviderId,
   type VaultResult,
   type VaultRpc,
-  type VaultStatusView
+  type VaultStatusView,
+  type VaultAccountView,
+  type VaultUsageView
 } from "./api";
 import type { AuditEntry } from "./devices";
 import type { Env } from "./env";
@@ -64,7 +66,11 @@ export class Vault implements VaultRpc {
       if (!devices) return fail("bad_request", "authorizedDevices must be a list of device ids");
       const disabled = await this.userDisabled(userId);
       if (disabled) return disabled;
-      const put = await accountStub(this.env, userId, provider).put(userId, provider, material, devices);
+      const profile = (request as Partial<PutCredentialRequest>).profile;
+      if (profile !== undefined && (typeof profile !== "object" || profile === null)) {
+        return fail("bad_request", "profile must be an object");
+      }
+      const put = await accountStub(this.env, userId, provider).put(userId, provider, material, devices, profile);
       if (!put.ok) return put;
       await this.audit(userId, { event: "upload", orgId: caller.orgId, provider, detail: `devices=${devices.length}` });
       return this.view(userId);
@@ -220,6 +226,59 @@ export class Vault implements VaultRpc {
       const disabled = await this.userDisabled(userId);
       if (disabled) return disabled;
       return accountStub(this.env, userId, "github").githubBranches(userId, repo);
+    });
+  }
+
+  /** Every stored login of `provider` (users only). */
+  accounts(caller: VaultCaller, provider: VaultProviderId): Promise<VaultResult<readonly VaultAccountView[]>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isProvider(provider)) return fail("bad_request", "unknown provider");
+      const disabled = await this.userDisabled(userId);
+      if (disabled) return disabled;
+      return accountStub(this.env, userId, provider).accounts(userId, provider);
+    });
+  }
+
+  /** Pick the login grants come from (`null` = none). Users only. */
+  activateAccount(
+    caller: VaultCaller,
+    provider: VaultProviderId,
+    slot: string | null
+  ): Promise<VaultResult<readonly VaultAccountView[]>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isProvider(provider)) return fail("bad_request", "unknown provider");
+      if (slot !== null && !isId(slot)) return fail("bad_request", "malformed account id");
+      const disabled = await this.userDisabled(userId);
+      if (disabled) return disabled;
+      const result = await accountStub(this.env, userId, provider).activate(userId, provider, slot);
+      if (result.ok) {
+        await this.audit(userId, { event: "activate", orgId: caller.orgId, provider, detail: slot ?? "none" });
+      }
+      return result;
+    });
+  }
+
+  /** Delete one stored login. Only removes access, so it stays available
+   * behind the per-user kill switch. */
+  forgetAccount(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<readonly VaultAccountView[]>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isProvider(provider)) return fail("bad_request", "unknown provider");
+      if (!isId(slot)) return fail("bad_request", "malformed account id");
+      const result = await accountStub(this.env, userId, provider).forget(userId, provider, slot);
+      if (!result.ok) return result;
+      if (result.value.removed) await this.audit(userId, { event: "forget", orgId: caller.orgId, provider, detail: slot });
+      return { ok: true as const, value: result.value.accounts };
+    });
+  }
+
+  /** Plan usage of one Claude or Codex login (users only). */
+  accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isProvider(provider)) return fail("bad_request", "unknown provider");
+      if (!isId(slot)) return fail("bad_request", "malformed account id");
+      const disabled = await this.userDisabled(userId);
+      if (disabled) return disabled;
+      return accountStub(this.env, userId, provider).usage(userId, provider, slot);
     });
   }
 

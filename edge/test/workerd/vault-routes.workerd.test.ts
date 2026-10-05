@@ -41,6 +41,21 @@ describe("/vault routes → VAULT service binding", () => {
       branches: ["main", "dev"]
     });
     expect((await lastCall("githubBranches")).args).toEqual([caller, "acme/app"]);
+
+    expect(await (await call("GET", "/vault/org1/accounts/claude", bearer)).json()).toMatchObject({
+      accounts: [{ slot: "a1", active: true }]
+    });
+    expect((await lastCall("accounts")).args).toEqual([caller, "claude"]);
+    expect((await call("POST", "/vault/org1/accounts/codex/active", bearer, { slot: "a1" })).status).toBe(200);
+    expect((await lastCall("activateAccount")).args).toEqual([caller, "codex", "a1"]);
+    expect((await call("POST", "/vault/org1/accounts/codex/active", bearer, { slot: null })).status).toBe(200);
+    expect((await lastCall("activateAccount")).args).toEqual([caller, "codex", null]);
+    expect(await (await call("DELETE", "/vault/org1/accounts/anthropic-key/a1", bearer)).json()).toEqual({ accounts: [] });
+    expect((await lastCall("forgetAccount")).args).toEqual([caller, "anthropic-key", "a1"]);
+    expect(await (await call("GET", "/vault/org1/accounts/claude/a1/usage", bearer)).json()).toMatchObject({
+      body: { five_hour: { utilization: 10 } }
+    });
+    expect((await lastCall("accountUsage")).args).toEqual([caller, "claude", "a1"]);
   });
 
   it("validates shapes before calling the vault", async () => {
@@ -58,6 +73,10 @@ describe("/vault routes → VAULT service binding", () => {
     await bad("POST", "/vault/org1/grant", { provider: "codex", deviceId: "d", ts: "1", sig: "s" });
     await bad("POST", "/vault/org1/grant", { provider: "github", deviceId: "d", ts: 1, sig: "c2ln", repo: 7 });
     await bad("GET", "/vault/org1/github/branches");
+    await bad("GET", "/vault/org1/accounts/bogus");
+    await bad("POST", "/vault/org1/accounts/codex/active", { slot: "bad id!" });
+    await bad("POST", "/vault/org1/accounts/codex/active", {});
+    await bad("DELETE", "/vault/org1/accounts/codex/bad%20id");
     await bad("PUT", "/vault/org1/credentials/codex", { material: { key: "x".repeat(70_000) }, authorizedDevices: [] });
     expect((await call("GET", "/vault/other-org", bearer)).status).toBe(403);
     expect((await call("GET", "/vault/org1/nope", bearer)).status).toBe(404);

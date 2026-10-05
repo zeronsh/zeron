@@ -45,6 +45,19 @@ const deviceList = (value: unknown): string[] | undefined =>
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** A login's display identity: short strings only. `null` = malformed. */
+const accountProfile = (value: unknown): Record<string, string> | null => {
+  if (!isObject(value)) return null;
+  const out: Record<string, string> = {};
+  for (const [key, field] of Object.entries(value)) {
+    if (!["email", "displayName", "organization", "plan"].includes(key)) continue;
+    if (field === undefined || field === null) continue;
+    if (typeof field !== "string" || field.length > 200) return null;
+    out[key] = field;
+  }
+  return out;
+};
+
 /** `VaultResult` → HTTP. The vault picks the status; anything outside the
  * error range is a contract bug, answered as a bad gateway. */
 export const vaultResponse = <T>(result: VaultResult<T>): Response => {
@@ -105,9 +118,15 @@ export const handleVaultRoute = async (
       if (b instanceof Response) return b;
       const authorizedDevices = deviceList(b.authorizedDevices);
       if (!isObject(b.material) || !authorizedDevices) {
-        return bad("Expected {material, authorizedDevices}.");
+        return bad("Expected {material, authorizedDevices, profile?}.");
       }
-      const req = { material: b.material, authorizedDevices } as unknown as PutCredentialRequest;
+      const profile = b.profile === undefined ? undefined : accountProfile(b.profile);
+      if (profile === null) return bad("profile must be {email?, displayName?, organization?, plan?} strings.");
+      const req = {
+        material: b.material,
+        authorizedDevices,
+        ...(profile ? { profile } : {})
+      } as unknown as PutCredentialRequest;
       return call(() => vault.putCredential(caller, provider, req));
     }
     if (method === "PATCH") {
@@ -118,6 +137,32 @@ export const handleVaultRoute = async (
       return call(() => vault.authorize(caller, provider, authorizedDevices));
     }
     if (method === "DELETE") return call(() => vault.disconnect(caller, provider));
+  }
+
+  // /vault/{orgId}/accounts/{provider}[/{slot}[/usage]] — a provider's
+  // stored logins: list, pick the active one, forget one, read one's usage.
+  if (rest[0] === "accounts" && rest.length >= 2) {
+    const provider = rest[1];
+    if (!isProvider(provider)) return bad("Unknown provider.");
+    const list = <T>(run: () => Promise<VaultResult<T>>) =>
+      call(async () => {
+        const result = await run();
+        return result.ok ? { ok: true as const, value: { accounts: result.value } } : result;
+      });
+    if (rest.length === 2 && method === "GET") return list(() => vault.accounts(caller, provider));
+    if (rest.length === 3 && rest[2] === "active" && method === "POST") {
+      const b = await body();
+      if (b instanceof Response) return b;
+      const slot = b.slot;
+      if (slot !== null && (typeof slot !== "string" || !ID_RE.test(slot))) return bad("Expected {slot: id | null}.");
+      return list(() => vault.activateAccount(caller, provider, slot));
+    }
+    const slot = rest[2];
+    if (slot === undefined || !ID_RE.test(slot)) return bad("Bad account id.");
+    if (rest.length === 3 && method === "DELETE") return list(() => vault.forgetAccount(caller, provider, slot));
+    if (rest.length === 4 && rest[3] === "usage" && method === "GET") {
+      return call(() => vault.accountUsage(caller, provider, slot));
+    }
   }
 
   // POST /vault/{orgId}/devices/enroll — laptops enroll their own key here.

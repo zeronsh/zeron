@@ -5,7 +5,7 @@
  *   GET    /cloud/{orgId}                          account status (user)
  *   POST   /cloud/{orgId}/enable                   turn Cloud on (user)
  *   DELETE /cloud/{orgId}                          turn Cloud off: every session machine (user)
- *   GET    /cloud/{orgId}/usage?month=             metered usage (user)
+ *   GET    /cloud/{orgId}/usage?from=&to=          credits: balance + use per day (user)
  *   GET    /cloud/{orgId}/projects                 Cloud projects (user)
  *   PUT    /cloud/{orgId}/projects/{spaceId}       add/update a project (user)
  *   DELETE /cloud/{orgId}/projects/{spaceId}       remove a project + its sessions (user)
@@ -27,7 +27,10 @@ import type { Env } from "../env";
 import { json, jsonError, readJsonBody } from "../http";
 import type { CloudResult, RepoInput } from "./cloud-account";
 import { isEdgeOrigin } from "./install-script";
-import { isMonthKey, monthKey } from "./metering";
+import { DAY_MS, dayKey, isDayKey } from "./metering";
+
+/** The longest range a usage read covers. */
+const MAX_USAGE_DAYS = 366;
 import { CLOUD_DEVICE_PREFIX, cloudAccountName } from "./policy";
 import { sandboxProvider, type ProviderEnv } from "./providers";
 
@@ -171,10 +174,17 @@ export const handleCloudRoute = async (
     });
   }
   if (rest[0] === "usage" && rest.length === 1 && request.method === "GET") {
-    const month = url.searchParams.get("month") ?? monthKey(Date.now());
-    if (!isMonthKey(month)) return jsonError(400, "bad_request", "month must be YYYY-MM.");
-    if (!ns) return json({ month, seconds: 0, dollars: 0, sandboxes: [], closed: false, available: false });
-    return rpc(() => accountStub(ns, orgId, auth.userId).usage(caller, month));
+    // Default: the last 30 days, today included.
+    const to = url.searchParams.get("to") ?? dayKey(Date.now());
+    const from = url.searchParams.get("from") ?? dayKey(Date.parse(`${to}T00:00:00Z`) - 29 * DAY_MS);
+    if (!isDayKey(from) || !isDayKey(to) || from > to) {
+      return jsonError(400, "bad_request", "from and to must be YYYY-MM-DD, from ≤ to.");
+    }
+    if ((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS >= MAX_USAGE_DAYS) {
+      return jsonError(400, "bad_request", `At most ${MAX_USAGE_DAYS} days.`);
+    }
+    if (!ns) return json({ from, to, days: [], credits: 0, balance: 0, available: false });
+    return rpc(() => accountStub(ns, orgId, auth.userId).usage(caller, from, to));
   }
   if (!ns) return unavailable();
   const stub = accountStub(ns, orgId, auth.userId);

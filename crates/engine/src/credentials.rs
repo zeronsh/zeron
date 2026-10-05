@@ -74,10 +74,10 @@ pub const GITHUB_NOT_CONNECTED: &str =
     "github_not_connected: GitHub isn't connected for this device — connect it in Settings → Cloud";
 
 /// A Cloud run of a provider with no login anywhere on the device.
-pub const CODEX_NOT_SIGNED_IN: &str = "Codex isn't signed in on Cloud. Sign in with ChatGPT or add an \
-     OpenAI API key in Settings → Cloud, then send again.";
-pub const CLAUDE_NOT_SIGNED_IN: &str = "Claude Code isn't signed in on Cloud. Sign in with Claude or \
-     add an Anthropic API key in Settings → Cloud, then send again.";
+pub const CODEX_NOT_SIGNED_IN: &str = "Codex isn't signed in on Cloud. Sign in with ChatGPT, pick an \
+     account or add an OpenAI API key in Settings → Providers → Cloud, then send again.";
+pub const CLAUDE_NOT_SIGNED_IN: &str = "Claude Code isn't signed in on Cloud. Sign in with Claude, pick an \
+     account or add an Anthropic API key in Settings → Providers → Cloud, then send again.";
 
 /// A spawn uses a cached grant only while it has at least this much life left.
 const GRANT_SLACK: Duration = Duration::from_secs(5 * 60);
@@ -85,6 +85,10 @@ const GRANT_SLACK: Duration = Duration::from_secs(5 * 60);
 const REFRESH_AHEAD: Duration = Duration::from_secs(10 * 60);
 /// A "not connected" answer is reused this long before asking again.
 const MISSING_TTL: Duration = Duration::from_secs(30);
+/// A run re-asks the vault for a grant older than this, so switching the
+/// account in Settings → Providers takes effect on the next turn (grants
+/// otherwise live until shortly before they expire — hours).
+const RUN_REVALIDATE: Duration = Duration::from_secs(30);
 /// Background refresher cadence (wall-clock re-evaluation; sandboxes stop
 /// and resume, which tokio's monotonic timers do not see).
 const REFRESH_TICK: Duration = Duration::from_secs(60);
@@ -159,7 +163,7 @@ pub enum GrantOutcome {
 }
 
 enum Cached {
-    Granted(Grant),
+    Granted { grant: Grant, at: Instant },
     Missing { at: Instant, reason: String },
 }
 
@@ -303,15 +307,28 @@ impl CredentialBroker {
 
     /// A grant valid for at least 5 more minutes (cached or fresh).
     pub async fn grant(&self, provider: VaultProvider) -> GrantOutcome {
-        self.grant_within(provider, GRANT_SLACK).await
+        self.grant_within(provider, GRANT_SLACK, None).await
     }
 
-    async fn grant_within(&self, provider: VaultProvider, min_validity: Duration) -> GrantOutcome {
-        if let Some(hit) = self.cached(provider, min_validity) {
+    /// [`Self::grant`] for a run about to start: a cached grant older than
+    /// [`RUN_REVALIDATE`] is checked with the vault first, so the run uses
+    /// the provider's active account as it is now.
+    async fn grant_for_run(&self, provider: VaultProvider) -> GrantOutcome {
+        self.grant_within(provider, GRANT_SLACK, Some(RUN_REVALIDATE))
+            .await
+    }
+
+    async fn grant_within(
+        &self,
+        provider: VaultProvider,
+        min_validity: Duration,
+        max_age: Option<Duration>,
+    ) -> GrantOutcome {
+        if let Some(hit) = self.cached(provider, min_validity, max_age) {
             return hit;
         }
         let _gate = self.inner.grant_gate.lock().await;
-        if let Some(hit) = self.cached(provider, min_validity) {
+        if let Some(hit) = self.cached(provider, min_validity, max_age) {
             return hit;
         }
         match self.fetch(provider).await {
@@ -322,7 +339,13 @@ impl CredentialBroker {
                     expires_in_s = grant.remaining_ms() / 1000,
                     "credentials: vault grant"
                 );
-                lock(&self.inner.cache).insert(provider, Cached::Granted(grant.clone()));
+                lock(&self.inner.cache).insert(
+                    provider,
+                    Cached::Granted {
+                        grant: grant.clone(),
+                        at: Instant::now(),
+                    },
+                );
                 GrantOutcome::Granted(grant)
             }
             GrantOutcome::NotConnected(reason) => {
@@ -339,7 +362,7 @@ impl CredentialBroker {
             GrantOutcome::Unavailable(reason) => {
                 // Offline fallback: a cached grant that is still valid keeps
                 // working while the vault is unreachable.
-                if let Some(Cached::Granted(grant)) = lock(&self.inner.cache).get(&provider)
+                if let Some(Cached::Granted { grant, .. }) = lock(&self.inner.cache).get(&provider)
                     && grant.remaining_ms() > OFFLINE_MIN_VALIDITY.as_millis() as i64
                 {
                     tracing::warn!(provider = provider.as_str(), %reason,
@@ -352,9 +375,17 @@ impl CredentialBroker {
         }
     }
 
-    fn cached(&self, provider: VaultProvider, min_validity: Duration) -> Option<GrantOutcome> {
+    fn cached(
+        &self,
+        provider: VaultProvider,
+        min_validity: Duration,
+        max_age: Option<Duration>,
+    ) -> Option<GrantOutcome> {
         match lock(&self.inner.cache).get(&provider)? {
-            Cached::Granted(grant) if grant.remaining_ms() > min_validity.as_millis() as i64 => {
+            Cached::Granted { grant, at }
+                if grant.remaining_ms() > min_validity.as_millis() as i64
+                    && max_age.is_none_or(|max| at.elapsed() < max) =>
+            {
                 Some(GrantOutcome::Granted(grant.clone()))
             }
             Cached::Missing { at, reason } if at.elapsed() < MISSING_TTL => {
@@ -366,7 +397,7 @@ impl CredentialBroker {
 
     fn cached_grant(&self, provider: VaultProvider) -> Option<Grant> {
         match lock(&self.inner.cache).get(&provider)? {
-            Cached::Granted(grant) => Some(grant.clone()),
+            Cached::Granted { grant, .. } => Some(grant.clone()),
             Cached::Missing { .. } => None,
         }
     }
@@ -464,6 +495,41 @@ impl CredentialBroker {
         Ok(())
     }
 
+    /// Which credential a run of `harness` would use now, in [`Self::prepare`]'s
+    /// order: the vault login, the sandbox's own, the vault API key. Keyed by
+    /// the grant's generation, so another account (or a refreshed token) reads
+    /// as different. `None` while the vault can't be reached: unknown is not
+    /// a change.
+    pub async fn credential(&self, harness: HarnessId) -> Option<String> {
+        let (login, key, native) = match harness {
+            HarnessId::Codex => (
+                VaultProvider::Codex,
+                VaultProvider::OpenaiKey,
+                self.codex_native_login(),
+            ),
+            HarnessId::ClaudeCode => (
+                VaultProvider::Claude,
+                VaultProvider::AnthropicKey,
+                self.claude_native_login(),
+            ),
+            _ => return None,
+        };
+        let generation = |grant: Grant| format!("{}:{}", grant.provider, grant.generation);
+        match self.grant_for_run(login).await {
+            GrantOutcome::Granted(grant) => return Some(generation(grant)),
+            GrantOutcome::Unavailable(_) => return None,
+            GrantOutcome::NotConnected(_) => {}
+        }
+        if native {
+            return Some("native".into());
+        }
+        match self.grant_for_run(key).await {
+            GrantOutcome::Granted(grant) => Some(generation(grant)),
+            GrantOutcome::NotConnected(_) => Some("none".into()),
+            GrantOutcome::Unavailable(_) => None,
+        }
+    }
+
     /// A Codex login the sandbox has on its own (`codex login` inside it, or
     /// an API key in the engine's environment).
     fn codex_native_login(&self) -> bool {
@@ -524,7 +590,7 @@ impl CredentialBroker {
     pub async fn codex_home(&self) -> Option<PathBuf> {
         let home = managed_codex_home(&self.inner.config.data_dir);
         let auth_file = home.join("auth.json");
-        match self.grant(VaultProvider::Codex).await {
+        match self.grant_for_run(VaultProvider::Codex).await {
             GrantOutcome::Granted(grant) => {
                 return self
                     .write_codex_auth(&home, codex_chatgpt_auth_json(&grant, chrono::Utc::now()))
@@ -538,7 +604,7 @@ impl CredentialBroker {
             }
             GrantOutcome::NotConnected(_) => {}
         }
-        match self.grant(VaultProvider::OpenaiKey).await {
+        match self.grant_for_run(VaultProvider::OpenaiKey).await {
             GrantOutcome::Granted(grant) => self
                 .write_codex_auth(&home, codex_api_key_auth_json(&grant.access_token))
                 .await
@@ -560,7 +626,7 @@ impl CredentialBroker {
     /// Returns the `ANTHROPIC_API_KEY` to inject, if that is the resolution;
     /// a subscription grant goes to the CLI's own credential file instead.
     pub async fn prepare_claude(&self) -> Option<String> {
-        match self.grant(VaultProvider::Claude).await {
+        match self.grant_for_run(VaultProvider::Claude).await {
             GrantOutcome::Granted(grant) => {
                 if self.write_claude_credentials(&grant).await {
                     return None;
@@ -574,7 +640,7 @@ impl CredentialBroker {
         if self.claude_native_login() {
             return None;
         }
-        match self.grant(VaultProvider::AnthropicKey).await {
+        match self.grant_for_run(VaultProvider::AnthropicKey).await {
             GrantOutcome::Granted(grant) => Some(grant.access_token),
             _ => None,
         }
@@ -765,7 +831,7 @@ impl CredentialBroker {
         };
         if github_due {
             match self
-                .grant_within(VaultProvider::Github, REFRESH_AHEAD)
+                .grant_within(VaultProvider::Github, REFRESH_AHEAD, None)
                 .await
             {
                 GrantOutcome::Granted(grant) => self.sync_github_files(&grant).await,
@@ -779,7 +845,7 @@ impl CredentialBroker {
             // Claude Code access tokens live hours, not days: keep the file
             // ahead of expiry for long-lived sessions and terminals.
             match self
-                .grant_within(VaultProvider::Claude, REFRESH_AHEAD)
+                .grant_within(VaultProvider::Claude, REFRESH_AHEAD, None)
                 .await
             {
                 GrantOutcome::Granted(grant) => {
@@ -793,7 +859,10 @@ impl CredentialBroker {
             && grant.remaining_ms() <= REFRESH_AHEAD.as_millis() as i64
         {
             let home = managed_codex_home(&self.inner.config.data_dir);
-            match self.grant_within(VaultProvider::Codex, REFRESH_AHEAD).await {
+            match self
+                .grant_within(VaultProvider::Codex, REFRESH_AHEAD, None)
+                .await
+            {
                 GrantOutcome::Granted(grant) => {
                     self.write_codex_auth(
                         &home,
@@ -867,6 +936,10 @@ fn classify_grant_failure(status: u16, body: &EdgeErrorBody) -> GrantOutcome {
 impl crate::registry::RunEnvironment for CredentialBroker {
     async fn prepare(&self, harness: HarnessId, request: &mut RunRequest) -> Result<(), String> {
         CredentialBroker::prepare(self, harness, request).await
+    }
+
+    async fn credential(&self, harness: HarnessId) -> Option<String> {
+        CredentialBroker::credential(self, harness).await
     }
 }
 

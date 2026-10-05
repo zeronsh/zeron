@@ -21,6 +21,7 @@ mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
+mod cloud_accounts;
 pub mod cloud_client;
 pub mod credentials;
 pub mod diff_sync;

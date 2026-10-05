@@ -981,6 +981,52 @@ async fn grants_are_cached_fall_back_offline_and_drop_on_revocation() {
     assert_eq!(rig.edge.requests("/vault/").len(), asked);
 }
 
+/// The credential a run would use, as the broker fingerprints it for
+/// replacing a parked session: the login first, then the key; unknown while
+/// the vault is down. (A fresh broker per step: no cached answers.)
+#[tokio::test]
+async fn the_run_credential_follows_the_active_account() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "claude",
+        200,
+        json!({"provider": "claude", "accessToken": "at", "expiresAt": in_ms(86_400), "generation": 3}),
+    );
+    rig.grant(
+        "anthropic-key",
+        200,
+        json!({"provider": "anthropic-key", "accessToken": "k1", "expiresAt": in_ms(86_400 * 365), "generation": 1}),
+    );
+    let fingerprint = || async {
+        rig.broker(identity.clone(), "http://127.0.0.1:9")
+            .credential(HarnessId::ClaudeCode)
+            .await
+    };
+    assert_eq!(fingerprint().await.as_deref(), Some("claude:3"));
+    // The key became the active account (the login was cleared).
+    rig.grant(
+        "claude",
+        404,
+        json!({"error": "not_found", "message": "no claude account is active"}),
+    );
+    assert_eq!(fingerprint().await.as_deref(), Some("anthropic-key:1"));
+    rig.grant(
+        "anthropic-key",
+        404,
+        json!({"error": "not_found", "message": "no anthropic-key credential"}),
+    );
+    assert_eq!(fingerprint().await.as_deref(), Some("none"));
+    rig.grant("claude", 503, json!({"error": "unavailable"}));
+    assert_eq!(fingerprint().await, None, "unknown is not a change");
+    assert_eq!(
+        rig.broker(identity, "http://127.0.0.1:9")
+            .credential(HarnessId::Cursor)
+            .await,
+        None
+    );
+}
+
 #[tokio::test]
 async fn a_stale_grant_timestamp_is_retried_once_with_a_larger_ts() {
     let rig = Rig::new().await;

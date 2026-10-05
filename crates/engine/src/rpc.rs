@@ -784,6 +784,9 @@ impl EngineRpc {
     /// The logical Cloud device (no engine; the edge writes its row with the
     /// `cloud-account` capability), as opposed to a session's device.
     fn is_cloud_account_device(&self, device_id: &str) -> bool {
+        if crate::cloud_accounts::is_cloud_accounts_target(device_id) {
+            return true;
+        }
         self.workspace.read_devices().is_ok_and(|devices| {
             devices.iter().any(|d| {
                 d.id == device_id
@@ -818,6 +821,9 @@ impl EngineRpc {
         };
         match method {
             methods::LIST_HARNESSES => {
+                // Enabled = Cloud has an account to run it with (unknown
+                // while the vault can't be read: then every one is).
+                let ready = crate::cloud_accounts::ready_harnesses(&self.cloud()).await;
                 let descriptors: Vec<_> = self
                     .registry
                     .descriptors()
@@ -825,7 +831,7 @@ impl EngineRpc {
                     .filter(|d| crate::registry::CLOUD_HARNESS_IDS.contains(&d.id))
                     .map(|mut d| {
                         d.installed = true;
-                        d.enabled = Some(true);
+                        d.enabled = Some(ready.as_ref().is_none_or(|ready| ready.contains(&d.id)));
                         d
                     })
                     .collect();
@@ -2023,7 +2029,20 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
-            if target.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX)
+            // Settings → Providers' Cloud: its logins live in the vault.
+            if crate::cloud_accounts::is_cloud_accounts_target(&target)
+                && crate::cloud_accounts::handles(method)
+            {
+                return Box::pin(crate::cloud_accounts::dispatch(
+                    self.cloud(),
+                    self.agent_accounts.clone(),
+                    method,
+                    params,
+                ))
+                .await;
+            }
+            if (target.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX)
+                || crate::cloud_accounts::is_cloud_accounts_target(&target))
                 && let Some(reply) = self.answer_for_cloud(&target, method, &params).await
             {
                 return reply;

@@ -50,6 +50,8 @@ export type VaultResult<T> =
       readonly status: number;
     };
 
+/** One provider's connection, summarized from its active account (else its
+ * most recent one). */
 export interface VaultConnectionView {
   readonly provider: VaultProviderId;
   readonly status: "connected" | "needsReconnect";
@@ -57,6 +59,50 @@ export interface VaultConnectionView {
   /** Email / GitHub login / `…abcd` key suffix. Never secret material. */
   readonly account?: string;
   readonly updatedAt: number;
+  /** How many accounts the provider holds (one is used: the active one). */
+  readonly accounts?: number;
+  /** Whether one of them is active (grants come from it). */
+  readonly hasActive?: boolean;
+}
+
+/** Non-secret identity of an uploaded login, from the uploader's own sign-in
+ * (Claude's profile endpoint). Display and de-duplication only. */
+export interface VaultAccountProfile {
+  readonly email?: string;
+  readonly displayName?: string;
+  readonly organization?: string;
+  readonly plan?: string;
+}
+
+/**
+ * One stored login of a provider. A provider holds any number; grants come
+ * from the ACTIVE one. Signing in to an account already stored replaces it
+ * (same email/organization, same API key), anything else adds one; a new
+ * sign-in becomes active.
+ */
+export interface VaultAccountView {
+  /** Stable id within the provider. */
+  readonly slot: string;
+  readonly status: "connected" | "needsReconnect";
+  readonly active: boolean;
+  /** `oauth` (subscription login) · `setup-token` · `api-key` · `github`. */
+  readonly kind: "oauth" | "setup-token" | "api-key" | "github";
+  /** Email / GitHub login / `…abcd` key suffix / plan. Never secret. */
+  readonly account?: string;
+  readonly email?: string;
+  readonly displayName?: string;
+  readonly organization?: string;
+  readonly plan?: string;
+  readonly authorizedDevices: readonly string[];
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/** A subscription login's plan usage, as its provider answered it (the
+ * engine parses it with its own probe code). */
+export interface VaultUsageView {
+  readonly body: Record<string, unknown>;
+  readonly fetchedAt: number;
 }
 
 export interface VaultDeviceView {
@@ -111,6 +157,8 @@ export type VaultMaterial =
 export interface PutCredentialRequest {
   readonly material: VaultMaterial;
   readonly authorizedDevices: readonly string[];
+  /** The login's identity, when the uploader knows it (Claude: its profile). */
+  readonly profile?: VaultAccountProfile;
 }
 
 export interface EnrollDeviceRequest {
@@ -218,4 +266,23 @@ export interface VaultRpc {
    * Users only. `not_found` when GitHub isn't connected or can't see it.
    */
   githubBranches(caller: VaultCaller, repo: string): Promise<VaultResult<readonly string[]>>;
+  /** Every stored login of `provider` (users only). */
+  accounts(caller: VaultCaller, provider: VaultProviderId): Promise<VaultResult<readonly VaultAccountView[]>>;
+  /** Make `slot` the login grants come from; `null` = none (the engine then
+   * falls through to the provider's API key). Users only. */
+  activateAccount(
+    caller: VaultCaller,
+    provider: VaultProviderId,
+    slot: string | null
+  ): Promise<VaultResult<readonly VaultAccountView[]>>;
+  /** Delete one stored login. Forgetting the active one leaves none active.
+   * Users only. */
+  forgetAccount(
+    caller: VaultCaller,
+    provider: VaultProviderId,
+    slot: string
+  ): Promise<VaultResult<readonly VaultAccountView[]>>;
+  /** Plan usage of one Claude or Codex login, read by the vault (users only;
+   * `not_found` for providers without a usage view). */
+  accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>>;
 }

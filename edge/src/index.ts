@@ -43,6 +43,7 @@
  *   GET  /cloud/:orgId/usage            — user bearer
  *   *    /vault/:orgId/…                — VAULT service binding
  *   GET  /admin/cloud/usage             — ADMIN_TOKEN (operator export)
+ *   POST /admin/cloud/credits           — ADMIN_TOKEN (grant a user credits)
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";

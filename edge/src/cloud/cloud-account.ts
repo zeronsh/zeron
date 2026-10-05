@@ -43,8 +43,15 @@ import {
 } from "./crypto";
 import { isBranch, isCheckoutPath, isRepoUrl } from "./install-script";
 import {
+  CREDIT_SECONDS,
   RECONCILE_EVERY_MS,
+  STARTING_CREDITS,
+  addCredits,
   appendLedger,
+  creditsGranted,
+  creditsPerDay,
+  creditsUsed,
+  hasGrant,
   closeUsageRow,
   ensureMeteringTables,
   listLedger,
@@ -60,6 +67,7 @@ import {
   upsertUsage,
   type CloudUsage,
   type LedgerEntry,
+  type MonthUsage,
   type LedgerEvent,
   type ReconcileTask,
   type SandboxRef
@@ -107,6 +115,9 @@ export interface CloudStatusView {
   readonly awakeSessions: number;
   readonly maxAwakeSessions: number;
   readonly available: boolean;
+  /** Credits left (a minute of a small machine each); sessions don't start
+   * or wake at zero or below. */
+  readonly credits: number;
 }
 
 /** Wire shape of `CloudSession`. */
@@ -196,7 +207,7 @@ interface SessionRepo extends RepoInput {
 }
 
 /** Per-user billing view for the operator export. */
-export interface CloudBillingRow extends CloudUsage {
+export interface CloudBillingRow extends MonthUsage {
   readonly orgId?: string;
   readonly userId?: string;
   readonly deviceId?: string;
@@ -221,6 +232,14 @@ interface AccountRecord {
   /** A failed sweep of deleted sessions' devices retries then
    * (`sweepStaleDevices`). */
   sweepDevicesAt?: number;
+  /** Logical device ids of earlier times Cloud was on (each turn-off
+   * revokes one). Connections still authorized for them move to the new
+   * one on enable. Survives turning Cloud off. */
+  retiredDeviceIds?: string[];
+  /** The last reconcile that read awake machines' meters (any kind). */
+  lastReconcileAt?: number;
+  /** The last reconcile of every open row (the others read awake machines'). */
+  lastFullReconcileAt?: number;
 }
 
 interface SessionRecord {
@@ -263,9 +282,16 @@ interface SessionRecord {
   error?: string;
   failedAction?: CloudAction;
   idleCheckAt?: number;
+  /** When the machine last started running (provision or wake): unmetered
+   * time since the last reconcile counts against the balance. */
+  awakeSince?: number;
 }
 
 const ACCOUNT_KEY = "account";
+/** Earlier logical device ids remembered for moving connections over. */
+const RETIRED_DEVICES_KEPT = 8;
+/** While a machine is awake, credits are re-checked this often. */
+const CREDIT_CHECK_MS = 5 * 60_000;
 const SESSION_PREFIX = "session:";
 /** A delete that crashed mid-way may be retried after this long. */
 const DELETE_STUCK_MS = 5 * 60_000;
@@ -419,8 +445,27 @@ export class CloudAccount extends DurableObject<Env> {
       ...(lastActiveAt ? { lastActiveAt } : {}),
       awakeSessions: this.awakeCount(),
       maxAwakeSessions: this.maxAwake(),
-      available: true
+      available: true,
+      credits: Math.floor(this.balance() * 100) / 100
     };
+  }
+
+  /** Credits left: granted minus used, less awake machines' time since their
+   * meters were last read (a running machine is never free). */
+  private balance(now = Date.now()): number {
+    if (!this.acct.orgId) return 0;
+    const sql = this.sql();
+    let unmetered = 0;
+    for (const s of this.sessions.values()) {
+      if (!AWAKE_STATES.has(s.state)) continue;
+      const since = Math.max(s.awakeSince ?? now, this.acct.lastReconcileAt ?? 0);
+      unmetered += Math.max(0, now - since) / 1000;
+    }
+    return creditsGranted(sql) - creditsUsed(sql) - unmetered / CREDIT_SECONDS;
+  }
+
+  private outOfCredits(): CloudResult<never> {
+    return fail(402, "no_credits", "You're out of Cloud credits.");
   }
 
   private sessionView(s: SessionRecord): CloudSessionView {
@@ -472,6 +517,13 @@ export class CloudAccount extends DurableObject<Env> {
         .register({ orgId, userId, deviceId, sandboxes })
         .catch((e: unknown) => console.warn("cloud.index register failed", String(e)))
     );
+  }
+
+  /** When metering runs next: soon while a machine is awake (its credits
+   * are being spent), hourly while any row is still open, else never. */
+  private nextReconcile(sql: SqlStorage, now: number): number | undefined {
+    if (this.awakeCount() > 0) return now + CREDIT_CHECK_MS;
+    return meteringOpen(listSandboxes(sql), listUsage(sql), now) ? now + RECONCILE_EVERY_MS : undefined;
   }
 
   private scheduleReconcile(at = Date.now() + 1_000): void {
@@ -615,10 +667,46 @@ export class CloudAccount extends DurableObject<Env> {
     a.state = "ready";
     a.error = undefined;
     a.failedAction = undefined;
+    // Once per user, ever: the grant row outlives turning Cloud off.
+    const starting = Number(this.env.CLOUD_STARTING_CREDITS ?? "0");
+    if (Number.isFinite(starting) && starting > 0 && !hasGrant(this.sql(), STARTING_CREDITS)) {
+      addCredits(this.sql(), { at: Date.now(), credits: starting, reason: STARTING_CREDITS });
+    }
     await this.saveAccount();
     this.ledger("ready", undefined, { detail: `account ${a.deviceId}` });
     this.register();
+    await this.moveConnections(caller, a.deviceId);
     return this.okAccount();
+  }
+
+  /**
+   * Turning Cloud off revoked its logical device and turning it on minted a
+   * new one: every stored connection (GitHub, the Claude Code and Codex
+   * accounts) still authorized for an earlier Cloud is authorized for this
+   * one instead, so nothing has to be connected again. Best effort: a
+   * failure leaves the connection for the user to re-connect.
+   */
+  private async moveConnections(caller: CloudCaller, deviceId: string): Promise<void> {
+    const retired = this.acct.retiredDeviceIds ?? [];
+    const vault = this.env.VAULT;
+    if (retired.length === 0 || !vault) return;
+    const user = { userId: caller.userId, orgId: caller.orgId, kind: "user" as const };
+    try {
+      const status = await vault.status(user);
+      if (!status.ok) throw new Error(`${status.error}: ${status.message}`);
+      for (const connection of status.value.connections) {
+        if (!connection.authorizedDevices.some((id) => retired.includes(id))) continue;
+        const devices = [
+          ...new Set(connection.authorizedDevices.map((id) => (retired.includes(id) ? deviceId : id)))
+        ];
+        const moved = await vault.authorize(user, connection.provider, devices);
+        if (!moved.ok) throw new Error(`${connection.provider}: ${moved.error}: ${moved.message}`);
+      }
+      this.acct.retiredDeviceIds = undefined;
+      await this.saveAccount();
+    } catch (e) {
+      console.warn("cloud enable: moving connections to the new Cloud failed", explain(e));
+    }
   }
 
   /**
@@ -655,13 +743,12 @@ export class CloudAccount extends DurableObject<Env> {
   /** The account delete completes once its last session is gone. */
   private async maybeFinishAccountDelete(): Promise<void> {
     if (this.acct.state !== "deleting" || this.sessions.size > 0) return;
-    const { generation, orgId, userId } = this.acct;
+    const { generation, orgId, userId, deviceId, retiredDeviceIds = [] } = this.acct;
     this.acct = freshAccount(generation, orgId && userId ? { orgId, userId } : undefined);
+    if (deviceId) this.acct.retiredDeviceIds = [...retiredDeviceIds, deviceId].slice(-RETIRED_DEVICES_KEPT);
     const sql = this.sql();
     const now = Date.now();
-    this.acct.nextReconcileAt = meteringOpen(listSandboxes(sql), listUsage(sql), now)
-      ? now + RECONCILE_EVERY_MS
-      : undefined;
+    this.acct.nextReconcileAt = this.nextReconcile(sql, now);
     this.register();
     await this.saveAccount();
   }
@@ -697,6 +784,7 @@ export class CloudAccount extends DurableObject<Env> {
     if (baseBranch !== undefined && !isBranch(baseBranch)) return fail(400, "bad_request", "Malformed branch.");
     const existing = this.sessions.get(chatId);
     if (existing) return this.okSession(existing);
+    if (this.balance() <= 0) return this.outOfCredits();
     const name = typeof repo?.fullName === "string" ? repo.fullName.split("/")[1] : undefined;
     const root = (this.env.CLOUD_PROJECTS_ROOT ?? CLOUD_PROJECTS_ROOT).replace(/\/+$/, "");
     const path = name ? `${root}/${name}` : "";
@@ -807,6 +895,7 @@ export class CloudAccount extends DurableObject<Env> {
     const cur = this.sessions.get(s.chatId);
     if (cur !== s || (s.state !== "provisioning" && s.state !== "error")) return this.okSession(cur ?? s);
     s.state = "provisioning";
+    s.awakeSince = Date.now();
     s.enrollHash = hash;
     s.runnerKey = undefined;
     s.lastTokenTs = undefined;
@@ -842,8 +931,10 @@ export class CloudAccount extends DurableObject<Env> {
     if (!params) {
       return this.failNow(s, "wake", 409, "no_sandbox", "This session has no machine to wake. Delete its machine and send again.");
     }
+    if (this.balance() <= 0) return this.outOfCredits();
     if (!(await this.makeRoomFor(s.chatId))) return this.tooManyAwake();
     s.state = "starting";
+    s.awakeSince = Date.now();
     s.awaitingOnline = true;
     s.pendingWake = false;
     s.error = undefined;
@@ -1008,6 +1099,7 @@ export class CloudAccount extends DurableObject<Env> {
       const sandbox = await provider.get(s.sandboxId);
       if (sandbox.state !== "stopped" || s.state !== "ready") return false;
       s.state = "sleeping";
+      s.awakeSince = undefined;
       this.ledger("stop", s, { detail: "stopped by the provider (auto-stop)" });
       this.scheduleReconcile();
       return (await this.beginWake(s)).ok;
@@ -1183,24 +1275,35 @@ export class CloudAccount extends DurableObject<Env> {
   }
 
   /**
-   * Pull each provider's figure for every open (month, sandbox) window.
-   * Returns whether every read succeeded. Never throws for a provider
-   * failure: the row keeps its last figure plus `reconcileError`, and the
-   * next pass retries. `now` is a parameter for the month-boundary tests.
+   * Pull each provider's figure for open (day, sandbox) windows: every one
+   * hourly, and in between only awake machines' (their credits are being
+   * spent). Out of credits, every awake machine is put to sleep. Returns
+   * whether every read succeeded. Never throws for a provider failure: the
+   * row keeps its last figure plus `reconcileError`, and the next pass
+   * retries. `now` is a parameter for the day-boundary tests.
    */
-  async reconcile(now = Date.now()): Promise<boolean> {
+  async reconcile(
+    now = Date.now(),
+    full = now - (this.acct.lastFullReconcileAt ?? 0) >= RECONCILE_EVERY_MS
+  ): Promise<boolean> {
     if (!this.acct.orgId) return true; // never enabled: nothing to meter
     const sql = this.sql();
+    const awake = new Set(
+      [...this.sessions.values()]
+        .filter((s) => AWAKE_STATES.has(s.state) || s.state === "stopping")
+        .flatMap((s) => (s.sandboxId ? [`${s.provider}/${s.sandboxId}`] : []))
+    );
     let allOk = true;
     for (const task of planReconcile(listSandboxes(sql), listUsage(sql), now)) {
+      if (!full && !awake.has(`${task.provider}/${task.sandboxId}`)) continue;
       if (!task.fetch) {
-        closeUsageRow(sql, task.month, task);
+        closeUsageRow(sql, task.day, task);
         continue;
       }
       try {
         const usage = await this.readUsage(task);
         upsertUsage(sql, {
-          month: task.month,
+          day: task.day,
           provider: task.provider,
           sandboxId: task.sandboxId,
           sandboxType: usage.machine,
@@ -1213,25 +1316,49 @@ export class CloudAccount extends DurableObject<Env> {
       } catch (e) {
         allOk = false;
         // A sandbox the provider no longer knows can never be re-read: once
-        // its month is over, close the row on its last figure (flagged).
+        // its day is over, close the row on its last figure (flagged).
         const gone = e instanceof SandboxError && e.kind === "notFound";
         recordUsageFailure(sql, task, explain(e), gone && task.close);
       }
     }
-    this.acct.nextReconcileAt = meteringOpen(listSandboxes(sql), listUsage(sql), now)
-      ? now + RECONCILE_EVERY_MS
-      : undefined;
+    if (allOk) {
+      this.acct.lastReconcileAt = now;
+      if (full) this.acct.lastFullReconcileAt = now;
+    }
+    if (this.balance(now) <= 0) {
+      for (const s of [...this.sessions.values()]) {
+        if (s.state === "ready" && !s.pendingDelete) await this.beginSleep(s, "out of credits");
+      }
+    }
+    this.acct.nextReconcileAt = this.nextReconcile(sql, now);
     this.register();
     await this.saveAccount();
     return allOk;
   }
 
-  /** `GET /cloud/{orgId}/usage?month=` — the caller's own month. */
-  usage(caller: CloudCaller, month: string, now = Date.now()): CloudResult<CloudUsage> {
+  /** `GET /cloud/{orgId}/usage?from=&to=` — the caller's credits: balance,
+   * and use per UTC day over `[from, to]`. */
+  usage(caller: CloudCaller, from: string, to: string, now = Date.now()): CloudResult<CloudUsage> {
     if (this.acct.orgId !== undefined && !this.matches(caller)) return fail(403, "forbidden", "Not your Cloud.");
-    const { errors: _errors, orgId: _o, userId: _u, deviceId: _d, ...view } = this.billing(month, now);
-    void [_errors, _o, _u, _d];
-    return { ok: true, value: view };
+    const rows = this.acct.orgId ? listUsage(this.sql(), { from, to }) : [];
+    const days = creditsPerDay(from, to, rows);
+    return {
+      ok: true,
+      value: {
+        from,
+        to,
+        days,
+        credits: Math.round(days.reduce((sum, d) => sum + d.credits, 0) * 100) / 100,
+        balance: Math.floor(this.balance(now) * 100) / 100,
+        available: true
+      }
+    };
+  }
+
+  /** Operator grant (or correction, when negative): `POST /admin/cloud/credits`. */
+  async grantCredits(credits: number, reason: string): Promise<{ readonly balance: number }> {
+    addCredits(this.sql(), { at: Date.now(), credits, reason });
+    return { balance: Math.floor(this.balance() * 100) / 100 };
   }
 
   /** Operator export row (billing.ts). */
@@ -1241,7 +1368,7 @@ export class CloudAccount extends DurableObject<Env> {
 
   private billing(month: string, now: number): CloudBillingRow {
     const summary = this.acct.orgId
-      ? summarizeMonth(month, listSandboxes(this.sql()), listUsage(this.sql(), month), now)
+      ? summarizeMonth(month, listSandboxes(this.sql()), listUsage(this.sql()), now)
       : summarizeMonth(month, [], [], now);
     return {
       ...summary,
@@ -1328,6 +1455,7 @@ export class CloudAccount extends DurableObject<Env> {
     const s = this.current(chatId, generation);
     if (!s || s.state !== "stopping") return false;
     s.state = "sleeping";
+    s.awakeSince = undefined;
     s.activeRuns = 0;
     s.clients = 0;
     s.idleCheckAt = undefined;
@@ -1377,7 +1505,7 @@ export class CloudAccount extends DurableObject<Env> {
     if (!lastAttempt && (failed || running)) return failed ? "failed" : "running";
     for (const { task, usage } of reads) {
       upsertUsage(sql, {
-        month: task.month,
+        day: task.day,
         provider: task.provider,
         sandboxId: task.sandboxId,
         sandboxType: usage.machine,

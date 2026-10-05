@@ -6,6 +6,9 @@
 //! step is its fallback) and account-shaped loading skeletons. Zeron
 //! retargets devices from the settings sidebar (`targetDeviceId` passthrough;
 //! a remote device's callback is forwarded to this one engine-side).
+//! Cloud is one of those targets: its logins and API keys live in the vault,
+//! a sign-in runs on this computer and is stored for Cloud, and the active
+//! account is what every Cloud machine uses from its next turn.
 //!
 //! The accounts RPC surface is being implemented engine-side in parallel —
 //! every call here surfaces failures as inline UI states rather than assuming
@@ -13,14 +16,14 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, Context, Entity, Hsla, SharedString, Subscription, Task, Window, div, prelude::*,
-    px,
+    AnyElement, Context, Entity, Focusable, Hsla, SharedString, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 use std::time::Duration;
 
 use zeron_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, HarnessId,
+    AgentLoginStatus, CLOUD_ACCOUNTS_DEVICE, HarnessId, VaultProvider,
 };
 use zeron_rpc::methods;
 
@@ -333,6 +336,30 @@ fn login_copy(harness: HarnessId, provider: Option<&str>) -> &'static str {
     }
 }
 
+/// [`login_copy`] for a sign-in stored for Cloud. Pure.
+fn cloud_login_copy(harness: HarnessId) -> &'static str {
+    match harness {
+        HarnessId::Codex => {
+            "Finish signing in to ChatGPT in your browser. The login is stored for Cloud and \
+             becomes the account every Cloud machine uses; this computer's login is untouched."
+        }
+        _ => {
+            "Finish signing in to Claude in your browser. The login is stored for Cloud and \
+             becomes the account every Cloud machine uses; this computer's login is untouched."
+        }
+    }
+}
+
+/// The API key a Cloud provider card also takes: (vault provider, field
+/// label). `None` for providers Cloud doesn't run. Pure.
+pub fn cloud_api_key(harness: HarnessId) -> Option<(VaultProvider, &'static str)> {
+    match harness {
+        HarnessId::ClaudeCode => Some((VaultProvider::AnthropicKey, "Anthropic API key")),
+        HarnessId::Codex => Some((VaultProvider::OpenaiKey, "OpenAI API key")),
+        _ => None,
+    }
+}
+
 /// Accounts of one provider, in the engine's order (slot creation). No
 /// active-first re-sort: switching accounts must not move the switched-to
 /// card — the Active badge already says which one is live, and a list that
@@ -484,6 +511,16 @@ impl LoginFlow {
     }
 }
 
+/// Cloud's inline API-key field under a provider's accounts.
+struct ApiKeyEntry {
+    harness: HarnessId,
+    input: Entity<ComposerInput>,
+    saving: bool,
+    error: Option<SharedString>,
+    focus_pending: bool,
+    _events: Subscription,
+}
+
 /// The last accounts list per target device (`None` = this device), shared
 /// by every accounts view so a re-opened Settings paints instantly and
 /// revalidates in place instead of flashing a skeleton.
@@ -513,6 +550,7 @@ pub struct AccountsPage {
     row_menu: popover::Popup<String>,
     login: Option<LoginFlow>,
     login_attempts: u64,
+    api_key: Option<ApiKeyEntry>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     load_task: Option<Task<()>>,
@@ -563,6 +601,7 @@ impl AccountsPage {
             row_menu: popover::Popup::default(),
             login: None,
             login_attempts: 0,
+            api_key: None,
             error: None,
             code_input,
             load_task: None,
@@ -592,6 +631,7 @@ impl AccountsPage {
         // login/action state and reload with a forced usage probe (the new
         // device's cache is cold).
         self.login = None;
+        self.api_key = None;
         self.busy_account = None;
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
@@ -601,6 +641,7 @@ impl AccountsPage {
         if self.embedded_harness != Some(harness) {
             self.embedded_harness = Some(harness);
             self.login = None;
+            self.api_key = None;
             self.error = None;
             cx.notify();
         }
@@ -609,6 +650,11 @@ impl AccountsPage {
     #[cfg(test)]
     pub(crate) fn embedded_harness(&self) -> Option<HarnessId> {
         self.embedded_harness
+    }
+
+    /// Whether the page shows Cloud's accounts (kept by the vault).
+    fn targets_cloud(&self) -> bool {
+        self.target_device.as_deref() == Some(CLOUD_ACCOUNTS_DEVICE)
     }
 
     /// Params with the `targetDeviceId` passthrough merged in.
@@ -633,7 +679,8 @@ impl AccountsPage {
         use crate::icons::{self, icon};
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
-            // Cloud's providers live on the Cloud page.
+            // Cloud's accounts are on Providers (the legacy page lists
+            // devices only).
             (
                 s.provider_devices().cloned().collect::<Vec<_>>(),
                 s.local_device_id.clone(),
@@ -1094,11 +1141,178 @@ impl AccountsPage {
     /// Escape that reached Settings unclaimed cancels an open login first,
     /// so it never closes Settings under the dialog. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.api_key.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if self.login.is_none() {
             return false;
         }
         self.cancel_login(cx);
         true
+    }
+
+    // ---- Cloud API keys ----
+
+    fn open_api_key(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        let Some((_, label)) = cloud_api_key(harness) else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            ComposerInput::new(label, cx)
+                .with_single_line()
+                .with_masked()
+        });
+        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                this.save_api_key(cx);
+            }
+        });
+        self.api_key = Some(ApiKeyEntry {
+            harness,
+            input,
+            saving: false,
+            error: None,
+            focus_pending: true,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    /// Store the key for Cloud. It becomes the card's active account, so
+    /// Cloud machines use it from their next turn.
+    fn save_api_key(&mut self, cx: &mut Context<Self>) {
+        let (engine, device) = {
+            let state = self.state.read(cx);
+            let device = state
+                .cloud_status
+                .as_ref()
+                .and_then(|status| status.device_id.clone())
+                .or_else(|| state.cloud_account_device().map(|d| d.id.clone()));
+            (state.engine().cloned(), device)
+        };
+        let Some(entry) = self.api_key.as_mut() else {
+            return;
+        };
+        if entry.saving {
+            return;
+        }
+        let Some((provider, _)) = cloud_api_key(entry.harness) else {
+            return;
+        };
+        let key = entry.input.read(cx).text().trim().to_string();
+        let problem = if key.is_empty() {
+            Some("Paste a key first.")
+        } else if device.is_none() {
+            Some("Turn Cloud on in Settings → Cloud first.")
+        } else {
+            None
+        };
+        let (Some(engine), Some(device), None) = (engine, device, problem) else {
+            entry.error = problem.map(Into::into);
+            cx.notify();
+            return;
+        };
+        entry.saving = true;
+        entry.error = None;
+        let params = serde_json::json!({
+            "provider": provider.as_str(),
+            "key": key,
+            "authorizedDevices": [device],
+        });
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::VAULT_PUT_API_KEY, params)
+                .await;
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(_) => {
+                        page.api_key = None;
+                        page.load(force_usage_for(LoadTrigger::PostAction), cx);
+                    }
+                    Err(error) => {
+                        if let Some(entry) = page.api_key.as_mut() {
+                            entry.saving = false;
+                            entry.error = Some(error.to_string().into());
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The masked key field, under the card's add row.
+    fn render_api_key_entry(
+        &self,
+        harness: HarnessId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let entry = self.api_key.as_ref().filter(|e| e.harness == harness)?;
+        let saving = entry.saving;
+        Some(
+            div()
+                .pb(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(div().flex_1().min_w(px(160.0)).child(popover::dialog_field(
+                            entry.input.clone().into_any_element(),
+                        )))
+                        .child(
+                            widgets::action_button(theme, widgets::ActionTone::Quiet)
+                                .id("accounts-api-key-cancel")
+                                .role(gpui::Role::Button)
+                                .tab_index(0)
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .on_click(cx.listener(|page, _, _, cx| {
+                                    page.api_key = None;
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        )
+                        .child(
+                            widgets::action_button(theme, widgets::ActionTone::Solid)
+                                .id("accounts-api-key-save")
+                                .role(gpui::Role::Button)
+                                .tab_index(0)
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .when(saving, |el| el.opacity(0.5))
+                                .when(!saving, |el| {
+                                    el.on_click(cx.listener(|page, _, _, cx| page.save_api_key(cx)))
+                                })
+                                .child(if saving { "Saving…" } else { "Save key" }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(
+                            "Stored encrypted in your account for Cloud. It becomes the account \
+                             Cloud machines use.",
+                        )),
+                )
+                .when_some(entry.error.clone(), |el, error| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.danger_muted.opacity(0.9))
+                            .child(error),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn retry_login(&mut self, cx: &mut Context<Self>) {
@@ -1505,6 +1719,7 @@ impl AccountsPage {
                  code Anthropic shows you below. Your current login is untouched until you \
                  switch."
             }
+            _ if self.targets_cloud() => cloud_login_copy(login.harness),
             _ => login_copy(login.harness, login.provider),
         };
         // "Reopen the sign-in page" (zeron: `text-[12px]
@@ -1768,6 +1983,11 @@ impl AccountsPage {
                     // Adding is the list's last row, not a header button —
                     // it sits where the next account will appear. A
                     // one-login agent that is connected has nothing to add.
+                    let api_key = self
+                        .targets_cloud()
+                        .then(|| cloud_api_key(harness))
+                        .flatten()
+                        .filter(|_| self.api_key.is_none());
                     let add_row = (empty || !keeps_one_login(harness)).then(|| {
                         div()
                             .py(px(8.0))
@@ -1799,12 +2019,33 @@ impl AccountsPage {
                                         .child(SharedString::from(label))
                                 },
                             ))
+                            .when_some(api_key, |el, (_, label)| {
+                                let label = format!("Add {label}");
+                                el.child(
+                                    widgets::action_button(theme, widgets::ActionTone::Quiet)
+                                        .id("accounts-add-api-key")
+                                        .role(gpui::Role::Button)
+                                        .aria_label(label.clone())
+                                        .tab_index(0)
+                                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                        .on_click(cx.listener(move |page, _, _, cx| {
+                                            page.open_api_key(harness, cx)
+                                        }))
+                                        .child(
+                                            crate::icons::icon(crate::icons::PLUS)
+                                                .size(px(14.0))
+                                                .text_color(theme.text_muted),
+                                        )
+                                        .child(SharedString::from(label)),
+                                )
+                            })
                     });
                     div()
                         .flex()
                         .flex_col()
                         .children(rows)
                         .children(add_row)
+                        .children(self.render_api_key_entry(harness, theme, cx))
                         .into_any_element()
                 }
             };
@@ -1883,6 +2124,11 @@ impl Render for AccountsPage {
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
+        if let Some(entry) = self.api_key.as_mut()
+            && std::mem::take(&mut entry.focus_pending)
+        {
+            window.focus(&entry.input.focus_handle(cx), cx);
+        }
         if let Some(harness) = self.embedded_harness {
             return self.render_embedded_provider(harness, &theme, now, dialog, cx);
         }
@@ -2593,6 +2839,72 @@ mod tests {
             .unwrap();
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
+    }
+
+    /// Cloud's cards take an API key beside sign-ins; the key field refuses
+    /// an empty key and a Cloud that isn't on, and the sign-in says where the
+    /// login goes.
+    #[gpui::test]
+    fn cloud_cards_add_api_keys_inline(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            cloud_api_key(HarnessId::ClaudeCode).map(|(p, _)| p),
+            Some(VaultProvider::AnthropicKey)
+        );
+        assert_eq!(
+            cloud_api_key(HarnessId::Codex).map(|(p, _)| p),
+            Some(VaultProvider::OpenaiKey)
+        );
+        assert_eq!(cloud_api_key(HarnessId::Cursor), None);
+        let window = page(cx);
+        window
+            .update(cx, |page, _, cx| {
+                page.set_target_device(Some(CLOUD_ACCOUNTS_DEVICE.into()), cx);
+                page.set_embedded_harness(HarnessId::ClaudeCode, cx);
+                assert!(page.targets_cloud());
+                page.snapshot = Loadable::Ready(AgentAccountsSnapshot {
+                    accounts: vec![AgentAccount {
+                        id: "anthropic-key:a1".into(),
+                        harness: HarnessId::ClaudeCode,
+                        email: None,
+                        plan_label: Some("API key …abcd".into()),
+                        active: true,
+                        usage_windows: vec![],
+                        usage_fetched_at: None,
+                        usage_error: None,
+                        display_name: None,
+                        organization: None,
+                        auth_kind: Some(zeron_proto::AgentAuthKind::ApiKey),
+                        switchable: true,
+                        saved_at: None,
+                        provider: None,
+                    }],
+                    warnings: vec![],
+                });
+                page.open_api_key(HarnessId::ClaudeCode, cx);
+                page.save_api_key(cx);
+                assert_eq!(
+                    page.api_key.as_ref().and_then(|e| e.error.as_deref()),
+                    Some("Paste a key first.")
+                );
+                let input = page.api_key.as_ref().unwrap().input.clone();
+                input.update(cx, |input, cx| input.set_text("sk-ant-test", cx));
+                page.save_api_key(cx);
+                assert_eq!(
+                    page.api_key.as_ref().and_then(|e| e.error.as_deref()),
+                    Some("Turn Cloud on in Settings → Cloud first.")
+                );
+                page.login = Some(waiting(HarnessId::ClaudeCode, 1));
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |page, _, cx| {
+                assert!(page.dismiss_on_escape(cx), "escape closes the key field");
+                assert!(page.api_key.is_none());
+            })
+            .unwrap();
+        assert!(cloud_login_copy(HarnessId::Codex).contains("every Cloud machine"));
     }
 
     #[gpui::test]

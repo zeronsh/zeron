@@ -2213,7 +2213,17 @@ impl AgentAccounts {
             map.insert("subscriptionType".into(), serde_json::json!(sub));
         }
         if let Some(capture) = capture {
-            return capture(oauth).await.map_err(EngineError::Other);
+            // The login's identity rides along (never secret): Cloud keeps
+            // several logins and tells them apart by it.
+            let profile = serde_json::json!({
+                "email": email,
+                "displayName": display_name,
+                "organization": org_name,
+                "plan": claude_plan(org_type.as_deref(), rate_tier.as_deref()),
+            });
+            return capture(serde_json::json!({ "credential": oauth, "profile": profile }))
+                .await
+                .map_err(EngineError::Other);
         }
         let mut oauth_account = serde_json::json!({
             "accountUuid": account_uuid,
@@ -3784,6 +3794,21 @@ fn short_duration(ms: i64) -> String {
     } else {
         format!("{}h", (secs + 3599) / 3600)
     }
+}
+
+/// A usage reply from `harness`'s plan endpoint (Claude's `/api/oauth/usage`,
+/// Codex's `/wham/usage`) as windows and the live plan label — for logins
+/// whose usage is read elsewhere (Cloud's, by the vault).
+pub(crate) fn usage_windows_from_reply(
+    harness: HarnessId,
+    body: &serde_json::Value,
+) -> Option<(Vec<AgentUsageWindow>, Option<String>)> {
+    let snapshot = match harness {
+        HarnessId::ClaudeCode => claude_usage_windows(body),
+        HarnessId::Codex => codex_usage_snapshot(body),
+        _ => None,
+    }?;
+    Some((snapshot.windows, snapshot.plan_label))
 }
 
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.
@@ -5534,17 +5559,20 @@ mod login_tests {
         let poll = poll_until_settled(&accounts, &start.login_id).await;
         assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
 
-        // The capturer got the claudeAiOauth blob…
+        // The capturer got the claudeAiOauth blob, with the login's
+        // profile beside it (what tells two stored logins apart)…
         let captured = lock(&captured).clone();
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0]["accessToken"], "access");
-        assert_eq!(captured[0]["refreshToken"], "refresh");
-        assert!(captured[0]["expiresAt"].as_i64().unwrap() > now_ms());
+        let credential = &captured[0]["credential"];
+        assert_eq!(credential["accessToken"], "access");
+        assert_eq!(credential["refreshToken"], "refresh");
+        assert!(credential["expiresAt"].as_i64().unwrap() > now_ms());
         assert!(
-            captured[0]["scopes"]
+            credential["scopes"]
                 .as_array()
                 .is_some_and(|s| !s.is_empty())
         );
+        assert!(captured[0]["profile"].is_object());
         // …and nothing landed on this device: no live credentials, no
         // identity rewrite, no slot, no account row.
         let config = config(tmp.path());

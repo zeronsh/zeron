@@ -2,14 +2,11 @@
 //! user's Cloud — one device in every list, with its own projects and
 //! providers, where every session runs on its own machine that sleeps when
 //! idle. The account (on/off), the sessions' machines (wake, sleep, delete),
-//! the two providers connected *for* Cloud (Codex and Claude Code), GitHub
-//! for the repositories projects point at, usage, and the devices allowed to
-//! use stored credentials.
-//!
-//! Codex and Claude sign in through the browser on THIS computer and are kept
-//! for Cloud, so every session machine can use them; an API key is the
-//! alternative. Every call here is local IPC — this device's engine talks to
-//! the edge with the user's bearer; no session machine is dialed.
+//! GitHub for the repositories projects point at, usage, and the devices
+//! allowed to use stored credentials. Cloud's Codex and Claude Code accounts
+//! are managed in Settings → Providers with Cloud picked. Every call here is
+//! local IPC — this device's engine talks to the edge with the user's bearer;
+//! no session machine is dialed.
 //! The page is rebuilt on every visit, so status is read once per open and
 //! after each action; only settling sessions or a turn-off are re-checked.
 
@@ -17,64 +14,21 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, Focusable, SharedString, Subscription, Task,
-    Window, div, prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 
 use zeron_proto::{
-    AgentLoginMode, AgentLoginPoll, AgentLoginStart, AgentLoginStatus, CloudState, CloudStatus,
-    CloudUsage, GithubConnectProgress, GithubConnectState, GithubDeviceFlow, HarnessId,
-    VaultProvider, VaultStatus,
+    CloudState, CloudStatus, CloudUsage, GithubConnectProgress, GithubConnectState,
+    GithubDeviceFlow, VaultProvider, VaultStatus,
 };
 use zeron_rpc::methods;
 
 use crate::cloud::{self, CloudAction, ProviderLink};
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
-
-/// How often a browser sign-in is asked whether it has landed (the
-/// Providers page's cadence).
-const SIGN_IN_POLL: Duration = Duration::from_millis(1500);
-
-/// The inline API-key field under a provider row.
-struct ApiKeyEditor {
-    provider: VaultProvider,
-    input: Entity<ComposerInput>,
-    saving: bool,
-    error: Option<SharedString>,
-    focus_pending: bool,
-    _events: Subscription,
-}
-
-/// A browser sign-in on THIS computer whose result goes to the vault for
-/// Cloud (`VaultConnectCodex` / `VaultConnectClaude`), driven like a
-/// Providers-page login: poll until it lands, or paste Claude's code.
-struct SignInFlow {
-    provider: VaultProvider,
-    attempt: u64,
-    login_id: Option<String>,
-    url: Option<String>,
-    step: SignInStep,
-}
-
-enum SignInStep {
-    Starting,
-    Browser {
-        message: Option<SharedString>,
-    },
-    /// Claude without a loopback port: the user pastes the code Anthropic
-    /// shows.
-    PasteCode {
-        input: Entity<ComposerInput>,
-        submitting: bool,
-        error: Option<SharedString>,
-        focus_pending: bool,
-        _events: Subscription,
-    },
-}
 
 enum GithubFlow {
     Idle,
@@ -86,20 +40,28 @@ enum GithubFlow {
     Failed(SharedString),
 }
 
+/// What the Cloud page last read, so a later visit paints at once and
+/// revalidates in place instead of flashing loading states.
+#[derive(Default)]
+struct CloudPageCache {
+    vault: Option<VaultStatus>,
+    usage: Option<(cloud::UsageRange, CloudUsage)>,
+}
+
+impl gpui::Global for CloudPageCache {}
+
 pub struct CloudPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     status: Loadable<CloudStatus>,
     vault: Loadable<VaultStatus>,
-    /// This month's metered machine time; `None` hides the section (not
-    /// loaded, unavailable, or an engine without the call).
+    /// Credits over `usage_range`; `None` hides the section (not loaded,
+    /// unavailable, or an engine without the call).
     usage: Option<CloudUsage>,
+    usage_range: cloud::UsageRange,
+    range_select: widgets::SelectState,
     busy: Option<CloudAction>,
     confirm_delete: bool,
-    /// The browser sign-in (Codex or Claude) this computer is running.
-    sign_in: Option<SignInFlow>,
-    sign_in_attempts: u64,
-    api_key: Option<ApiKeyEditor>,
     github: GithubFlow,
     /// Vault call in flight per row, so its button reads busy.
     vault_busy: Option<SharedString>,
@@ -109,8 +71,6 @@ pub struct CloudPage {
     usage_task: Option<Task<()>>,
     vault_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
-    sign_in_task: Option<Task<()>>,
-    sign_in_poll: Option<Task<()>>,
     vault_action_task: Option<Task<()>>,
     github_task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
@@ -120,17 +80,32 @@ pub struct CloudPage {
 impl CloudPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
+        // Paint what is known (the last status any surface read, this page's
+        // last vault and usage reads), then revalidate.
+        let status = state
+            .read(cx)
+            .cloud_status
+            .clone()
+            .map_or(Loadable::Idle, Loadable::Ready);
+        let cache = cx.try_global::<CloudPageCache>();
+        let vault = cache
+            .and_then(|cache| cache.vault.clone())
+            .map_or(Loadable::Idle, Loadable::Ready);
+        let (usage_range, usage) = cache
+            .and_then(|cache| cache.usage.clone())
+            .map_or((cloud::UsageRange::default(), None), |(range, usage)| {
+                (range, Some(usage))
+            });
         let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
-            status: Loadable::Idle,
-            vault: Loadable::Idle,
-            usage: None,
+            status,
+            vault,
+            usage,
+            usage_range,
+            range_select: widgets::SelectState::default(),
             busy: None,
             confirm_delete: false,
-            sign_in: None,
-            sign_in_attempts: 0,
-            api_key: None,
             github: GithubFlow::Idle,
             vault_busy: None,
             error: None,
@@ -139,38 +114,28 @@ impl CloudPage {
             usage_task: None,
             vault_task: None,
             action_task: None,
-            sign_in_task: None,
-            sign_in_poll: None,
             vault_action_task: None,
             github_task: None,
             copy_task: None,
             _observe: observe,
         };
         page.load_status(cx);
+        if page.cloud_id().is_some() {
+            page.load_vault(cx);
+        }
         page.load_usage(cx);
         page
     }
 
     /// Escape that reached Settings unclaimed closes the delete confirmation
-    /// or the API-key field first. Returns whether it did.
+    /// first. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.confirm_delete {
-            self.confirm_delete = false;
-        } else if self.api_key.is_some() {
-            self.api_key = None;
-        } else if self.sign_in.is_some() {
-            self.cancel_sign_in(cx);
-        } else {
+        if !self.confirm_delete {
             return false;
         }
+        self.confirm_delete = false;
         cx.notify();
         true
-    }
-
-    fn signing_in(&self, provider: VaultProvider) -> bool {
-        self.sign_in
-            .as_ref()
-            .is_some_and(|f| f.provider == provider)
     }
 
     fn cloud_status(&self) -> Option<&CloudStatus> {
@@ -269,17 +234,36 @@ impl CloudPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let range = self.usage_range;
+        let params = range.params(Utc::now().date_naive());
         self.usage_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call_as::<CloudUsage>(methods::CLOUD_USAGE, serde_json::json!({}))
+                .call_as::<CloudUsage>(methods::CLOUD_USAGE, params)
                 .await;
             this.update(cx, |page, cx| {
+                if page.usage_range != range {
+                    return;
+                }
                 page.usage = result.ok().filter(|usage| usage.available);
+                cx.default_global::<CloudPageCache>().usage =
+                    page.usage.clone().map(|usage| (range, usage));
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Show credits over another range (the chart keeps the last range's
+    /// bars until the new ones land).
+    fn set_usage_range(&mut self, range: cloud::UsageRange, cx: &mut Context<Self>) {
+        widgets::close_select(self, |page: &mut Self| &mut page.range_select, cx);
+        if self.usage_range == range {
+            return;
+        }
+        self.usage_range = range;
+        self.load_usage(cx);
+        cx.notify();
     }
 
     fn load_vault(&mut self, cx: &mut Context<Self>) {
@@ -296,7 +280,10 @@ impl CloudPage {
                 .await;
             this.update(cx, |page, cx| {
                 match result {
-                    Ok(vault) => page.vault = Loadable::Ready(vault),
+                    Ok(vault) => {
+                        cx.default_global::<CloudPageCache>().vault = Some(vault.clone());
+                        page.vault = Loadable::Ready(vault);
+                    }
                     Err(error) if matches!(page.vault, Loadable::Ready(_)) => {
                         page.error = Some(error.to_string().into());
                     }
@@ -309,6 +296,17 @@ impl CloudPage {
     }
 
     // ---- lifecycle ----
+
+    /// The switch: on turns Cloud on at once; off asks first (it deletes
+    /// every session's machine).
+    fn toggle_cloud(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on {
+            self.confirm_delete = true;
+            cx.notify();
+        } else {
+            self.run(CloudAction::Enable, cx);
+        }
+    }
 
     fn run(&mut self, action: CloudAction, cx: &mut Context<Self>) {
         if self.busy.is_some() {
@@ -335,7 +333,7 @@ impl CloudPage {
                             page.vault = Loadable::Idle;
                             page.github = GithubFlow::Idle;
                             page.github_task = None;
-                            page.api_key = None;
+                            cx.default_global::<CloudPageCache>().vault = None;
                         }
                         page.apply_status(status, cx);
                         page.load_usage(cx);
@@ -354,356 +352,11 @@ impl CloudPage {
 
     // ---- providers ----
 
-    /// Sign in to ChatGPT (Codex) or Claude on THIS computer, into a
-    /// throwaway credential slot, and keep the result for Cloud. The
-    /// computer's own login is untouched. The start returns the sign-in page;
-    /// the flow then runs like a Providers-page login on this same engine.
-    fn connect_subscription(&mut self, provider: VaultProvider, cx: &mut Context<Self>) {
-        let (Some(engine), Some(cloud_id)) =
-            (self.state.read(cx).engine().cloned(), self.cloud_id())
-        else {
-            return;
-        };
-        let Some((method, _)) = subscription_sign_in(provider) else {
-            return;
-        };
-        if self.sign_in.is_some() {
-            return;
-        }
-        let devices = self.authorized_with(provider, &cloud_id);
-        self.sign_in_attempts += 1;
-        let attempt = self.sign_in_attempts;
-        self.sign_in = Some(SignInFlow {
-            provider,
-            attempt,
-            login_id: None,
-            url: None,
-            step: SignInStep::Starting,
-        });
-        self.sign_in_poll = None;
-        self.error = None;
-        self.sign_in_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call_as::<AgentLoginStart>(
-                    method,
-                    serde_json::json!({ "authorizedDevices": devices }),
-                )
-                .await
-                .map_err(|error| error.to_string());
-            this.update(cx, |page, cx| page.apply_sign_in_start(attempt, result, cx))
-                .ok();
-        }));
-        cx.notify();
-    }
-
-    fn apply_sign_in_start(
-        &mut self,
-        attempt: u64,
-        result: Result<AgentLoginStart, String>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(flow) = self.sign_in.as_mut().filter(|f| f.attempt == attempt) else {
-            return;
-        };
-        let brand = subscription_sign_in(flow.provider).map_or("", |(_, brand)| brand);
-        match result {
-            Ok(start) => {
-                if !start.url.is_empty() {
-                    crate::settings::accounts::open_login_url(&start.url, cx);
-                    flow.url = Some(start.url.clone());
-                }
-                flow.login_id = Some(start.login_id);
-                match start.mode {
-                    AgentLoginMode::PasteCode => {
-                        let input = cx
-                            .new(|cx| ComposerInput::new("Paste the code", cx).with_single_line());
-                        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-                            if matches!(event, ComposerInputEvent::Submitted) {
-                                this.submit_sign_in_code(cx);
-                            }
-                        });
-                        flow.step = SignInStep::PasteCode {
-                            input,
-                            submitting: false,
-                            error: None,
-                            focus_pending: true,
-                            _events: events,
-                        };
-                    }
-                    AgentLoginMode::Browser => {
-                        flow.step = SignInStep::Browser { message: None };
-                        self.spawn_sign_in_poll(cx);
-                    }
-                }
-            }
-            Err(error) => {
-                self.sign_in = None;
-                self.error = Some(format!("Couldn't start the {brand} sign-in: {error}").into());
-            }
-        }
-        cx.notify();
-    }
-
-    /// Ask every [`SIGN_IN_POLL`] whether the browser sign-in has landed in
-    /// the vault. Dropping the task (Cancel, the page closing) stops asking;
-    /// the sign-in itself still completes if the user finishes it.
-    fn spawn_sign_in_poll(&mut self, cx: &mut Context<Self>) {
-        let Some(SignInFlow {
-            login_id: Some(login_id),
-            attempt,
-            ..
-        }) = &self.sign_in
-        else {
-            return;
-        };
-        let attempt = *attempt;
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = serde_json::json!({ "loginId": login_id });
-        self.sign_in_poll = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(SIGN_IN_POLL).await;
-                let result = engine
-                    .client()
-                    .call_as::<AgentLoginPoll>(methods::POLL_AGENT_LOGIN, params.clone())
-                    .await
-                    .map_err(|error| error.to_string());
-                match this.update(cx, |page, cx| page.apply_sign_in_poll(attempt, result, cx)) {
-                    Ok(false) => {}
-                    Ok(true) | Err(_) => break,
-                }
-            }
-        }));
-    }
-
-    /// Fold one poll in; `true` once polling is over.
-    fn apply_sign_in_poll(
-        &mut self,
-        attempt: u64,
-        result: Result<AgentLoginPoll, String>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(flow) = self.sign_in.as_mut().filter(|f| f.attempt == attempt) else {
-            return true;
-        };
-        let brand = subscription_sign_in(flow.provider).map_or("", |(_, brand)| brand);
-        let finished = match result {
-            Ok(poll) => match poll.status {
-                AgentLoginStatus::Done => {
-                    self.sign_in = None;
-                    self.load_vault(cx);
-                    true
-                }
-                AgentLoginStatus::Error => {
-                    self.sign_in = None;
-                    self.error = Some(
-                        poll.message
-                            .unwrap_or_else(|| format!("The {brand} sign-in failed."))
-                            .into(),
-                    );
-                    true
-                }
-                AgentLoginStatus::Pending => {
-                    if let Some(url) = poll.url.filter(|url| flow.url.as_ref() != Some(url)) {
-                        crate::settings::accounts::open_login_url(&url, cx);
-                        flow.url = Some(url);
-                    }
-                    flow.step = SignInStep::Browser {
-                        message: poll.message.map(Into::into),
-                    };
-                    false
-                }
-            },
-            Err(error) => {
-                self.sign_in = None;
-                self.error = Some(format!("Lost track of the {brand} sign-in: {error}").into());
-                true
-            }
-        };
-        cx.notify();
-        finished
-    }
-
-    /// Claude's paste-code fallback: hand the code back to finish the
-    /// sign-in, then re-read the vault.
-    fn submit_sign_in_code(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Some(SignInFlow {
-            login_id: Some(login_id),
-            attempt,
-            step:
-                SignInStep::PasteCode {
-                    input,
-                    submitting,
-                    error,
-                    ..
-                },
-            ..
-        }) = &mut self.sign_in
-        else {
-            return;
-        };
-        if *submitting {
-            return;
-        }
-        let code = input.read(cx).text().trim().to_string();
-        if code.is_empty() {
-            *error = Some("Paste the code first.".into());
-            cx.notify();
-            return;
-        }
-        *submitting = true;
-        *error = None;
-        let attempt = *attempt;
-        let params = serde_json::json!({ "loginId": login_id, "code": code });
-        self.sign_in_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::COMPLETE_AGENT_LOGIN, params)
-                .await;
-            this.update(cx, |page, cx| {
-                if page.sign_in.as_ref().is_none_or(|f| f.attempt != attempt) {
-                    return;
-                }
-                match result {
-                    Ok(_) => {
-                        page.sign_in = None;
-                        page.load_vault(cx);
-                    }
-                    Err(failure) => {
-                        if let Some(SignInFlow {
-                            step:
-                                SignInStep::PasteCode {
-                                    submitting, error, ..
-                                },
-                            ..
-                        }) = &mut page.sign_in
-                        {
-                            *submitting = false;
-                            *error = Some(failure.to_string().into());
-                        }
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    /// Stop the browser sign-in on this computer (best effort).
-    fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
-        let login_id = self.sign_in.take().and_then(|flow| flow.login_id);
-        self.sign_in_task = None;
-        self.sign_in_poll = None;
-        if let (Some(login_id), Some(engine)) = (login_id, self.state.read(cx).engine().cloned()) {
-            cx.spawn(async move |_, _| {
-                if let Err(error) = engine
-                    .client()
-                    .call(
-                        methods::CANCEL_AGENT_LOGIN,
-                        serde_json::json!({ "loginId": login_id }),
-                    )
-                    .await
-                {
-                    tracing::debug!(%error, "CancelAgentLogin failed (best-effort)");
-                }
-            })
-            .detach();
-        }
-        cx.notify();
-    }
-
     fn authorized_with(&self, provider: VaultProvider, cloud_id: &str) -> Vec<String> {
         self.vault.ready().map_or_else(
             || vec![cloud_id.to_string()],
             |vault| cloud::authorized_with(vault, provider, cloud_id),
         )
-    }
-
-    fn open_api_key(&mut self, provider: VaultProvider, cx: &mut Context<Self>) {
-        let placeholder = match provider {
-            VaultProvider::AnthropicKey => "Anthropic API key",
-            _ => "OpenAI API key",
-        };
-        let input = cx.new(|cx| {
-            ComposerInput::new(placeholder, cx)
-                .with_single_line()
-                .with_masked()
-        });
-        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                this.save_api_key(cx);
-            }
-        });
-        self.api_key = Some(ApiKeyEditor {
-            provider,
-            input,
-            saving: false,
-            error: None,
-            focus_pending: true,
-            _events: events,
-        });
-        cx.notify();
-    }
-
-    fn save_api_key(&mut self, cx: &mut Context<Self>) {
-        let (Some(engine), Some(cloud_id)) =
-            (self.state.read(cx).engine().cloned(), self.cloud_id())
-        else {
-            return;
-        };
-        let Some(editor) = self.api_key.as_ref() else {
-            return;
-        };
-        if editor.saving {
-            return;
-        }
-        let key = editor.input.read(cx).text().trim().to_string();
-        let provider = editor.provider;
-        if key.is_empty() {
-            if let Some(editor) = self.api_key.as_mut() {
-                editor.error = Some("Paste a key first.".into());
-            }
-            cx.notify();
-            return;
-        }
-        let params = serde_json::json!({
-            "provider": provider.as_str(),
-            "key": key,
-            "authorizedDevices": self.authorized_with(provider, &cloud_id),
-        });
-        if let Some(editor) = self.api_key.as_mut() {
-            editor.saving = true;
-            editor.error = None;
-        }
-        self.vault_action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call_as::<VaultStatus>(methods::VAULT_PUT_API_KEY, params)
-                .await;
-            this.update(cx, |page, cx| {
-                match result {
-                    Ok(vault) => {
-                        page.vault = Loadable::Ready(vault);
-                        page.api_key = None;
-                    }
-                    Err(error) => {
-                        if let Some(editor) = page.api_key.as_mut() {
-                            editor.saving = false;
-                            editor.error = Some(error.to_string().into());
-                        }
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
     }
 
     /// Stop `provider` being used on Cloud. A credential that other devices
@@ -753,11 +406,6 @@ impl CloudPage {
             params,
             cx,
         );
-    }
-
-    fn revoke_device(&mut self, device_id: String, cx: &mut Context<Self>) {
-        let params = serde_json::json!({ "deviceId": device_id });
-        self.vault_call(device_id.into(), methods::VAULT_REVOKE_DEVICE, params, cx);
     }
 
     /// One credential mutation whose reply is the fresh `VaultStatus`.
@@ -933,14 +581,6 @@ impl CloudPage {
 }
 
 /// The browser sign-in call and brand for a subscription provider.
-fn subscription_sign_in(provider: VaultProvider) -> Option<(&'static str, &'static str)> {
-    match provider {
-        VaultProvider::Codex => Some((methods::VAULT_CONNECT_CODEX, "ChatGPT")),
-        VaultProvider::Claude => Some((methods::VAULT_CONNECT_CLAUDE, "Claude")),
-        _ => None,
-    }
-}
-
 fn action_name(action: CloudAction) -> &'static str {
     match action {
         CloudAction::Enable => "Turning on Cloud",
@@ -993,6 +633,15 @@ fn tile(theme: &Theme, icon_path: &'static str, tint: Option<gpui::Hsla>) -> gpu
                 .size(px(16.0))
                 .text_color(tint.unwrap_or(theme.text_muted)),
         )
+}
+
+/// A short line under a section's card.
+fn footnote(theme: &Theme, copy: &'static str) -> gpui::Div {
+    div()
+        .px(px(4.0))
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted.opacity(0.75))
+        .child(SharedString::from(copy))
 }
 
 fn text(color: gpui::Hsla, copy: impl Into<SharedString>) -> AnyElement {
@@ -1060,40 +709,6 @@ fn busy_meta(
         .into_any_element()
 }
 
-/// What distinguishes one subscription provider row from another.
-struct SubscriptionRow {
-    harness: HarnessId,
-    title: &'static str,
-    subscription: VaultProvider,
-    key: VaultProvider,
-    /// Whose account the browser sign-in uses ("ChatGPT", "Claude").
-    brand: &'static str,
-    key_label: &'static str,
-}
-
-/// A provider row's pieces, rendered once its position in the block is known.
-struct RowParts {
-    leading: Option<gpui::Div>,
-    title: &'static str,
-    meta: Vec<AnyElement>,
-    note: Option<SharedString>,
-    actions: Vec<AnyElement>,
-}
-
-impl RowParts {
-    fn render(self, theme: &Theme, first: bool) -> gpui::Div {
-        row(
-            theme,
-            first,
-            self.leading,
-            self.title,
-            self.meta,
-            self.note,
-            self.actions,
-        )
-    }
-}
-
 impl CloudPage {
     fn render_status(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let leading = Some(tile(theme, crate::icons::CLOUD, None));
@@ -1144,570 +759,115 @@ impl CloudPage {
             Loadable::Ready(status) => status.clone(),
         };
         let busy = self.busy;
-        let label_for = |action: CloudAction, idle: &'static str| -> &'static str {
-            if busy == Some(action) {
-                action.busy_label()
-            } else {
-                idle
-            }
-        };
-        let (meta, note, actions): (Vec<AnyElement>, Option<SharedString>, Vec<AnyElement>) =
-            if !status.available {
-                (
+        if !status.available {
+            return widgets::section_card(theme)
+                .mt(px(28.0))
+                .child(row(
+                    theme,
+                    true,
+                    leading,
+                    "Cloud",
                     vec![text(
                         theme.text_muted,
                         "Cloud needs a signed-in account with sync turned on.",
                     )],
-                    Some("Sign in to Zeron on this computer to use Cloud.".into()),
+                    None,
                     Vec::new(),
-                )
-            } else {
-                match status.state {
-                    CloudState::Off => (
-                        vec![text(
-                            theme.text_muted,
-                            "Run Codex and Claude Code on your GitHub repositories in the \
-                             cloud — each session on its own machine, asleep when idle — even \
-                             while your computers are off.",
-                        )],
-                        Some("Nothing is created and no sign-in leaves this computer until you turn it on.".into()),
-                        vec![
-                            action(
-                                theme,
-                                "cloud-enable",
-                                widgets::ActionTone::Solid,
-                                label_for(CloudAction::Enable, "Turn on Cloud"),
-                                busy.is_none(),
-                            )
-                            .when(busy.is_none(), |el| {
-                                el.on_click(cx.listener(|this, _, _, cx| this.run(CloudAction::Enable, cx)))
-                            })
-                            .into_any_element(),
-                        ],
-                    ),
-                    CloudState::Deleting => (
-                        vec![busy_meta(
+                ))
+                .into_any_element();
+        }
+        let on = cloud::account_enabled(&status);
+        let mut actions: Vec<AnyElement> = Vec::new();
+        let meta: Vec<AnyElement> = if let Some(action) = busy {
+            vec![busy_meta(
+                theme,
+                "cloud-status-busy",
+                action.busy_label(),
+                cx,
+            )]
+        } else {
+            match status.state {
+                CloudState::Deleting => vec![busy_meta(
+                    theme,
+                    "cloud-status-settling",
+                    cloud::account_state_label(CloudState::Deleting),
+                    cx,
+                )],
+                CloudState::Error => {
+                    let retry_with = cloud::retry_action(&status);
+                    actions.push(
+                        action(
                             theme,
-                            "cloud-status-settling",
-                            cloud::account_state_label(CloudState::Deleting),
-                            cx,
-                        )],
-                        Some(
-                            "Stopping every session's machine, then deleting them and their files."
-                                .into(),
-                        ),
-                        Vec::new(),
-                    ),
-                    CloudState::Error => {
-                        let retry_with = cloud::retry_action(&status);
-                        let message = status
+                            "cloud-retry",
+                            widgets::ActionTone::Quiet,
+                            "Retry",
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.run(retry_with, cx)))
+                        .into_any_element(),
+                    );
+                    vec![text(
+                        theme.danger_muted.opacity(0.9),
+                        status
                             .error
                             .clone()
-                            .unwrap_or_else(|| "Something went wrong with Cloud.".into());
-                        (
-                            vec![text(theme.danger_muted.opacity(0.9), message)],
-                            None,
-                            vec![
-                                action(
-                                    theme,
-                                    "cloud-retry",
-                                    widgets::ActionTone::Filled,
-                                    label_for(retry_with, "Retry"),
-                                    busy.is_none(),
-                                )
-                                .when(busy.is_none(), |el| {
-                                    el.on_click(cx.listener(move |this, _, _, cx| this.run(retry_with, cx)))
-                                })
-                                .into_any_element(),
-                            ],
-                        )
-                    }
-                    _ => {
-                        let mut meta = vec![text(theme.success_muted, "On")];
-                        if let Some(at) = status.last_active_at {
-                            meta.push(text(
-                                theme.text_muted,
-                                format!("Active {}", cloud::ago(at, Utc::now())),
-                            ));
-                        }
-                        (
-                            meta,
-                            Some(
-                                "Pick Cloud in a project's checkout menu to run a session on its \
-                                 own machine. Machines sleep when idle and wake when you send."
-                                    .into(),
-                            ),
-                            Vec::new(),
-                        )
-                    }
+                            .unwrap_or_else(|| "Something went wrong with Cloud.".into()),
+                    )]
                 }
-            };
+                // The switch says on or off; the row only adds what it can't.
+                _ if on => {
+                    let mut meta = Vec::new();
+                    match status.credits {
+                        Some(credits) if credits <= 0.0 => {
+                            meta.push(text(theme.warning_muted.opacity(0.9), "Out of credits"))
+                        }
+                        Some(credits) => meta.push(text(
+                            theme.text_muted,
+                            format!("{} left", cloud::format_credits(credits)),
+                        )),
+                        None => {}
+                    }
+                    meta
+                }
+                _ => Vec::new(),
+            }
+        };
+        // On ⇄ off. Turning it off deletes every machine, so it asks first.
+        let interactive = busy.is_none() && status.state != CloudState::Deleting;
+        let accent = theme.accent;
+        actions.push(
+            widgets::toggle_switch(theme, on, "cloud-enabled")
+                .id("cloud-switch")
+                .when(!interactive, |el| el.opacity(0.55))
+                .when(interactive, |el| {
+                    el.cursor_pointer()
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Cloud")
+                        .aria_toggled(if on {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(move |s| s.border_2().border_color(accent).opacity(1.0))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_cloud(on, cx)))
+                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                            if !event.is_held
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                this.toggle_cloud(on, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                })
+                .into_any_element(),
+        );
+        let note: Option<SharedString> = (status.state == CloudState::Off && busy.is_none())
+            .then(|| "Nothing is created until you turn it on.".into());
         widgets::section_card(theme)
             .mt(px(28.0))
             .child(row(theme, true, leading, "Cloud", meta, note, actions))
             .into_any_element()
-    }
-
-    /// Claude's paste-code field, inset under its row while that step is up.
-    fn render_sign_in_code(
-        &mut self,
-        provider: VaultProvider,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let Some(SignInFlow {
-            step:
-                SignInStep::PasteCode {
-                    input,
-                    submitting,
-                    error,
-                    focus_pending,
-                    ..
-                },
-            ..
-        }) = self.sign_in.as_mut().filter(|f| f.provider == provider)
-        else {
-            return None;
-        };
-        if std::mem::take(focus_pending) {
-            window.focus(&input.focus_handle(cx), cx);
-        }
-        let (input, submitting, error) = (input.clone(), *submitting, error.clone());
-        Some(
-            div()
-                .mx(px(16.0))
-                .pl(px(36.0 + 16.0))
-                .pb(px(14.0))
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div().flex_1().min_w(px(160.0)).child(
-                                popover::dialog_field(input.into_any_element())
-                                    .font_family(theme.font_mono.clone()),
-                            ),
-                        )
-                        .child(
-                            action(
-                                theme,
-                                "sign-in-code-submit",
-                                widgets::ActionTone::Solid,
-                                if submitting {
-                                    "Checking…"
-                                } else {
-                                    "Finish sign-in"
-                                },
-                                !submitting,
-                            )
-                            .when(!submitting, |el| {
-                                el.on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_sign_in_code(cx)),
-                                )
-                            }),
-                        ),
-                )
-                .when_some(error, |el, error| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
-                            .text_color(theme.danger_muted.opacity(0.9))
-                            .child(error),
-                    )
-                })
-                .into_any_element(),
-        )
-    }
-
-    /// The masked key field, inset under its provider row.
-    fn render_api_key_editor(
-        &mut self,
-        provider: VaultProvider,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let editor = self.api_key.as_mut().filter(|e| e.provider == provider)?;
-        if std::mem::take(&mut editor.focus_pending) {
-            window.focus(&editor.input.focus_handle(cx), cx);
-        }
-        let saving = editor.saving;
-        let error = editor.error.clone();
-        let input = editor.input.clone();
-        Some(
-            div()
-                .mx(px(16.0))
-                .pl(px(36.0 + 16.0))
-                .pb(px(14.0))
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(160.0))
-                                .child(popover::dialog_field(input.into_any_element())),
-                        )
-                        .child(
-                            action(theme, "api-key-cancel", widgets::ActionTone::Quiet, "Cancel", true)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.api_key = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            action(
-                                theme,
-                                "api-key-save",
-                                widgets::ActionTone::Solid,
-                                if saving { "Saving…" } else { "Save key" },
-                                !saving,
-                            )
-                            .when(!saving, |el| {
-                                el.on_click(cx.listener(|this, _, _, cx| this.save_api_key(cx)))
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
-                        .text_color(theme.text_muted.opacity(0.75))
-                        .child(SharedString::from(
-                            "Stored encrypted in your account and used only on the devices you allow.",
-                        )),
-                )
-                .when_some(error, |el, error| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
-                            .text_color(theme.danger_muted.opacity(0.9))
-                            .child(error),
-                    )
-                })
-                .into_any_element(),
-        )
-    }
-
-    fn render_providers(
-        &mut self,
-        cloud_id: &str,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let block = widgets::section_card(theme);
-        let vault = match &self.vault {
-            Loadable::Ready(vault) if vault.available => vault.clone(),
-            Loadable::Ready(_) => {
-                return widgets::section(
-                    theme,
-                    "Providers on Cloud",
-                    block.mt(px(0.0)).child(row(
-                        theme,
-                        true,
-                        None,
-                        "Sign-ins for Cloud aren't available right now",
-                        vec![text(
-                            theme.text_muted,
-                            "Your account can't store provider sign-ins at the moment. Try again later.",
-                        )],
-                        None,
-                        Vec::new(),
-                    )),
-                )
-                .into_any_element();
-            }
-            Loadable::Error(error) => {
-                let error = error.clone();
-                return widgets::section(
-                    theme,
-                    "Providers on Cloud",
-                    block.mt(px(0.0)).child(row(
-                        theme,
-                        true,
-                        None,
-                        "Couldn't load providers",
-                        vec![text(theme.danger_muted.opacity(0.9), error)],
-                        None,
-                        vec![
-                            action(
-                                theme,
-                                "vault-retry",
-                                widgets::ActionTone::Filled,
-                                "Retry",
-                                true,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.vault = Loadable::Idle;
-                                this.load_vault(cx);
-                            }))
-                            .into_any_element(),
-                        ],
-                    )),
-                )
-                .into_any_element();
-            }
-            Loadable::Idle | Loadable::Loading => {
-                return widgets::section(
-                    theme,
-                    "Providers on Cloud",
-                    block.mt(px(0.0)).child(row(
-                        theme,
-                        true,
-                        None,
-                        "Providers",
-                        vec![busy_meta(theme, "vault-loading", "Loading…", cx)],
-                        None,
-                        Vec::new(),
-                    )),
-                )
-                .into_any_element();
-            }
-        };
-        let codex = self.subscription_row(
-            SubscriptionRow {
-                harness: HarnessId::Codex,
-                title: "Codex",
-                subscription: VaultProvider::Codex,
-                key: VaultProvider::OpenaiKey,
-                brand: "ChatGPT",
-                key_label: "OpenAI API key",
-            },
-            &vault,
-            cloud_id,
-            theme,
-            cx,
-        );
-        let claude = self.subscription_row(
-            SubscriptionRow {
-                harness: HarnessId::ClaudeCode,
-                title: "Claude Code",
-                subscription: VaultProvider::Claude,
-                key: VaultProvider::AnthropicKey,
-                brand: "Claude",
-                key_label: "Anthropic API key",
-            },
-            &vault,
-            cloud_id,
-            theme,
-            cx,
-        );
-        let codex_editor = self.render_api_key_editor(VaultProvider::OpenaiKey, theme, window, cx);
-        let claude_editor =
-            self.render_api_key_editor(VaultProvider::AnthropicKey, theme, window, cx);
-        let claude_code = self.render_sign_in_code(VaultProvider::Claude, theme, window, cx);
-        let block = block
-            .mt(px(0.0))
-            .child(codex.render(theme, true))
-            .children(codex_editor)
-            .child(claude.render(theme, false))
-            .children(claude_code)
-            .children(claude_editor);
-        widgets::section(theme, "Providers on Cloud", block).into_any_element()
-    }
-
-    /// One subscription provider: a browser sign-in on this computer
-    /// (stored for Cloud) or the user's own API key.
-    fn subscription_row(
-        &self,
-        spec: SubscriptionRow,
-        vault: &VaultStatus,
-        cloud_id: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> RowParts {
-        let SubscriptionRow {
-            harness,
-            title,
-            subscription,
-            key,
-            brand,
-            key_label,
-        } = spec;
-        let link = cloud::provider_link(vault, subscription, cloud_id);
-        let key_link = cloud::provider_link(vault, key, cloud_id);
-        let idle = self.vault_busy.is_none();
-        let row_busy =
-            |provider: VaultProvider| self.vault_busy.as_deref() == Some(provider.as_str());
-        let id = |suffix: &str| SharedString::from(format!("{}-{suffix}", subscription.as_str()));
-        let sign_in = |label: &'static str, cx: &mut Context<Self>| {
-            let enabled = self.sign_in.is_none();
-            action(
-                theme,
-                id("sign-in"),
-                widgets::ActionTone::Filled,
-                label,
-                enabled,
-            )
-            .when(enabled, |el| {
-                el.on_click(
-                    cx.listener(move |this, _, _, cx| this.connect_subscription(subscription, cx)),
-                )
-            })
-            .into_any_element()
-        };
-        let account_text = |label: &str, account: &Option<String>| {
-            account
-                .as_deref()
-                .map_or(label.to_string(), |a| format!("{label} · {a}"))
-        };
-        let mut meta: Vec<AnyElement> = Vec::new();
-        let mut actions: Vec<AnyElement> = Vec::new();
-        if let Some(flow) = self.sign_in.as_ref().filter(|f| f.provider == subscription) {
-            let key = if subscription == VaultProvider::Claude {
-                "claude-signing-in"
-            } else {
-                "codex-signing-in"
-            };
-            match &flow.step {
-                SignInStep::Starting => meta.push(busy_meta(
-                    theme,
-                    key,
-                    format!("Opening the {brand} sign-in…"),
-                    cx,
-                )),
-                SignInStep::Browser { message } => meta.push(busy_meta(
-                    theme,
-                    key,
-                    message.clone().unwrap_or_else(|| {
-                        format!("Finish signing in with {brand} in your browser…").into()
-                    }),
-                    cx,
-                )),
-                SignInStep::PasteCode { .. } => meta.push(text(
-                    theme.text_muted,
-                    format!("Paste the code {brand} shows you to finish"),
-                )),
-            }
-            if let Some(url) = flow.url.clone() {
-                actions.push(
-                    action(
-                        theme,
-                        id("reopen"),
-                        widgets::ActionTone::Quiet,
-                        "Reopen page",
-                        true,
-                    )
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        crate::settings::accounts::open_login_url(&url, cx)
-                    }))
-                    .into_any_element(),
-                );
-            }
-            actions.push(
-                action(
-                    theme,
-                    id("cancel"),
-                    widgets::ActionTone::Quiet,
-                    "Cancel",
-                    true,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.cancel_sign_in(cx)))
-                .into_any_element(),
-            );
-        } else {
-            match (&link, &key_link) {
-                (ProviderLink::Connected { account }, _) => {
-                    meta.push(text(theme.success_muted, "Connected"));
-                    meta.push(text(theme.text_muted, account_text(brand, account)));
-                    actions.push(self.disconnect_action(
-                        theme,
-                        subscription,
-                        "Disconnect",
-                        idle,
-                        row_busy(subscription),
-                        cx,
-                    ));
-                }
-                (ProviderLink::NeedsReconnect { account }, _) => {
-                    meta.push(text(theme.warning_muted.opacity(0.9), "Needs reconnect"));
-                    if let Some(account) = account {
-                        meta.push(text(theme.text_muted, account.clone()));
-                    }
-                    actions.push(self.disconnect_action(
-                        theme,
-                        subscription,
-                        "Disconnect",
-                        idle,
-                        row_busy(subscription),
-                        cx,
-                    ));
-                    actions.push(sign_in("Sign in again", cx));
-                }
-                (_, ProviderLink::Connected { account }) => {
-                    meta.push(text(theme.success_muted, "Connected"));
-                    meta.push(text(theme.text_muted, account_text(key_label, account)));
-                    actions.push(self.disconnect_action(
-                        theme,
-                        key,
-                        "Remove key",
-                        idle,
-                        row_busy(key),
-                        cx,
-                    ));
-                }
-                (ProviderLink::NotAuthorized { account }, _) => {
-                    meta.push(text(
-                        theme.text_muted,
-                        account
-                            .as_deref()
-                            .map_or(format!("Signed in with {brand} for other devices"), |a| {
-                                format!("Signed in with {brand} as {a} for other devices")
-                            }),
-                    ));
-                    actions.push(self.authorize_action(theme, subscription, idle, cx));
-                }
-                _ => {
-                    meta.push(text(theme.text_muted, "Not connected"));
-                    actions.push(
-                        action(
-                            theme,
-                            id("api-key"),
-                            widgets::ActionTone::Quiet,
-                            "Use an API key",
-                            true,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_api_key(key, cx)))
-                        .into_any_element(),
-                    );
-                    actions.push(sign_in(
-                        if subscription == VaultProvider::Claude {
-                            "Sign in with Claude"
-                        } else {
-                            "Sign in with ChatGPT"
-                        },
-                        cx,
-                    ));
-                }
-            }
-        }
-        let note = (!link.is_stored() && !key_link.is_stored() && !self.signing_in(subscription))
-            .then(|| {
-                SharedString::from(format!(
-                    "Signs in on this computer and keeps the sign-in for every Cloud session. \
-                     Your own {title} login here is untouched."
-                ))
-            });
-        let (icon, tint) = crate::pickers::harness_brand_icon(harness);
-        RowParts {
-            leading: Some(tile(theme, icon, tint)),
-            title,
-            meta,
-            note,
-            actions,
-        }
     }
 
     fn disconnect_action(
@@ -1732,52 +892,50 @@ impl CloudPage {
         .into_any_element()
     }
 
-    fn authorize_action(
-        &self,
-        theme: &Theme,
-        provider: VaultProvider,
-        idle: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        action(
-            theme,
-            SharedString::from(format!("authorize-{}", provider.as_str())),
-            widgets::ActionTone::Filled,
-            "Use on Cloud",
-            idle,
-        )
-        .when(idle, |el| {
-            el.on_click(cx.listener(move |this, _, _, cx| this.authorize(provider, cx)))
-        })
-        .into_any_element()
-    }
-
+    /// GitHub, for the repositories Cloud sessions clone and push to. Always
+    /// shown while signed in; with Cloud off it is dimmed and says why.
     fn render_github(
         &mut self,
-        cloud_id: &str,
+        cloud_id: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let vault = self.vault.ready().filter(|v| v.available)?.clone();
-        let link = cloud::provider_link(&vault, VaultProvider::Github, cloud_id);
+        let vault = self.vault.ready().filter(|v| v.available).cloned();
+        if !self.cloud_status().is_some_and(|status| status.available) {
+            return None;
+        }
         let idle = self.vault_busy.is_none();
         let busy = self.vault_busy.as_deref() == Some(VaultProvider::Github.as_str());
         let mut meta: Vec<AnyElement> = Vec::new();
         let mut actions: Vec<AnyElement> = Vec::new();
-        let mut note: Option<SharedString> = None;
-        let connect = |label: &'static str, cx: &mut Context<Self>| {
+        let connect = |label: &'static str, enabled: bool, cx: &mut Context<Self>| {
             action(
                 theme,
                 "github-connect",
                 widgets::ActionTone::Filled,
                 label,
-                true,
+                enabled,
             )
-            .on_click(cx.listener(|this, _, _, cx| this.start_github(cx)))
+            .when(enabled, |el| {
+                el.on_click(cx.listener(|this, _, _, cx| this.start_github(cx)))
+            })
             .into_any_element()
         };
-        match &self.github {
-            GithubFlow::Starting => {
+        let link = match (cloud_id, vault.as_ref()) {
+            (Some(cloud_id), Some(vault)) => {
+                Some(cloud::provider_link(vault, VaultProvider::Github, cloud_id))
+            }
+            _ => None,
+        };
+        match (&self.github, &link) {
+            (_, None) if cloud_id.is_none() => {
+                meta.push(text(theme.text_muted, "Turn on Cloud to connect GitHub."));
+                actions.push(connect("Connect", false, cx));
+            }
+            (_, None) => {
+                meta.push(busy_meta(theme, "github-loading", "Checking GitHub…", cx));
+            }
+            (GithubFlow::Starting, _) => {
                 meta.push(busy_meta(
                     theme,
                     "github-starting",
@@ -1785,7 +943,7 @@ impl CloudPage {
                     cx,
                 ));
             }
-            GithubFlow::Waiting { .. } => {
+            (GithubFlow::Waiting { .. }, _) => {
                 meta.push(busy_meta(
                     theme,
                     "github-waiting",
@@ -1804,75 +962,72 @@ impl CloudPage {
                     .into_any_element(),
                 );
             }
-            GithubFlow::Failed(message) => {
+            (GithubFlow::Failed(message), _) => {
                 meta.push(text(theme.danger_muted.opacity(0.9), message.clone()));
-                actions.push(connect("Try again", cx));
+                actions.push(connect("Try again", true, cx));
             }
-            GithubFlow::Idle => match &link {
-                ProviderLink::Connected { account } => {
-                    meta.push(text(
-                        theme.success_muted,
-                        account.as_deref().map_or("Connected".to_string(), |login| {
-                            format!("Connected as {login}")
-                        }),
-                    ));
-                    if let Some(url) = vault.github_install_url.clone() {
-                        note = Some(
-                            "Sessions reach the repositories the Zeron GitHub App is installed on, \
-                             and push and open pull requests as the App."
-                                .into(),
-                        );
-                        actions.push(
-                            action(
-                                theme,
-                                "github-install",
-                                widgets::ActionTone::Quiet,
-                                "Choose repositories",
-                                true,
-                            )
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                crate::settings::accounts::open_login_url(&url, cx);
-                            }))
-                            .into_any_element(),
-                        );
-                    }
-                    actions.push(self.disconnect_action(
-                        theme,
-                        VaultProvider::Github,
-                        "Disconnect",
-                        idle,
-                        busy,
-                        cx,
-                    ));
-                }
-                ProviderLink::NeedsReconnect { account } => {
-                    meta.push(text(theme.warning_muted.opacity(0.9), "Needs reconnect"));
-                    if let Some(account) = account {
-                        meta.push(text(theme.text_muted, account.clone()));
-                    }
-                    actions.push(connect("Reconnect", cx));
-                }
-                ProviderLink::NotAuthorized { account } => {
-                    meta.push(text(
-                        theme.text_muted,
-                        account
-                            .as_deref()
-                            .map_or("Connected for other devices".to_string(), |login| {
-                                format!("Connected as {login} for other devices")
-                            }),
-                    ));
-                    actions.push(self.authorize_action(theme, VaultProvider::Github, idle, cx));
-                }
-                ProviderLink::NotConnected => {
-                    meta.push(text(theme.text_muted, "Not connected"));
-                    note = Some(
-                        "Connect, then install the Zeron GitHub App on the repositories Cloud \
-                         sessions should clone, push to and open pull requests on."
-                            .into(),
+            (GithubFlow::Idle, Some(ProviderLink::Connected { account })) => {
+                meta.push(text(
+                    theme.text_muted,
+                    account.clone().unwrap_or_else(|| "Connected".into()),
+                ));
+                if let Some(url) = vault.as_ref().and_then(|v| v.github_install_url.clone()) {
+                    actions.push(
+                        action(
+                            theme,
+                            "github-install",
+                            widgets::ActionTone::Quiet,
+                            "Repositories",
+                            true,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::accounts::open_login_url(&url, cx);
+                        }))
+                        .into_any_element(),
                     );
-                    actions.push(connect("Connect GitHub", cx));
                 }
-            },
+                actions.push(self.disconnect_action(
+                    theme,
+                    VaultProvider::Github,
+                    "Disconnect",
+                    idle,
+                    busy,
+                    cx,
+                ));
+            }
+            (GithubFlow::Idle, Some(ProviderLink::NeedsReconnect { account })) => {
+                meta.push(text(theme.warning_muted.opacity(0.9), "Needs reconnect"));
+                if let Some(account) = account {
+                    meta.push(text(theme.text_muted, account.clone()));
+                }
+                actions.push(connect("Reconnect", true, cx));
+            }
+            // Connected for other devices only: connecting just lets Cloud
+            // use it (no new sign-in).
+            (GithubFlow::Idle, Some(ProviderLink::NotAuthorized { account })) => {
+                if let Some(account) = account {
+                    meta.push(text(theme.text_muted, account.clone()));
+                }
+                actions.push(
+                    action(
+                        theme,
+                        "github-authorize",
+                        widgets::ActionTone::Filled,
+                        if busy { "Connecting…" } else { "Connect" },
+                        idle,
+                    )
+                    .when(idle, |el| {
+                        el.on_click(
+                            cx.listener(|this, _, _, cx| this.authorize(VaultProvider::Github, cx)),
+                        )
+                    })
+                    .into_any_element(),
+                );
+            }
+            (GithubFlow::Idle, Some(_)) => {
+                meta.push(text(theme.text_muted, "Not connected"));
+                actions.push(connect("Connect", true, cx));
+            }
         }
         let code = match &self.github {
             GithubFlow::Waiting { flow, copied } => {
@@ -1880,17 +1035,21 @@ impl CloudPage {
             }
             _ => None,
         };
+        let enabled = cloud_id.is_some();
         let block = widgets::section_card(theme)
             .mt(px(0.0))
-            .child(row(
-                theme,
-                true,
-                Some(tile(theme, crate::icons::GIT_BRANCH, None)),
-                "GitHub",
-                meta,
-                note,
-                actions,
-            ))
+            .child(
+                row(
+                    theme,
+                    true,
+                    Some(tile(theme, crate::icons::GITHUB_MARK, None)),
+                    "GitHub",
+                    meta,
+                    None,
+                    actions,
+                )
+                .when(!enabled, |el| el.opacity(0.6)),
+            )
             .children(code);
         Some(widgets::section(theme, "GitHub", block).into_any_element())
     }
@@ -1956,171 +1115,135 @@ impl CloudPage {
             .into_any_element()
     }
 
-    fn render_vault_devices(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let vault = self.vault.ready().filter(|v| v.available)?;
-        let groups = cloud::group_vault_devices(&vault.devices);
-        let cloud_id = self.cloud_id();
-        if groups.computers.is_empty() && groups.cloud_machines == 0 {
-            return None;
-        }
-        let mut computers = groups.computers;
-        // Active first, newest enrollment first.
-        computers.sort_by(|a, b| {
-            a.revoked_at
-                .is_some()
-                .cmp(&b.revoked_at.is_some())
-                .then_with(|| b.enrolled_at.cmp(&a.enrolled_at))
-        });
-        let names: Vec<(String, String)> = {
-            let state = self.state.read(cx);
-            state
-                .devices
+    /// Credits: used over the picked range against what's left, and a bar
+    /// per day.
+    fn render_usage(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let usage = self.usage.clone()?;
+        let selected = cloud::UsageRange::ALL
+            .iter()
+            .position(|range| *range == self.usage_range)
+            .unwrap_or(0);
+        let range_select = widgets::select(
+            "cloud-usage-range",
+            "Usage range",
+            theme,
+            |page: &mut Self| &mut page.range_select,
+        )
+        .options(
+            cloud::UsageRange::ALL
                 .iter()
-                .map(|d| (d.id.clone(), d.name.clone()))
-                .collect()
-        };
-        let now = Utc::now();
-        let idle = self.vault_busy.is_none();
-        // (title, meta, the device to revoke when active)
-        let mut rows: Vec<(String, Vec<AnyElement>, Option<String>)> = Vec::new();
-        if let Some(cloud_id) = cloud_id.filter(|_| groups.cloud_machines > 0) {
-            let machines = groups.cloud_machines;
-            rows.push((
-                cloud::CLOUD_LABEL.to_string(),
-                vec![text(
-                    theme.text_muted,
-                    format!(
-                        "{machines} session machine{}",
-                        if machines == 1 { "" } else { "s" }
-                    ),
-                )],
-                Some(cloud_id),
-            ));
-        }
-        for device in computers {
-            let name = names
-                .iter()
-                .find(|(id, _)| *id == device.device_id)
-                .map(|(_, name)| name.clone())
-                .unwrap_or_else(|| crate::settings::devices::short_id(&device.device_id));
-            let mut meta = vec![text(
-                theme.text_muted,
-                format!("Added {}", cloud::ago(device.enrolled_at, now)),
-            )];
-            let revoked = device.revoked_at.is_some();
-            if revoked {
-                meta.push(text(theme.warning_muted.opacity(0.9), "Access revoked"));
+                .map(|range| widgets::SelectOption::new(range.label())),
+            selected,
+        )
+        // Fits the longest label, so switching never resizes the trigger.
+        .width(128.0)
+        .on_select(|page, ix, _, cx| {
+            if let Some(range) = cloud::UsageRange::ALL.get(ix) {
+                page.set_usage_range(*range, cx);
             }
-            rows.push((name, meta, (!revoked).then_some(device.device_id)));
+        })
+        .render(&self.range_select, cx);
+        let fractions = cloud::bar_fractions(&usage.days);
+        let gap = if usage.days.len() > 45 { 1.0 } else { 3.0 };
+        let bar_color = theme.accent.opacity(0.85);
+        let empty_color = theme.wash(0.06);
+        let bars = usage
+            .days
+            .iter()
+            .zip(fractions)
+            .enumerate()
+            .map(|(ix, (day, fraction))| {
+                let ran = day.credits > 0.0;
+                div()
+                    .id(("cloud-usage-bar", ix))
+                    .flex_1()
+                    .min_w(px(1.0))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .tooltip(widgets::text_tooltip(format!(
+                        "{} · {}",
+                        cloud::short_day(&day.day),
+                        cloud::format_credits(day.credits)
+                    )))
+                    .child(
+                        div()
+                            .w_full()
+                            // A day that ran stays visible next to a busy one.
+                            .h(if ran {
+                                gpui::relative(fraction.max(0.04))
+                            } else {
+                                px(2.0).into()
+                            })
+                            .rounded(px(2.0))
+                            .bg(if ran { bar_color } else { empty_color }),
+                    )
+            });
+        let axis = |day: Option<&zeron_proto::CloudUsageDay>| {
+            day.map(|d| cloud::short_day(&d.day)).unwrap_or_default()
+        };
+        let mut meta = vec![text(
+            theme.text_muted,
+            format!("{} left", cloud::format_credits(usage.balance)),
+        )];
+        if usage.balance <= 0.0 {
+            meta = vec![text(theme.warning_muted.opacity(0.9), "Out of credits")];
         }
-        let mut block = widgets::section_card(theme).mt(px(0.0));
-        for (ix, (name, meta, revoke)) in rows.into_iter().enumerate() {
-            let actions = match revoke {
-                None => Vec::new(),
-                Some(device_id) => {
-                    let busy = self.vault_busy.as_deref() == Some(device_id.as_str());
-                    vec![
-                        action(
-                            theme,
-                            ("vault-revoke", ix),
-                            widgets::ActionTone::Quiet,
-                            if busy { "Revoking…" } else { "Revoke" },
-                            idle,
-                        )
-                        .aria_label(format!("Revoke access for {name}"))
-                        .when(idle, |el| {
-                            el.on_click(cx.listener(move |this, _, _, cx| {
-                                this.revoke_device(device_id.clone(), cx)
-                            }))
-                        })
-                        .into_any_element(),
-                    ]
-                }
-            };
-            // Compact: no tile, a shorter row.
-            block = block.child(
-                widgets::card_row(theme, ix == 0)
-                    .min_h(px(48.0))
-                    .py(px(8.0))
+        let block = widgets::section_card(theme)
+            .mt(px(0.0))
+            .child(
+                widgets::card_row(theme, true)
+                    .min_h(px(52.0))
+                    .py(px(10.0))
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(160.0))
-                            .child(widgets::row_title(theme, name))
+                            .child(widgets::row_title(
+                                theme,
+                                format!("{} used", cloud::format_credits(usage.credits)),
+                            ))
                             .child(widgets::meta_line(theme, meta)),
                     )
-                    .child(div().flex_none().flex().items_center().children(actions)),
+                    .child(range_select),
+            )
+            .child(
+                div()
+                    .px(px(16.0))
+                    .pb(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id("cloud-usage-chart")
+                            .h(px(88.0))
+                            .flex()
+                            .flex_row()
+                            .items_end()
+                            .gap(px(gap))
+                            .children(bars),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted.opacity(0.75))
+                            .child(axis(usage.days.first()))
+                            .child(axis(usage.days.last())),
+                    ),
             );
-        }
-        Some(widgets::section(theme, "Devices with access", block).into_any_element())
-    }
-
-    fn render_usage(&self, theme: &Theme) -> Option<AnyElement> {
-        let usage = self.usage.as_ref()?;
-        let (summary, cost) = cloud::usage_summary(usage);
-        let mut meta = Vec::new();
-        if let Some(cost) = cost {
-            meta.push(text(theme.text_muted, cost));
-        }
-        let block = widgets::section_card(theme).mt(px(0.0)).child(
-            widgets::card_row(theme, true)
-                .min_h(px(48.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(160.0))
-                        .child(widgets::row_title(theme, summary))
-                        .when(!meta.is_empty(), |el| {
-                            el.child(widgets::meta_line(theme, meta))
-                        }),
-                ),
-        );
-        Some(widgets::section(theme, "Usage", block).into_any_element())
-    }
-
-    fn render_danger_zone(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let idle = self.busy.is_none();
-        let deleting = self.busy == Some(CloudAction::Delete);
-        let danger = theme.danger_muted;
-        let block = widgets::section_card(theme).mt(px(0.0)).child(row(
-            theme,
-            true,
-            None,
-            "Turn off Cloud",
-            vec![text(
-                theme.text_muted,
-                "Permanently deletes every session's machine and every file on them, including \
-                 work that hasn't been pushed. Transcripts, projects and connections stay.",
-            )],
-            None,
-            vec![
-                action(
+        Some(
+            widgets::section(theme, "Usage", block)
+                .child(footnote(
                     theme,
-                    "cloud-delete",
-                    widgets::ActionTone::Quiet,
-                    if deleting {
-                        "Turning off…"
-                    } else {
-                        "Turn off…"
-                    },
-                    idle,
-                )
-                .text_color(danger)
-                .when(idle, |el| {
-                    el.on_click(cx.listener(|this, _, _, cx| {
-                        this.confirm_delete = true;
-                        cx.notify();
-                    }))
-                })
+                    "A credit is a minute of a small machine. Machines only use credits while awake.",
+                ))
                 .into_any_element(),
-            ],
-        ));
-        widgets::section(theme, "Danger zone", block).into_any_element()
+        )
     }
 
     fn render_delete_dialog(
@@ -2189,20 +1312,12 @@ impl Render for CloudPage {
         let theme = Theme::of(cx).for_settings_surface();
         let dialog = self.render_delete_dialog(window.viewport_size(), cx);
         let status = self.render_status(&theme, cx);
-        let usage = self.render_usage(&theme);
+        let usage = self.render_usage(&theme, cx);
         let cloud_id = self
             .cloud_status()
             .filter(|s| s.available)
             .and_then(|_| self.cloud_id());
-        let (providers, github, devices, danger) = match cloud_id.as_deref() {
-            Some(id) => (
-                Some(self.render_providers(id, &theme, window, cx)),
-                self.render_github(id, &theme, cx),
-                self.render_vault_devices(&theme, cx),
-                Some(self.render_danger_zone(&theme, cx)),
-            ),
-            None => (None, None, None, None),
-        };
+        let github = self.render_github(cloud_id.as_deref(), &theme, cx);
         let scrollbar = popover::rail(self, "cloud-page-scrollbar", &theme, cx);
         div()
             .id("cloud-page-host")
@@ -2224,7 +1339,7 @@ impl Render for CloudPage {
                                 .child(widgets::page_header(&theme, "Cloud", None))
                                 .child(widgets::page_subtitle(
                                     &theme,
-                                    "Your own device in the cloud, with its own projects and providers. Every session runs on its own machine.",
+                                    "Run your agents in cloud sandboxes.",
                                 ))
                                 .when_some(self.error.clone(), |el, message| {
                                     el.child(
@@ -2240,11 +1355,8 @@ impl Render for CloudPage {
                                     )
                                 })
                                 .child(status)
-                                .children(providers)
-                                .children(github)
                                 .children(usage)
-                                .children(devices)
-                                .children(danger),
+                                .children(github),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),
@@ -2258,19 +1370,6 @@ impl Render for CloudPage {
 mod tests {
     use super::*;
 
-    #[test]
-    fn subscription_sign_ins_map_to_their_vault_calls() {
-        assert_eq!(
-            subscription_sign_in(VaultProvider::Codex),
-            Some((methods::VAULT_CONNECT_CODEX, "ChatGPT"))
-        );
-        assert_eq!(
-            subscription_sign_in(VaultProvider::Claude),
-            Some((methods::VAULT_CONNECT_CLAUDE, "Claude"))
-        );
-        assert_eq!(subscription_sign_in(VaultProvider::Github), None);
-    }
-
     fn connection(
         provider: VaultProvider,
         status: zeron_proto::VaultConnectionStatus,
@@ -2283,11 +1382,13 @@ mod tests {
             authorized_devices: devices.iter().map(|d| d.to_string()).collect(),
             account: Some(account.into()),
             updated_at: 0,
+            accounts: 1,
+            has_active: true,
         }
     }
 
     /// Every lifecycle state and provider standing paints without a panic,
-    /// with the inline key field, the GitHub code and the delete dialog open.
+    /// with the GitHub code and the delete dialog open.
     #[gpui::test]
     fn every_state_renders(cx: &mut gpui::TestAppContext) {
         use zeron_proto::VaultConnectionStatus::{Connected, NeedsReconnect};
@@ -2389,25 +1490,22 @@ mod tests {
                         awake_sessions: 2,
                         max_awake_sessions: 5,
                         available,
+                        credits: [Some(1240.0), Some(0.0), None][ix % 3],
                     });
                     page.vault = Loadable::Ready(vault);
+                    let days = if ix % 2 == 0 { 7 } else { 90 };
                     page.usage = Some(CloudUsage {
-                        month: "2026-10".into(),
-                        seconds: 44_640,
-                        dollars: 1.25,
+                        from: "2026-07-08".into(),
+                        to: "2026-10-05".into(),
+                        days: (0..days)
+                            .map(|d| zeron_proto::CloudUsageDay {
+                                day: format!("2026-10-{:02}", d % 28 + 1),
+                                credits: [0.0, 12.0, 340.0][d % 3],
+                            })
+                            .collect(),
+                        credits: 1240.0,
+                        balance: [500.0, -3.0][ix % 2],
                         available: true,
-                        ..Default::default()
-                    });
-                    page.sign_in = (ix % 3 == 0).then(|| SignInFlow {
-                        provider: if ix % 2 == 0 {
-                            VaultProvider::Codex
-                        } else {
-                            VaultProvider::Claude
-                        },
-                        attempt: 0,
-                        login_id: Some("login".into()),
-                        url: Some("https://example.com/sign-in".into()),
-                        step: SignInStep::Browser { message: None },
                     });
                     page.confirm_delete = ix % 2 == 0;
                     page.github = match ix % 3 {
@@ -2424,11 +1522,6 @@ mod tests {
                         1 => GithubFlow::Failed("Denied".into()),
                         _ => GithubFlow::Idle,
                     };
-                    if ix % 2 == 1 {
-                        page.open_api_key(VaultProvider::AnthropicKey, cx);
-                    } else {
-                        page.api_key = None;
-                    }
                     cx.notify();
                 });
                 cx.update(|window, cx| window.draw(cx).clear());
@@ -2467,78 +1560,6 @@ mod tests {
             assert_eq!(cloud::retry_action(&failed), CloudAction::Delete);
             page.apply_status(failed, cx);
             assert!(page.recheck_task.is_none());
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        // Claude's paste-code fallback, then the poll outcomes.
-        page.update(cx, |page, cx| {
-            page.vault = Loadable::Ready(VaultStatus {
-                available: true,
-                ..Default::default()
-            });
-            page.api_key = None;
-            page.sign_in = Some(SignInFlow {
-                provider: VaultProvider::Claude,
-                attempt: 7,
-                login_id: None,
-                url: None,
-                step: SignInStep::Starting,
-            });
-            page.apply_sign_in_start(
-                7,
-                Ok(AgentLoginStart {
-                    login_id: "login-7".into(),
-                    url: String::new(),
-                    mode: AgentLoginMode::PasteCode,
-                    callback_port: None,
-                }),
-                cx,
-            );
-            assert!(matches!(
-                page.sign_in.as_ref().map(|f| &f.step),
-                Some(SignInStep::PasteCode { .. })
-            ));
-            // An empty code is refused locally.
-            page.submit_sign_in_code(cx);
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        page.update(cx, |page, cx| {
-            // A stale attempt's poll is ignored and ends its loop.
-            assert!(page.apply_sign_in_poll(
-                6,
-                Ok(AgentLoginPoll {
-                    status: AgentLoginStatus::Done,
-                    message: None,
-                    url: None,
-                    callback_port: None,
-                }),
-                cx,
-            ));
-            assert!(page.sign_in.is_some());
-            if let Some(flow) = page.sign_in.as_mut() {
-                flow.step = SignInStep::Browser { message: None };
-            }
-            assert!(!page.apply_sign_in_poll(
-                7,
-                Ok(AgentLoginPoll {
-                    status: AgentLoginStatus::Pending,
-                    message: Some("Waiting for the browser…".into()),
-                    url: None,
-                    callback_port: None,
-                }),
-                cx,
-            ));
-            assert!(page.apply_sign_in_poll(
-                7,
-                Ok(AgentLoginPoll {
-                    status: AgentLoginStatus::Error,
-                    message: Some("Denied".into()),
-                    url: None,
-                    callback_port: None,
-                }),
-                cx,
-            ));
-            assert!(page.sign_in.is_none());
-            assert_eq!(page.error.as_deref(), Some("Denied"));
         });
         cx.update(|window, cx| window.draw(cx).clear());
         // Loading and failure before any status.

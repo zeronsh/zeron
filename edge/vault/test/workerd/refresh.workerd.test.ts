@@ -36,7 +36,7 @@ const withCodex = async (expiresInMs: number) => {
 
 const storedGeneration = (userId: string) =>
   runInDurableObject(accountStub(env, userId, "codex"), (_instance, state) =>
-    state.storage.sql.exec<{ generation: number }>("SELECT generation FROM record").toArray()[0]?.generation
+    state.storage.sql.exec<{ generation: number }>("SELECT generation FROM accounts").toArray()[0]?.generation
   );
 
 describe("codex refresh", () => {

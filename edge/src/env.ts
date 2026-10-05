@@ -60,6 +60,8 @@ export interface Env {
   BOAT_API_BASE?: string;
   /** Idle minutes before an unused Cloud session sleeps (default 20). */
   CLOUD_IDLE_MINUTES?: string;
+  /** Credits a user gets the first time they turn Cloud on (default 0). */
+  CLOUD_STARTING_CREDITS?: string;
   /** Origin session engines talk to; default = the creating request's
    * origin. For dev tunnels. */
   CLOUD_EDGE_URL?: string;

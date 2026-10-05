@@ -25,12 +25,12 @@ const withKey = async () => {
 
 const record = (userId: string) =>
   runInDurableObject(accountStub(env, userId, PROVIDER), (_instance, state) =>
-    state.storage.sql.exec<{ generation: number; envelope: string }>("SELECT generation, envelope FROM record").toArray()[0]!
+    state.storage.sql.exec<{ generation: number; envelope: string }>("SELECT generation, envelope FROM accounts").toArray()[0]!
   );
 
 const replaceEnvelope = (userId: string, envelope: string) =>
   runInDurableObject(accountStub(env, userId, PROVIDER), (_instance, state) => {
-    state.storage.sql.exec("UPDATE record SET envelope = ? WHERE id = 1", envelope);
+    state.storage.sql.exec("UPDATE accounts SET envelope = ?", envelope);
   });
 
 describe("KEK rotation", () => {

@@ -133,6 +133,14 @@ pub trait RunEnvironment: Send + Sync {
         harness: HarnessId,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String>;
+
+    /// Which credential a run of `harness` would use now (an opaque
+    /// fingerprint), `None` when unknown. A parked session started with a
+    /// different one is replaced before its next turn, so switching the
+    /// account applies from the next turn.
+    async fn credential(&self, _harness: HarnessId) -> Option<String> {
+        None
+    }
 }
 
 enum Slot {
@@ -272,6 +280,19 @@ impl HarnessRegistry {
         match environment {
             Some(environment) => environment.prepare(harness, request).await,
             None => Ok(()),
+        }
+    }
+
+    /// [`RunEnvironment::credential`] (`None` without a provider).
+    pub async fn run_credential(&self, harness: HarnessId) -> Option<String> {
+        let environment = self
+            .run_environment
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match environment {
+            Some(environment) => environment.credential(harness).await,
+            None => None,
         }
     }
 

@@ -26,6 +26,8 @@ export class TestLogRoom extends DurableObject {}
 type Caller = { userId: string; orgId: string; kind: string; deviceId?: string };
 const vaultCalls: { method: string; args: unknown[] }[] = [];
 const STATUS = { connections: [], devices: [], available: true };
+const rebindConnections = new Map<string, Map<string, string[]>>();
+const ACCOUNTS = [{ slot: "a1", status: "connected", active: true, kind: "oauth", account: "me@example.com", authorizedDevices: ["cloud-1"], createdAt: 1, updatedAt: 1 }];
 
 export class VaultStub extends WorkerEntrypoint {
   private answer(method: string, args: unknown[], value: unknown) {
@@ -39,9 +41,25 @@ export class VaultStub extends WorkerEntrypoint {
     if (caller.userId.startsWith("vault-down")) return { ok: false, error: "unavailable", message: "KMS down", status: 503 };
     return { ok: true, value };
   }
-  status(caller: Caller) { return this.answer("status", [caller], STATUS); }
+  /** `rebind*` users have connections that remember what they're authorized for. */
+  private connections(caller: Caller) {
+    if (!caller.userId.startsWith("rebind")) return STATUS;
+    const mine = rebindConnections.get(caller.userId) ?? new Map<string, string[]>();
+    return {
+      ...STATUS,
+      connections: [...mine].map(([provider, authorizedDevices]) => ({ provider, status: "connected", authorizedDevices, updatedAt: 1 }))
+    };
+  }
+  status(caller: Caller) { return this.answer("status", [caller], this.connections(caller)); }
   putCredential(caller: Caller, provider: string, req: unknown) { return this.answer("putCredential", [caller, provider, req], STATUS); }
-  authorize(caller: Caller, provider: string, devices: string[]) { return this.answer("authorize", [caller, provider, devices], STATUS); }
+  authorize(caller: Caller, provider: string, devices: string[]) {
+    if (caller.userId.startsWith("rebind")) {
+      const mine = rebindConnections.get(caller.userId) ?? new Map<string, string[]>();
+      mine.set(provider, devices);
+      rebindConnections.set(caller.userId, mine);
+    }
+    return this.answer("authorize", [caller, provider, devices], this.connections(caller));
+  }
   disconnect(caller: Caller, provider: string) { return this.answer("disconnect", [caller, provider], STATUS); }
   enrollDevice(caller: Caller, req: unknown) { return this.answer("enrollDevice", [caller, req], STATUS); }
   revokeDevice(caller: Caller, deviceId: string) { return this.answer("revokeDevice", [caller, deviceId], STATUS); }
@@ -60,6 +78,14 @@ export class VaultStub extends WorkerEntrypoint {
   }
   githubBranches(caller: Caller, repo: string) {
     return this.answer("githubBranches", [caller, repo], ["main", "dev"]);
+  }
+  accounts(caller: Caller, provider: string) { return this.answer("accounts", [caller, provider], ACCOUNTS); }
+  activateAccount(caller: Caller, provider: string, slot: string | null) {
+    return this.answer("activateAccount", [caller, provider, slot], ACCOUNTS);
+  }
+  forgetAccount(caller: Caller, provider: string, slot: string) { return this.answer("forgetAccount", [caller, provider, slot], []); }
+  accountUsage(caller: Caller, provider: string, slot: string) {
+    return this.answer("accountUsage", [caller, provider, slot], { body: { five_hour: { utilization: 10 } }, fetchedAt: 1 });
   }
   calls() { return vaultCalls; }
 }

@@ -135,13 +135,14 @@ export const usageCsv = (data: UsageExport): string => {
   return `${lines.join("\n")}\n`;
 };
 
-/** `/admin/cloud/usage` — undefined when not this route. */
+/** `/admin/cloud/usage` and `/admin/cloud/credits` — undefined when not
+ * one of them. */
 export const handleAdminRoute = async (
   request: Request,
   env: BillingEnv,
   url: URL
 ): Promise<Response | undefined> => {
-  if (url.pathname !== "/admin/cloud/usage") return undefined;
+  if (url.pathname !== "/admin/cloud/usage" && url.pathname !== "/admin/cloud/credits") return undefined;
   if (!env.ADMIN_TOKEN) return json({ error: "not_found" }, 404);
   // Header only (never `?token=`: query strings end up in logs).
   const header = request.headers.get("authorization") ?? "";
@@ -151,6 +152,7 @@ export const handleAdminRoute = async (
   if (!token || !constantTimeEqual(given, expected)) {
     return jsonError(401, "unauthenticated", "Admin token required.");
   }
+  if (url.pathname === "/admin/cloud/credits") return grantCredits(request, env);
   if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
   const month = url.searchParams.get("month") ?? monthKey(Date.now());
   if (!isMonthKey(month)) return jsonError(400, "bad_request", "month must be YYYY-MM.");
@@ -164,6 +166,36 @@ export const handleAdminRoute = async (
     });
   }
   return json(data);
+};
+
+const ADMIN_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** `POST /admin/cloud/credits {orgId, userId, credits, reason}`: add credits
+ * to a user's Cloud (negative corrects). Answers the new balance. */
+const grantCredits = async (request: Request, env: BillingEnv): Promise<Response> => {
+  if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+  if (!env.CLOUD_ACCOUNTS) return jsonError(503, "unavailable", "Cloud is not configured.");
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return jsonError(400, "bad_request", "Expected a JSON body.");
+  }
+  const { orgId, userId, credits, reason } = body;
+  if (
+    typeof orgId !== "string" ||
+    !ADMIN_ID_RE.test(orgId) ||
+    typeof userId !== "string" ||
+    !ADMIN_ID_RE.test(userId) ||
+    typeof credits !== "number" ||
+    !Number.isFinite(credits) ||
+    Math.abs(credits) > 1_000_000 ||
+    typeof reason !== "string" ||
+    reason.length === 0
+  ) {
+    return jsonError(400, "bad_request", "Expected {orgId, userId, credits (number), reason}.");
+  }
+  return json(await deviceStub(env, orgId, userId).grantCredits(credits, reason));
 };
 
 /** A provider's sandboxes that no user's CloudAccount ever registered. */

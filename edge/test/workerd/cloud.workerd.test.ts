@@ -50,7 +50,7 @@ const registryRows = async (u: TestUser) =>
 describe("account", () => {
   it("reports off + available for a new user and refuses another org", async () => {
     const u = newUser();
-    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true });
+    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true, credits: 0 });
     expect((await call("GET", "/cloud/other-org", userBearer(u))).status).toBe(403);
     expect((await call("GET", "/cloud/org1")).status).toBe(401);
   });
@@ -197,6 +197,48 @@ describe("sessions get their own machines", () => {
     expect((await call("POST", "/cloud/org1/sessions/chat-busy/sleep", userBearer(u), {})).status).toBe(200);
     await waitForSession(u, "chat-busy", "sleeping");
     expect((await posts()).some((c) => c.path.endsWith("/stop"))).toBe(true);
+  });
+});
+
+describe("credits", () => {
+  const grant = (u: TestUser, credits: number) =>
+    runInDurableObject(accountStub(u), (instance) =>
+      (instance as unknown as { grantCredits(c: number, r: string): Promise<{ balance: number }> }).grantCredits(credits, "test")
+    );
+
+  it("starts with the starting credits, and refuses new sessions and wakes at zero", async () => {
+    const u = newUser();
+    const project = await enableCloud(u);
+    expect((await status(u)).credits).toBe(1000); // CLOUD_STARTING_CREDITS
+    // Turning Cloud off and on again never re-grants them.
+    expect((await call("DELETE", "/cloud/org1", userBearer(u))).status).toBe(200);
+    await waitForState(u, "off");
+    await enableCloud(u, project.spaceId);
+    expect((await status(u)).credits).toBe(1000);
+    await grant(u, -1000);
+    const refused = await createSession(u, "chat-broke", project.spaceId);
+    expect(refused.status).toBe(402);
+    expect(await refused.json()).toMatchObject({ error: "no_credits" });
+
+    await grant(u, 50);
+    await readySession(u, "chat-paid", project);
+    await withSession(u, "chat-paid", (s) => {
+      s.state = "sleeping";
+    });
+    await grant(u, -100);
+    expect((await call("POST", "/cloud/org1/sessions/chat-paid/wake", userBearer(u), {})).status).toBe(402);
+  });
+
+  it("puts awake machines to sleep once credits run out", async () => {
+    const u = newUser();
+    await readySession(u, "chat-spend", await enableCloud(u));
+    await grant(u, -2000);
+    await runInDurableObject(accountStub(u), (instance) =>
+      (instance as unknown as { reconcile(now?: number, full?: boolean): Promise<boolean> }).reconcile(Date.now(), true)
+    );
+    expect(["stopping", "sleeping"]).toContain((await session(u, "chat-spend"))?.state);
+    const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
+    expect(ledger.some((e) => e.event === "sleep" && e.detail === "out of credits")).toBe(true);
   });
 });
 
@@ -482,9 +524,6 @@ describe("delete", () => {
     expect(deleted("laptop-1")).toBe(false);
     expect((await session(u, "chat-keep"))?.state).toBe("ready");
     expect((await boatState()).sandboxes.find((s) => s.id === keep.sandboxId)?.deleted).toBe(false);
-
-    const usage = (await (await call("GET", "/cloud/org1/usage", userBearer(u))).json()) as { sandboxes: { sandboxId: string; chatId?: string }[] };
-    expect(usage.sandboxes.find((s) => s.sandboxId === sandboxId)?.chatId).toBe(chatId);
   });
 
   it("does not delete when the stop is refused for good; the error stays retryable", async () => {
@@ -499,6 +538,26 @@ describe("delete", () => {
     await call("DELETE", `/cloud/org1/sessions/${chatId}`, userBearer(u));
     await waitForSession(u, chatId, "gone");
     expect((await boatState()).sandboxes.find((s) => s.id === sandboxId)?.deleted).toBe(true);
+  });
+
+  it("turning Cloud on again keeps its connections: they move to the new Cloud", async () => {
+    const u = newUser("rebind");
+    const { accountDeviceId: first } = await enableCloud(u);
+    // Connected for this Cloud (GitHub and a Claude login) and for a laptop.
+    const user = { userId: u.userId, orgId: u.orgId, kind: "user" };
+    await env.VAULT.authorize(user, "github", [first]);
+    await env.VAULT.authorize(user, "claude", [first, "laptop-1"]);
+    await env.VAULT.authorize(user, "codex", ["laptop-1"]);
+    expect((await call("DELETE", "/cloud/org1", userBearer(u))).status).toBe(200);
+    await waitForState(u, "off");
+    const { accountDeviceId: second } = await enableCloud(u);
+    expect(second).not.toBe(first);
+    const status = (await env.VAULT.status(user)) as { value: { connections: { provider: string; authorizedDevices: string[] }[] } };
+    const devices = (provider: string) =>
+      status.value.connections.find((c) => c.provider === provider)?.authorizedDevices;
+    expect(devices("github")).toEqual([second]);
+    expect(devices("claude")).toEqual([second, "laptop-1"]);
+    expect(devices("codex")).toEqual(["laptop-1"]); // never Cloud's: untouched
   });
 
   it("turning Cloud off deletes every session and revokes the account", async () => {

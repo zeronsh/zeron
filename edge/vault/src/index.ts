@@ -22,7 +22,9 @@ import type {
   VaultProviderId,
   VaultResult,
   VaultRpc,
-  VaultStatusView
+  VaultStatusView,
+  VaultAccountView,
+  VaultUsageView
 } from "./api";
 import { runCanary } from "./canary";
 import type { Env } from "./env";
@@ -90,6 +92,26 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
 
   githubBranches(caller: VaultCaller, repo: string): Promise<VaultResult<readonly string[]>> {
     return this.vault().githubBranches(caller, repo);
+  }
+
+  accounts(caller: VaultCaller, provider: VaultProviderId): Promise<VaultResult<readonly VaultAccountView[]>> {
+    return this.vault().accounts(caller, provider);
+  }
+
+  activateAccount(
+    caller: VaultCaller,
+    provider: VaultProviderId,
+    slot: string | null
+  ): Promise<VaultResult<readonly VaultAccountView[]>> {
+    return this.vault().activateAccount(caller, provider, slot);
+  }
+
+  forgetAccount(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<readonly VaultAccountView[]>> {
+    return this.vault().forgetAccount(caller, provider, slot);
+  }
+
+  accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
+    return this.vault().accountUsage(caller, provider, slot);
   }
 }
 

@@ -20,8 +20,14 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use zeron_proto::{
     CloudSession, CloudSessions, CloudStatus, CloudUsage, GithubConnectProgress, GithubDeviceFlow,
-    GithubRepo, HarnessId, VaultProvider, VaultStatus,
+    GithubRepo, HarnessId, VaultAccount, VaultAccountProfile, VaultProvider, VaultStatus,
 };
+
+#[derive(Deserialize)]
+struct AccountList {
+    #[serde(default)]
+    accounts: Vec<VaultAccount>,
+}
 use zeron_rpc::{RpcError, RpcReply, TokenError, TokenSource, methods, parse_params};
 
 use crate::EngineError;
@@ -33,7 +39,7 @@ use crate::http_error::describe_http_error;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Shown when a mutation is attempted on a runtime that can't use Cloud.
-const UNAVAILABLE: &str =
+pub(crate) const UNAVAILABLE: &str =
     "Cloud needs a signed-in Zeron account with sync on. Sign in from Settings → Account.";
 
 fn http() -> reqwest::Client {
@@ -357,19 +363,26 @@ impl CloudClient {
         }
     }
 
-    /// `GET /cloud/{orgId}/usage[?month=YYYY-MM]`.
-    pub async fn usage(&self, month: Option<&str>) -> Result<CloudUsage, EngineError> {
-        if let Some(month) = month
-            && !is_month(month)
-        {
-            return Err(EngineError::Other(format!(
-                "month must look like 2026-10, not {month:?}"
-            )));
+    /// `GET /cloud/{orgId}/usage[?from=YYYY-MM-DD&to=YYYY-MM-DD]`.
+    pub async fn usage(
+        &self,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<CloudUsage, EngineError> {
+        for day in [from, to].into_iter().flatten() {
+            if !is_day(day) {
+                return Err(EngineError::Other(format!(
+                    "days must look like 2026-10-05, not {day:?}"
+                )));
+            }
         }
         let Some(target) = self.target.as_deref() else {
             return Ok(CloudUsage::default());
         };
-        let query: Vec<(&str, &str)> = month.map(|m| ("month", m)).into_iter().collect();
+        let query: Vec<(&str, &str)> = [("from", from), ("to", to)]
+            .into_iter()
+            .filter_map(|(key, day)| day.map(|day| (key, day)))
+            .collect();
         match target
             .call::<CloudUsage>(
                 reqwest::Method::GET,
@@ -463,11 +476,13 @@ impl CloudClient {
         &self,
         claude_ai_oauth: serde_json::Value,
         authorized_devices: Vec<String>,
+        profile: Option<VaultAccountProfile>,
     ) -> Result<VaultStatus, EngineError> {
-        self.put_credential(
+        self.put_credential_with(
             VaultProvider::Claude,
             serde_json::json!({ "claudeAiOauth": claude_ai_oauth }),
             authorized_devices,
+            profile,
         )
         .await
     }
@@ -478,19 +493,115 @@ impl CloudClient {
         material: serde_json::Value,
         authorized_devices: Vec<String>,
     ) -> Result<VaultStatus, EngineError> {
+        self.put_credential_with(provider, material, authorized_devices, None)
+            .await
+    }
+
+    async fn put_credential_with(
+        &self,
+        provider: VaultProvider,
+        material: serde_json::Value,
+        authorized_devices: Vec<String>,
+        profile: Option<VaultAccountProfile>,
+    ) -> Result<VaultStatus, EngineError> {
+        let mut body = serde_json::json!({
+            "material": material,
+            "authorizedDevices": authorized_devices,
+        });
+        if let Some(profile) = profile {
+            body["profile"] = serde_json::to_value(profile).unwrap_or_default();
+        }
         self.target()?
             .call::<VaultStatus>(
                 reqwest::Method::PUT,
                 &["vault", "credentials", provider.as_str()],
                 &[],
-                Some(serde_json::json!({
-                    "material": material,
-                    "authorizedDevices": authorized_devices,
-                })),
+                Some(body),
                 "Save credential",
             )
             .await
             .map(available_vault)
+            .map_err(Failure::into_error)
+    }
+
+    /// `GET /vault/{orgId}/accounts/{provider}` — every stored login.
+    pub async fn vault_accounts(
+        &self,
+        provider: VaultProvider,
+    ) -> Result<Vec<VaultAccount>, EngineError> {
+        self.target()?
+            .call::<AccountList>(
+                reqwest::Method::GET,
+                &["vault", "accounts", provider.as_str()],
+                &[],
+                None,
+                "Cloud accounts",
+            )
+            .await
+            .map(|list| list.accounts)
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /vault/{orgId}/accounts/{provider}/active {slot}` — the login
+    /// Cloud uses (`None`: none of this provider's).
+    pub async fn vault_activate(
+        &self,
+        provider: VaultProvider,
+        slot: Option<&str>,
+    ) -> Result<Vec<VaultAccount>, EngineError> {
+        self.target()?
+            .call::<AccountList>(
+                reqwest::Method::POST,
+                &["vault", "accounts", provider.as_str(), "active"],
+                &[],
+                Some(serde_json::json!({ "slot": slot })),
+                "Switch the Cloud account",
+            )
+            .await
+            .map(|list| list.accounts)
+            .map_err(Failure::into_error)
+    }
+
+    /// `DELETE /vault/{orgId}/accounts/{provider}/{slot}`.
+    pub async fn vault_forget(
+        &self,
+        provider: VaultProvider,
+        slot: &str,
+    ) -> Result<Vec<VaultAccount>, EngineError> {
+        self.target()?
+            .call::<AccountList>(
+                reqwest::Method::DELETE,
+                &["vault", "accounts", provider.as_str(), slot],
+                &[],
+                None,
+                "Remove the Cloud account",
+            )
+            .await
+            .map(|list| list.accounts)
+            .map_err(Failure::into_error)
+    }
+
+    /// `GET /vault/{orgId}/accounts/{provider}/{slot}/usage` — the provider's
+    /// usage reply for one login, read by the vault.
+    pub async fn vault_usage(
+        &self,
+        provider: VaultProvider,
+        slot: &str,
+    ) -> Result<serde_json::Value, EngineError> {
+        #[derive(Deserialize)]
+        struct Usage {
+            body: serde_json::Value,
+        }
+        self.target()?
+            .call::<Usage>(
+                reqwest::Method::GET,
+                &["vault", "accounts", provider.as_str(), slot, "usage"],
+                &[],
+                None,
+                "Cloud account usage",
+            )
+            .await
+            .map(|usage| usage.body)
             .map_err(Failure::into_error)
     }
 
@@ -611,7 +722,9 @@ pub(crate) fn handles(method: &str) -> bool {
 #[serde(rename_all = "camelCase")]
 struct UsageParams {
     #[serde(default)]
-    month: Option<String>,
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -720,18 +833,33 @@ pub(crate) async fn dispatch(
         }
         methods::CLOUD_USAGE => {
             let p: UsageParams = params(raw)?;
-            let month = p.month.filter(|m| !m.trim().is_empty());
-            RpcReply::value(&cloud.usage(month.as_deref()).await.map_err(failed)?)
+            let from = p.from.filter(|d| !d.trim().is_empty());
+            let to = p.to.filter(|d| !d.trim().is_empty());
+            RpcReply::value(
+                &cloud
+                    .usage(from.as_deref(), to.as_deref())
+                    .await
+                    .map_err(failed)?,
+            )
         }
         methods::VAULT_STATUS => RpcReply::value(&cloud.vault_status().await.map_err(failed)?),
         methods::VAULT_PUT_API_KEY => {
             let p: PutKeyParams = params(raw)?;
-            RpcReply::value(
-                &cloud
-                    .put_api_key(p.provider, &p.key, p.authorized_devices)
-                    .await
-                    .map_err(failed)?,
-            )
+            let status = cloud
+                .put_api_key(p.provider, &p.key, p.authorized_devices)
+                .await
+                .map_err(failed)?;
+            // A new key is the account Cloud uses from now on — machines
+            // prefer an active subscription login, so clear that one.
+            let login = match p.provider {
+                VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
+                VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
+                _ => None,
+            };
+            if let Some(login) = login {
+                cloud.vault_activate(login, None).await.map_err(failed)?;
+            }
+            RpcReply::value(&status)
         }
         methods::VAULT_AUTHORIZE => {
             let p: ProviderParams = params(raw)?;
@@ -769,25 +897,12 @@ pub(crate) async fn dispatch(
             if !cloud.is_available() {
                 return Err(RpcError::Failed(UNAVAILABLE.into()));
             }
-            let codex = method == methods::VAULT_CONNECT_CODEX;
-            let devices = p.authorized_devices;
-            let capture: CaptureSink = Arc::new(move |credential| {
-                let cloud = cloud.clone();
-                let devices = devices.clone();
-                Box::pin(async move {
-                    let uploaded = if codex {
-                        cloud.put_codex_auth(credential, devices).await
-                    } else {
-                        cloud.put_claude_auth(credential, devices).await
-                    };
-                    uploaded.map(drop).map_err(|e| e.to_string())
-                })
-            });
-            let harness = if codex {
+            let harness = if method == methods::VAULT_CONNECT_CODEX {
                 HarnessId::Codex
             } else {
                 HarnessId::ClaudeCode
             };
+            let capture = vault_upload_sink(cloud, harness, p.authorized_devices);
             let start = accounts
                 .start_capture_login(harness, capture)
                 .await
@@ -795,6 +910,46 @@ pub(crate) async fn dispatch(
             RpcReply::value(&start)
         }
         other => Err(RpcError::UnknownMethod(other.to_string())),
+    }
+}
+
+/// Where a capture-only sign-in on this device lands: the vault, as a login
+/// of `harness`'s subscription provider usable by `devices`.
+pub(crate) fn vault_upload_sink(
+    cloud: CloudClient,
+    harness: HarnessId,
+    devices: Vec<String>,
+) -> CaptureSink {
+    Arc::new(move |captured| {
+        let cloud = cloud.clone();
+        let devices = devices.clone();
+        Box::pin(async move {
+            let uploaded = if harness == HarnessId::Codex {
+                cloud.put_codex_auth(captured, devices).await
+            } else {
+                let (credential, profile) = split_capture(captured);
+                cloud.put_claude_auth(credential, devices, profile).await
+            };
+            uploaded.map(drop).map_err(|e| e.to_string())
+        })
+    })
+}
+
+/// A captured sign-in: `{credential, profile}` (Claude's, with the identity
+/// its profile reported) or the bare credential (Codex's `auth.json`, whose
+/// id token names the account).
+pub(crate) fn split_capture(
+    captured: serde_json::Value,
+) -> (serde_json::Value, Option<VaultAccountProfile>) {
+    match captured {
+        serde_json::Value::Object(mut map) if map.contains_key("credential") => {
+            let credential = map.remove("credential").unwrap_or_default();
+            let profile = map
+                .remove("profile")
+                .and_then(|p| serde_json::from_value::<VaultAccountProfile>(p).ok());
+            (credential, profile)
+        }
+        other => (other, None),
     }
 }
 
@@ -900,18 +1055,9 @@ fn available_vault(status: VaultStatus) -> VaultStatus {
     }
 }
 
-fn is_month(month: &str) -> bool {
-    let bytes = month.as_bytes();
-    bytes.len() == 7
-        && bytes[4] == b'-'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| i == 4 || b.is_ascii_digit())
-        && matches!(
-            &month[5..],
-            "01" | "02" | "03" | "04" | "05" | "06" | "07" | "08" | "09" | "10" | "11" | "12"
-        )
+/// A UTC day as the edge takes it: `YYYY-MM-DD`, a real date.
+fn is_day(day: &str) -> bool {
+    day.len() == 10 && chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok()
 }
 
 fn token_error(error: TokenError) -> Failure {
@@ -1132,19 +1278,19 @@ mod tests {
                     "spaceId": "sp-1", "state": "deleting", "createdAt": 3}),
             ),
             ("DELETE", "/cloud/org_1") => (200, serde_json::json!({"state": "off"})),
-            ("GET", "/cloud/org_1/usage?month=2026-09") => (
+            ("GET", "/cloud/org_1/usage?from=2026-09-29&to=2026-09-30") => (
                 200,
                 serde_json::json!({
-                    "month": "2026-09", "seconds": 7200, "dollars": 0.5,
-                    "sandboxes": [{"sandboxId": "bx_1", "sandboxType": "default",
-                        "seconds": 7200, "dollars": 0.5, "running": false,
-                        "reconciledAt": 9}],
-                    "closed": true
+                    "from": "2026-09-29", "to": "2026-09-30",
+                    "days": [{"day": "2026-09-29", "credits": 120.0},
+                             {"day": "2026-09-30", "credits": 0.0}],
+                    "credits": 120.0, "balance": 380.5
                 }),
             ),
             ("GET", "/cloud/org_1/usage") => (
                 200,
-                serde_json::json!({"month": "2026-10", "seconds": 0, "dollars": 0.0}),
+                serde_json::json!({"from": "2026-09-06", "to": "2026-10-05", "days": [],
+                    "credits": 0.0, "balance": 500.0}),
             ),
             ("GET", "/vault/org_1") => (200, vault_view()),
             ("PUT", "/vault/org_1/credentials/anthropic-key") => {
@@ -1271,29 +1417,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_usage_month_is_optional_and_validated() {
+    async fn cloud_usage_range_is_optional_and_validated() {
         let edge = MockEdge::start(edge).await;
         let client = edge.client("org_1");
 
-        let usage = client.usage(Some("2026-09")).await.unwrap();
-        assert_eq!(usage.month, "2026-09");
-        assert_eq!(usage.seconds, 7200);
-        assert_eq!(usage.sandboxes.len(), 1);
-        assert!(usage.closed);
+        let usage = client
+            .usage(Some("2026-09-29"), Some("2026-09-30"))
+            .await
+            .unwrap();
+        assert_eq!(usage.days.len(), 2);
+        assert_eq!(usage.days[0].credits, 120.0);
+        assert_eq!(usage.credits, 120.0);
+        assert_eq!(usage.balance, 380.5);
         assert!(usage.available);
 
-        let current = client.usage(None).await.unwrap();
-        assert_eq!(current.month, "2026-10");
-        assert!(current.available);
+        let recent = client.usage(None, None).await.unwrap();
+        assert_eq!(recent.balance, 500.0);
+        assert!(recent.available);
         assert!(
             edge.requests()
                 .iter()
                 .any(|r| r.target == "/cloud/org_1/usage"),
-            "no query when the month is omitted"
+            "no query when the range is omitted"
         );
 
-        assert!(client.usage(Some("2026-13")).await.is_err());
-        assert!(client.usage(Some("../x")).await.is_err());
+        assert!(client.usage(Some("2026-13-01"), None).await.is_err());
+        assert!(client.usage(None, Some("../x")).await.is_err());
     }
 
     #[tokio::test]
@@ -1408,7 +1557,7 @@ mod tests {
             assert!(!client.enable().await.unwrap().available);
             assert!(!client.sessions().await.unwrap().available);
             assert!(!client.delete().await.unwrap().available);
-            assert!(!client.usage(None).await.unwrap().available);
+            assert!(!client.usage(None, None).await.unwrap().available);
             assert!(!client.vault_status().await.unwrap().available);
             let error = client
                 .put_api_key(VaultProvider::AnthropicKey, "sk-1", vec![])
@@ -1421,12 +1570,12 @@ mod tests {
     }
 
     #[test]
-    fn months_are_strict() {
-        assert!(is_month("2026-01"));
-        assert!(is_month("1999-12"));
-        assert!(!is_month("2026-1"));
-        assert!(!is_month("2026-00"));
-        assert!(!is_month("2026/01"));
-        assert!(!is_month("２０２６-01"));
+    fn days_are_strict() {
+        assert!(is_day("2026-01-31"));
+        assert!(is_day("2024-02-29"));
+        assert!(!is_day("2026-02-30"));
+        assert!(!is_day("2026-1-05"));
+        assert!(!is_day("2026/01/05"));
+        assert!(!is_day("２０２６-01-05"));
     }
 }

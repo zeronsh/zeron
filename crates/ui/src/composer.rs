@@ -64,6 +64,9 @@ pub const TEXTAREA_MIN: f32 = 76.0;
 pub const TEXTAREA_MAX: f32 = 260.0;
 /// Expanded actions row: 2px top + 32px picker + 8px bottom.
 const ACTIONS_BOTTOM_PAD: f32 = 8.0;
+/// How long after a send that brings a Cloud machine up its first setup step
+/// appears (the message and the working line land first).
+const CLOUD_SETUP_STEP_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
 pub const ACTIONS_ROW_HEIGHT: f32 = 2.0 + 32.0 + ACTIONS_BOTTOM_PAD;
 /// The pill's 1px hairline, top + bottom (`rounded-[26px] border`).
 pub const PILL_BORDER_V: f32 = 2.0;
@@ -8695,10 +8698,28 @@ impl Composer {
         true
     }
 
+    /// The send would run on Cloud (a new session there, or a chat whose
+    /// machine is Cloud's) and Cloud is out of credits: it can't start or
+    /// wake a machine.
+    fn out_of_cloud_credits(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        if !state
+            .cloud_status
+            .as_ref()
+            .is_some_and(crate::cloud::out_of_credits)
+        {
+            return false;
+        }
+        match state.selected_chat.as_deref() {
+            Some(chat) => state.chat_cloud_session(chat).is_some(),
+            None => self.pickers.read(cx).runs_on_cloud(cx),
+        }
+    }
+
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
-        if self.queue_edit_finishing {
+        if self.queue_edit_finishing || self.out_of_cloud_credits(cx) {
             return true;
         }
         let state = self.state.read(cx);
@@ -9082,23 +9103,21 @@ impl Composer {
         }
         // A queued message is not in the transcript yet — the queue panel is
         // its echo, and it gets a real bubble when the host sends it.
-        self.state.update(cx, |s, cx| {
+        let cloud_boot = self.state.update(cx, |s, cx| {
             if is_new {
                 s.select_chat(Some(chat_id.clone()), cx);
             }
+            let mut boot = None;
             if should_publish_optimistic_echo(queue) {
                 s.push_echo(&chat_id, echo);
                 // A send that brings a Cloud machine up shows its first setup
-                // step at once; the machine adds the rest as it gets there.
-                let boot = if is_new {
+                // step (below); the machine adds the rest as it gets there.
+                boot = if is_new {
                     matches!(plan, crate::pickers::CheckoutPlan::Cloud { .. }).then_some(false)
                 } else {
                     s.cloud_machine_booting(&chat_id)
                         .map(|state| state != zeron_proto::CloudState::Provisioning)
                 };
-                if let Some(waking) = boot {
-                    s.push_cloud_setup_echo(&chat_id, &message_id, created_at, waking);
-                }
                 // Working overlay until the host executes the queued command —
                 // without it a remote send flashed Completed (and could ring
                 // the done-chime) in the queue→drain→sync gap.
@@ -9110,7 +9129,23 @@ impl Composer {
                 }
             }
             cx.notify();
+            boot
         });
+        // The setup step arrives a beat after the message, like a turn's
+        // first tool call: the message lands with the working line under
+        // it, then the step reveals above that line.
+        if let Some(waking) = cloud_boot {
+            let state = self.state.clone();
+            let (chat_id, message_id) = (chat_id.clone(), message_id.clone());
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(CLOUD_SETUP_STEP_DELAY).await;
+                state.update(cx, |s, cx| {
+                    s.push_cloud_setup_echo(&chat_id, &message_id, created_at, waking);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
 
         self.input.update(cx, |input, cx| input.set_text("", cx));
         self.drafts.remove(&self.current_key);
@@ -10663,7 +10698,9 @@ impl Composer {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .tooltip(crate::settings::widgets::text_tooltip(
-                        if mode == SendButtonMode::Queue {
+                        if self.out_of_cloud_credits(cx) {
+                            "Out of Cloud credits"
+                        } else if mode == SendButtonMode::Queue {
                             "Queue message"
                         } else {
                             "Send message"
@@ -12642,6 +12679,49 @@ mod tests {
                 "Pending edits must still block submission"
             );
         });
+    }
+
+    /// Out of credits, a send that would run on Cloud is held at the button:
+    /// Cloud can't start or wake its machine. Other chats are untouched.
+    #[gpui::test]
+    fn cloud_sends_wait_for_credits(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.cloud_status = Some(zeron_proto::CloudStatus {
+                state: zeron_proto::CloudState::Ready,
+                device_id: Some("cloud-1".into()),
+                available: true,
+                credits: Some(0.0),
+                ..Default::default()
+            });
+            state.cloud_sessions = Some(zeron_proto::CloudSessions {
+                sessions: vec![zeron_proto::CloudSession {
+                    chat_id: "on-cloud".into(),
+                    device_id: "cloud-s1".into(),
+                    state: zeron_proto::CloudState::Sleeping,
+                    ..Default::default()
+                }],
+                available: true,
+            });
+            state
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        state.update(cx, |state, _| state.selected_chat = Some("on-cloud".into()));
+        composer.update(cx, |composer, cx| {
+            assert!(composer.out_of_cloud_credits(cx));
+            assert!(composer.send_blocked(cx));
+        });
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("on-laptop".into())
+        });
+        composer.update(cx, |composer, cx| assert!(!composer.send_blocked(cx)));
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("on-cloud".into());
+            if let Some(status) = state.cloud_status.as_mut() {
+                status.credits = Some(30.0);
+            }
+        });
+        composer.update(cx, |composer, cx| assert!(!composer.send_blocked(cx)));
     }
 
     #[gpui::test]

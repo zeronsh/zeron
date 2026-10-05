@@ -19,6 +19,10 @@ const REFUSED: [string, string][] = [
   ["POST", "/vault/o/disable"],
   ["POST", "/vault/o/github/device"],
   ["GET", "/vault/o/grant"],
+  ["GET", "/vault/o/accounts/claude"],
+  ["POST", "/vault/o/accounts/claude/active"],
+  ["DELETE", "/vault/o/accounts/codex/a1"],
+  ["GET", "/vault/o/accounts/codex/a1/usage"],
   // Another device's room: its RPC surface.
   ["GET", "/device/laptop-1/ws?role=client"],
   ["GET", "/device/laptop-1/ws?role=host"],

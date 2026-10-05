@@ -177,6 +177,10 @@ struct RunHandle {
     /// is unambiguously before the stop (cancelled with it) or after it
     /// (re-dispatched to a fresh runtime — never lost).
     retiring: Arc<std::sync::atomic::AtomicBool>,
+    /// The credential the run started with (a Cloud device's broker; `None`
+    /// elsewhere): a parked session whose account has since changed is
+    /// replaced before its next turn.
+    credential: Option<String>,
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -620,9 +624,20 @@ impl SessionsEngine {
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
                 h.retiring.clone(),
+                h.credential.clone(),
             )
         });
-        if let Some((run_id, steerable, route, steer_tx, ledger, history_sent, retiring)) = routed {
+        if let Some((
+            run_id,
+            steerable,
+            route,
+            steer_tx,
+            ledger,
+            history_sent,
+            retiring,
+            credential,
+        )) = routed
+        {
             if idle {
                 // No prompt rides an idle start, so nothing could carry an
                 // in-place reconfiguration: only the runtime as is will do.
@@ -632,6 +647,15 @@ impl SessionsEngine {
                     Err(EngineError::Other("incompatible live runtime".into()))
                 };
             }
+            // A parked session started with another account (Cloud): replace it.
+            let route = if self
+                .credential_changed(chat_id, harness_id, credential.as_deref())
+                .await
+            {
+                None
+            } else {
+                route
+            };
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let mut bootstrap = None;
             let same_runtime = route.is_some();
@@ -757,6 +781,7 @@ impl SessionsEngine {
         if !idle {
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
+        let credential = self.inner.registry.run_credential(harness_id).await;
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -841,6 +866,7 @@ impl SessionsEngine {
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: fork_history_sent.clone(),
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                credential,
             },
         );
         self.set_status(
@@ -889,6 +915,31 @@ impl SessionsEngine {
             turn,
         ));
         Ok(run_id)
+    }
+
+    /// Whether a session parked between turns started with a credential other
+    /// than the one a run would use now (the Cloud account was switched, or
+    /// its token rotated). Never mid-turn or with background work still
+    /// running, and never on an unknown credential.
+    async fn credential_changed(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        started_with: Option<&str>,
+    ) -> bool {
+        // Mid-turn, or with background work (subagents, shells) still on it:
+        // replacing the runtime would kill that work. The switch waits.
+        if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
+            return false;
+        }
+        match self.inner.registry.run_credential(harness_id).await {
+            Some(now) if Some(now.as_str()) != started_with => {
+                tracing::info!(chat = %chat_id, harness = ?harness_id,
+                    "credential changed; replacing the parked session");
+                true
+            }
+            _ => false,
+        }
     }
 
     /// A warm send's prompt with the fork's copied history in front, when the

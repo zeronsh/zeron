@@ -1928,6 +1928,7 @@ mod tests {
                 org_id: "test-org".into(),
                 user_id: "test-user".into(),
                 edge: None,
+                local_only: false,
             },
         )
         .unwrap();

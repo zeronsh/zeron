@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use zeron_proto::{
-    CloudSession, CloudSessions, CloudState, CloudStatus, CloudUsage, Device, GithubRepo,
-    VaultConnection, VaultConnectionStatus, VaultDevice, VaultProvider, VaultStatus,
+    CloudSession, CloudSessions, CloudState, CloudStatus, Device, GithubRepo, VaultConnection,
+    VaultConnectionStatus, VaultDevice, VaultProvider, VaultStatus,
 };
 
 use crate::icons;
@@ -287,32 +287,6 @@ pub fn authorized_with(
     devices
 }
 
-/// "Devices with access", grouped: computers one per row, Cloud's session
-/// machines folded into one "Cloud · N session machines" row.
-#[derive(Debug, Default, PartialEq)]
-pub struct VaultDeviceGroups {
-    pub computers: Vec<VaultDevice>,
-    /// Enrolled, not revoked Cloud session machines.
-    pub cloud_machines: usize,
-}
-
-/// Session machines enroll as kind `cloud`; any of them (and the logical
-/// device, should it appear) belong to Cloud. Revoked machines are gone
-/// (deleted sessions) and not counted.
-pub fn group_vault_devices(devices: &[VaultDevice]) -> VaultDeviceGroups {
-    let mut groups = VaultDeviceGroups::default();
-    for device in devices {
-        if device.kind == "cloud" {
-            if device.revoked_at.is_none() {
-                groups.cloud_machines += 1;
-            }
-        } else {
-            groups.computers.push(device.clone());
-        }
-    }
-    groups
-}
-
 /// Newest push first, then by name, so the list is stable between loads.
 pub fn sort_repos(repos: &mut [GithubRepo]) {
     repos.sort_by(|a, b| {
@@ -377,77 +351,111 @@ pub fn github_not_connected(error: &str) -> Option<String> {
     })
 }
 
-/// "12.4 hours" (one decimal; "1.0 hour").
-pub fn format_hours(seconds: u64) -> String {
-    let hours = format!("{:.1}", seconds as f64 / 3600.0);
-    let unit = if hours == "1.0" { "hour" } else { "hours" };
-    format!("{hours} {unit}")
+/// The ranges the Usage section shows credits over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsageRange {
+    Last7Days,
+    #[default]
+    Last30Days,
+    ThisMonth,
+    LastMonth,
+    Last90Days,
 }
 
-/// The machine cost line, left out while it rounds to nothing. It is what
-/// the machine cost to run, not a charge.
-pub fn format_cost(dollars: f64) -> Option<String> {
-    (dollars >= 0.005).then(|| format!("${dollars:.2} machine cost"))
-}
+impl UsageRange {
+    pub const ALL: [UsageRange; 5] = [
+        UsageRange::Last7Days,
+        UsageRange::Last30Days,
+        UsageRange::ThisMonth,
+        UsageRange::LastMonth,
+        UsageRange::Last90Days,
+    ];
 
-/// The Usage row: `("October 2026 · 12.4 hours", Some("$3.10 machine cost"))`.
-pub fn usage_summary(usage: &CloudUsage) -> (String, Option<String>) {
-    let month = chrono::NaiveDate::parse_from_str(&format!("{}-01", usage.month), "%Y-%m-%d")
-        .map(|date| date.format("%B %Y").to_string())
-        .unwrap_or_else(|_| usage.month.clone());
-    (
-        format!("{month} · {}", format_hours(usage.seconds)),
-        format_cost(usage.dollars),
-    )
-}
+    pub fn label(self) -> &'static str {
+        match self {
+            UsageRange::Last7Days => "Last 7 days",
+            UsageRange::Last30Days => "Last 30 days",
+            UsageRange::ThisMonth => "This month",
+            UsageRange::LastMonth => "Last month",
+            UsageRange::Last90Days => "Last 90 days",
+        }
+    }
 
-/// One line of the per-session usage breakdown.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UsageLine {
-    /// The session's chat title, or "Other" for machine time no session
-    /// owns.
-    pub label: String,
-    pub seconds: u64,
-    pub dollars: f64,
-}
-
-/// Usage per session (sandboxes summed by chat), most time first; machine
-/// time with no chat is one "Other" line at the end. `title` names a chat.
-pub fn usage_breakdown(usage: &CloudUsage, title: impl Fn(&str) -> String) -> Vec<UsageLine> {
-    let mut by_chat: Vec<(String, u64, f64)> = Vec::new();
-    let mut other = (0u64, 0f64);
-    for sandbox in &usage.sandboxes {
-        match &sandbox.chat_id {
-            Some(chat) => match by_chat.iter_mut().find(|(id, ..)| id == chat) {
-                Some(row) => {
-                    row.1 += sandbox.seconds;
-                    row.2 += sandbox.dollars;
-                }
-                None => by_chat.push((chat.clone(), sandbox.seconds, sandbox.dollars)),
-            },
-            None => {
-                other.0 += sandbox.seconds;
-                other.1 += sandbox.dollars;
+    /// `[from, to]`, inclusive UTC days, for `today` (UTC).
+    pub fn days(self, today: chrono::NaiveDate) -> (chrono::NaiveDate, chrono::NaiveDate) {
+        use chrono::Datelike;
+        let back = |days: i64| today - chrono::Duration::days(days - 1);
+        let month_start = today.with_day(1).unwrap_or(today);
+        match self {
+            UsageRange::Last7Days => (back(7), today),
+            UsageRange::Last30Days => (back(30), today),
+            UsageRange::Last90Days => (back(90), today),
+            UsageRange::ThisMonth => (month_start, today),
+            UsageRange::LastMonth => {
+                let end = month_start - chrono::Duration::days(1);
+                (end.with_day(1).unwrap_or(end), end)
             }
         }
     }
-    by_chat.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let mut lines: Vec<UsageLine> = by_chat
-        .into_iter()
-        .map(|(chat, seconds, dollars)| UsageLine {
-            label: title(&chat),
-            seconds,
-            dollars,
+
+    /// The `CloudUsage` params for this range.
+    pub fn params(self, today: chrono::NaiveDate) -> serde_json::Value {
+        let (from, to) = self.days(today);
+        serde_json::json!({
+            "from": from.format("%Y-%m-%d").to_string(),
+            "to": to.format("%Y-%m-%d").to_string(),
         })
-        .collect();
-    if other.0 > 0 || other.1 > 0.0 {
-        lines.push(UsageLine {
-            label: "Other".into(),
-            seconds: other.0,
-            dollars: other.1,
-        });
     }
-    lines
+}
+
+/// "1,240 credits" — whole credits (a minute each), with a decimal only
+/// under ten so a short session still reads as something.
+pub fn format_credits(credits: f64) -> String {
+    let negative = credits < 0.0;
+    let value = credits.abs();
+    let number = if value > 0.0 && value < 10.0 && value.fract() >= 0.05 {
+        format!("{value:.1}")
+    } else {
+        let whole = value.round() as u64;
+        let digits = whole.to_string();
+        let mut grouped = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(c);
+        }
+        grouped
+    };
+    let unit = if number == "1" { "credit" } else { "credits" };
+    format!("{}{number} {unit}", if negative { "-" } else { "" })
+}
+
+/// Each day's bar height as a fraction of the busiest day's (0 when nothing
+/// ran in the whole range).
+pub fn bar_fractions(days: &[zeron_proto::CloudUsageDay]) -> Vec<f32> {
+    let peak = days.iter().map(|d| d.credits).fold(0.0_f64, f64::max);
+    days.iter()
+        .map(|d| {
+            if peak > 0.0 {
+                (d.credits / peak) as f32
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// "Oct 5" for a `YYYY-MM-DD` day.
+pub fn short_day(day: &str) -> String {
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map(|date| date.format("%b %-d").to_string())
+        .unwrap_or_else(|_| day.to_string())
+}
+
+/// Whether Cloud can't start or wake a session for lack of credits.
+pub fn out_of_credits(status: &CloudStatus) -> bool {
+    status.credits.is_some_and(|credits| credits <= 0.0)
 }
 
 /// `CloudStatus`, or why it could not be read.
@@ -636,6 +644,8 @@ mod tests {
             authorized_devices: vec!["cloud-old".into()],
             account: Some("me@example.com".into()),
             updated_at: 0,
+            accounts: 1,
+            has_active: true,
         });
         assert_eq!(
             provider_link(&vault, VaultProvider::Codex, "cloud-1"),
@@ -659,25 +669,6 @@ mod tests {
             provider_link(&vault, VaultProvider::Codex, "cloud-1"),
             ProviderLink::NeedsReconnect { .. }
         ));
-    }
-
-    #[test]
-    fn session_machines_fold_into_one_cloud_row() {
-        let vault_device = |id: &str, kind: &str, revoked: bool| VaultDevice {
-            device_id: id.into(),
-            kind: kind.into(),
-            enrolled_at: 0,
-            revoked_at: revoked.then_some(1),
-            parent_id: (kind == "cloud").then(|| "cloud-1".into()),
-        };
-        let groups = group_vault_devices(&[
-            vault_device("mac", "laptop", false),
-            vault_device("s1", "cloud", false),
-            vault_device("s2", "cloud", false),
-            vault_device("s3", "cloud", true),
-        ]);
-        assert_eq!(groups.computers.len(), 1);
-        assert_eq!(groups.cloud_machines, 2);
     }
 
     #[test]
@@ -713,44 +704,39 @@ mod tests {
     }
 
     #[test]
-    fn usage_reads_hours_first_and_breaks_down_by_session() {
-        let sandbox =
-            |chat: Option<&str>, seconds: u64, dollars: f64| zeron_proto::CloudSandboxUsage {
-                sandbox_id: format!("bx_{seconds}"),
-                chat_id: chat.map(str::to_string),
-                sandbox_type: "default".into(),
-                seconds,
-                dollars,
-                ..Default::default()
-            };
-        let mut usage = CloudUsage {
-            month: "2026-10".into(),
-            seconds: 44_640,
-            dollars: 0.0,
-            available: true,
-            sandboxes: vec![
-                sandbox(Some("a"), 3600, 0.5),
-                sandbox(None, 600, 0.0),
-                sandbox(Some("b"), 36_000, 2.0),
-                sandbox(Some("a"), 4440, 0.25),
-            ],
-            ..Default::default()
+    fn usage_ranges_and_credits_read_naturally() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+        let day = |m, d| chrono::NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        assert_eq!(UsageRange::Last7Days.days(today), (day(9, 29), today));
+        assert_eq!(UsageRange::Last30Days.days(today), (day(9, 6), today));
+        assert_eq!(UsageRange::ThisMonth.days(today), (day(10, 1), today));
+        assert_eq!(UsageRange::LastMonth.days(today), (day(9, 1), day(9, 30)));
+        assert_eq!(
+            UsageRange::ThisMonth.params(today),
+            serde_json::json!({"from": "2026-10-01", "to": "2026-10-05"})
+        );
+        assert_eq!(format_credits(1.0), "1 credit");
+        assert_eq!(format_credits(0.0), "0 credits");
+        assert_eq!(format_credits(2.5), "2.5 credits");
+        assert_eq!(format_credits(1240.4), "1,240 credits");
+        assert_eq!(format_credits(1_234_567.0), "1,234,567 credits");
+        assert_eq!(format_credits(-12.0), "-12 credits");
+        let usage_day = |credits| zeron_proto::CloudUsageDay {
+            day: "2026-10-05".into(),
+            credits,
         };
         assert_eq!(
-            usage_summary(&usage),
-            ("October 2026 · 12.4 hours".to_string(), None)
+            bar_fractions(&[usage_day(0.0), usage_day(30.0), usage_day(60.0)]),
+            [0.0, 0.5, 1.0]
         );
-        usage.dollars = 3.104;
-        assert_eq!(
-            usage_summary(&usage).1.as_deref(),
-            Some("$3.10 machine cost")
-        );
-        assert_eq!(format_hours(3600), "1.0 hour");
-        let lines = usage_breakdown(&usage, |chat| format!("Chat {chat}"));
-        let labels: Vec<_> = lines.iter().map(|l| l.label.as_str()).collect();
-        assert_eq!(labels, ["Chat b", "Chat a", "Other"]);
-        assert_eq!(lines[1].seconds, 8040);
-        usage.month = "bogus".into();
-        assert!(usage_summary(&usage).0.starts_with("bogus · "));
+        assert_eq!(bar_fractions(&[usage_day(0.0)]), [0.0]);
+        assert_eq!(short_day("2026-10-05"), "Oct 5");
+        let status = |credits| CloudStatus {
+            credits,
+            ..Default::default()
+        };
+        assert!(out_of_credits(&status(Some(0.0))));
+        assert!(!out_of_credits(&status(Some(3.0))));
+        assert!(!out_of_credits(&status(None)));
     }
 }

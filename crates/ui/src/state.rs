@@ -1560,6 +1560,12 @@ impl AppState {
         }
     }
 
+    /// Signed in (Cloud is per account; whether this account can use it is
+    /// `CloudStatus::available`).
+    pub fn signed_in(&self) -> bool {
+        matches!(self.auth, Some(AuthState::SignedIn { .. }))
+    }
+
     /// The signed-in user, if the engine reports one.
     pub fn auth_user(&self) -> Option<&zeron_proto::UserProfile> {
         match self.auth.as_ref()? {
@@ -1785,6 +1791,19 @@ impl AppState {
         created_at: i64,
         waking: bool,
     ) {
+        // Pushed a beat after the send: the machine may already have written
+        // its own setup entry, or (already up) moved past the message.
+        let entry_id = zeron_proto::cloud_setup_entry_id(message_id);
+        if self.selected_chat.as_deref() == Some(chat_id)
+            && (self.transcript.iter().any(|e| e.id == entry_id)
+                || self
+                    .transcript
+                    .iter()
+                    .position(|e| e.id == message_id)
+                    .is_some_and(|ix| ix + 1 < self.transcript.len()))
+        {
+            return;
+        }
         let (name, step) = if waking {
             ("Waking the Cloud machine", "wake")
         } else {
@@ -1793,7 +1812,7 @@ impl AppState {
         self.push_echo(
             chat_id,
             SessionMessageEntry {
-                id: zeron_proto::cloud_setup_entry_id(message_id),
+                id: entry_id,
                 role: zeron_doc::MessageRole::Assistant,
                 parts: vec![zeron_doc::MessagePart::Tool {
                     id: zeron_proto::cloud_setup_part_id(message_id, "machine"),
@@ -1823,7 +1842,7 @@ impl AppState {
     }
 
     /// The selected chat shows a Cloud setup placeholder (it says what the
-    /// send waits on; the working trailer stays out of its way).
+    /// send waits on, so the working line under it doesn't repeat it).
     pub fn cloud_setup_echo_pending(&self) -> bool {
         self.pending_echoes()
             .iter()
@@ -2197,8 +2216,8 @@ impl AppState {
         self.devices.iter().filter(|d| crate::cloud::is_listed(d))
     }
 
-    /// Devices whose providers the Providers page manages: Cloud's are
-    /// managed on the Cloud page.
+    /// Devices the Providers page lists by name. Cloud is one extra entry
+    /// there (its accounts live in the vault), never its session machines.
     pub fn provider_devices(&self) -> impl Iterator<Item = &Device> {
         self.listed_devices().filter(|d| !crate::cloud::is_cloud(d))
     }
@@ -3068,6 +3087,10 @@ impl AppState {
     /// The Cloud repository a project's GitHub origin names, when Cloud
     /// reaches it — the checkout picker then offers Cloud.
     pub fn cloud_repo_for(&self, space: &zeron_proto::Space) -> Option<&zeron_proto::GithubRepo> {
+        // Cloud is offered only while it is on.
+        if !self.cloud_enabled() {
+            return None;
+        }
         let name = space.github_repo.as_deref()?;
         self.cloud_repos
             .as_ref()?
@@ -6115,6 +6138,17 @@ mod tests {
         state.apply_transcript(vec![entry("m2", user)]);
         assert!(state.cloud_setup_echo_pending());
         state.apply_transcript(vec![entry("m2", user), entry("a2", assistant)]);
+        assert!(!state.cloud_setup_echo_pending());
+        // The placeholder lands a beat after the send: never once the machine
+        // has written its own setup entry or already answered.
+        state.apply_transcript(vec![
+            entry("m1", user),
+            entry("m1.cloud-setup", assistant),
+            entry("m2", user),
+            entry("a2", assistant),
+        ]);
+        state.push_cloud_setup_echo("c1", "m1", 0, false);
+        state.push_cloud_setup_echo("c1", "m2", 0, true);
         assert!(!state.cloud_setup_echo_pending());
     }
 

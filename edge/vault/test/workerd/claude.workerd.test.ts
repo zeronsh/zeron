@@ -34,7 +34,7 @@ const withClaude = async (expiresInMs: number) => {
 const stored = (userId: string) =>
   runInDurableObject(accountStub(env, userId, "claude"), (_instance, state) =>
     state.storage.sql
-      .exec<{ generation: number; status: string; envelope: string }>("SELECT generation, status, envelope FROM record")
+      .exec<{ generation: number; status: string; envelope: string }>("SELECT generation, status, envelope FROM accounts")
       .toArray()[0]
   );
 

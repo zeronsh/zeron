@@ -272,9 +272,10 @@ pub mod methods {
     /// `{chatId}` → `CloudSession` (`Deleting`). Deletes the sandbox and
     /// anything uncommitted in it; the transcript stays.
     pub const CLOUD_SESSION_DELETE: &str = "CloudSessionDelete";
-    /// Metered Cloud machine time for the signed-in user, reconciled against
-    /// the sandbox provider's own meter: `{month?: "YYYY-MM"}` (default: the
-    /// current UTC month) → `CloudUsage`.
+    /// The signed-in user's Cloud credits — balance, and use per UTC day
+    /// (reconciled against the sandbox provider's own meter):
+    /// `{from?: "YYYY-MM-DD", to?: "YYYY-MM-DD"}` (default: the last 30 days)
+    /// → `CloudUsage`.
     pub const CLOUD_USAGE: &str = "CloudUsage";
     // Credential vault (IPC-only; the edge forwards to the vault Worker).
     /// `{}` → `VaultStatus`.
