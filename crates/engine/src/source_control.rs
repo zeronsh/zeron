@@ -25,7 +25,9 @@ const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
-const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
+const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
+
+const GITHUB_PR_METADATA_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";
 
 /// GitHub connection cursors are short opaque base64 tokens. Anything else is
 /// rejected before it reaches the provider.
@@ -427,12 +429,12 @@ impl GitHubCli {
         let mut args = vec![
             "pr".into(),
             if diff { "diff".into() } else { "view".into() },
-            url,
+            url.clone(),
         ];
         if diff {
             args.push("--color=never".into());
         } else {
-            args.extend(["--json".into(), "title,body,url,number,author,baseRefName,headRefName,state,isDraft,reviewDecision,mergeable,additions,deletions,comments,reviews,files,statusCheckRollup".into()]);
+            args.extend(["--json".into(), "title,body,url,number,author,baseRefName,headRefName,headRefOid,state,isDraft,reviewDecision,mergeable,additions,deletions,comments,reviews,files,statusCheckRollup".into()]);
         }
         let output = self
             .runner
@@ -472,11 +474,86 @@ impl GitHubCli {
                     _ => {}
                 }
             }
+            let checks_reported = value.get("statusCheckRollup").is_some();
             remove_nulls(&mut value);
-            let detail: zeron_proto::ChangeRequestDetail =
+            let mut detail: zeron_proto::ChangeRequestDetail =
                 serde_json::from_value(value).map_err(|_| ChangeRequestError::Decode)?;
+            if checks_reported {
+                detail.ci = zeron_proto::change_request_assessment::ChangeRequestCi::from_checks(
+                    &detail.status_check_rollup,
+                );
+            }
+            if zeron_proto::change_request_assessment::valid_head_oid(&detail.head_ref_oid)
+                && let Ok(metadata) = self.fetch_pr_metadata(&detail.url, &url).await
+            {
+                let checks = metadata.checks();
+                let (head, ci, authored, requested) = metadata.into_fields();
+                if head == detail.head_ref_oid {
+                    if let Some(checks) = checks {
+                        detail.status_check_rollup = checks;
+                    } else if ci.state != detail.ci.state {
+                        detail.status_check_rollup.clear();
+                    }
+                    detail.ci = ci;
+                    detail.viewer_did_author = authored;
+                    detail.viewer_review_requested = requested;
+                } else {
+                    // Detail/check names belong to an older head: do not attest
+                    // to them after the branch moved during the two reads.
+                    detail.ci = Default::default();
+                    detail.status_check_rollup.clear();
+                }
+            }
             serde_json::to_value(detail).map_err(|_| ChangeRequestError::Decode)
         }
+    }
+
+    async fn fetch_pr_metadata(
+        &self,
+        canonical: &str,
+        requested: &str,
+    ) -> Result<GhPrMetadata, ChangeRequestError> {
+        let url = validated_pull_request_url(if canonical.is_empty() {
+            requested
+        } else {
+            canonical
+        })?;
+        let parts: Vec<_> = url.split('/').collect();
+        let output = self
+            .runner
+            .run(ProcessRequest {
+                args: vec![
+                    "api".into(),
+                    "graphql".into(),
+                    "-f".into(),
+                    format!("query={GITHUB_PR_METADATA_QUERY}"),
+                    "-f".into(),
+                    format!("owner={}", parts[3]),
+                    "-f".into(),
+                    format!("name={}", parts[4]),
+                    "-F".into(),
+                    format!("number={}", parts[6]),
+                ],
+                ..github_request()
+            })
+            .await
+            .map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        if value["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            return Err(ChangeRequestError::Decode);
+        }
+        serde_json::from_value(value["data"]["repository"]["pullRequest"].clone())
+            .map_err(|_| ChangeRequestError::Decode)
     }
 
     pub fn new() -> Self {
@@ -591,6 +668,7 @@ impl GitHubCli {
             _ if !output.success => return Err(classify_github_failure(&output.stderr)),
             _ => return Err(ChangeRequestError::Decode),
         };
+        let partial_metadata = !response.errors.is_empty();
         let canonical = response.data.repository.map(|repo| repo.name_with_owner);
         if canonical
             .as_deref()
@@ -606,6 +684,19 @@ impl GitHubCli {
             .flatten()
             .map(to_list_item)
             .collect::<Result<Vec<_>, _>>()?;
+        for item in &mut items {
+            if partial_metadata {
+                item.ci = Default::default();
+                item.viewer_did_author = None;
+                item.viewer_review_requested = None;
+            }
+            if filter == zeron_proto::ChangeRequestFilter::Authored {
+                item.viewer_did_author = Some(true);
+            }
+            if filter == zeron_proto::ChangeRequestFilter::Reviewing {
+                item.viewer_review_requested = Some(true);
+            }
+        }
         // GitHub can return the canonical name of a renamed repository.
         // Scope is enforced by the query, not by matching an old remote name.
         items.truncate(50);
@@ -1085,6 +1176,8 @@ struct GhPullRequest {
 struct GhSearchPullRequest {
     #[serde(default)]
     author: Option<zeron_proto::ChangeRequestActor>,
+    #[serde(flatten)]
+    metadata: GhPrMetadata,
     number: u64,
     title: String,
     url: String,
@@ -1100,8 +1193,207 @@ struct GhSearchPullRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrMetadata {
+    #[serde(default)]
+    head_ref_oid: Option<String>,
+    #[serde(default)]
+    viewer_did_author: Option<bool>,
+    #[serde(default)]
+    viewer_latest_review_request: Option<GhReviewRequestId>,
+    #[serde(default)]
+    review_requests: Option<GhReviewRequests>,
+    // Missing and explicit null have different meanings (unavailable vs no checks).
+    #[serde(default)]
+    #[serde(deserialize_with = "present_nullable")]
+    status_check_rollup: Option<Option<GhCiRollup>>,
+}
+
+impl GhPrMetadata {
+    fn checks(&self) -> Option<Vec<zeron_proto::ChangeRequestCheck>> {
+        match self.status_check_rollup.as_ref()? {
+            None => Some(Vec::new()),
+            Some(rollup) => rollup.contexts.nodes.as_ref().map(|nodes| {
+                nodes
+                    .iter()
+                    .filter(|node| !node.is_null())
+                    .map(|node| {
+                        // CheckRun and legacy StatusContext have different nullable fields.
+                        let text =
+                            |field: &str| node[field].as_str().unwrap_or_default().to_owned();
+                        zeron_proto::ChangeRequestCheck {
+                            name: text("name"),
+                            context: text("context"),
+                            status: text("status"),
+                            conclusion: text("conclusion"),
+                            state: text("state"),
+                            details_url: text("detailsUrl"),
+                            target_url: text("targetUrl"),
+                        }
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    fn into_fields(
+        self,
+    ) -> (
+        String,
+        zeron_proto::change_request_assessment::ChangeRequestCi,
+        Option<bool>,
+        Option<bool>,
+    ) {
+        use zeron_proto::change_request_assessment::{ChangeRequestCi, CiState};
+        let ci = match self.status_check_rollup {
+            None => ChangeRequestCi::default(),
+            Some(None) => ChangeRequestCi {
+                state: CiState::NoChecks,
+                total_count: 0,
+            },
+            Some(Some(rollup)) => {
+                let mut state = match rollup.state.as_str() {
+                    "SUCCESS" => CiState::Passed,
+                    "FAILURE" | "ERROR" => CiState::Failed,
+                    "PENDING" | "EXPECTED" => CiState::Pending,
+                    _ => CiState::Unknown,
+                };
+                let skipped: u64 = rollup
+                    .contexts
+                    .check_run_counts_by_state
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .filter(|count| matches!(count.state.as_str(), "NEUTRAL" | "SKIPPED"))
+                    .map(|count| count.count)
+                    .fold(0u64, u64::saturating_add);
+                if state == CiState::Passed && rollup.contexts.total_count == 0 {
+                    state = CiState::NoChecks;
+                }
+                if state == CiState::Passed && skipped > 0 && skipped == rollup.contexts.total_count
+                {
+                    state = CiState::Skipped;
+                }
+                // Aggregate success must never hide failed/cancelled jobs, even if
+                // GitHub does not consider them required for merging.
+                if rollup
+                    .contexts
+                    .check_run_counts_by_state
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        rollup
+                            .contexts
+                            .status_context_counts_by_state
+                            .as_ref()
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .any(|count| {
+                        count.count > 0
+                            && zeron_proto::change_request_assessment::check_failed(&count.state)
+                    })
+                {
+                    state = CiState::Failed;
+                }
+                if rollup
+                    .commit
+                    .as_ref()
+                    .is_some_and(|commit| Some(commit.oid.as_str()) != self.head_ref_oid.as_deref())
+                {
+                    state = CiState::Unknown;
+                }
+                ChangeRequestCi {
+                    state,
+                    total_count: rollup.contexts.total_count,
+                }
+            }
+        };
+        let requested = self.review_requests.and_then(|requests| {
+            let found = self
+                .viewer_latest_review_request
+                .as_ref()
+                .is_some_and(|latest| {
+                    requests
+                        .nodes
+                        .iter()
+                        .flatten()
+                        .any(|request| request.id == latest.id)
+                });
+            if found {
+                Some(true)
+            } else if requests.page_info.has_next_page {
+                None
+            } else {
+                Some(false)
+            }
+        });
+        (
+            self.head_ref_oid.unwrap_or_default(),
+            ci,
+            self.viewer_did_author,
+            requested,
+        )
+    }
+}
+
+fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReviewRequestId {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewRequests {
+    nodes: Vec<Option<GhReviewRequestId>>,
+    page_info: GhPageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCiRollup {
+    state: String,
+    contexts: GhCiCount,
+    #[serde(default)]
+    commit: Option<GhCiCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhCiCount {
+    total_count: u64,
+    #[serde(default)]
+    nodes: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    check_run_counts_by_state: Option<Vec<GhCiStateCount>>,
+    #[serde(default)]
+    status_context_counts_by_state: Option<Vec<GhCiStateCount>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCiCommit {
+    oid: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCiStateCount {
+    state: String,
+    count: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct GhSearchResponse {
     data: GhSearchData,
+    #[serde(default)]
+    errors: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1303,9 +1595,14 @@ fn to_list_item(
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(ChangeRequestError::Decode);
     }
+    let (head_ref_oid, ci, authored, requested) = pull_request.metadata.into_fields();
     Ok(ChangeRequestListItem {
         provider: "github".into(),
         author: pull_request.author.unwrap_or_default(),
+        head_ref_oid,
+        ci,
+        viewer_did_author: authored,
+        viewer_review_requested: requested,
         repository: repository.into(),
         number: pull_request.number,
         title,
@@ -1637,8 +1934,21 @@ mod tests {
                 }
             })
         };
+        let head = "a".repeat(40);
+        let metadata = json!({"headRefOid": head, "viewerDidAuthor": true,
+            "viewerLatestReviewRequest": null,
+            "reviewRequests": {"nodes": [], "pageInfo": {"hasNextPage": false}},
+            "statusCheckRollup": {"commit": {"oid": head}, "state": "FAILURE", "contexts": {"totalCount": 1,
+                "nodes": [{"name": "linux", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://github.com/acme/zeron/actions/runs/1"}]}}
+        });
+        let metadata_response = json!({"data": {"repository": {"pullRequest": metadata}}});
         let detail = json!({"url": url, "number": 123, "title": "Add dashboard", "author": null,
-            "comments": [], "reviewDecision": null, "statusCheckRollup": []});
+            "headRefOid": head, "comments": [], "reviewDecision": null,
+            "statusCheckRollup": [{"name": "linux", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/acme/zeron/actions/runs/1"}]});
+        let mut moved_head = metadata_response.clone();
+        moved_head["data"]["repository"]["pullRequest"]["headRefOid"] = "b".repeat(40).into();
+        moved_head["data"]["repository"]["pullRequest"]["statusCheckRollup"]["commit"]["oid"] =
+            "b".repeat(40).into();
         let mut updated = detail.clone();
         updated["comments"] =
             json!([{"body": body, "author": {"login": "writer"}, "viewerDidAuthor": true}]);
@@ -1646,11 +1956,13 @@ mod tests {
             command_success(serde_json::to_vec(&page(123, Some("Y3Vyc29yOjE="))).unwrap()),
             command_success(serde_json::to_vec(&page(124, None)).unwrap()),
             command_success(serde_json::to_vec(&detail).unwrap()),
+            command_success(serde_json::to_vec(&metadata_response).unwrap()),
             command_success(patch),
             command_success(
                 serde_json::to_vec(&json!({"body": body, "user": {"login": "writer"}})).unwrap(),
             ),
             command_success(serde_json::to_vec(&updated).unwrap()),
+            command_success(serde_json::to_vec(&moved_head).unwrap()),
             command_failure("authentication required: gh auth login; private-provider-diagnostic"),
         ]);
         let github = GitHubCli::with_runner(runner.clone());
@@ -1730,10 +2042,21 @@ mod tests {
             assert_eq!(loaded.number, 123);
             assert!(loaded.author.login.is_empty());
             assert!(loaded.comments.is_empty());
+            assert_eq!(loaded.head_ref_oid, head);
+            assert_eq!(
+                loaded.ci.state,
+                zeron_proto::change_request_assessment::CiState::Failed
+            );
+            assert_eq!(loaded.ci.total_count, 1);
+            assert_eq!(
+                loaded.status_check_rollup[0].conclusion, "FAILURE",
+                "CI and rows use one snapshot even when a job changed on the same head"
+            );
+            assert_eq!(loaded.viewer_did_author, Some(true));
         }
         assert_eq!(
             runner.requests().len(),
-            3,
+            4,
             "the second detail read uses the real provider cache"
         );
         let diff: String = client
@@ -1758,6 +2081,12 @@ mod tests {
             loaded.comments[0].body, body,
             "posting invalidates the cached thread"
         );
+        assert_eq!(
+            loaded.ci.state,
+            zeron_proto::change_request_assessment::CiState::Unknown,
+            "a changed head invalidates the old checks"
+        );
+        assert!(loaded.status_check_rollup.is_empty());
         let error = client
             .call(
                 methods::POST_CHANGE_REQUEST_COMMENT,
@@ -1798,7 +2127,7 @@ mod tests {
         let requests = runner.requests();
         assert_eq!(
             requests.len(),
-            7,
+            9,
             "invalid input never reaches gh and writes are not retried"
         );
         for request in &requests {
@@ -1819,9 +2148,9 @@ mod tests {
         ));
         assert!(requests[1].args.contains(&"after=Y3Vyc29yOjE=".into()));
         assert_eq!(&requests[2].args[..3], ["pr", "view", url]);
-        assert_eq!(requests[3].args, ["pr", "diff", url, "--color=never"]);
+        assert_eq!(requests[4].args, ["pr", "diff", url, "--color=never"]);
         assert_eq!(
-            requests[4].args,
+            requests[5].args,
             [
                 "api",
                 "--method",
@@ -1832,11 +2161,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(requests[4].stdin.as_ref().unwrap())
+            serde_json::from_slice::<serde_json::Value>(requests[5].stdin.as_ref().unwrap())
                 .unwrap(),
             json!({"body": body})
         );
-        assert!(!requests[4].args.iter().any(|arg| arg.contains(body)));
+        assert!(!requests[5].args.iter().any(|arg| arg.contains(body)));
     }
 
     #[test]
@@ -2075,6 +2404,87 @@ mod tests {
             "data": { "search": { "nodes": items } }
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn board_metadata_is_batched_and_only_attests_to_the_current_head() {
+        use zeron_proto::change_request_assessment::{CiState, Facts, MissingInformation};
+        let head = "a".repeat(40);
+        let nodes = (1..=50).map(|number| {
+            let mut node = search_pull_request("acme/zeron", number, "A PR", "OPEN", "MERGEABLE",
+                "2026-08-10T09:30:00Z", "2026-08-19T12:00:00Z", false, Some("REVIEW_REQUIRED"));
+            node["headRefOid"] = head.clone().into();
+            node["viewerDidAuthor"] = false.into();
+            node["viewerLatestReviewRequest"] = serde_json::json!({"id": "latest"});
+            node["reviewRequests"] = serde_json::json!({
+                "nodes": [{"id": if number == 1 { "latest" } else { "other" }}],
+                "pageInfo": {"hasNextPage": number == 2}
+            });
+            node["statusCheckRollup"] = match number {
+                1 => serde_json::json!({"commit": {"oid": head}, "state": "SUCCESS", "contexts": {
+                    "totalCount": 3, "checkRunCountsByState": [{"state": "CANCELLED", "count": 1}]
+                }}),
+                2 => serde_json::json!({"commit": {"oid": "b".repeat(40)}, "state": "SUCCESS", "contexts": {"totalCount": 3}}),
+                3 => serde_json::Value::Null,
+                4 => serde_json::json!({"commit": {"oid": head}, "state": "SUCCESS", "contexts": {
+                    "totalCount": 3, "checkRunCountsByState": [{"state": "SKIPPED", "count": 3}]
+                }}),
+                _ => serde_json::json!({"commit": {"oid": head}, "state": "PENDING", "contexts": {"totalCount": 3}}),
+            };
+            if number == 5 { node.as_object_mut().unwrap().remove("statusCheckRollup"); }
+            node
+        }).collect();
+        let runner = FakeProcessRunner::with_responses([command_success(search_response(nodes))]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let page = github
+            .list_page(
+                "acme/zeron",
+                zeron_proto::ChangeRequestFilter::All,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 50);
+        assert_eq!(
+            runner.requests().len(),
+            1,
+            "no per-PR detail or diff requests"
+        );
+        let query = &runner.requests()[0].args[3];
+        assert!(query.contains("headRefOid"));
+        assert!(!query.contains("body"));
+        assert!(!query.contains("files"));
+        assert!(!query.contains("diff"));
+        let item = |number| {
+            page.items
+                .iter()
+                .find(|item| item.number == number)
+                .unwrap()
+        };
+        assert_eq!(item(1).head_ref_oid, head);
+        assert_eq!(item(1).ci.state, CiState::Failed);
+        assert_eq!(item(1).viewer_review_requested, Some(true));
+        assert!(!Facts::from_item(item(1)).assess().attention.is_empty());
+        assert_eq!(item(2).ci.state, CiState::Unknown);
+        assert_eq!(
+            item(2).viewer_review_requested,
+            None,
+            "unseen review requests remain unknown"
+        );
+        assert_eq!(item(3).ci.state, CiState::NoChecks);
+        assert_eq!(
+            item(3).viewer_review_requested,
+            Some(false),
+            "a completed request is not active"
+        );
+        assert_eq!(item(4).ci.state, CiState::Skipped);
+        assert!(
+            Facts::from_item(item(5))
+                .assess()
+                .missing
+                .contains(&MissingInformation::Ci)
+        );
     }
 
     async fn authored(

@@ -875,6 +875,16 @@ pub struct ChangeRequestListItem {
     #[serde(default)]
     pub author: ChangeRequestActor,
     pub repository: String,
+    /// Current source commit, captured with the CI rollup in one provider request.
+    #[serde(default)]
+    pub head_ref_oid: String,
+    #[serde(default)]
+    pub ci: crate::change_request_assessment::ChangeRequestCi,
+    /// None means an older host or unavailable viewer relationship metadata.
+    #[serde(default)]
+    pub viewer_did_author: Option<bool>,
+    #[serde(default)]
+    pub viewer_review_requested: Option<bool>,
     pub number: u64,
     pub title: String,
     pub url: String,
@@ -912,6 +922,10 @@ pub struct ChangeRequestDetail {
     pub author: ChangeRequestActor,
     pub base_ref_name: String,
     pub head_ref_name: String,
+    pub head_ref_oid: String,
+    pub ci: crate::change_request_assessment::ChangeRequestCi,
+    pub viewer_did_author: Option<bool>,
+    pub viewer_review_requested: Option<bool>,
     pub state: String,
     pub is_draft: bool,
     pub review_decision: String,
@@ -1418,6 +1432,10 @@ mod tests {
             let item = ChangeRequestListItem {
                 provider: "github".into(),
                 author: Default::default(),
+                head_ref_oid: String::new(),
+                ci: Default::default(),
+                viewer_did_author: None,
+                viewer_review_requested: None,
                 repository: "private-owner/private-repo".into(),
                 number: 123,
                 title: "Add pull request dashboard".into(),
@@ -1492,6 +1510,10 @@ mod tests {
         let mut value = serde_json::to_value(ChangeRequestListItem {
             provider: "github".into(),
             author: Default::default(),
+            head_ref_oid: String::new(),
+            ci: Default::default(),
+            viewer_did_author: None,
+            viewer_review_requested: None,
             repository: "acme/zeron".into(),
             number: 1,
             title: "No decision".into(),

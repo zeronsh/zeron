@@ -53,14 +53,15 @@ pub(crate) fn board(
                 )
                 .child(
                     div()
-                        .h(px(16.0))
                         .pl(px(22.0))
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
                         .child(bar(px(16.0), 16.0, index, view, theme, cx))
                         .child(bar(px(72.0), 10.0, index, view, theme, cx))
-                        .child(bar(px(52.0), 16.0, index, view, theme, cx)),
+                        .child(bar(px(52.0), 16.0, index, view, theme, cx))
+                        .child(bar(px(120.0), 12.0, index, view, theme, cx)),
                 );
             let row = crate::pull_requests::table_row_shell(layout, index == 0, index == 5, theme)
                 .child(identity);
@@ -68,12 +69,22 @@ pub(crate) fn board(
                 row.child(
                     div()
                         .pl(px(22.0))
-                        .h(px(16.0))
+                        .h(px(28.0))
                         .flex()
                         .items_center()
+                        .gap(px(Theme::SPACE_SM))
                         .child(bar(px(72.0), 10.0, index, view, theme, cx))
                         .child(div().flex_1())
-                        .child(bar(px(44.0), 10.0, index, view, theme, cx)),
+                        .child(bar(px(44.0), 10.0, index, view, theme, cx))
+                        .child(
+                            div()
+                                .size(px(28.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(bar(px(14.0), 14.0, index, view, theme, cx)),
+                        ),
                 )
                 .into_any_element()
             } else {
@@ -101,6 +112,15 @@ pub(crate) fn board(
                             theme,
                             cx,
                         ))),
+                )
+                .child(
+                    div()
+                        .size(px(28.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(bar(px(14.0), 14.0, index, view, theme, cx)),
                 )
                 .into_any_element()
             }
@@ -174,6 +194,32 @@ pub(crate) fn summary(gap: f32, view: EntityId, theme: &Theme, cx: &mut App) -> 
         .gap(px(gap))
         .child(widgets::section_card(theme).mt_0().children(fields))
         .child(
+            widgets::section_card(theme).mt_0().child(
+                widgets::card_row(theme, true)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(widgets::row_title(theme, "Current assessment"))
+                            .child(bar(relative(0.6), 14.0, 4, view, theme, cx))
+                            .child(bar(relative(0.4), 14.0, 4, view, theme, cx))
+                            .child(bar(px(100.0), 13.0, 4, view, theme, cx)),
+                    )
+                    .child(
+                        div()
+                            .size(px(28.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(bar(px(14.0), 14.0, 4, view, theme, cx)),
+                    ),
+            ),
+        )
+        .child(
             widgets::section_card(theme)
                 .mt_0()
                 .px(px(16.0))
@@ -208,6 +254,23 @@ pub(crate) fn summary(gap: f32, view: EntityId, theme: &Theme, cx: &mut App) -> 
                                 ),
                         )
                         .child(bar(px(180.0), 28.0, 5, view, theme, cx)),
+                )
+                .child(
+                    widgets::card_row(theme, false)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(120.0))
+                                .child(widgets::row_title(theme, "Verification")),
+                        )
+                        .child(div().flex_1().min_w_0().child(bar(
+                            relative(0.8),
+                            28.0,
+                            6,
+                            view,
+                            theme,
+                            cx,
+                        ))),
                 )
                 .child(crate::pull_request_detail::field_row(
                     "Checkout",

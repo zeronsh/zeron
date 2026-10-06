@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod attachment_mentions;
+pub mod change_request_assessment;
 pub mod entities;
 pub mod file_mentions;
 pub mod invocation;

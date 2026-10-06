@@ -16,6 +16,8 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcError, capability_errors, methods};
 
+use zeron_proto::change_request_assessment::{Blocker, CiState, Facts};
+
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::popover;
@@ -101,11 +103,10 @@ impl PullRequestGroup {
 }
 
 fn request_group(item: &ChangeRequestListItem) -> PullRequestGroup {
+    let assessment = Facts::from_item(item).assess();
     if item.is_draft {
         PullRequestGroup::Drafts
-    } else if item.mergeability == ChangeRequestMergeability::Conflicting
-        || item.review_decision == ChangeRequestReviewDecision::ChangesRequested
-    {
+    } else if !assessment.blockers.is_empty() || !assessment.attention.is_empty() {
         PullRequestGroup::Attention
     } else if item.review_decision == ChangeRequestReviewDecision::Approved {
         PullRequestGroup::Approved
@@ -156,6 +157,86 @@ impl PullRequestSort {
     };
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum PersonalView {
+    #[default]
+    Everything,
+    NeedsYou,
+    Starred,
+}
+
+/// Stable across devices and remote spellings; stars are local preferences.
+pub(crate) fn star_key(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.trim_end_matches('/').to_ascii_lowercase();
+    };
+    parsed.set_fragment(None);
+    parsed.set_query(None);
+    let path = parsed.path().trim_end_matches('/').to_owned();
+    parsed.set_path(&path);
+    parsed.to_string().to_ascii_lowercase()
+}
+
+pub(crate) fn star_button(url: &str, theme: &Theme, cx: &gpui::App) -> gpui::Stateful<gpui::Div> {
+    let key = star_key(url);
+    let starred = crate::settings::current(cx)
+        .pull_request_stars
+        .contains(&key);
+    let label = if starred {
+        "Unstar pull request"
+    } else {
+        "Star pull request"
+    };
+    div()
+        .id(SharedString::from(format!("pr-star-{key}")))
+        .debug_selector(|| "pr-star".into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .aria_toggled(if starred {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .tab_index(0)
+        .size(px(28.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.glass_hover()))
+        .tooltip(widgets::text_tooltip(label))
+        .child(
+            icon(if starred {
+                icons::STAR_BOLD
+            } else {
+                icons::STAR
+            })
+            .size(px(14.0))
+            .text_color(if starred {
+                theme.warning
+            } else {
+                theme.text_muted
+            }),
+        )
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            if crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                if settings.pull_request_stars.contains(&key) {
+                    settings.pull_request_stars.retain(|value| value != &key);
+                } else {
+                    settings.pull_request_stars.push(key.clone());
+                }
+            }) {
+                cx.refresh_windows();
+            }
+        })
+}
+
 /// Repository-scoped dashboard with lazy, cached relationship filters.
 pub struct PullRequestsPage {
     state: Entity<AppState>,
@@ -191,6 +272,7 @@ pub struct PullRequestsPage {
     view_items: Option<Rc<Vec<ChangeRequestListItem>>>,
     sort: PullRequestSort,
     filter: ChangeRequestFilter,
+    personal_view: PersonalView,
     /// A new repository starts on Authored; only this automatic choice may
     /// fall back to All. Explicit choices and settled defaults survive visits.
     automatic_filter: bool,
@@ -297,6 +379,7 @@ impl PullRequestsPage {
             view_items: None,
             sort: PullRequestSort::DEFAULT,
             filter: ChangeRequestFilter::Authored,
+            personal_view: PersonalView::Everything,
             automatic_filter: true,
             scope_filters: Vec::new(),
             filter_fades,
@@ -1681,6 +1764,24 @@ impl Render for PullRequestsPage {
                 Rc::new(items)
             })
             .clone();
+        let stars = crate::settings::current(cx).pull_request_stars;
+        let items = if self.personal_view == PersonalView::Everything {
+            items
+        } else {
+            Rc::new(
+                items
+                    .iter()
+                    .filter(|item| match self.personal_view {
+                        PersonalView::Everything => true,
+                        PersonalView::NeedsYou => {
+                            !Facts::from_item(item).assess().attention.is_empty()
+                        }
+                        PersonalView::Starred => stars.contains(&star_key(&item.url)),
+                    })
+                    .cloned()
+                    .collect(),
+            )
+        };
         let layout = self
             .content_width
             .map(table_layout)
@@ -1921,6 +2022,54 @@ impl Render for PullRequestsPage {
                             .child(self.render_sort_menu(&theme, cx)),
                     ),
             )
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children(
+                        [
+                            (PersonalView::NeedsYou, "Needs you", "pr-view-needs-you"),
+                            (PersonalView::Starred, "Starred", "pr-view-starred"),
+                        ]
+                        .into_iter()
+                        .map(|(view, label, id)| {
+                            let selected = self.personal_view == view;
+                            crate::surface_chrome::tab_frame(id, selected, &theme)
+                                .debug_selector(move || id.into())
+                                .role(gpui::Role::Button)
+                                .aria_label(label)
+                                .aria_selected(selected)
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .px(px(10.0))
+                                .child(label)
+                                .on_click(cx.listener(move |page, _, _, cx| {
+                                    page.personal_view = if selected {
+                                        PersonalView::Everything
+                                    } else {
+                                        view
+                                    };
+                                    page.scroll.scroll.set_offset(gpui::Point::default());
+                                    if !selected {
+                                        page.select_filter(ChangeRequestFilter::All, cx);
+                                    }
+                                    cx.notify();
+                                }))
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(if initial_loading {
+                                "Loading pull requests…".to_owned()
+                            } else {
+                                format!("{} shown · {} loaded", items.len(), self.items.len())
+                            }),
+                    ),
+            )
             .when(!self.query.is_empty(), |el| {
                 el.child(
                     div()
@@ -1953,12 +2102,17 @@ impl Render for PullRequestsPage {
                 .flex()
                 .flex_col()
                 .items_center()
-                .child("No matching pull requests")
+                .child(match self.personal_view {
+                    PersonalView::NeedsYou => "Nothing needs your attention in the loaded PRs",
+                    PersonalView::Starred => "No starred pull requests in the loaded PRs",
+                    PersonalView::Everything => "No matching pull requests",
+                })
                 .child(
-                    empty_action("pr-empty-clear-search", "Clear search", &theme).on_click(
-                        cx.listener(|page, _, _, cx| {
+                    empty_action("pr-empty-clear-search", "Show loaded pull requests", &theme)
+                        .on_click(cx.listener(|page, _, _, cx| {
                             page.search.update(cx, |input, cx| input.set_text("", cx));
                             page.query.clear();
+                            page.personal_view = PersonalView::Everything;
                             page.view_items = None;
                             cx.notify();
                         }),
@@ -2214,6 +2368,7 @@ fn render_grouped_requests(
                                     index + 1 == row_count,
                                     selected_url == Some(item.url.as_str()),
                                     theme,
+                                    cx,
                                 )
                             }));
                         el.child(
@@ -2267,7 +2422,9 @@ fn render_table_row(
     last: bool,
     selected: bool,
     theme: &Theme,
+    cx: &gpui::App,
 ) -> AnyElement {
+    let star = star_button(&item.url, theme, cx);
     let url = item.url.clone();
     let row = table_row_shell(layout, first, last, theme)
         .id(SharedString::from(format!(
@@ -2329,7 +2486,8 @@ fn render_table_row(
                     .gap(px(Theme::SPACE_SM))
                     .child(render_diff_stats(item, theme))
                     .child(div().flex_1())
-                    .child(updated()),
+                    .child(updated())
+                    .child(star),
             )
             .into_any_element()
     } else {
@@ -2345,27 +2503,56 @@ fn render_table_row(
                     .child(updated())
                     .child(render_diff_stats(item, theme)),
             )
+            .child(star)
             .into_any_element()
     }
 }
 
 fn status_description(item: &ChangeRequestListItem) -> String {
+    let assessment = Facts::from_item(item).assess();
     let mut labels = vec![if item.is_draft { "Draft" } else { "Open" }];
-    if item.mergeability == ChangeRequestMergeability::Conflicting {
-        labels.push("Merge conflicts");
+    labels.extend(assessment.blockers.iter().map(|blocker| blocker.label()));
+    if item.review_decision == ChangeRequestReviewDecision::Approved {
+        labels.push("Approved");
     }
-    match item.review_decision {
-        ChangeRequestReviewDecision::ChangesRequested => labels.push("Changes requested"),
-        ChangeRequestReviewDecision::Approved => labels.push("Approved"),
-        _ => {}
-    }
+    labels.extend(
+        assessment
+            .attention
+            .iter()
+            .filter(|reason| {
+                **reason != zeron_proto::change_request_assessment::AttentionReason::FailingCi
+            })
+            .map(|reason| reason.label()),
+    );
     labels.join(" · ")
 }
 
 fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement {
     let title = SharedString::from(single_line(&item.title));
     let full_title = title.clone();
-    let status = status_description(item);
+    let assessment = Facts::from_item(item).assess();
+    let mut labels: Vec<_> = assessment
+        .blockers
+        .iter()
+        .filter(|blocker| **blocker != Blocker::FailingCi)
+        .map(|blocker| blocker.label())
+        .collect();
+    if item.is_draft {
+        labels.insert(0, "Draft");
+    }
+    if item.review_decision == ChangeRequestReviewDecision::Approved {
+        labels.push("Approved");
+    }
+    labels.extend(
+        assessment
+            .attention
+            .iter()
+            .filter(|reason| {
+                **reason != zeron_proto::change_request_assessment::AttentionReason::FailingCi
+            })
+            .map(|reason| reason.label()),
+    );
+    let status = labels.join(" · ");
     let tone = if item.mergeability == ChangeRequestMergeability::Conflicting {
         theme.danger_muted
     } else if item.review_decision == ChangeRequestReviewDecision::ChangesRequested {
@@ -2404,6 +2591,7 @@ fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .pl(px(22.0))
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
@@ -2439,7 +2627,57 @@ fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement
                     item,
                     theme,
                 ))
-                .when(status != "Open", |el| {
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "pr-ci-{}",
+                            pull_request_key(item)
+                        )))
+                        .debug_selector(|| "pr-row-ci".into())
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(match item.ci.state {
+                            CiState::Failed => theme.danger_muted,
+                            CiState::Passed => theme.success_muted,
+                            _ => theme.text_muted,
+                        })
+                        .tooltip(widgets::text_tooltip(format!(
+                            "{} · Commit: {}\n{}",
+                            item.ci.state.label(),
+                            if item.head_ref_oid.is_empty() {
+                                "unavailable"
+                            } else {
+                                &item.head_ref_oid
+                            },
+                            format!(
+                                "{}\nNext: {}",
+                                assessment
+                                    .missing
+                                    .iter()
+                                    .map(|missing| missing.label())
+                                    .collect::<Vec<_>>()
+                                    .join(" · "),
+                                assessment
+                                    .actions
+                                    .first()
+                                    .map_or("No action suggested", |action| action.label())
+                            )
+                        )))
+                        .child(format!(
+                            "{}{}",
+                            item.ci.state.label(),
+                            if item.head_ref_oid.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    " · {}",
+                                    item.head_ref_oid.chars().take(7).collect::<String>()
+                                )
+                            }
+                        )),
+                )
+                .when(!status.is_empty(), |el| {
                     el.child(
                         div()
                             .min_w_0()
@@ -2830,6 +3068,10 @@ mod tests {
         ChangeRequestListItem {
             provider: "github".into(),
             author: Default::default(),
+            head_ref_oid: String::new(),
+            ci: Default::default(),
+            viewer_did_author: None,
+            viewer_review_requested: None,
             repository: repository.into(),
             number,
             title: format!("Pull request {number}"),
@@ -2862,6 +3104,7 @@ mod tests {
                 true,
                 false,
                 Theme::of(cx),
+                cx,
             ))
         }
     }
@@ -3623,6 +3866,90 @@ mod tests {
     }
 
     #[gpui::test]
+    fn pull_request_personal_views_star_locally_without_opening_a_pull_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        assert_eq!(
+            star_key("https://github.com/Owner/Repo/pull/1/?tab=checks#discussion"),
+            star_key("https://github.com/owner/repo/pull/1")
+        );
+        let directory = fixture::settings(cx, crate::settings::UiSettings::default());
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, None);
+            let mut page = PullRequestsPage::new(state, cx);
+            let mut mine = pull_request("owner/repo", 1, 1, 1, 1);
+            mine.head_ref_oid = "a".repeat(40);
+            mine.ci = zeron_proto::change_request_assessment::ChangeRequestCi {
+                state: CiState::Failed,
+                total_count: 3,
+            };
+            mine.viewer_did_author = Some(true);
+            mine.viewer_review_requested = Some(false);
+            let mut theirs = mine.clone();
+            theirs.number = 2;
+            theirs.url = "https://github.com/owner/repo/pull/2".into();
+            theirs.viewer_did_author = Some(false);
+            page.items = vec![mine, theirs];
+            page.filter = ChangeRequestFilter::All;
+            page.load_state = PullRequestsLoadState::Ready;
+            page
+        });
+        let click = |selector: &'static str, cx: &mut gpui::VisualTestContext| {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            cx.simulate_mouse_down(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.run_until_parked();
+        };
+        cx.simulate_resize(gpui::size(px(320.0), px(600.0)));
+        cx.run_until_parked();
+        click("pr-view-starred", cx);
+        assert!(cx.debug_bounds("pull-requests-no-results").is_some());
+        click("pr-view-starred", cx);
+        click("pr-view-needs-you", cx);
+        assert!(cx.debug_bounds("pull-requests-no-results").is_none());
+        let star = cx.debug_bounds("pr-star").unwrap();
+        let row = cx.debug_bounds("pull-request-row").unwrap();
+        assert!(row.contains(&star.center()));
+        click("pr-star", cx);
+        cx.update(|_, cx| {
+            assert_eq!(
+                crate::settings::current(cx).pull_request_stars,
+                ["https://github.com/owner/repo/pull/1"]
+            );
+            crate::settings::flush(cx);
+        });
+        assert_eq!(
+            crate::settings::UiSettings::load(directory.path()).pull_request_stars,
+            ["https://github.com/owner/repo/pull/1"]
+        );
+        click("pr-view-starred", cx);
+        assert!(cx.debug_bounds("pull-request-row").is_some());
+        for width in [320.0, 900.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(600.0)));
+            cx.run_until_parked();
+            let row = cx.debug_bounds("pull-request-row").unwrap();
+            let star = cx.debug_bounds("pr-star").unwrap();
+            let ci = cx.debug_bounds("pr-row-ci").unwrap();
+            assert!(star.left() >= row.left() && star.right() <= row.right());
+            assert!(ci.left() >= row.left() && ci.right() <= row.right());
+            assert!(ci.bottom() <= row.bottom());
+        }
+        click("pr-star", cx);
+        assert!(cx.debug_bounds("pull-requests-no-results").is_some());
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.items.len(), 2, "local views keep the fetched snapshot")
+        });
+    }
+
+    #[gpui::test]
     fn narrow_sorting_and_refresh_stay_reachable(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
         fixture::init(cx);
@@ -3817,7 +4144,7 @@ mod tests {
         item.review_decision = ChangeRequestReviewDecision::ChangesRequested;
         assert_eq!(
             status_description(&item),
-            "Draft · Merge conflicts · Changes requested"
+            "Draft · Changes requested · Merge conflicts"
         );
         item.is_draft = false;
         item.mergeability = ChangeRequestMergeability::Unknown;

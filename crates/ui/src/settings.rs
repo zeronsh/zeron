@@ -960,6 +960,8 @@ pub struct UiSettings {
     /// Last explicitly selected PR scope, restored when no project is selected.
     pub last_pull_request_repository: Option<String>,
     pub last_pull_request_device: Option<String>,
+    /// Device-local bookmarks, keyed by provider/repository/PR, never GitHub mutations.
+    pub pull_request_stars: Vec<String>,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -1069,6 +1071,7 @@ impl Default for UiSettings {
             pull_request_destination: PullRequestDestination::Native,
             last_pull_request_repository: None,
             last_pull_request_device: None,
+            pull_request_stars: Vec::new(),
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -1731,6 +1734,7 @@ impl UiSettings {
             pull_request_destination,
             last_pull_request_repository,
             last_pull_request_device,
+            pull_request_stars,
         );
         current
     }
@@ -2777,6 +2781,7 @@ mod tests {
             pull_request_destination: PullRequestDestination::External,
             last_pull_request_repository: Some("acme/zeron".into()),
             last_pull_request_device: Some("remote-device".into()),
+            pull_request_stars: vec!["https://github.com/acme/zeron/pull/123".into()],
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,

@@ -17,6 +17,7 @@ use gpui::{
 #[cfg(test)]
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
+use zeron_proto::change_request_assessment::{CiState, Facts, check_failed, check_status};
 use zeron_proto::{ChangeRequestDetail, ChangeRequestListItem};
 use zeron_rpc::methods;
 
@@ -371,6 +372,7 @@ pub struct PullRequestDetailPage {
     /// A comment is being posted.
     sending: bool,
     comment_error: Option<String>,
+    verification_platform: handoff::VerificationPlatform,
     mention_token: Option<crate::composer::MentionToken>,
     mention_choices: Vec<String>,
     mention_index: usize,
@@ -447,6 +449,7 @@ impl PullRequestDetailPage {
             comment_subscription: None,
             sending: false,
             comment_error: None,
+            verification_platform: handoff::VerificationPlatform::Relevant,
             mention_token: None,
             mention_choices: Vec::new(),
             mention_index: 0,
@@ -678,6 +681,13 @@ impl PullRequestDetailPage {
                 page.loading = false;
                 match result {
                     Ok(mut snapshot) => {
+                        if let Some(preview) = &page.preview
+                            && !snapshot.detail.head_ref_oid.is_empty()
+                            && preview.head_ref_oid == snapshot.detail.head_ref_oid
+                        {
+                            snapshot.detail.viewer_did_author = snapshot.detail.viewer_did_author.or(preview.viewer_did_author);
+                            snapshot.detail.viewer_review_requested = snapshot.detail.viewer_review_requested.or(preview.viewer_review_requested);
+                        }
                         page.fetched = Some(snapshot.fetched);
                         snapshot.diff = page.diff.clone();
                         page.body = Some(snapshot.body.clone());
@@ -1052,40 +1062,24 @@ enum StatusTone {
     Merged,
 }
 
-fn check_status(check: &zeron_proto::ChangeRequestCheck) -> String {
-    [&check.conclusion, &check.state, &check.status]
-        .into_iter()
-        .find(|value| !value.is_empty())
-        .map(|value| value.to_ascii_uppercase())
-        .unwrap_or_default()
-}
-
-fn check_failed(status: &str) -> bool {
-    matches!(
-        status,
-        "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "STARTUP_FAILURE"
-    )
-}
-
-fn ci_status(checks: &[zeron_proto::ChangeRequestCheck]) -> &'static str {
-    if checks.is_empty() {
-        return "No checks reported";
+fn ci_status(detail: &ChangeRequestDetail) -> &'static str {
+    match Facts::from_detail(detail).assess().ci.state {
+        CiState::Unknown => "CI unavailable",
+        CiState::NoChecks => "No checks reported",
+        CiState::Failed => "FAILURE",
+        CiState::Pending => "PENDING",
+        CiState::Passed => "SUCCESS",
+        CiState::Skipped => "SKIPPED",
     }
-    let statuses: Vec<_> = checks.iter().map(check_status).collect();
-    if statuses.iter().any(|value| check_failed(value)) {
-        "FAILURE"
-    } else if statuses
-        .iter()
-        .any(|value| !matches!(value.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED"))
-    {
-        "PENDING"
-    } else if statuses
-        .iter()
-        .all(|value| matches!(value.as_str(), "NEUTRAL" | "SKIPPED"))
-    {
-        "SKIPPED"
+}
+
+fn assessment_ci_empty_copy(detail: &ChangeRequestDetail) -> &'static str {
+    if Facts::from_detail(detail).assess().ci.state == CiState::Unknown {
+        "CI metadata is unavailable. Refresh to try again."
+    } else if Facts::from_detail(detail).assess().ci.state == CiState::NoChecks {
+        "No checks reported."
     } else {
-        "SUCCESS"
+        "Check details are unavailable. Open this pull request on GitHub."
     }
 }
 
@@ -1451,8 +1445,12 @@ impl Render for PullRequestDetailPage {
                                 .tab_index(0)
                                 .aria_label(format!(
                                     "Checks, {}, {}",
-                                    detail.status_check_rollup.len(),
-                                    status_style(ci_status(&detail.status_check_rollup)).0
+                                    Facts::from_detail(detail)
+                                        .assess()
+                                        .ci
+                                        .total_count
+                                        .max(detail.status_check_rollup.len() as u64),
+                                    status_style(ci_status(detail)).0
                                 ))
                                 .aria_expanded(self.checks_expanded)
                                 .rounded_t(px(12.0))
@@ -1477,10 +1475,14 @@ impl Render for PullRequestDetailPage {
                                     .text_color(theme.text_muted),
                                 )
                                 .child(div().flex_1().child(format!(
-                                    "Checks · {}",
-                                    detail.status_check_rollup.len()
-                                )))
-                                .child(status_chip(ci_status(&detail.status_check_rollup), &theme))
+                                        "Checks · {}",
+                                        Facts::from_detail(detail)
+                                            .assess()
+                                            .ci
+                                            .total_count
+                                            .max(detail.status_check_rollup.len() as u64)
+                                    )))
+                                .child(status_chip(ci_status(detail), &theme))
                                 .on_click(cx.listener(|page, _, _, cx| {
                                     page.checks_expanded = !page.checks_expanded;
                                     cx.notify();
@@ -1491,7 +1493,7 @@ impl Render for PullRequestDetailPage {
                                 div()
                                     .p(px(16.0))
                                     .text_color(theme.text_muted)
-                                    .child("No checks reported."),
+                                    .child(assessment_ci_empty_copy(detail)),
                             );
                         }
                         for (index, check) in detail
@@ -1554,7 +1556,93 @@ impl Render for PullRequestDetailPage {
                                     }),
                             );
                         }
+                        let assessment = Facts::from_detail(detail).assess();
+                        let assessment_card = widgets::section_card(&theme)
+                            .mt(px(CARD_GAP))
+                            .id("pr-assessment")
+                            .debug_selector(|| "pr-assessment".into())
+                            .child(
+                                widgets::card_row(&theme, true)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(6.0))
+                                            .child(widgets::row_title(&theme, "Current assessment"))
+                                            .child(
+                                                div()
+                                                    .text_size(crate::typography::ui_rems(12.0))
+                                                    .text_color(theme.text_muted)
+                                                    .child(if assessment.blockers.is_empty() {
+                                                        if assessment.missing.is_empty() {
+                                                            "No blockers reported".to_owned()
+                                                        } else {
+                                                            "Assessment incomplete".to_owned()
+                                                        }
+                                                    } else {
+                                                        assessment
+                                                            .blockers
+                                                            .iter()
+                                                            .map(|blocker| blocker.label())
+                                                            .collect::<Vec<_>>()
+                                                            .join(" · ")
+                                                    }),
+                                            )
+                                            .children(assessment.actions.first().map(|action| {
+                                                div()
+                                                    .text_size(crate::typography::ui_rems(12.0))
+                                                    .text_color(theme.text)
+                                                    .child(format!("Next: {}", action.label()))
+                                            }))
+                                            .children(assessment.missing.iter().map(|missing| {
+                                                div()
+                                                    .text_size(crate::typography::ui_rems(11.0))
+                                                    .text_color(theme.text_muted)
+                                                    .child(missing.label())
+                                            }))
+                                            .child(
+                                                div()
+                                                    .id("pr-head-commit")
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .tooltip(widgets::text_tooltip(
+                                                        if detail.head_ref_oid.is_empty() {
+                                                            "Current commit unavailable".to_owned()
+                                                        } else {
+                                                            detail.head_ref_oid.clone()
+                                                        },
+                                                    ))
+                                                    .text_size(crate::typography::ui_rems(11.0))
+                                                    .font_family(theme.font_mono.clone())
+                                                    .text_color(theme.text_muted)
+                                                    .child(if detail.head_ref_oid.is_empty() {
+                                                        "Commit unavailable".to_owned()
+                                                    } else {
+                                                        format!(
+                                                            "Commit {}",
+                                                            detail
+                                                                .head_ref_oid
+                                                                .chars()
+                                                                .take(7)
+                                                                .collect::<String>()
+                                                        )
+                                                    }),
+                                            ),
+                                    )
+                                    .child(crate::pull_requests::star_button(
+                                        if detail.url.is_empty() {
+                                            &self.url
+                                        } else {
+                                            &detail.url
+                                        },
+                                        &theme,
+                                        cx,
+                                    )),
+                            );
                         column = column
+                            .child(assessment_card)
                             .child(checks.mt(px(CARD_GAP)))
                             .child(self.handoff_card(detail, &theme, cx));
                         let description = div()
@@ -2096,6 +2184,17 @@ mod tests {
             status: status.into(),
             ..Default::default()
         };
+        let ci_status = |checks: &[zeron_proto::ChangeRequestCheck]| {
+            super::ci_status(&ChangeRequestDetail {
+                ci: zeron_proto::change_request_assessment::ChangeRequestCi::from_checks(checks),
+                status_check_rollup: checks.to_vec(),
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            super::ci_status(&ChangeRequestDetail::default()),
+            "CI unavailable"
+        );
         assert_eq!(ci_status(&[]), "No checks reported");
         assert_eq!(
             ci_status(&[
@@ -2700,6 +2799,24 @@ mod tests {
         assert_eq!(check_name.left() - check.left(), px(16.0));
         assert!(check.size.height <= px(40.0));
         assert!(check_name.top() > check.top() && check_name.bottom() < check.bottom());
+        let platform = cx.debug_bounds("pr-verification-Windows").unwrap();
+        cx.simulate_mouse_down(
+            platform.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            platform.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert_eq!(
+                page.verification_platform,
+                handoff::VerificationPlatform::Windows
+            )
+        });
         let code = cx.debug_bounds("pr-code").unwrap();
         cx.simulate_mouse_down(
             code.center(),
