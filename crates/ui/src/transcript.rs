@@ -8077,19 +8077,16 @@ fn agent_message_display(text: &str) -> String {
     format!("Message from {name}\n\n{body}")
 }
 
-fn user_bubble_text(
-    row_id: &SharedString,
-    text: SharedString,
-    mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+/// The bubble text's runs: body text in the sans font, chips as labels in it
+/// with their padding pinned to [`crate::composer::CHIP_PAD_FAMILY`], and an
+/// agent attribution's name in bold.
+fn user_bubble_runs(
+    text: &str,
+    mentions: &[crate::composer::SentMentionSpan],
     theme: &Theme,
-    measured_h: Rc<Cell<f32>>,
-    entity_id: gpui::EntityId,
-    overlays: Vec<ChipOverlay>,
-    open_image: Rc<dyn Fn(&SharedString, &mut Window, &mut gpui::App)>,
-) -> AnyElement {
-    // Split runs at chip boundaries (spans are in order): body text keeps the
-    // sans font, chips read as inline code. Size/line-height flow from the
-    // bubble's div like every text child.
+) -> Vec<TextRun> {
+    // Split runs at chip boundaries (spans are in order). Size and line
+    // height flow from the bubble's div like every text child.
     let body_run = |len: usize| TextRun {
         len,
         font: gpui::font(theme.font_sans.clone()),
@@ -8158,6 +8155,20 @@ fn user_bubble_text(
             })
             .collect();
     }
+    runs
+}
+
+fn user_bubble_text(
+    row_id: &SharedString,
+    text: SharedString,
+    mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+    theme: &Theme,
+    measured_h: Rc<Cell<f32>>,
+    entity_id: gpui::EntityId,
+    overlays: Vec<ChipOverlay>,
+    open_image: Rc<dyn Fn(&SharedString, &mut Window, &mut gpui::App)>,
+) -> AnyElement {
+    let runs = user_bubble_runs(&text, &mentions, theme);
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let chip_layout = layout.clone();
@@ -8177,11 +8188,21 @@ fn user_bubble_text(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_, hitbox, window, cx| {
             for (span, icon) in mentions.iter().zip(&chip_icons) {
-                // Centered on the line box like the composer's chips.
+                // Centered on the label like the composer's chips.
+                let label = crate::composer::chip_pad_ranges(&span.range)[0].end;
                 for (row, rect) in render::range_rects(&layout, &span.range, 0.0, 2.0)
                     .into_iter()
                     .enumerate()
                 {
+                    let row_top = rect.origin.y - px(2.0);
+                    let offset = crate::composer::text_chip_label_offset(
+                        &layout,
+                        label,
+                        row_top,
+                        px(2.0),
+                        window,
+                    );
+                    let rect = Bounds::new(rect.origin + point(px(0.0), offset), rect.size);
                     let icon = icon.as_ref().filter(|_| row == 0);
                     crate::composer::paint_chip(window, rect, icon, &sel_theme, cx);
                 }
@@ -14362,6 +14383,38 @@ mod tests {
         assert_eq!(text.as_ref(), "");
         assert!(rows[0].copy_text.is_none());
         assert_eq!(attachments.len(), 1);
+    }
+
+    /// A sent bubble shapes each chip's padding in Geist and its label, like
+    /// the rest of the body, in the interface font.
+    #[test]
+    fn bubble_chip_padding_is_shaped_in_geist() {
+        let raw = format!(
+            "open {} and {}",
+            zeron_proto::attachment_mentions::attachment_mention_link(1, None),
+            zeron_proto::attachment_mentions::attachment_mention_link(2, Some("notes.md")),
+        );
+        let (text, spans) = crate::composer::sent_mention_display(&raw).expect("chips project");
+        let mut theme = Theme::dark();
+        theme.font_sans = "Geist Mono".into();
+        let runs = user_bubble_runs(&text, &spans, &theme);
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+        let mut at = 0;
+        let mut pads = Vec::new();
+        for run in &runs {
+            let range = at..at + run.len;
+            at = range.end;
+            if run.font.family.as_ref() == crate::composer::CHIP_PAD_FAMILY {
+                pads.push(range);
+            } else {
+                assert_eq!(run.font.family.as_ref(), "Geist Mono");
+            }
+        }
+        let expected: Vec<_> = spans
+            .iter()
+            .flat_map(|span| crate::composer::chip_pad_ranges(&span.range))
+            .collect();
+        assert_eq!(pads, expected);
     }
 
     /// A sent prompt's file mentions render as chips in the transcript: the
