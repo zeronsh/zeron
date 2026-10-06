@@ -277,10 +277,22 @@ jobs:
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             -only-testing:ZeronTests CODE_SIGNING_ALLOWED=NO test
+      - name: Run Markdown image UI tests
+        working-directory: apps/ios
+        run: |
+          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -resultBundlePath "$RUNNER_TEMP/ios-image-tests.xcresult" \
+            -parallel-testing-enabled NO -collect-test-diagnostics never \
+            -only-testing:ZeronUITests/SessionFlowTests/testMarkdownImageLoadsAndOpensPreview \
+            -only-testing:ZeronUITests/SessionFlowTests/testMarkdownImageFailureShowsRetry \
+            CODE_SIGNING_ALLOWED=NO test-without-building
       - name: Upload iOS test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ios-test-results
-          path: ${{ runner.temp }}/ios-tests.xcresult
+          path: |
+            ${{ runner.temp }}/ios-tests.xcresult
+            ${{ runner.temp }}/ios-image-tests.xcresult
           if-no-files-found: ignore

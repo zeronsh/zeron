@@ -855,6 +855,8 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
     fn block(b: &PBlock) -> usize {
         match b {
             PBlock::Text(t) | PBlock::Heading(t) => t.p.heap_bytes(),
+            PBlock::Flow(children) => children.iter().map(block).sum(),
+            PBlock::Image { reference, alt } => reference.len() + alt.len(),
             PBlock::Code(c) => c.body.p.heap_bytes() + c.source.len() + c.label.as_ref().map_or(0, |l| l.p.heap_bytes()),
             PBlock::Quote(children) => children.iter().map(block).sum(),
             PBlock::List { items, .. } => items

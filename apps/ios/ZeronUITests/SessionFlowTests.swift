@@ -21,6 +21,53 @@ final class SessionFlowTests: XCTestCase {
         add(shot)
     }
 
+    func testMarkdownImageLoadsAndOpensPreview() {
+        let app = launch(["-route", "chat:chat-images"])
+        let image = app.images["/workspace/calculator/5-plus-3.png"]
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        snapshot(app, "markdown-images-initial")
+        XCTAssertTrue(image.waitForExistence(timeout: 10))
+        let loaded = NSPredicate(format: "value == 'Image loaded'")
+        expectation(for: loaded, evaluatedWith: image)
+        waitForExpectations(timeout: 10)
+        XCTAssertEqual(image.label, "Calculation result: 8")
+        XCTAssertTrue(image.isHittable)
+        snapshot(app, "markdown-image-loaded")
+        image.tap()
+        XCTAssertTrue(app.buttons["Close image preview"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.images["image-preview"].label, "Calculation result: 8")
+        snapshot(app, "markdown-image-preview")
+        app.buttons["Share image"].tap()
+        let copy = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Copy'")).firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Save Image'")).firstMatch.exists)
+        snapshot(app, "markdown-image-share")
+        copy.tap()
+        app.buttons["Close image preview"].tap()
+        XCTAssertTrue(image.waitForExistence(timeout: 5))
+        let download = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier == 'transcript-link' AND value == '/workspace/calculator/5-plus-3.png'"
+        )).firstMatch
+        XCTAssertTrue(download.exists, "ordinary download link stays separate")
+    }
+
+    func testMarkdownImageFailureShowsRetry() {
+        let app = launch(["-route", "chat:chat-images"])
+        let image = app.images["/tmp/calculator-result/missing.png"]
+        XCTAssertTrue(image.waitForExistence(timeout: 10))
+        let failed = NSPredicate(format: "value BEGINSWITH 'Image unavailable'")
+        expectation(for: failed, evaluatedWith: image)
+        waitForExpectations(timeout: 10)
+        XCTAssertEqual(image.label, "Missing screenshot")
+        XCTAssertTrue((image.value as? String)?.contains("Tap to retry") == true)
+        snapshot(app, "markdown-image-failed")
+        image.tap()
+        expectation(for: failed, evaluatedWith: image)
+        waitForExpectations(timeout: 10)
+        XCTAssertFalse(app.buttons["Close image preview"].exists)
+        snapshot(app, "markdown-image-retry")
+    }
+
     func testFrontPageShowsFoldersAndRecents() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))

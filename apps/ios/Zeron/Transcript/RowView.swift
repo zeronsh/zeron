@@ -212,13 +212,12 @@ final class RowView: UIView {
             case let .toolStatus(running, failed):
                 view = ToolStatusView(running: running, failed: failed)
             case let .image(reference):
-                let iv = UIImageView()
-                iv.contentMode = .scaleAspectFill
-                iv.clipsToBounds = true
+                let iv = TranscriptImageView(label: w.payload ?? "Image")
                 iv.layer.cornerRadius = min(rect.width, rect.height) > 120 ? 14 : 12
-                iv.layer.cornerCurve = .continuous
-                iv.isUserInteractionEnabled = true
-                iv.accessibilityTraits = .image
+                iv.onActivate = { [weak self, weak iv] in
+                    guard let self, let iv else { return }
+                    self.activateImage(iv)
+                }
                 iv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(openImage(_:))))
                 delegate?.rowView(self, imageFor: reference, into: iv)
                 if reference.hasPrefix("pending://") {
@@ -294,7 +293,18 @@ final class RowView: UIView {
     }
 
     @objc private func openImage(_ tap: UITapGestureRecognizer) {
-        guard let iv = tap.view as? UIImageView, let image = iv.image, let vc = findViewController() else { return }
+        guard let iv = tap.view as? UIImageView else { return }
+        activateImage(iv)
+    }
+
+    private func activateImage(_ iv: UIImageView) {
+        guard let image = iv.image else {
+            if let reference = iv.accessibilityIdentifier {
+                delegate?.rowView(self, imageFor: reference, into: iv)
+            }
+            return
+        }
+        guard let vc = findViewController() else { return }
         vc.present(ImageViewer(image: image, source: iv), animated: true)
     }
 
