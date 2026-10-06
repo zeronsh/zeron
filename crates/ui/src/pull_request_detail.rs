@@ -1331,11 +1331,17 @@ impl Render for PullRequestDetailPage {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
+        let empty_activity = self.tab == Tab::Activity
+            && self
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.comments.is_empty() && detail.reviews.is_empty());
         let content = {
             let mut column = widgets::page_column()
                 .id("pr-content-column")
                 .debug_selector(|| "pr-content-column".into())
                 .max_w(px(760.0))
+                .when(empty_activity, |el| el.min_h_full())
                 .when(self.tab == Tab::Code, |el| {
                     el.max_w_full().px(px(24.0)).h_full().min_h_0()
                 })
@@ -1369,14 +1375,17 @@ impl Render for PullRequestDetailPage {
                     .join("/");
                 column = column
                     .when(self.tab != Tab::Code, |column| {
-                        column.child(detail_header(
-                            &detail.title,
-                            &detail.author.login,
-                            repository,
-                            detail.number,
-                            self.fetched,
-                            &theme,
-                        ))
+                        column.child(
+                            detail_header(
+                                &detail.title,
+                                &detail.author.login,
+                                repository,
+                                detail.number,
+                                self.fetched,
+                                &theme,
+                            )
+                            .when(empty_activity, |el| el.flex_none()),
+                        )
                     })
                     .when(self.tab == Tab::Summary, |el| {
                         el.child(
@@ -1614,10 +1623,45 @@ impl Render for PullRequestDetailPage {
                             .flex()
                             .flex_col();
                         if activity.is_empty() {
-                            thread = thread.child(
+                            thread = thread
+                                .pl_0()
+                                .flex_1()
+                                .flex_shrink_0()
+                                .min_h(px(160.0))
+                                .items_center()
+                                .justify_center()
+                                .child(
                                 div()
-                                    .text_color(theme.text_muted)
-                                    .child("No comments or reviews yet."),
+                                    .id("pr-activity-empty")
+                                    .debug_selector(|| "pr-activity-empty".into())
+                                    .w_full()
+                                    .max_w(px(320.0))
+                                    .flex_none()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .text_center()
+                                    .child(
+                                        div().mb(px(Theme::SPACE_LG)).child(
+                                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                                .size(px(24.0))
+                                                .text_color(theme.text_muted),
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .text_size(crate::typography::ui_rems(15.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child("No activity yet"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .mt(px(6.0))
+                                            .text_color(theme.text_muted)
+                                            .child("Comments and reviews will appear here. Start the conversation below."),
+                                    ),
                             );
                         }
                         let viewer_login = detail
@@ -2806,6 +2850,53 @@ mod tests {
         page.read_with(cx, |page, _| {
             assert!(page.scroll.scroll.offset().y < px(0.0))
         });
+        page.update(cx, |page, cx| {
+            let detail = page.detail.as_mut().unwrap();
+            detail.comments.clear();
+            detail.reviews.clear();
+            page.activity_bodies.clear();
+            page.scroll.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        });
+        for (width, height) in [
+            (320.0, 600.0),
+            (900.0, 400.0),
+            (1200.0, 900.0),
+            (320.0, 400.0),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.run_until_parked();
+            let composer = cx.debug_bounds("pr-comment-surface").unwrap();
+            page.update(cx, |page, cx| {
+                // In short windows the header and empty state can scroll;
+                // the composer stays in its dock.
+                let offset = page.scroll.scroll.max_offset().y;
+                page.scroll.scroll.set_offset(gpui::point(px(0.0), -offset));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let empty = cx.debug_bounds("pr-activity-empty").unwrap();
+            let thread = cx.debug_bounds("pr-activity-thread").unwrap();
+            let meta = cx.debug_bounds("pr-detail-meta").unwrap();
+            assert!(
+                (empty.center().y - thread.center().y).abs() <= px(1.0),
+                "empty state is vertically centered: {empty:?}, {thread:?}",
+            );
+            assert_eq!(empty.center().x, composer.center().x);
+            assert_eq!(
+                thread.bottom(),
+                cx.debug_bounds("pr-detail-scroll").unwrap().bottom() - px(32.0),
+                "empty thread uses the available height",
+            );
+            assert!(empty.top() >= meta.bottom() + px(24.0));
+            assert!(
+                empty.bottom() <= composer.top(),
+                "composer remains reachable"
+            );
+            assert!(empty.size.width <= thread.size.width);
+            assert!(cx.debug_bounds("pr-message-0").is_none());
+            assert_eq!(cx.debug_bounds("pr-comment-surface").unwrap(), composer);
+        }
         let title = cx.debug_bounds("pr-back-title").unwrap();
         let back = cx.debug_bounds("pr-back").unwrap();
         assert!(title.size.width > px(100.0) && back.contains(&title.center()));
