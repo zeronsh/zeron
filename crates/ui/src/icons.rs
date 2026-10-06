@@ -181,6 +181,14 @@ icon_assets![
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),
     (VOLUME_LOUD, "volume-loud"),
+    (VOLUME_CROSS, "volume-cross"),
+    (MUSIC_NOTE, "music-note"),
+    (MUSIC_PLAY, "music-play"),
+    (MUSIC_PAUSE, "music-pause"),
+    (MUSIC_NEXT, "music-next"),
+    (MUSIC_PREVIOUS, "music-previous"),
+    (MUSIC_REPEAT, "music-repeat"),
+    (MUSIC_REPEAT_ONE, "music-repeat-one"),
     // Hand-drawn zeron glyphs (terminal-panel.tsx / composer-actions.tsx /
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),

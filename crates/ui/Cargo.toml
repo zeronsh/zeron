@@ -48,6 +48,7 @@ required-features = ["compact-picker-fixture"]
 
 [dependencies]
 zeron-voice = { path = "../voice" }
+zeron-music = { path = "../music" }
 url = "2"
 zeron-proto.workspace = true
 similar.workspace = true

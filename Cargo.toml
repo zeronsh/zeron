@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/voice",
+    "crates/music",
     "crates/theme",
     "crates/proto",
     "crates/preview",

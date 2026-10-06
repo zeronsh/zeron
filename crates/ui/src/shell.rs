@@ -2008,6 +2008,7 @@ pub struct Shell {
     harness_update_geometry: [Option<WidthTween>; 2],
     harness_update_scroll: settings::widgets::PageScroll,
     user_menu: popover::Popup<()>,
+    music: Entity<crate::music::MusicPlayer>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
     /// Repaints the update strip and dialog as the app-level update
@@ -2424,6 +2425,7 @@ impl Shell {
             harness_update_geometry: [None; 2],
             harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
+            music: cx.new(crate::music::MusicPlayer::new),
             sidebar_notice: None,
             _app_update_observation: crate::app_update::AppUpdate::global(cx)
                 .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
@@ -9047,6 +9049,13 @@ impl Shell {
             .justify_between()
             .gap(px(4.0))
             .child(trigger)
+            .children(settings::music_player_enabled(cx).then(|| {
+                div()
+                    .flex_1()
+                    .flex()
+                    .justify_end()
+                    .child(self.music.clone())
+            }))
             .child(
                 div()
                     .id("settings-trigger")

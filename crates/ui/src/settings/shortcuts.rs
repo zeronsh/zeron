@@ -841,6 +841,41 @@ impl Render for ShortcutsPage {
                         cx.notify();
                     })),
             );
+        let music_player = crate::settings::music_player_enabled(cx);
+        let music_player_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(&theme, "Music player"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![div().child("Sidebar player.").into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(&theme, music_player, "music-player")
+                    .id("music-player-toggle")
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Music player")
+                    .aria_toggled(if music_player {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Debounced,
+                            cx,
+                            |settings| settings.music_player_enabled = !music_player,
+                        );
+                        cx.refresh_windows();
+                        cx.notify();
+                    })),
+            );
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -903,7 +938,8 @@ impl Render for ShortcutsPage {
                                             .child(send_behavior_row)
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
-                                            .child(escape_behavior_row),
+                                            .child(escape_behavior_row)
+                                            .child(music_player_row),
                                     )
                                     .child(self.thread_naming.clone()),
                             ),
