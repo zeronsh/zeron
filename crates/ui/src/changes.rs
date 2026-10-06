@@ -64,7 +64,7 @@ use zeron_syntax::LanguageId as Lang;
 // ---------------------------------------------------------------------------
 
 pub const FILE_HEADER_HEIGHT: f32 = crate::surface_chrome::HEADER_HEIGHT;
-pub(crate) const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
+const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
 /// Coverage of the theme's content-plane tint over the sticky header blur.
 /// Light needs substantially more coverage: dark text is much more vulnerable
 /// to rows ghosting through the blur than light text is on a dark tint.

@@ -147,7 +147,7 @@ impl PullRequestDetailPage {
                                 body: parsed.clone(),
                                 activity: page.activity_bodies.clone(),
                                 fetched: page.fetched.unwrap_or_else(Instant::now),
-                                diff: page.diff_snapshot(),
+                                diff: page.diff.clone(),
                             };
                             page.cache.borrow_mut().put(
                                 page.target.clone(),
@@ -446,31 +446,28 @@ impl PullRequestDetailPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext;
+    use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct CommentRpc(Arc<AtomicUsize>);
-    #[async_trait::async_trait]
-    impl zeron_rpc::RpcService for CommentRpc {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
-            assert_eq!(method, methods::POST_CHANGE_REQUEST_COMMENT);
-            assert_eq!(params["targetDeviceId"], "device");
-            let attempt = self.0.fetch_add(1, Ordering::SeqCst);
-            if attempt > 0 {
-                return Err(zeron_rpc::RpcError::Failed("offline".into()));
+    fn comment_rpc(calls: Arc<AtomicUsize>) -> Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            async move {
+                assert_eq!(method.as_str(), methods::POST_CHANGE_REQUEST_COMMENT);
+                assert_eq!(params["targetDeviceId"], "device");
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                if attempt > 0 {
+                    return Err(zeron_rpc::RpcError::Failed("offline".into()));
+                }
+                zeron_rpc::RpcReply::value(&zeron_proto::ChangeRequestComment {
+                    body: params["body"].as_str().unwrap().into(),
+                    author: zeron_proto::ChangeRequestActor {
+                        login: "writer".into(),
+                    },
+                    ..Default::default()
+                })
             }
-            zeron_rpc::RpcReply::value(&zeron_proto::ChangeRequestComment {
-                body: params["body"].as_str().unwrap().into(),
-                author: zeron_proto::ChangeRequestActor {
-                    login: "writer".into(),
-                },
-                ..Default::default()
-            })
-        }
+        })
     }
 
     #[gpui::test]
@@ -500,7 +497,7 @@ mod tests {
             cx.set_http_client(client);
         });
         let (page, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| AppState::new());
+            let state = fixture::state(cx, None);
             PullRequestDetailPage::new(
                 state,
                 "https://github.com/a/b/pull/1".into(),
@@ -530,15 +527,13 @@ mod tests {
     fn pull_request_comment_preserves_mentions_drafts_and_prevents_duplicate_submission(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let calls = Arc::new(AtomicUsize::new(0));
+        let rpc = comment_rpc(calls.clone());
         let (page, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| AppState::new());
+            let state = fixture::state(cx, None);
             let mut page = PullRequestDetailPage::new(
                 state.clone(),
                 "https://github.com/a/b/pull/1".into(),
@@ -549,9 +544,7 @@ mod tests {
                 cx,
             );
             state.update(cx, |state, _| {
-                state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                    zeron_rpc::memory_client(Arc::new(CommentRpc(calls.clone()))),
-                ))
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()))
             });
             page.detail = Some(ChangeRequestDetail {
                 author: zeron_proto::ChangeRequestActor {
@@ -585,13 +578,9 @@ mod tests {
             page.send_comment(cx);
             page.send_comment(cx);
         });
-        for _ in 0..100 {
-            cx.run_until_parked();
-            runtime.block_on(async { tokio::task::yield_now().await });
-            if page.read_with(cx, |page, _| !page.sending) {
-                break;
-            }
-        }
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| !page.sending)
+        });
         page.update(cx, |page, cx| {
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert!(page.comment_input.read(cx).text().is_empty());
@@ -604,13 +593,9 @@ mod tests {
                 .update(cx, |input, cx| input.set_text("Keep this draft", cx));
             page.send_comment(cx);
         });
-        for _ in 0..100 {
-            cx.run_until_parked();
-            runtime.block_on(async { tokio::task::yield_now().await });
-            if page.read_with(cx, |page, _| !page.sending) {
-                break;
-            }
-        }
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| !page.sending)
+        });
         page.read_with(cx, |page, cx| {
             assert_eq!(calls.load(Ordering::SeqCst), 2);
             assert_eq!(page.comment_input.read(cx).text(), "Keep this draft");
@@ -623,23 +608,15 @@ mod tests {
     fn pull_request_comment_outlives_the_view_and_a_failed_one_returns_as_a_draft(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let calls = Arc::new(AtomicUsize::new(0));
+        let rpc = comment_rpc(calls.clone());
         let url = "https://github.com/a/b/pull/1";
         let target = Some("device".to_owned());
         let cache = Rc::new(RefCell::new(PullRequestCache::default()));
-        let state = cx.new(|_| {
-            let mut state = AppState::new();
-            state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::memory_client(Arc::new(CommentRpc(calls.clone()))),
-            ));
-            state
-        });
+        let state = cx.update(|cx| fixture::state(cx, Some(rpc.client())));
         let open = |cx: &mut gpui::TestAppContext| {
             cache.borrow_mut().put(
                 target.clone(),
@@ -675,10 +652,10 @@ mod tests {
                     window.remove_window();
                 })
                 .unwrap();
-            for _ in 0..100 {
-                cx.run_until_parked();
-                runtime.block_on(async { tokio::task::yield_now().await });
-            }
+            rpc.settle(cx, &runtime, |_| {
+                rpc.completed() == expected_calls
+                    && (cache.borrow().entries.is_empty() || !cache.borrow().drafts.is_empty())
+            });
             assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
         };
 

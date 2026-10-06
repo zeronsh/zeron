@@ -12504,31 +12504,6 @@ fn window_control_button_with(
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    window_control_button_with_options(
-        id,
-        glyph,
-        WindowControlButtonOptions {
-            tooltip: Some(label),
-            ..Default::default()
-        },
-        theme,
-        on_click,
-    )
-}
-
-#[derive(Default, Clone, Copy)]
-struct WindowControlButtonOptions {
-    active: bool,
-    tooltip: Option<&'static str>,
-}
-
-fn window_control_button_with_options(
-    id: &'static str,
-    glyph: impl IntoElement,
-    options: WindowControlButtonOptions,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
     let fade_key = format!("window-control-{id}");
     div()
         .id(id)
@@ -12542,16 +12517,9 @@ fn window_control_button_with_options(
         // zeron window-controls.tsx: `transition-colors` — the wash fades.
         .bg(motion::hover_blend(
             &fade_key,
-            if options.active {
-                theme.glass_hover()
-            } else {
-                theme.glass_hover().opacity(0.0)
-            },
+            theme.glass_hover().opacity(0.0),
             theme.glass_hover(),
         ))
-        .when(options.active, |button| {
-            button.border_1().border_color(theme.border_strong)
-        })
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
@@ -12572,9 +12540,7 @@ fn window_control_button_with_options(
             on_click(event, window, cx)
         })
         .child(glyph)
-        .when_some(options.tooltip, |button, label| {
-            button.tooltip(crate::settings::widgets::text_tooltip(label))
-        })
+        .tooltip(crate::settings::widgets::text_tooltip(label))
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;

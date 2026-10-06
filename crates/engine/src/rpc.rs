@@ -79,7 +79,7 @@ use crate::project_actions::ProjectActionsStore;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, session_home_dir};
 use crate::sessions::SessionsEngine;
-use crate::source_control::{ChangeRequestError, GitHubCli, OpenChangeRequestLookup};
+use crate::source_control::{ChangeRequestError, GitHubCli};
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
@@ -625,7 +625,7 @@ pub struct EngineRpc {
     project_actions: ProjectActionsStore,
     previews: Option<zeron_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
-    open_change_requests: std::sync::Arc<dyn OpenChangeRequestLookup>,
+    github: GitHubCli,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
     agent_accounts: AgentAccounts,
@@ -672,7 +672,7 @@ impl EngineRpc {
             project_actions,
             previews: None,
             change_requests,
-            open_change_requests: std::sync::Arc::new(GitHubCli::new()),
+            github: GitHubCli::new(),
             diff_sync,
             uploads,
             agent_accounts,
@@ -722,12 +722,9 @@ impl EngineRpc {
         self
     }
 
-    /// Replace the global change request source, primarily for host integration tests.
-    pub fn with_open_change_requests(
-        mut self,
-        lookup: std::sync::Arc<dyn OpenChangeRequestLookup>,
-    ) -> Self {
-        self.open_change_requests = lookup;
+    #[cfg(test)]
+    pub(crate) fn with_github(mut self, github: GitHubCli) -> Self {
+        self.github = github;
         self
     }
 
@@ -2605,7 +2602,7 @@ impl RpcService for EngineRpc {
                     return Err(RpcError::BadParams("invalid page cursor".into()));
                 }
                 let page = self
-                    .open_change_requests
+                    .github
                     .list_page(&p.repository, p.filter, p.after.as_deref(), p.refresh)
                     .await
                     .map_err(change_request_rpc_error)?;
@@ -2624,7 +2621,7 @@ impl RpcService for EngineRpc {
                     ));
                 }
                 let comment = self
-                    .open_change_requests
+                    .github
                     .post_comment(&p.url, &p.body)
                     .await
                     .map_err(change_request_rpc_error)?;
@@ -2638,16 +2635,21 @@ impl RpcService for EngineRpc {
                     refresh: bool,
                 }
                 let p: P = parse_params(params)?;
-                let detail = self
-                    .open_change_requests
-                    .detail(
-                        &p.url,
-                        method == methods::GET_CHANGE_REQUEST_DIFF,
-                        p.refresh,
-                    )
-                    .await
-                    .map_err(change_request_rpc_error)?;
-                RpcReply::value(&detail)
+                if method == methods::GET_CHANGE_REQUEST_DIFF {
+                    let diff = self
+                        .github
+                        .diff(&p.url, p.refresh)
+                        .await
+                        .map_err(change_request_rpc_error)?;
+                    RpcReply::value(&diff)
+                } else {
+                    let detail = self
+                        .github
+                        .detail(&p.url, p.refresh)
+                        .await
+                        .map_err(change_request_rpc_error)?;
+                    RpcReply::value(&detail)
+                }
             }
             // One-shot scoped capture for the Changes pane: `branch` diffs the
             // working tree against merge-base(baseRef, HEAD); `turn` diffs the

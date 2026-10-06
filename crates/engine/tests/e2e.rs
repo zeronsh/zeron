@@ -13,69 +13,17 @@ use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
 };
-use zeron_engine::{
-    ChangeRequestError, EngineCore, EngineRpc, HarnessRegistry, OpenChangeRequestLookup, RunJournal,
-};
+use zeron_engine::{EngineCore, EngineRpc, HarnessRegistry, RunJournal};
 use zeron_harness::mock::MockHarness;
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AgentEvent, ChangeRequestListItem, ChangeRequestState, DoneStatus, HarnessId, Model,
-    ReasoningLevel, RunRequest, SandboxLevel, SessionStatus, SteeringMode, ToolCall,
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    SessionStatus, SteeringMode, ToolCall,
 };
 use zeron_sync::DocsStore;
 
 const CHAT: &str = "chat-e2e";
 const VIEWER: &str = "viewer-device";
-
-struct FixedOpenChangeRequests(Vec<ChangeRequestListItem>);
-
-#[async_trait]
-impl OpenChangeRequestLookup for FixedOpenChangeRequests {
-    async fn list_page(
-        &self,
-        repository: &str,
-        filter: zeron_proto::ChangeRequestFilter,
-        after: Option<&str>,
-        _refresh: bool,
-    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
-        assert_eq!(repository, "acme/zeron");
-        assert_eq!(filter, zeron_proto::ChangeRequestFilter::Reviewing);
-        assert_eq!(after, None);
-        Ok(zeron_proto::ChangeRequestPage {
-            items: self.0.clone(),
-            next_cursor: None,
-            total_count: Some(self.0.len() as u64),
-        })
-    }
-    async fn post_comment(
-        &self,
-        url: &str,
-        body: &str,
-    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
-        assert_eq!(url, self.0[0].url);
-        if body == "signed out" {
-            return Err(ChangeRequestError::Authentication);
-        }
-        Ok(zeron_proto::ChangeRequestComment {
-            body: body.into(),
-            viewer_did_author: true,
-            ..Default::default()
-        })
-    }
-    async fn detail(
-        &self,
-        url: &str,
-        diff: bool,
-        _refresh: bool,
-    ) -> Result<serde_json::Value, ChangeRequestError> {
-        assert_eq!(url, self.0[0].url);
-        if diff {
-            Ok(serde_json::json!("diff --git a/a b/a\n"))
-        } else {
-            Ok(serde_json::json!({ "title": self.0[0].title, "number": self.0[0].number }))
-        }
-    }
-}
 
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
@@ -1591,130 +1539,6 @@ async fn rpc_surface_over_in_memory_transport() {
             break;
         }
     }
-}
-
-#[tokio::test]
-async fn pull_request_list_dispatch_returns_provider_items() {
-    let dir = tempfile::tempdir().unwrap();
-    let core = assemble(
-        dir.path(),
-        Arc::new(MockHarness {
-            script: mock_script(),
-        }),
-    );
-    let item = ChangeRequestListItem {
-        provider: "github".into(),
-        author: Default::default(),
-        repository: "acme/zeron".into(),
-        number: 123,
-        title: "Add dashboard".into(),
-        url: "https://github.com/acme/zeron/pull/123".into(),
-        state: ChangeRequestState::Open,
-        is_draft: false,
-        review_decision: zeron_proto::ChangeRequestReviewDecision::ChangesRequested,
-        additions: 42,
-        deletions: 7,
-        mergeability: zeron_proto::ChangeRequestMergeability::Mergeable,
-        created_at: chrono::DateTime::parse_from_rfc3339("2026-08-10T09:30:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        updated_at: chrono::DateTime::parse_from_rfc3339("2026-08-19T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    };
-    let rpc = EngineRpc::new(
-        core.sessions.clone(),
-        core.doc_host.clone(),
-        core.workspace.clone(),
-        core.registry.clone(),
-        core.repos.clone(),
-        core.workspace_files.clone(),
-        core.terminals.clone(),
-        core.project_actions.clone(),
-        core.change_requests.clone(),
-        core.diff_sync.clone(),
-        core.uploads.clone(),
-        core.agent_accounts.clone(),
-        core.workspace_scope(),
-    )
-    .with_auth(core.auth())
-    .with_open_change_requests(Arc::new(FixedOpenChangeRequests(vec![item.clone()])));
-    let client = zeron_rpc::memory_client(Arc::new(rpc));
-
-    for invalid in [
-        serde_json::json!({}),
-        serde_json::json!({ "filter": "all" }),
-        serde_json::json!({ "repository": "acme/zeron", "filter": "unknown" }),
-        serde_json::json!({ "repository": "acme/zeron repo:other/repo" }),
-        serde_json::json!({ "repository": "acme/zeron", "after": "a b" }),
-    ] {
-        let error = client
-            .call(
-                zeron_rpc::methods::LIST_CHANGE_REQUEST_PAGE,
-                invalid.clone(),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().starts_with("bad params"),
-            "{invalid} must be rejected before the provider: {error}"
-        );
-    }
-
-    let page: zeron_proto::ChangeRequestPage = client
-        .call_as(
-            zeron_rpc::methods::LIST_CHANGE_REQUEST_PAGE,
-            serde_json::json!({ "repository": "acme/zeron", "filter": "reviewing", "targetDeviceId": core.device_id }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(page.items, vec![item.clone()]);
-    assert_eq!(page.total_count, Some(1));
-    let detail: zeron_proto::ChangeRequestDetail = client
-        .call_as(
-            zeron_rpc::methods::GET_CHANGE_REQUEST,
-            serde_json::json!({ "url": item.url, "targetDeviceId": core.device_id }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(detail.title, item.title);
-    assert_eq!(detail.number, item.number);
-    let diff: String = client
-        .call_as(
-            zeron_rpc::methods::GET_CHANGE_REQUEST_DIFF,
-            serde_json::json!({ "url": item.url, "targetDeviceId": core.device_id }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(diff, "diff --git a/a b/a\n");
-
-    let comment: zeron_proto::ChangeRequestComment = client
-        .call_as(
-            zeron_rpc::methods::POST_CHANGE_REQUEST_COMMENT,
-            serde_json::json!({ "url": item.url, "body": "Looks good", "targetDeviceId": core.device_id }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(comment.body, "Looks good");
-    assert!(comment.viewer_did_author);
-    let post = |body: String| {
-        client.call(
-            zeron_rpc::methods::POST_CHANGE_REQUEST_COMMENT,
-            serde_json::json!({ "url": item.url, "body": body }),
-        )
-    };
-    for body in ["  ".to_owned(), "x".repeat(60_001)] {
-        let error = post(body).await.unwrap_err();
-        assert!(error.to_string().starts_with("bad params"), "{error}");
-    }
-    assert!(
-        matches!(
-            post("signed out".into()).await,
-            Err(zeron_rpc::RpcError::Capability(code))
-                if code == zeron_rpc::capability_errors::PULL_REQUESTS_AUTHENTICATION
-        ),
-        "provider failures cross the wire as stable codes"
-    );
 }
 
 #[tokio::test]

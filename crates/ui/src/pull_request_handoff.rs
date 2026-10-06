@@ -3,7 +3,6 @@
 //! commands an agent needs. The prompt is only staged in the composer; the
 //! user reviews and sends it.
 use super::*;
-use zeron_proto::ChangeRequestCheck;
 
 /// What the new session should do with the pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,30 +47,12 @@ impl Handoff {
     }
 }
 
-fn check_status(check: &ChangeRequestCheck) -> String {
-    [&check.conclusion, &check.state, &check.status]
-        .into_iter()
-        .find(|value| !value.is_empty())
-        .map(|value| value.to_ascii_uppercase())
-        .unwrap_or_default()
-}
-
 /// Failed checks as (name, details link).
 pub(super) fn failing_checks(detail: &ChangeRequestDetail) -> Vec<(String, String)> {
     detail
         .status_check_rollup
         .iter()
-        .filter(|check| {
-            matches!(
-                check_status(check).as_str(),
-                "FAILURE"
-                    | "ERROR"
-                    | "TIMED_OUT"
-                    | "ACTION_REQUIRED"
-                    | "CANCELLED"
-                    | "STARTUP_FAILURE"
-            )
-        })
+        .filter(|check| check_failed(&check_status(check)))
         .map(|check| {
             let name = if check.name.is_empty() {
                 check.context.clone()
@@ -294,6 +275,7 @@ impl PullRequestDetailPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::ChangeRequestCheck;
 
     fn detail() -> ChangeRequestDetail {
         ChangeRequestDetail {

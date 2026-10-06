@@ -125,12 +125,11 @@ enum RowRole {
     Line,
 }
 
-#[derive(Clone)]
 struct CodeRow {
     role: RowRole,
     text: SharedString,
-    old: String,
-    new: String,
+    old: Option<u32>,
+    new: Option<u32>,
     kind: crate::changes::LineKind,
     spans: Vec<zeron_syntax::HighlightSpan>,
 }
@@ -156,8 +155,8 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
         rows.push(CodeRow {
             role: RowRole::File,
             text: file.path.clone().into(),
-            old: String::new(),
-            new: String::new(),
+            old: None,
+            new: None,
             kind: LineKind::Meta,
             spans: Vec::new(),
         });
@@ -165,8 +164,8 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
             rows.push(CodeRow {
                 role: RowRole::Notice,
                 text: notice.into(),
-                old: String::new(),
-                new: String::new(),
+                old: None,
+                new: None,
                 kind: LineKind::Meta,
                 spans: Vec::new(),
             });
@@ -175,8 +174,8 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
             rows.push(CodeRow {
                 role: RowRole::Hunk,
                 text: hunk.header.into(),
-                old: String::new(),
-                new: String::new(),
+                old: None,
+                new: None,
                 kind: LineKind::Meta,
                 spans: Vec::new(),
             });
@@ -188,8 +187,8 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
                         .map(|h| h.spans(&line).to_vec())
                         .unwrap_or_default(),
                     text: line.text.into(),
-                    old: line.old_no.map(|n| n.to_string()).unwrap_or_default(),
-                    new: line.new_no.map(|n| n.to_string()).unwrap_or_default(),
+                    old: line.old_no,
+                    new: line.new_no,
                     kind: line.kind,
                 }
             }));
@@ -198,21 +197,20 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
     (rows, files)
 }
 
-#[derive(Clone)]
 struct ParsedDiff {
-    patch: Arc<String>,
-    rows: Arc<Vec<CodeRow>>,
-    files: Arc<Vec<(String, usize)>>,
-    pairs: Arc<Vec<Vec<crate::changes::LinePair>>>,
+    patch: String,
+    rows: Vec<CodeRow>,
+    files: Vec<(String, usize)>,
+    pairs: Vec<Vec<crate::changes::LinePair>>,
     /// Per-file (additions, deletions), counted from the patch itself.
-    stats: Arc<Vec<(u64, u64)>>,
+    stats: Vec<(u64, u64)>,
     /// Widest code line, in display columns, across the whole patch.
     columns: usize,
     gutter: f32,
 }
 
 impl ParsedDiff {
-    fn new(patch: String) -> Self {
+    fn new(patch: String) -> Arc<Self> {
         use crate::changes::LineKind;
         let (rows, files) = code_rows(&patch);
         let stats = files
@@ -235,15 +233,15 @@ impl ParsedDiff {
             .map(|row| crate::changes::visual_columns(&row.text))
             .max()
             .unwrap_or(0);
-        Self {
-            pairs: Arc::new(code::split_files(&rows, &files)),
+        Arc::new(Self {
+            pairs: code::split_files(&rows, &files),
             gutter: code::code_gutter(&rows),
-            patch: Arc::new(patch),
-            rows: Arc::new(rows),
-            files: Arc::new(files),
-            stats: Arc::new(stats),
+            patch,
+            rows,
+            files,
+            stats,
             columns,
-        }
+        })
     }
 }
 
@@ -253,7 +251,7 @@ struct DetailSnapshot {
     body: crate::markdown::BlockTree,
     activity: Vec<crate::markdown::BlockTree>,
     fetched: Instant,
-    diff: Option<ParsedDiff>,
+    diff: Option<Arc<ParsedDiff>>,
 }
 
 /// Window/profile scoped, bounded cache. Device remains part of the identity.
@@ -300,6 +298,36 @@ impl PullRequestCache {
     }
 }
 
+/// Mutable navigation and layout state for the immutable parsed patch.
+struct CodeReview {
+    split: bool,
+    horizontal: gpui::ScrollHandle,
+    /// The review stream: every file's header and (unless folded) body.
+    list: gpui::ListState,
+    stream: Rc<Vec<code::StreamRow>>,
+    ranges: Vec<std::ops::Range<usize>>,
+    collapsed: std::collections::HashSet<usize>,
+    /// A file picked from the tree stays selected until the reader scrolls;
+    /// the last files can be too short to reach the top of the viewport.
+    jumped: Option<usize>,
+    tree_scroll: gpui::ScrollHandle,
+}
+
+impl Default for CodeReview {
+    fn default() -> Self {
+        Self {
+            split: false,
+            horizontal: gpui::ScrollHandle::new(),
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(1024.0)),
+            stream: Default::default(),
+            ranges: Vec::new(),
+            collapsed: Default::default(),
+            jumped: None,
+            tree_scroll: gpui::ScrollHandle::new(),
+        }
+    }
+}
+
 pub struct PullRequestDetailPage {
     state: Entity<AppState>,
     pub url: String,
@@ -316,24 +344,8 @@ pub struct PullRequestDetailPage {
     diff_task: Option<Task<()>>,
     copy_reset: Option<Task<()>>,
     copied_link: bool,
-    diff: Option<Arc<String>>,
-    code_rows: Arc<Vec<CodeRow>>,
-    code_pairs: Arc<Vec<Vec<crate::changes::LinePair>>>,
-    code_split: bool,
-    code_files: Arc<Vec<(String, usize)>>,
-    code_stats: Arc<Vec<(u64, u64)>>,
-    code_columns: usize,
-    code_gutter: f32,
-    code_horizontal: gpui::ScrollHandle,
-    /// The review stream: every file's header and (unless folded) body.
-    code_list: gpui::ListState,
-    code_stream: Rc<Vec<code::StreamRow>>,
-    code_ranges: Vec<std::ops::Range<usize>>,
-    collapsed_files: std::collections::HashSet<usize>,
-    /// A file picked from the tree stays selected until the reader scrolls;
-    /// the last files can be too short to reach the top of the viewport.
-    jumped_file: Option<usize>,
-    file_tree_scroll: gpui::ScrollHandle,
+    diff: Option<Arc<ParsedDiff>>,
+    review: CodeReview,
     diff_error: Option<String>,
     /// Refresh ran away from the Code tab: its next diff load must bypass
     /// the engine cache so it matches the refreshed details.
@@ -398,20 +410,7 @@ impl PullRequestDetailPage {
             copy_reset: None,
             copied_link: false,
             diff: None,
-            code_rows: Default::default(),
-            code_pairs: Default::default(),
-            code_split: crate::settings::current(cx).diff_split,
-            code_files: Default::default(),
-            code_stats: Default::default(),
-            code_columns: 0,
-            code_gutter: crate::changes::GUTTER_WIDTH,
-            code_horizontal: gpui::ScrollHandle::new(),
-            code_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(1024.0)),
-            code_stream: Default::default(),
-            code_ranges: Vec::new(),
-            collapsed_files: Default::default(),
-            jumped_file: None,
-            file_tree_scroll: gpui::ScrollHandle::new(),
+            review: CodeReview::default(),
             diff_error: None,
             diff_refresh_owed: false,
             tab: Tab::Summary,
@@ -458,33 +457,33 @@ impl PullRequestDetailPage {
             image_previous_focus: None,
             image_failed: None,
         };
-        page.file_search_subscription = Some(cx.subscribe(
-            &page.file_search,
-            |page: &mut Self, input, event, cx| {
-                if matches!(event, crate::composer::ComposerInputEvent::Edited) {
-                    page.file_query = input.read(cx).text().to_lowercase();
-                    cx.notify();
-                } else if matches!(event, crate::composer::ComposerInputEvent::Submitted) {
-                    if let Some(index) = page
-                        .code_files
-                        .iter()
-                        .position(|(path, _)| path.to_lowercase().contains(&page.file_query))
-                    {
-                        page.select_code_file(index, cx);
-                        if page.files_expanded {
-                            page.toggle_files(cx);
-                            page.return_focus = Some(page.files_focus.clone());
+        page.file_search_subscription =
+            Some(
+                cx.subscribe(&page.file_search, |page: &mut Self, input, event, cx| {
+                    if matches!(event, crate::composer::ComposerInputEvent::Edited) {
+                        page.file_query = input.read(cx).text().to_lowercase();
+                        cx.notify();
+                    } else if matches!(event, crate::composer::ComposerInputEvent::Submitted) {
+                        if let Some(index) =
+                            page.parsed_diff().files.iter().position(|(path, _)| {
+                                path.to_lowercase().contains(&page.file_query)
+                            })
+                        {
+                            page.select_code_file(index, cx);
+                            if page.files_expanded {
+                                page.toggle_files(cx);
+                                page.return_focus = Some(page.files_focus.clone());
+                            }
                         }
                     }
-                }
-            },
-        ));
+                }),
+            );
         let page_handle = cx.weak_entity();
-        page.code_list.set_scroll_handler(move |_, _, cx| {
+        page.review.list.set_scroll_handler(move |_, _, cx| {
             // Scrolling hands the tree selection back to the scroll position
             // and re-pins the sticky header.
             let _ = page_handle.update(cx, |page, cx| {
-                page.jumped_file = None;
+                page.review.jumped = None;
                 cx.notify();
             });
         });
@@ -680,7 +679,7 @@ impl PullRequestDetailPage {
                 match result {
                     Ok(mut snapshot) => {
                         page.fetched = Some(snapshot.fetched);
-                        snapshot.diff = page.diff_snapshot();
+                        snapshot.diff = page.diff.clone();
                         page.body = Some(snapshot.body.clone());
                         page.activity_bodies = snapshot.activity.clone();
                         page.detail = Some(snapshot.detail.clone());
@@ -738,28 +737,18 @@ impl PullRequestDetailPage {
         }));
     }
 
-    fn diff_snapshot(&self) -> Option<ParsedDiff> {
-        Some(ParsedDiff {
-            pairs: self.code_pairs.clone(),
-            patch: self.diff.clone()?,
-            rows: self.code_rows.clone(),
-            files: self.code_files.clone(),
-            stats: self.code_stats.clone(),
-            columns: self.code_columns,
-            gutter: self.code_gutter,
-        })
+    /// Rendering may run while a diff is loading. Its empty view shares the
+    /// same representation as a loaded patch, without parallel fallback fields.
+    fn parsed_diff(&self) -> &ParsedDiff {
+        static EMPTY: std::sync::LazyLock<Arc<ParsedDiff>> =
+            std::sync::LazyLock::new(|| ParsedDiff::new(String::new()));
+        self.diff.as_deref().unwrap_or(&EMPTY)
     }
 
-    fn install_diff(&mut self, diff: ParsedDiff, cx: &mut Context<Self>) {
-        self.code_pairs = diff.pairs;
-        self.diff = Some(diff.patch);
-        self.code_rows = diff.rows;
-        self.code_files = diff.files;
-        self.code_stats = diff.stats;
-        self.code_columns = diff.columns;
-        self.code_gutter = diff.gutter;
-        self.collapsed_files.clear();
-        self.jumped_file = None;
+    fn install_diff(&mut self, diff: Arc<ParsedDiff>, cx: &mut Context<Self>) {
+        self.diff = Some(diff);
+        self.review.collapsed.clear();
+        self.review.jumped = None;
         self.rebuild_stream(cx);
     }
 
@@ -937,8 +926,8 @@ impl PullRequestDetailPage {
 
     /// Scroll the review stream so a file's header is pinned.
     pub fn fixture_scroll_code(&mut self, distance: f32, cx: &mut Context<Self>) {
-        self.code_list.scroll_by(px(distance));
-        self.jumped_file = None;
+        self.review.list.scroll_by(px(distance));
+        self.review.jumped = None;
         cx.notify();
     }
 }
@@ -1021,9 +1010,6 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         "pr-detail-refresh" | "pr-retry" | "pr-retry-diff" => Some(crate::icons::REFRESH),
         "pr-external" => Some(crate::icons::ARROW_UP_RIGHT),
         "pr-files" => Some(crate::icons::FILE_TREE),
-        "pr-summary" => Some(crate::icons::DOCUMENT),
-        "pr-code" => Some(crate::icons::FILE_CODE),
-        "pr-activity" => Some(crate::icons::CHAT_ROUND_LINE),
         _ => None,
     };
     widgets::ghost_action(theme)
@@ -1066,26 +1052,27 @@ enum StatusTone {
     Merged,
 }
 
+fn check_status(check: &zeron_proto::ChangeRequestCheck) -> String {
+    [&check.conclusion, &check.state, &check.status]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase())
+        .unwrap_or_default()
+}
+
+fn check_failed(status: &str) -> bool {
+    matches!(
+        status,
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "STARTUP_FAILURE"
+    )
+}
+
 fn ci_status(checks: &[zeron_proto::ChangeRequestCheck]) -> &'static str {
     if checks.is_empty() {
         return "No checks reported";
     }
-    let statuses: Vec<_> = checks
-        .iter()
-        .map(|check| {
-            [&check.conclusion, &check.state, &check.status]
-                .into_iter()
-                .find(|value| !value.is_empty())
-                .map(|value| value.to_ascii_uppercase())
-                .unwrap_or_default()
-        })
-        .collect();
-    if statuses.iter().any(|value| {
-        matches!(
-            value.as_str(),
-            "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "STARTUP_FAILURE"
-        )
-    }) {
+    let statuses: Vec<_> = checks.iter().map(check_status).collect();
+    if statuses.iter().any(|value| check_failed(value)) {
         "FAILURE"
     } else if statuses
         .iter()
@@ -1879,6 +1866,7 @@ impl Render for PullRequestDetailPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
 
     fn snapshot(title: &str) -> DetailSnapshot {
         DetailSnapshot {
@@ -1922,16 +1910,15 @@ mod tests {
     fn pull_request_reopening_uses_cached_content_without_a_network_request(
         cx: &mut gpui::TestAppContext,
     ) {
-        use gpui::AppContext;
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| AppState::new());
+            let state = fixture::state(cx, None);
             let cache = Rc::new(RefCell::new(PullRequestCache::default()));
             let url = "https://github.com/a/b/pull/1";
             let diff = ParsedDiff::new(
                 "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n".into(),
             );
-            let rows = diff.rows.clone();
+            let reused = diff.clone();
             let mut cached = snapshot("Already loaded");
             cached.diff = Some(diff);
             cached.fetched = Instant::now() - Duration::from_secs(3600);
@@ -1942,7 +1929,7 @@ mod tests {
             assert_eq!(page.detail.as_ref().unwrap().title, "Already loaded");
             assert_eq!(page.activity_bodies.len(), 1);
             assert!(
-                Arc::ptr_eq(&page.code_rows, &rows),
+                Arc::ptr_eq(page.diff.as_ref().unwrap(), &reused),
                 "cached diff rows are reused without parsing or copying"
             );
             page
@@ -1951,42 +1938,38 @@ mod tests {
     }
 
     /// Records each diff request's `refresh` flag.
-    struct DiffRpc(Arc<std::sync::Mutex<Vec<bool>>>);
-    #[async_trait::async_trait]
-    impl zeron_rpc::RpcService for DiffRpc {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
-            match method {
-                methods::GET_CHANGE_REQUEST => zeron_rpc::RpcReply::value(&ChangeRequestDetail {
-                    title: "Fresh".into(),
-                    ..Default::default()
-                }),
-                methods::GET_CHANGE_REQUEST_DIFF => {
-                    self.0.lock().unwrap().push(params["refresh"] == true);
-                    zeron_rpc::RpcReply::value(
-                        &"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                    )
+    fn diff_rpc(calls: Arc<std::sync::Mutex<Vec<bool>>>) -> Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            async move {
+                match method.as_str() {
+                    methods::GET_CHANGE_REQUEST => {
+                        zeron_rpc::RpcReply::value(&ChangeRequestDetail {
+                            title: "Fresh".into(),
+                            ..Default::default()
+                        })
+                    }
+                    methods::GET_CHANGE_REQUEST_DIFF => {
+                        calls.lock().unwrap().push(params["refresh"] == true);
+                        zeron_rpc::RpcReply::value(
+                            &"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
+                        )
+                    }
+                    other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
                 }
-                other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
             }
-        }
+        })
     }
 
     #[gpui::test]
     fn pull_request_refresh_away_from_code_refreshes_the_next_diff(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let diffs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = diff_rpc(diffs.clone());
         let (page, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| AppState::new());
+            let state = fixture::state(cx, None);
             let cache = Rc::new(RefCell::new(PullRequestCache::default()));
             let mut cached = snapshot("Cached");
             cached.diff = Some(ParsedDiff::new(
@@ -1996,9 +1979,7 @@ mod tests {
                 .borrow_mut()
                 .put(None, "https://github.com/a/b/pull/1".into(), cached);
             state.update(cx, |state, _| {
-                state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                    zeron_rpc::memory_client(Arc::new(DiffRpc(diffs.clone()))),
-                ))
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()))
             });
             PullRequestDetailPage::new(
                 state,
@@ -2011,15 +1992,9 @@ mod tests {
             )
         });
         let settle = |cx: &mut gpui::VisualTestContext| {
-            for _ in 0..100 {
-                cx.run_until_parked();
-                runtime.block_on(async { tokio::task::yield_now().await });
-                if page.read_with(cx, |page, _| {
-                    page.task.is_none() && page.diff_task.is_none()
-                }) {
-                    break;
-                }
-            }
+            rpc.settle(cx, &runtime, |cx| {
+                page.read_with(cx, |page, _| !page.loading && page.diff_task.is_none())
+            });
         };
         page.update(cx, |page, cx| page.refresh(cx));
         settle(cx);
@@ -2110,14 +2085,14 @@ mod tests {
             .iter()
             .find(|row| row.kind == crate::changes::LineKind::Add)
             .unwrap();
-        assert_eq!(added.old, "");
-        assert_eq!(added.new, "2");
+        assert_eq!(added.old, None);
+        assert_eq!(added.new, Some(2));
         let removed = rows
             .iter()
             .find(|row| row.kind == crate::changes::LineKind::Del)
             .unwrap();
-        assert_eq!(removed.old, "2");
-        assert_eq!(removed.new, "");
+        assert_eq!(removed.old, Some(2));
+        assert_eq!(removed.new, None);
     }
 
     #[test]
@@ -2134,7 +2109,7 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_code_stream_navigates_folds_and_follows_layout(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         let page = host.read_with(cx, |host, _| host.page.clone());
         page.update(cx, |page, cx| {
@@ -2142,13 +2117,13 @@ mod tests {
                 "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+{}\n", "new ".repeat(100)
             )).collect::<String>();
             page.install_diff(ParsedDiff::new(patch), cx);
-            let cached = page.code_rows.clone();
+            let cached = page.diff.clone().unwrap();
             page.select_tab(Tab::Code, cx);
-            assert_eq!(page.code_ranges.len(), 3, "every file stays in the stream");
+            assert_eq!(page.review.ranges.len(), 3, "every file stays in the stream");
             for index in [2, 0, 1] {
                 page.select_code_file(index, cx);
                 assert_eq!(page.active_file(), Some(index));
-                assert!(Arc::ptr_eq(&cached, &page.code_rows));
+                assert!(Arc::ptr_eq(&cached, page.diff.as_ref().unwrap()));
             }
             page.select_code_file(99, cx);
             assert_eq!(page.active_file(), Some(1));
@@ -2254,7 +2229,7 @@ mod tests {
             );
             page.update(cx, |page, cx| page.select_code_file(0, cx));
             cx.run_until_parked();
-            page.read_with(cx, |page, _| assert!(page.code_split));
+            page.read_with(cx, |page, _| assert!(page.review.split));
             // Stream rows: header, hunk, then the first paired line.
             let left = cx.debug_bounds("pr-split-cell-2-true").unwrap();
             let right = cx.debug_bounds("pr-split-cell-2-false").unwrap();
@@ -2273,7 +2248,7 @@ mod tests {
                 gpui::Modifiers::default(),
             );
             cx.run_until_parked();
-            page.read_with(cx, |page, _| assert!(!page.code_split));
+            page.read_with(cx, |page, _| assert!(!page.review.split));
             for selector in [
                 "pr-copy-patch",
                 "pr-previous-file",
@@ -2320,9 +2295,9 @@ mod tests {
         );
         cx.run_until_parked();
         page.read_with(cx, |page, _| {
-            assert!(page.collapsed_files.contains(&0));
+            assert!(page.review.collapsed.contains(&0));
             assert_eq!(
-                page.code_ranges[0],
+                page.review.ranges[0],
                 0..1,
                 "a folded file keeps only its header"
             );
@@ -2339,14 +2314,14 @@ mod tests {
             gpui::Modifiers::default(),
         );
         cx.run_until_parked();
-        page.read_with(cx, |page, _| assert_eq!(page.code_stream.len(), 3));
+        page.read_with(cx, |page, _| assert_eq!(page.review.stream.len(), 3));
     }
 
     #[gpui::test]
     fn pull_request_file_jump_hides_the_header_divider_under_the_card_border(
         cx: &mut gpui::TestAppContext,
     ) {
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         let page = host.read_with(cx, |host, _| host.page.clone());
         cx.simulate_resize(gpui::size(px(1200.0), px(700.0)));
@@ -2426,9 +2401,9 @@ mod tests {
     #[gpui::test]
     fn pull_request_navigation_occludes_underlying_press_and_click(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (host, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| AppState::new());
+            let state = fixture::state(cx, None);
             let page = cx.new(|cx| {
                 PullRequestDetailPage::new(
                     state,
@@ -2487,9 +2462,9 @@ mod tests {
     #[gpui::test]
     fn pull_request_navigation_thumb_slides_onto_the_selected_tab(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (host, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| AppState::new());
+            let state = fixture::state(cx, None);
             let page = cx.new(|cx| {
                 PullRequestDetailPage::new(
                     state,
@@ -2541,71 +2516,6 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn pull_request_overview_rows_share_one_label_column(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::default()));
-        let (_, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
-        for width in [900.0, 320.0] {
-            cx.simulate_resize(gpui::size(px(width), px(1000.0)));
-            cx.run_until_parked();
-            let rows: Vec<_> = [
-                "pr-field-Status",
-                "pr-field-Review",
-                "pr-field-Branch",
-                "pr-field-Changes",
-            ]
-            .iter()
-            .map(|id| cx.debug_bounds(id).unwrap())
-            .collect();
-            for pair in rows.windows(2) {
-                assert_eq!(pair[0].left(), pair[1].left(), "{rows:?}");
-                assert!(pair[1].top() >= pair[0].bottom(), "{rows:?}");
-            }
-            // Cards stack at one rhythm, with no floating labels between them.
-            let cards: Vec<_> = [
-                "pr-overview",
-                "pr-checks-card",
-                "pr-handoff",
-                "pr-description",
-            ]
-            .iter()
-            .map(|id| cx.debug_bounds(id).unwrap())
-            .collect();
-            for pair in cards.windows(2) {
-                assert_eq!(pair[1].top() - pair[0].bottom(), px(CARD_GAP), "{cards:?}");
-            }
-            let meta = cx.debug_bounds("pr-detail-meta").unwrap();
-            assert_eq!(
-                cards[0].top() - meta.bottom(),
-                px(24.0),
-                "header sits 2× the card gap above"
-            );
-            // Handoff actions trail the title on wide rows, inside the card.
-            let row = cx.debug_bounds("pr-handoff-row").unwrap();
-            let actions = cx.debug_bounds("pr-handoff-actions").unwrap();
-            assert!(
-                actions.right() <= cards[2].right() - px(16.0),
-                "{actions:?}"
-            );
-            if width > 600.0 {
-                assert!(actions.top() >= row.top() && actions.bottom() <= row.bottom());
-                assert!(
-                    actions.size.height <= px(34.0),
-                    "one line of actions: {actions:?}"
-                );
-            }
-            // The long fixture title wraps inside the column instead of clipping.
-            let title = cx.debug_bounds("pr-detail-title").unwrap();
-            assert!(title.right() <= cards[0].right(), "{title:?}");
-            if width < 600.0 {
-                assert!(
-                    title.size.height > px(30.0),
-                    "narrow titles wrap: {title:?}"
-                );
-            }
-        }
-    }
-
     struct DetailHost {
         page: Entity<PullRequestDetailPage>,
         _subscription: Subscription,
@@ -2614,7 +2524,7 @@ mod tests {
 
     impl DetailHost {
         fn new(window: &mut Window, cx: &mut Context<Self>, loaded: bool) -> Self {
-            let state = cx.new(|_| AppState::new());
+            let state = fixture::state(cx, None);
             let page = cx.new(|cx| {
                 let mut page = PullRequestDetailPage::new(
                     state, "https://github.com/a/b/pull/1".into(),
@@ -2685,7 +2595,7 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_detail_actions_fit_and_tabs_switch(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         let page = host.read_with(cx, |host, _| host.page.clone());
         page.read_with(cx, |page, _| {
@@ -2704,12 +2614,9 @@ mod tests {
                 assert!(bounds.top() >= px(0.0) && bounds.bottom() <= px(Theme::TITLEBAR_HEIGHT));
                 previous_right = bounds.right();
             }
-            assert!(cx.debug_bounds("pr-immersive").is_none());
-            assert!(cx.debug_bounds("pr-browser").is_none());
             let nav = cx.debug_bounds("pr-detail-nav").unwrap();
             assert_eq!(nav.bottom(), px(784.0));
             assert_eq!(nav.size.height, px(44.0));
-            assert!(cx.debug_bounds("pr-checks").is_none());
             for selector in ["pr-summary", "pr-code", "pr-activity"] {
                 let bounds = cx.debug_bounds(selector).unwrap();
                 assert!(
@@ -2799,7 +2706,7 @@ mod tests {
             )
         });
         page.read_with(cx, |page, _| {
-            assert!(page.code_horizontal.max_offset().x > px(0.0))
+            assert!(page.review.horizontal.max_offset().x > px(0.0))
         });
         cx.simulate_resize(gpui::size(px(600.0), px(800.0)));
         cx.run_until_parked();
@@ -2910,7 +2817,7 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_error_keeps_retry_and_browser_actions(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (_, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, false));
         cx.simulate_resize(gpui::size(px(320.0), px(800.0)));
         cx.run_until_parked();

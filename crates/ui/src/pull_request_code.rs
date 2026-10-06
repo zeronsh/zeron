@@ -74,7 +74,9 @@ fn file_at(ranges: &[Range<usize>], row: usize) -> Option<usize> {
 pub(super) fn code_gutter(rows: &[CodeRow]) -> f32 {
     let digits = rows
         .iter()
-        .flat_map(|row| [row.old.len(), row.new.len()])
+        .flat_map(|row| [row.old, row.new])
+        .flatten()
+        .map(|number| number.checked_ilog10().unwrap_or(0) as usize + 1)
         .max()
         .unwrap_or(1);
     (digits as f32 * 6.6 + 14.0).max(crate::changes::GUTTER_WIDTH)
@@ -83,8 +85,8 @@ pub(super) fn code_gutter(rows: &[CodeRow]) -> f32 {
 fn diff_line(row: &CodeRow) -> crate::changes::DiffLine {
     crate::changes::DiffLine {
         kind: row.kind,
-        old_no: row.old.parse().ok(),
-        new_no: row.new.parse().ok(),
+        old_no: row.old,
+        new_no: row.new,
         text: row.text.to_string(),
     }
 }
@@ -198,15 +200,15 @@ impl PullRequestDetailPage {
     /// Rebuild the stream after the patch, layout, or folds change, keeping
     /// the file at the top of the viewport in place.
     pub(super) fn rebuild_stream(&mut self, cx: &mut Context<Self>) {
-        let Some(diff) = self.diff_snapshot() else {
+        let Some(diff) = &self.diff else {
             return;
         };
         let anchor = self.active_file();
-        let (rows, ranges) = stream(&diff, self.code_split, &self.collapsed_files);
-        self.code_list.reset(rows.len());
-        self.code_stream = Rc::new(rows);
-        self.code_ranges = ranges;
-        self.code_horizontal.set_offset(gpui::Point::default());
+        let (rows, ranges) = stream(diff, self.review.split, &self.review.collapsed);
+        self.review.list.reset(rows.len());
+        self.review.stream = Rc::new(rows);
+        self.review.ranges = ranges;
+        self.review.horizontal.set_offset(gpui::Point::default());
         if let Some(file) = anchor.filter(|file| *file > 0) {
             self.scroll_to_file(file);
         }
@@ -216,24 +218,25 @@ impl PullRequestDetailPage {
     /// The file under the top of the viewport, or the one just jumped to
     /// (the last files may be too short to reach the top).
     pub(super) fn active_file(&self) -> Option<usize> {
-        if self.code_ranges.is_empty() {
+        if self.review.ranges.is_empty() {
             return None;
         }
-        self.jumped_file
+        self.review
+            .jumped
             .or_else(|| {
                 file_at(
-                    &self.code_ranges,
-                    self.code_list.logical_scroll_top().item_ix,
+                    &self.review.ranges,
+                    self.review.list.logical_scroll_top().item_ix,
                 )
             })
-            .map(|file| file.min(self.code_ranges.len() - 1))
+            .map(|file| file.min(self.review.ranges.len() - 1))
     }
 
     fn scroll_to_file(&self, file: usize) {
-        if let Some(range) = self.code_ranges.get(file) {
+        if let Some(range) = self.review.ranges.get(file) {
             // Land just below the divider every header after the first
             // carries, so it never doubles the stream card's own border.
-            self.code_list.scroll_to(gpui::ListOffset {
+            self.review.list.scroll_to(gpui::ListOffset {
                 item_ix: range.start,
                 offset_in_item: px(header_divider(file)),
             });
@@ -242,7 +245,7 @@ impl PullRequestDetailPage {
 
     /// Arrow keys in the file tree: the previous or next file it shows.
     fn step_tree(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        let files: Vec<usize> = tree(&self.code_files, &self.file_query)
+        let files: Vec<usize> = tree(&self.parsed_diff().files, &self.file_query)
             .into_iter()
             .filter_map(|entry| match entry {
                 TreeEntry::File { index, .. } => Some(index),
@@ -266,21 +269,21 @@ impl PullRequestDetailPage {
     }
 
     pub(super) fn select_code_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.code_ranges.len() {
+        if index >= self.review.ranges.len() {
             return;
         }
         self.scroll_to_file(index);
-        self.jumped_file = Some(index);
+        self.review.jumped = Some(index);
         cx.notify();
     }
 
     fn toggle_fold(&mut self, file: usize, cx: &mut Context<Self>) {
-        if !self.collapsed_files.remove(&file) {
-            self.collapsed_files.insert(file);
+        if !self.review.collapsed.remove(&file) {
+            self.review.collapsed.insert(file);
         }
         // Keep the toggled header where the reader is looking.
         let anchor = self.active_file();
-        self.jumped_file = None;
+        self.review.jumped = None;
         self.rebuild_stream(cx);
         if anchor == Some(file) {
             self.scroll_to_file(file);
@@ -288,18 +291,18 @@ impl PullRequestDetailPage {
     }
 
     fn toggle_all_folds(&mut self, cx: &mut Context<Self>) {
-        if self.collapsed_files.len() == self.code_ranges.len() {
-            self.collapsed_files.clear();
+        if self.review.collapsed.len() == self.review.ranges.len() {
+            self.review.collapsed.clear();
         } else {
-            self.collapsed_files = (0..self.code_ranges.len()).collect();
+            self.review.collapsed = (0..self.review.ranges.len()).collect();
         }
-        self.jumped_file = None;
+        self.review.jumped = None;
         self.rebuild_stream(cx);
     }
 
     pub(super) fn toggle_split(&mut self, cx: &mut Context<Self>) {
-        self.code_split = !self.code_split;
-        let split = self.code_split;
+        self.review.split = !self.review.split;
+        let split = self.review.split;
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             settings.diff_split = split;
         });
@@ -315,12 +318,15 @@ impl PullRequestDetailPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let Some(row) = self.code_stream.get(index).copied() else {
+        let Some(row) = self.review.stream.get(index).copied() else {
+            return div().into_any_element();
+        };
+        let Some(diff) = &self.diff else {
             return div().into_any_element();
         };
         let text_width = self.code_text_width(&theme, window);
-        let gutter = self.code_gutter;
-        let rows = self.code_rows.clone();
+        let gutter = diff.gutter;
+        let rows = &diff.rows;
         let meta = |row: &CodeRow, theme: &Theme| match row.role {
             RowRole::Hunk => Some(crate::changes::hunk_header_row(&row.text, theme)),
             RowRole::Notice => Some(crate::changes::notice_row(row.text.to_string(), theme)),
@@ -340,13 +346,13 @@ impl PullRequestDetailPage {
                         &theme,
                         gutter,
                         text_width,
-                        &self.code_horizontal,
+                        &self.review.horizontal,
                         index,
                     )
                 })
             }
             StreamRow::Pair(file, pair) => {
-                let (left, right) = self.code_pairs[file][pair];
+                let (left, right) = diff.pairs[file][pair];
                 let first = &rows[left.or(right).unwrap_or_default() as usize];
                 meta(first, &theme).unwrap_or_else(|| {
                     let left_row = left.map(|i| &rows[i as usize]);
@@ -365,7 +371,7 @@ impl PullRequestDetailPage {
                         &theme,
                         gutter,
                         text_width,
-                        &self.code_horizontal,
+                        &self.review.horizontal,
                         index,
                     )
                 })
@@ -383,7 +389,7 @@ impl PullRequestDetailPage {
             .map(|advance| advance.as_f32())
             .unwrap_or(size.as_f32() * 0.6);
         // Slack covers ligatures and wide glyphs the column count misses.
-        self.code_columns as f32 * advance * 1.05
+        self.parsed_diff().columns as f32 * advance * 1.05
     }
 
     fn file_header(
@@ -394,7 +400,8 @@ impl PullRequestDetailPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let path = self
-            .code_files
+            .parsed_diff()
+            .files
             .get(file)
             .map(|(path, _)| path.clone())
             .unwrap_or_default();
@@ -402,8 +409,13 @@ impl PullRequestDetailPage {
             Some((directory, name)) => (format!("{directory}/"), name.to_owned()),
             None => (String::new(), path.clone()),
         };
-        let collapsed = self.collapsed_files.contains(&file);
-        let (additions, deletions) = self.code_stats.get(file).copied().unwrap_or_default();
+        let collapsed = self.review.collapsed.contains(&file);
+        let (additions, deletions) = self
+            .parsed_diff()
+            .stats
+            .get(file)
+            .copied()
+            .unwrap_or_default();
         let paint = crate::changes::sticky_file_header_paint(theme);
         // Frosted: the pinned copy blurs what scrolls beneath it and keeps the
         // rows' own translucent wash, so both read as one header. Opaque
@@ -503,17 +515,17 @@ impl PullRequestDetailPage {
     /// The current file's header, pinned over the stream while its body
     /// scrolls and pushed up by the next file's header.
     fn sticky_header(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let top = self.code_list.logical_scroll_top();
-        let file = file_at(&self.code_ranges, top.item_ix)?;
-        let range = self.code_ranges.get(file)?;
+        let top = self.review.list.logical_scroll_top();
+        let file = file_at(&self.review.ranges, top.item_ix)?;
+        let range = self.review.ranges.get(file)?;
         if !range.contains(&top.item_ix)
             || (top.item_ix == range.start && top.offset_in_item <= px(header_divider(file)))
         {
             return None;
         }
-        let next = self.code_ranges.get(file + 1).and_then(|next| {
-            let bounds = self.code_list.bounds_for_item(next.start)?;
-            Some((bounds.origin.y - self.code_list.viewport_bounds().origin.y).as_f32())
+        let next = self.review.ranges.get(file + 1).and_then(|next| {
+            let bounds = self.review.list.bounds_for_item(next.start)?;
+            Some((bounds.origin.y - self.review.list.viewport_bounds().origin.y).as_f32())
         });
         let header = self.file_header(file, true, theme, cx);
         // A faint veil of the content plane melts the blurred glyphs beneath
@@ -550,7 +562,7 @@ impl PullRequestDetailPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let entries = tree(&self.code_files, &self.file_query);
+        let entries = tree(&self.parsed_diff().files, &self.file_query);
         let mut list = div()
             .id("pr-file-list")
             .debug_selector(|| "pr-file-list".into())
@@ -569,7 +581,7 @@ impl PullRequestDetailPage {
             }))
             .size_full()
             .overflow_y_scroll()
-            .track_scroll(&self.file_tree_scroll)
+            .track_scroll(&self.review.tree_scroll)
             .flex()
             .flex_col()
             .gap(px(1.0))
@@ -616,9 +628,13 @@ impl PullRequestDetailPage {
                     .into_any_element(),
                 TreeEntry::File { index, name, depth } => {
                     let selected = active == Some(index);
-                    let (additions, deletions) =
-                        self.code_stats.get(index).copied().unwrap_or_default();
-                    let path = &self.code_files[index].0;
+                    let (additions, deletions) = self
+                        .parsed_diff()
+                        .stats
+                        .get(index)
+                        .copied()
+                        .unwrap_or_default();
+                    let path = &self.parsed_diff().files[index].0;
                     div()
                         .id(SharedString::from(format!("pr-file-{index}")))
                         .debug_selector(move || format!("pr-file-{index}"))
@@ -662,8 +678,8 @@ impl PullRequestDetailPage {
         // The PR detail already knows the totals while the patch loads.
         let (file_count, additions, deletions) = match (&self.detail, loading) {
             (Some(detail), true) => (detail.files.len(), detail.additions, detail.deletions),
-            _ => self.code_stats.iter().fold(
-                (self.code_files.len(), 0, 0),
+            _ => self.parsed_diff().stats.iter().fold(
+                (self.parsed_diff().files.len(), 0, 0),
                 |(files, a, d), (add, del)| (files, a + add, d + del),
             ),
         };
@@ -704,7 +720,7 @@ impl PullRequestDetailPage {
             .child(
                 div().flex_1().min_h_0().relative().child(
                     crate::edge_fade::edge_faded(16.0, true, true, list)
-                        .fade_overflow_y(&self.file_tree_scroll),
+                        .fade_overflow_y(&self.review.tree_scroll),
                 ),
             )
             .into_any_element()
@@ -720,9 +736,9 @@ impl PullRequestDetailPage {
         let wide = self.code_pane_width.is_some_and(|width| width >= WIDE_MIN);
         let loading = self.diff.is_none();
         let active = self.active_file();
-        let file_count = self.code_files.len();
-        let all_folded = file_count > 0 && self.collapsed_files.len() == file_count;
-        let patch = self.diff.clone().unwrap_or_default();
+        let file_count = self.parsed_diff().files.len();
+        let all_folded = file_count > 0 && self.review.collapsed.len() == file_count;
+        let diff = self.diff.clone();
         let measure = {
             let page = cx.weak_entity();
             gpui::canvas(
@@ -819,20 +835,23 @@ impl PullRequestDetailPage {
             .child(
                 action(
                     "pr-split",
-                    if self.code_split {
+                    if self.review.split {
                         "Show unified diff"
                     } else {
                         "Show split diff"
                     },
                     theme,
                 )
-                .aria_selected(self.code_split)
-                .when(self.code_split, |el| el.bg(theme.glass_hover()))
+                .aria_selected(self.review.split)
+                .when(self.review.split, |el| el.bg(theme.glass_hover()))
                 .on_click(cx.listener(|page, _, _, cx| page.toggle_split(cx))),
             )
             .child(
                 action("pr-copy-patch", "Copy diff", theme).on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(patch.as_ref().clone()));
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                        diff.as_ref()
+                            .map_or_else(String::new, |diff| diff.patch.clone()),
+                    ));
                 }),
             );
         let viewport = div()
@@ -854,9 +873,12 @@ impl PullRequestDetailPage {
                     ))
                 } else {
                     el.child(
-                        gpui::list(self.code_list.clone(), cx.processor(Self::render_code_row))
-                            .size_full()
-                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                        gpui::list(
+                            self.review.list.clone(),
+                            cx.processor(Self::render_code_row),
+                        )
+                        .size_full()
+                        .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
                     )
                     .children(self.sticky_header(theme, cx))
                 }
@@ -982,7 +1004,7 @@ mod tests {
             .map(|name| format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"))
             .collect::<String>();
         let parsed = ParsedDiff::new(patch);
-        assert_eq!(*parsed.stats, vec![(1, 1), (1, 1)]);
+        assert_eq!(parsed.stats, vec![(1, 1), (1, 1)]);
         let order = ["crates/ui/build.rs", "crates/ui/assets/a.svg", "Cargo.toml", "crates/ui/Cargo.toml"]
             .iter()
             .map(|name| format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"))

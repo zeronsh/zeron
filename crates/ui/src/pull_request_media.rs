@@ -498,6 +498,7 @@ pub(super) fn avatar(login: &str, id: SharedString, size: f32, theme: &Theme) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pull_request_test_support as fixture;
 
     #[test]
     fn pull_request_html_images_handle_multiline_attributes_and_entities() {
@@ -637,8 +638,8 @@ mod tests {
                 }
             }
         });
+        fixture::init(cx);
         cx.update(|cx| {
-            cx.set_global(Theme::default());
             cx.set_http_client(client);
         });
         let (view, cx) = cx.add_window_view(|_, _| MediaFixture {

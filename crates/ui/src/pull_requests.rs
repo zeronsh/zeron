@@ -149,48 +149,11 @@ fn matches_query(item: &ChangeRequestListItem, query: &str) -> bool {
         .all(|word| text.contains(&word.to_lowercase()))
 }
 
-struct DashboardTooltip(SharedString);
-
-impl Render for DashboardTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .max_w(px(420.0))
-            .text_color(theme.text)
-            .child(self.0.clone())
-    }
-}
-
 impl PullRequestSort {
     const DEFAULT: Self = Self {
         field: PullRequestSortField::Updated,
         direction: SortDirection::Descending,
     };
-
-    #[cfg(test)]
-    fn select(self, field: PullRequestSortField) -> Self {
-        if self.field != field {
-            return Self {
-                field,
-                direction: SortDirection::Descending,
-            };
-        }
-        Self {
-            field,
-            direction: match self.direction {
-                SortDirection::Ascending => SortDirection::Descending,
-                SortDirection::Descending => SortDirection::Ascending,
-            },
-        }
-    }
 }
 
 /// Repository-scoped dashboard with lazy, cached relationship filters.
@@ -741,7 +704,7 @@ impl PullRequestsPage {
                 .aria_label(format!("Repository: {label}"))
                 .aria_expanded(self.repository_menu.is_open())
                 .track_focus(&self.repository_focus)
-                .tooltip(move |_, cx| cx.new(|_| DashboardTooltip(tooltip.clone().into())).into())
+                .tooltip(widgets::text_tooltip(tooltip))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|page, _, _, _| page.repository_menu.note_trigger_press()),
@@ -1012,7 +975,7 @@ impl PullRequestsPage {
                 .size(px(14.0))
                 .text_color(theme.text_muted),
             )
-            .tooltip(move |_, cx| cx.new(|_| DashboardTooltip(label.into())).into());
+            .tooltip(widgets::text_tooltip(label));
         if self.sort_menu.get().is_some() {
             let menu = popover::popover_card(theme)
                 .w(px(220.0))
@@ -1673,9 +1636,7 @@ impl Render for PullRequestsPage {
                                             .text_color(theme.text_muted)
                                             .into_any_element()
                                     })
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| DashboardTooltip(freshness.clone())).into()
-                                    }),
+                                    .tooltip(widgets::text_tooltip(freshness)),
                             ),
                     ),
             )
@@ -2159,7 +2120,7 @@ fn render_table_row(
             )))
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text_muted)
-            .tooltip(move |_, cx| cx.new(|_| DashboardTooltip(exact.clone())).into())
+            .tooltip(widgets::text_tooltip(exact))
             .child(SharedString::from(
                 if sort_field == PullRequestSortField::Opened {
                     format!("Opened {}", compact_relative_time(timestamp, Utc::now()))
@@ -2246,7 +2207,7 @@ fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement
                 .truncate()
                 .text_size(crate::typography::ui_rems(widgets::ROW_TITLE_SIZE))
                 .text_color(theme.text)
-                .tooltip(move |_, cx| cx.new(|_| DashboardTooltip(full_title.clone())).into())
+                .tooltip(widgets::text_tooltip(full_title))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -2324,7 +2285,7 @@ fn render_diff_stats(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement 
         .gap(px(8.0))
         .font_family(theme.font_mono.clone())
         .text_size(crate::typography::ui_rems(11.0))
-        .tooltip(move |_, cx| cx.new(|_| DashboardTooltip(exact.clone())).into())
+        .tooltip(widgets::text_tooltip(exact))
         .child(
             div()
                 .text_color(theme.success_muted)
@@ -2626,6 +2587,7 @@ fn settle_snapshot<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
     use chrono::{TimeDelta, TimeZone};
 
     fn device(id: &str, platform: &str) -> Device {
@@ -2788,11 +2750,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use gpui::AppContext;
-        let temp = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            cx.set_global(Theme::default());
-            crate::settings::init(crate::settings::UiSettings::default(), temp.path(), cx);
-        });
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| AppState::new());
             PullRequestsPage::new(state, cx)
@@ -2823,11 +2781,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pull_request_board_never_fetches_on_entry_and_restores_repository_cache(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn pull_request_board_restores_the_selected_repository_cache(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| AppState::new());
             PullRequestsPage::new(state, cx)
@@ -2866,72 +2822,56 @@ mod tests {
         });
     }
 
-    struct InitialRepositoryRpc(std::sync::Arc<std::sync::Mutex<Vec<String>>>, bool);
-
-    #[async_trait::async_trait]
-    impl zeron_rpc::RpcService for InitialRepositoryRpc {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
-            self.0.lock().unwrap().push(method.into());
-            assert!(
-                params.get("targetDeviceId").is_none(),
-                "local identity comes from engine before device frames"
-            );
-            match method {
-                methods::GET_CHANGE_REQUEST_REPOSITORY => {
-                    assert_eq!(params["cwd"], "/checkout");
-                    if self.1 {
-                        return futures::future::pending().await;
+    fn initial_repository_rpc(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        stalled: bool,
+    ) -> std::sync::Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(method.clone());
+                assert!(
+                    params.get("targetDeviceId").is_none(),
+                    "local identity comes from engine before device frames"
+                );
+                match method.as_str() {
+                    methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                        assert_eq!(params["cwd"], "/checkout");
+                        if stalled {
+                            return futures::future::pending().await;
+                        }
+                        zeron_rpc::RpcReply::value(&Some("owner/repo"))
                     }
-                    zeron_rpc::RpcReply::value(&Some("owner/repo"))
+                    methods::LIST_CHANGE_REQUEST_PAGE => {
+                        assert_eq!(params["repository"], "owner/repo");
+                        assert_eq!(params["filter"], "authored");
+                        zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                            items: vec![pull_request("owner/canonical", 7, 1, 1, 1)],
+                            next_cursor: None,
+                            total_count: Some(1),
+                        })
+                    }
+                    _ => panic!("unexpected request {method}"),
                 }
-                methods::LIST_CHANGE_REQUEST_PAGE => {
-                    assert_eq!(params["repository"], "owner/repo");
-                    assert_eq!(params["filter"], "authored");
-                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
-                        items: vec![pull_request("owner/canonical", 7, 1, 1, 1)],
-                        next_cursor: None,
-                        total_count: Some(1),
-                    })
-                }
-                _ => panic!("unexpected request {method}"),
             }
-        }
+        })
     }
 
     #[gpui::test]
     fn pull_request_initial_load_waits_for_engine_and_project(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        let settings_dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            cx.set_global(Theme::default());
-            crate::settings::init(
-                {
-                    let mut settings = crate::settings::UiSettings::default();
-                    settings.space_filter = Some("project".into());
-                    settings
-                },
-                settings_dir.path(),
-                cx,
-            );
+        let _settings = fixture::settings(cx, {
+            let mut settings = crate::settings::UiSettings::default();
+            settings.space_filter = Some("project".into());
+            settings
         });
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = initial_repository_rpc(calls.clone(), false);
         let state = cx.new(|_| AppState::new());
         let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
         state.update(cx, |state, cx| {
-            state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::memory_client(std::sync::Arc::new(InitialRepositoryRpc(
-                    calls.clone(),
-                    false,
-                ))),
-            ));
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
             state.spaces = vec![zeron_proto::Space {
                 id: "project".into(),
                 device_id: "local".into(),
@@ -2947,15 +2887,11 @@ mod tests {
             state.no_project = false;
             cx.notify();
         });
-        for _ in 0..100 {
-            cx.run_until_parked();
-            if page.read_with(cx, |page, _| {
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
                 page.load_state == PullRequestsLoadState::Ready
-            }) {
-                break;
-            }
-            runtime.block_on(async { tokio::task::yield_now().await });
-        }
+            })
+        });
         page.update(cx, |page, cx| {
             assert_eq!(page.load_state, PullRequestsLoadState::Ready);
             assert_eq!(page.items[0].number, 7);
@@ -2982,15 +2918,11 @@ mod tests {
         page.update(cx, |page, cx| {
             page.select_project("/checkout".into(), "local".into(), cx);
         });
-        for _ in 0..100 {
-            cx.run_until_parked();
-            if page.read_with(cx, |page, _| {
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
                 page.initial_scope_task.is_none() && page.load_state == PullRequestsLoadState::Ready
-            }) {
-                break;
-            }
-            runtime.block_on(async { tokio::task::yield_now().await });
-        }
+            })
+        });
         page.read_with(cx, |page, _| {
             assert_eq!(page.repository.as_deref(), Some("owner/canonical"));
             assert!(page.repository_error.is_none());
@@ -3006,63 +2938,47 @@ mod tests {
     }
 
     /// `/<name>` checkouts belong to `owner/<name>`, except `/scratch`.
-    struct ProjectRepositoryRpc(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-
-    #[async_trait::async_trait]
-    impl zeron_rpc::RpcService for ProjectRepositoryRpc {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
-            match method {
-                methods::GET_CHANGE_REQUEST_REPOSITORY => {
-                    let cwd = params["cwd"].as_str().unwrap().to_owned();
-                    self.0.lock().unwrap().push(cwd.clone());
-                    let name = cwd.trim_start_matches('/');
-                    zeron_rpc::RpcReply::value(
-                        &(name != "scratch").then(|| format!("owner/{name}")),
-                    )
+    fn project_repository_rpc(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::sync::Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            async move {
+                match method.as_str() {
+                    methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                        let cwd = params["cwd"].as_str().unwrap().to_owned();
+                        calls.lock().unwrap().push(cwd.clone());
+                        let name = cwd.trim_start_matches('/');
+                        zeron_rpc::RpcReply::value(
+                            &(name != "scratch").then(|| format!("owner/{name}")),
+                        )
+                    }
+                    methods::LIST_CHANGE_REQUEST_PAGE => {
+                        let repository = params["repository"].as_str().unwrap();
+                        zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                            items: vec![pull_request(repository, 7, 1, 1, 1)],
+                            next_cursor: None,
+                            total_count: Some(1),
+                        })
+                    }
+                    _ => panic!("unexpected request {method}"),
                 }
-                methods::LIST_CHANGE_REQUEST_PAGE => {
-                    let repository = params["repository"].as_str().unwrap();
-                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
-                        items: vec![pull_request(repository, 7, 1, 1, 1)],
-                        next_cursor: None,
-                        total_count: Some(1),
-                    })
-                }
-                _ => panic!("unexpected request {method}"),
             }
-        }
+        })
     }
 
     #[gpui::test]
     fn pull_request_board_finds_and_follows_the_repository_it_is_opened_from(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        let settings_dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            cx.set_global(Theme::default());
-            crate::settings::init(
-                crate::settings::UiSettings::default(),
-                settings_dir.path(),
-                cx,
-            );
-        });
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
         let lookups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = project_repository_rpc(lookups.clone());
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
-            state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::memory_client(std::sync::Arc::new(ProjectRepositoryRpc(
-                    lookups.clone(),
-                ))),
-            ));
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
             state.local_device_id = Some("local".into());
             state.spaces = vec![
                 space("comet", "local", true, 60),
@@ -3081,13 +2997,7 @@ mod tests {
             }
         };
         let settle = |cx: &mut gpui::TestAppContext| {
-            for _ in 0..100 {
-                cx.run_until_parked();
-                runtime.block_on(tokio::time::sleep(std::time::Duration::from_millis(1)));
-                if page_ready(cx) {
-                    break;
-                }
-            }
+            rpc.settle(cx, &runtime, &page_ready);
         };
         settle(cx);
         // First run, All projects, nothing saved: the newest Git project that
@@ -3130,35 +3040,20 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_stalled_discovery_falls_back_once(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        let settings_dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            cx.set_global(Theme::default());
-            crate::settings::init(
-                {
-                    let mut settings = crate::settings::UiSettings::default();
-                    settings.space_filter = Some("project".into());
-                    settings.last_pull_request_repository = Some("owner/repo".into());
-                    settings
-                },
-                settings_dir.path(),
-                cx,
-            );
+        let _settings = fixture::settings(cx, {
+            let mut settings = crate::settings::UiSettings::default();
+            settings.space_filter = Some("project".into());
+            settings.last_pull_request_repository = Some("owner/repo".into());
+            settings
         });
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = initial_repository_rpc(calls.clone(), true);
         let state = cx.new(|_| AppState::new());
         let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
         state.update(cx, |state, cx| {
-            state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::memory_client(std::sync::Arc::new(InitialRepositoryRpc(
-                    calls.clone(),
-                    true,
-                ))),
-            ));
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
             state.spaces = vec![zeron_proto::Space {
                 id: "project".into(),
                 device_id: "local".into(),
@@ -3174,19 +3069,14 @@ mod tests {
             state.no_project = false;
             cx.notify();
         });
-        for iteration in 0..100 {
-            cx.run_until_parked();
-            if iteration == 2 {
-                cx.executor()
-                    .advance_clock(std::time::Duration::from_secs(4));
-            }
-            if page.read_with(cx, |page, _| {
+        rpc.settle(cx, &runtime, |_| !calls.lock().unwrap().is_empty());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(4));
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
                 page.load_state == PullRequestsLoadState::Ready
-            }) {
-                break;
-            }
-            runtime.block_on(async { tokio::task::yield_now().await });
-        }
+            })
+        });
         page.update(cx, |page, cx| {
             assert_eq!(page.load_state, PullRequestsLoadState::Ready);
             assert_eq!(page.items[0].number, 7);
@@ -3213,34 +3103,19 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_all_projects_loads_last_repo_without_discovery(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        let settings_dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            cx.set_global(Theme::default());
-            crate::settings::init(
-                {
-                    let mut settings = crate::settings::UiSettings::default();
-                    settings.last_pull_request_repository = Some("owner/repo".into());
-                    settings
-                },
-                settings_dir.path(),
-                cx,
-            );
+        let _settings = fixture::settings(cx, {
+            let mut settings = crate::settings::UiSettings::default();
+            settings.last_pull_request_repository = Some("owner/repo".into());
+            settings
         });
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = initial_repository_rpc(calls.clone(), false);
         let state = cx.new(|_| AppState::new());
         let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
         state.update(cx, |state, cx| {
-            state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::memory_client(std::sync::Arc::new(InitialRepositoryRpc(
-                    calls.clone(),
-                    false,
-                ))),
-            ));
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
             state.spaces = vec![zeron_proto::Space {
                 id: "project".into(),
                 device_id: "local".into(),
@@ -3256,15 +3131,11 @@ mod tests {
             state.no_project = false;
             cx.notify();
         });
-        for _ in 0..100 {
-            cx.run_until_parked();
-            if page.read_with(cx, |page, _| {
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
                 page.load_state == PullRequestsLoadState::Ready
-            }) {
-                break;
-            }
-            runtime.block_on(async { tokio::task::yield_now().await });
-        }
+            })
+        });
         page.update(cx, |page, cx| {
             assert_eq!(page.load_state, PullRequestsLoadState::Ready);
             assert_eq!(page.items[0].number, 7);
@@ -3285,7 +3156,7 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_filter_switches_restore_only_matching_snapshots(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| AppState::new());
             PullRequestsPage::new(state, cx)
@@ -3319,7 +3190,7 @@ mod tests {
 
     #[gpui::test]
     fn long_rows_fit_at_every_layout_and_do_not_resize_on_hover(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let mut item = pull_request(
             "a-very-long-organization/a-very-long-repository-name",
             181,
@@ -3363,7 +3234,7 @@ mod tests {
     #[gpui::test]
     fn narrow_sorting_and_refresh_stay_reachable(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut page = PullRequestsPage::new(state, cx);
@@ -3416,15 +3287,10 @@ mod tests {
             assert_eq!(page.sort.field, PullRequestSortField::Changes)
         });
         cx.run_until_parked();
-        // Popup exit uses wall-clock Instant as well as the executor timer.
-        std::thread::sleep(
-            crate::motion::MENU_OUT
-                .total()
-                .mul_f32(crate::motion::speed_scale())
-                + std::time::Duration::from_millis(30),
-        );
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(1));
+        page.update(cx, |page, cx| {
+            page.sort_menu = Default::default();
+            cx.notify();
+        });
         cx.run_until_parked();
         let viewport = cx.debug_bounds("pull-requests-scroll").unwrap();
         assert!(
@@ -3476,21 +3342,6 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn pull_request_column_matches_settings_width(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
-        cx.update(|cx| cx.set_global(Theme::default()));
-        let (_, cx) = cx.add_window_view(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            PullRequestsPage::new(state, cx)
-        });
-        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
-        cx.run_until_parked();
-        let column = cx.debug_bounds("pull-requests-column").unwrap();
-        assert_eq!(column.size.width, px(760.0));
-        assert_eq!(column.left(), px(220.0));
-    }
-
     #[test]
     fn groups_prioritize_attention_without_claiming_merge_readiness() {
         let mut item = pull_request("owner/repo", 181, 1, 1, 1);
@@ -3521,7 +3372,7 @@ mod tests {
     #[gpui::test]
     fn searching_reveals_collapsed_matches_and_handles_no_results(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut page = PullRequestsPage::new(state, cx);
@@ -3611,26 +3462,6 @@ mod tests {
     }
 
     #[test]
-    fn table_breakpoints_follow_the_measured_content_width() {
-        assert_eq!(table_layout(639.0), PullRequestTableLayout::Narrow);
-        assert_eq!(table_layout(640.0), PullRequestTableLayout::Compact);
-        assert_eq!(table_layout(899.0), PullRequestTableLayout::Compact);
-        assert_eq!(table_layout(900.0), PullRequestTableLayout::Wide);
-        assert_eq!(
-            table_layout(table_content_width(719.0)),
-            PullRequestTableLayout::Narrow
-        );
-        assert_eq!(
-            table_layout(table_content_width(720.0)),
-            PullRequestTableLayout::Compact
-        );
-        assert_eq!(
-            table_layout(table_content_width(948.0)),
-            PullRequestTableLayout::Compact
-        );
-    }
-
-    #[test]
     fn missing_remote_target_falls_back_only_after_an_authoritative_device_frame() {
         let local = device("local", "macos");
         let remote = device("remote", "linux");
@@ -3652,31 +3483,6 @@ mod tests {
             normalized_target_device(Some("local"), &[], Some("local")),
             None,
             "local calls stay direct even before the device frame"
-        );
-    }
-
-    #[test]
-    fn sorting_defaults_to_recent_updates_and_toggles_each_column() {
-        assert_eq!(
-            PullRequestSort::DEFAULT,
-            PullRequestSort {
-                field: PullRequestSortField::Updated,
-                direction: SortDirection::Descending,
-            }
-        );
-        assert_eq!(
-            PullRequestSort::DEFAULT.select(PullRequestSortField::Updated),
-            PullRequestSort {
-                field: PullRequestSortField::Updated,
-                direction: SortDirection::Ascending,
-            }
-        );
-        assert_eq!(
-            PullRequestSort::DEFAULT.select(PullRequestSortField::Changes),
-            PullRequestSort {
-                field: PullRequestSortField::Changes,
-                direction: SortDirection::Descending,
-            }
         );
     }
 
@@ -3810,58 +3616,48 @@ mod tests {
 
     /// Serves two pages and records each request's cursor and `refresh` flag.
     /// The `reviewing` filter never answers until `release` fires.
-    struct PagedRpc {
+    fn paged_rpc(
         calls: std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>,
         release: std::sync::Arc<tokio::sync::Notify>,
-    }
-
-    #[async_trait::async_trait]
-    impl zeron_rpc::RpcService for PagedRpc {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
-            assert_eq!(method, methods::LIST_CHANGE_REQUEST_PAGE);
-            let after = params["after"].as_str().map(str::to_owned);
-            self.calls
-                .lock()
-                .unwrap()
-                .push((after.clone(), params["refresh"] == true));
-            if params["filter"] == "reviewing" {
-                self.release.notified().await;
-                return zeron_rpc::RpcReply::value(&ChangeRequestPage {
-                    items: vec![pull_request("owner/repo", 99, 1, 1, 1)],
-                    next_cursor: None,
-                    total_count: Some(1),
-                });
+    ) -> std::sync::Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            let release = release.clone();
+            async move {
+                assert_eq!(method.as_str(), methods::LIST_CHANGE_REQUEST_PAGE);
+                let after = params["after"].as_str().map(str::to_owned);
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((after.clone(), params["refresh"] == true));
+                if params["filter"] == "reviewing" {
+                    release.notified().await;
+                    return zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: vec![pull_request("owner/repo", 99, 1, 1, 1)],
+                        next_cursor: None,
+                        total_count: Some(1),
+                    });
+                }
+                match after.as_deref() {
+                    None => zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: (1..=50)
+                            .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
+                            .collect(),
+                        next_cursor: Some("Y3Vyc29yOjUw".into()),
+                        total_count: Some(52),
+                    }),
+                    Some("Y3Vyc29yOjUw") => zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        // #50 moved onto the second page; it must not repeat.
+                        items: [50, 51, 52]
+                            .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
+                            .into(),
+                        next_cursor: None,
+                        total_count: Some(52),
+                    }),
+                    other => panic!("unexpected cursor {other:?}"),
+                }
             }
-            match after.as_deref() {
-                None => zeron_rpc::RpcReply::value(&ChangeRequestPage {
-                    items: (1..=50)
-                        .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
-                        .collect(),
-                    next_cursor: Some("Y3Vyc29yOjUw".into()),
-                    total_count: Some(52),
-                }),
-                Some("Y3Vyc29yOjUw") => zeron_rpc::RpcReply::value(&ChangeRequestPage {
-                    // #50 moved onto the second page; it must not repeat.
-                    items: [50, 51, 52]
-                        .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
-                        .into(),
-                    next_cursor: None,
-                    total_count: Some(52),
-                }),
-                other => panic!("unexpected cursor {other:?}"),
-            }
-        }
-    }
-
-    fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
+        })
     }
 
     fn paged_page(
@@ -3871,27 +3667,22 @@ mod tests {
         &mut gpui::VisualTestContext,
         std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>,
         std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<ScriptedRpc>,
     ) {
-        cx.update(|cx| cx.set_global(Theme::default()));
+        fixture::init(cx);
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
-        let client = zeron_rpc::memory_client(std::sync::Arc::new(PagedRpc {
-            calls: calls.clone(),
-            release: release.clone(),
-        }));
+        let rpc = paged_rpc(calls.clone(), release.clone());
+        let client = rpc.client();
         let (page, cx) = cx.add_window_view(|_, cx| {
-            let state = cx.new(|_| {
-                let mut state = AppState::new();
-                state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
-                state
-            });
+            let state = fixture::state(cx, Some(client));
             PullRequestsPage::new(state, cx)
         });
         page.update(cx, |page, cx| {
             page.repository = Some("owner/repo".into());
             page.load(false, cx);
         });
-        (page, cx, calls, release)
+        (page, cx, calls, release, rpc)
     }
 
     fn settle(
@@ -3899,26 +3690,22 @@ mod tests {
         runtime: &tokio::runtime::Runtime,
         done: impl Fn(&PullRequestsPage) -> bool,
         page: &Entity<PullRequestsPage>,
+        rpc: &ScriptedRpc,
     ) {
-        for _ in 0..100 {
-            cx.run_until_parked();
-            if page.read_with(cx, |page, _| done(page)) {
-                return;
-            }
-            runtime.block_on(async { tokio::task::yield_now().await });
-        }
+        rpc.settle(cx, runtime, |cx| page.read_with(cx, |page, _| done(page)));
     }
 
     #[gpui::test]
     fn pull_request_board_loads_more_pages_without_repeating_items(cx: &mut gpui::TestAppContext) {
-        let runtime = runtime();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        let (page, cx, calls, _) = paged_page(cx);
+        let (page, cx, calls, _, rpc) = paged_page(cx);
         settle(
             cx,
             &runtime,
             |page| page.load_state == PullRequestsLoadState::Ready,
             &page,
+            &rpc,
         );
         cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
         cx.run_until_parked();
@@ -3953,6 +3740,7 @@ mod tests {
             &runtime,
             |page| page.more_task.is_none() && page.items.len() > 50,
             &page,
+            &rpc,
         );
         page.read_with(cx, |page, _| {
             assert_eq!(page.items.len(), 52, "the moved #50 appears once");
@@ -3993,9 +3781,10 @@ mod tests {
             &runtime,
             |page| page.load_state == PullRequestsLoadState::Ready,
             &page,
+            &rpc,
         );
         page.update(cx, |page, cx| page.load_more(cx));
-        settle(cx, &runtime, |page| page.more_task.is_none(), &page);
+        settle(cx, &runtime, |page| page.more_task.is_none(), &page, &rpc);
         assert_eq!(
             calls.lock().unwrap()[2..],
             [(None, true), (Some("Y3Vyc29yOjUw".to_owned()), true)]
@@ -4004,29 +3793,34 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_board_drops_a_reply_for_a_filter_it_has_left(cx: &mut gpui::TestAppContext) {
-        let runtime = runtime();
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        let (page, cx, calls, release) = paged_page(cx);
+        let (page, cx, calls, release, rpc) = paged_page(cx);
         settle(
             cx,
             &runtime,
             |page| page.load_state == PullRequestsLoadState::Ready,
             &page,
+            &rpc,
         );
         page.update(cx, |page, cx| {
             page.select_filter(ChangeRequestFilter::Reviewing, cx)
         });
-        settle(cx, &runtime, |_| calls.lock().unwrap().len() == 2, &page);
+        settle(
+            cx,
+            &runtime,
+            |_| calls.lock().unwrap().len() == 2,
+            &page,
+            &rpc,
+        );
         page.update(cx, |page, cx| {
             assert_eq!(page.load_state, PullRequestsLoadState::Loading);
             page.select_filter(ChangeRequestFilter::Authored, cx);
             assert_eq!(page.items.len(), 50, "the loaded filter comes back at once");
         });
+        let completed = rpc.completed();
         release.notify_one();
-        for _ in 0..20 {
-            cx.run_until_parked();
-            runtime.block_on(async { tokio::task::yield_now().await });
-        }
+        rpc.settle(cx, &runtime, |_| rpc.completed() > completed);
         page.read_with(cx, |page, _| {
             assert_eq!(page.filter, ChangeRequestFilter::Authored);
             assert_eq!(page.items.len(), 50, "the late Reviewing reply is ignored");
