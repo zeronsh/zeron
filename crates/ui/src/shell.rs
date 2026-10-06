@@ -6491,14 +6491,14 @@ impl Shell {
         if !matches!(self.route, Route::PullRequests) {
             return self.render_session_title_bar(viewport_height, cx);
         }
+        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()
             .size_full()
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
-            .pl(px(
-                (self.sidebar_now() + Theme::SPACE_LG).max(self.title_bar_content_start())
-            ))
+            .pl(px((self.sidebar_now() + Theme::SPACE_LG)
+                .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
             .when_some(self.pull_request_detail.clone(), |bar, detail| {
                 bar.child(detail.update(cx, |page, cx| page.titlebar(cx)))
@@ -12507,6 +12507,7 @@ fn window_control_button_with(
     let fade_key = format!("window-control-{id}");
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .size(px(24.0))
         .flex_none()
         .flex()
@@ -15855,7 +15856,7 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn pull_request_route_hides_the_chat_side_pane(cx: &mut TestAppContext) {
+    fn pull_request_route_uses_full_window_without_titlebar_overlap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -15915,6 +15916,46 @@ mod exit_regressions {
             board.size.width > px(300.0),
             "the board keeps the room the pane would take"
         );
+
+        // The PR header and the persistent controls share the titlebar even
+        // with the sidebar collapsed and the macOS traffic lights hidden.
+        cx.update(|window, cx| {
+            motion::set_reduced_motion(cx, true);
+            window.dispatch_action(
+                Box::new(crate::pull_request_detail::OpenPullRequest(
+                    "https://github.com/a/b/pull/1".into(),
+                    None,
+                )),
+                cx,
+            );
+        });
+        for width in [600.0, 1400.0] {
+            cx.simulate_resize(gpui::size(px(width), px(800.0)));
+            for collapsed in [true, false] {
+                shell.update(cx, |shell, cx| {
+                    shell.settings.sidebar_collapsed = collapsed;
+                    shell.sidebar_tween = None;
+                    cx.notify();
+                });
+                for fullscreen in [false, true] {
+                    cx.update(|window, cx| {
+                        if window.is_fullscreen() != fullscreen {
+                            window.toggle_fullscreen();
+                        }
+                        window.draw(cx).clear();
+                    });
+                    cx.run_until_parked();
+                    let new_session = cx.debug_bounds("titlebar-new-session").unwrap();
+                    let back = cx.debug_bounds("pr-back").unwrap();
+                    assert!(
+                        back.left() >= new_session.right() + px(8.0),
+                        "PR back control overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, back={back:?}, new_session={new_session:?}"
+                    );
+                    let external = cx.debug_bounds("pr-external").unwrap();
+                    assert!(external.right() <= px(width));
+                }
+            }
+        }
     }
 
     #[gpui::test]
