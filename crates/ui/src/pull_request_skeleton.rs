@@ -28,36 +28,82 @@ pub(crate) fn bar(
 const WIDTHS: [f32; 6] = [0.62, 0.48, 0.71, 0.55, 0.39, 0.66];
 
 /// The board's grouped list: a group label over a card of PR rows.
-pub(crate) fn board(row_height: f32, view: EntityId, theme: &Theme, cx: &mut App) -> AnyElement {
+pub(crate) fn board(
+    layout: crate::pull_requests::PullRequestTableLayout,
+    view: EntityId,
+    theme: &Theme,
+    cx: &mut App,
+) -> AnyElement {
     let rows = (0..6)
         .map(|index| {
-            widgets::card_row(theme, index == 0)
-                .mx_0()
-                .px(px(16.0))
-                .min_h(px(row_height))
-                .flex_nowrap()
-                .child(bar(px(14.0), 14.0, index, view, theme, cx))
+            let identity = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(Theme::SPACE_XS))
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
+                        .h(px(20.0))
                         .flex()
-                        .flex_col()
+                        .items_center()
                         .gap(px(8.0))
-                        .child(bar(relative(WIDTHS[index]), 12.0, index, view, theme, cx))
-                        .child(bar(px(160.0), 10.0, index, view, theme, cx)),
+                        .child(bar(px(14.0), 14.0, index, view, theme, cx))
+                        .child(bar(relative(WIDTHS[index]), 12.0, index, view, theme, cx)),
                 )
                 .child(
                     div()
+                        .h(px(16.0))
+                        .pl(px(22.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM))
+                        .child(bar(px(16.0), 16.0, index, view, theme, cx))
+                        .child(bar(px(72.0), 10.0, index, view, theme, cx))
+                        .child(bar(px(52.0), 16.0, index, view, theme, cx)),
+                );
+            let row = crate::pull_requests::table_row_shell(layout, index == 0, index == 5, theme)
+                .child(identity);
+            if layout == crate::pull_requests::PullRequestTableLayout::Narrow {
+                row.child(
+                    div()
+                        .pl(px(22.0))
+                        .h(px(16.0))
+                        .flex()
+                        .items_center()
+                        .child(bar(px(72.0), 10.0, index, view, theme, cx))
+                        .child(div().flex_1())
+                        .child(bar(px(44.0), 10.0, index, view, theme, cx)),
+                )
+                .into_any_element()
+            } else {
+                row.child(
+                    div()
+                        .w(px(112.0))
                         .flex_none()
                         .flex()
                         .flex_col()
                         .items_end()
-                        .gap(px(8.0))
-                        .child(bar(px(44.0), 10.0, index, view, theme, cx))
-                        .child(bar(px(72.0), 10.0, index, view, theme, cx)),
+                        .gap(px(Theme::SPACE_XS))
+                        .child(div().h(px(16.0)).flex().items_center().child(bar(
+                            px(44.0),
+                            10.0,
+                            index,
+                            view,
+                            theme,
+                            cx,
+                        )))
+                        .child(div().h(px(16.0)).flex().items_center().child(bar(
+                            px(72.0),
+                            10.0,
+                            index,
+                            view,
+                            theme,
+                            cx,
+                        ))),
                 )
                 .into_any_element()
+            }
         })
         .collect::<Vec<_>>();
     div()
@@ -83,28 +129,27 @@ pub(crate) fn board(row_height: f32, view: EntityId, theme: &Theme, cx: &mut App
 
 /// The Summary's card stack below a real header.
 pub(crate) fn summary(gap: f32, view: EntityId, theme: &Theme, cx: &mut App) -> AnyElement {
-    let field = |index: usize, width: f32, cx: &mut App| {
-        widgets::card_row(theme, false)
-            .min_h(px(44.0))
-            .py(px(8.0))
-            .child(
-                div()
-                    .w(px(80.0))
-                    .flex_none()
-                    .child(bar(px(56.0), 10.0, index, view, theme, cx)),
+    let fields = ["Status", "Review", "Branch", "Changes"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let height = if index < 2 { 22.0 } else { 12.0 };
+            crate::pull_request_detail::field_row(
+                label,
+                bar(
+                    px(if index == 2 { 220.0 } else { 96.0 }),
+                    height,
+                    index,
+                    view,
+                    theme,
+                    cx,
+                )
+                .into_any_element(),
+                index == 0,
+                theme,
             )
-            .child(bar(px(width), 10.0, index, view, theme, cx))
-    };
-    let status = |index: usize, cx: &mut App| {
-        div()
-            .flex_1()
-            .min_w(px(160.0))
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(bar(px(48.0), 10.0, index, view, theme, cx))
-            .child(bar(px(96.0), 22.0, index, view, theme, cx))
-    };
+        })
+        .collect::<Vec<_>>();
     let lines = (0..5)
         .map(|index| {
             bar(
@@ -127,31 +172,49 @@ pub(crate) fn summary(gap: f32, view: EntityId, theme: &Theme, cx: &mut App) -> 
         .flex()
         .flex_col()
         .gap(px(gap))
+        .child(widgets::section_card(theme).mt_0().children(fields))
         .child(
             widgets::section_card(theme)
                 .mt_0()
-                .child(
-                    div()
-                        .p(px(16.0))
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(16.0))
-                        .child(status(0, cx))
-                        .child(status(1, cx)),
-                )
-                .child(field(2, 220.0, cx))
-                .child(field(3, 150.0, cx)),
+                .px(px(16.0))
+                .py(px(10.0))
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(bar(px(14.0), 14.0, 4, view, theme, cx))
+                .child(div().flex_1().child("Checks"))
+                .child(bar(px(72.0), 22.0, 4, view, theme, cx)),
         )
         .child(
             widgets::section_card(theme)
                 .mt_0()
-                .h(px(44.0))
-                .px(px(16.0))
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(bar(px(88.0), 10.0, 4, view, theme, cx))
-                .child(bar(px(72.0), 22.0, 4, view, theme, cx)),
+                .child(
+                    widgets::card_row(theme, true)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(220.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(widgets::row_title(theme, "Hand off to an agent"))
+                                .child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(
+                                            "Opens a new session with the prompt ready to send.",
+                                        ),
+                                ),
+                        )
+                        .child(bar(px(180.0), 28.0, 5, view, theme, cx)),
+                )
+                .child(crate::pull_request_detail::field_row(
+                    "Checkout",
+                    bar(relative(0.7), 12.0, 6, view, theme, cx).into_any_element(),
+                    false,
+                    theme,
+                )),
         )
         .child(
             widgets::section_card(theme)
@@ -164,7 +227,7 @@ pub(crate) fn summary(gap: f32, view: EntityId, theme: &Theme, cx: &mut App) -> 
 }
 
 /// Diff lines inside the stream card, under a file header.
-pub(crate) fn diff(view: EntityId, theme: &Theme, cx: &mut App) -> AnyElement {
+pub(crate) fn diff(split: bool, view: EntityId, theme: &Theme, cx: &mut App) -> AnyElement {
     let header = div()
         .h(px(crate::changes::FILE_HEADER_HEIGHT))
         .flex_none()
@@ -173,26 +236,81 @@ pub(crate) fn diff(view: EntityId, theme: &Theme, cx: &mut App) -> AnyElement {
         .items_center()
         .gap(px(8.0))
         .bg(theme.ink(0.025))
+        .child(bar(px(13.0), 13.0, 0, view, theme, cx))
         .child(bar(px(14.0), 14.0, 0, view, theme, cx))
-        .child(bar(px(220.0), 10.0, 0, view, theme, cx));
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(bar(relative(0.55), 10.0, 0, view, theme, cx)),
+        )
+        .child(bar(px(64.0), 10.0, 0, view, theme, cx))
+        .child(bar(px(24.0), 24.0, 0, view, theme, cx));
+    let cell = |index: usize, cx: &mut App| {
+        let gutter = |cx: &mut App| {
+            div()
+                .w(px(crate::changes::GUTTER_WIDTH))
+                .flex_none()
+                .pr(px(8.0))
+                .flex()
+                .justify_end()
+                .child(bar(px(12.0), 8.0, index, view, theme, cx))
+        };
+        div()
+            .h(px(crate::changes::diff_line_height(theme)))
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .child(div().w(px(crate::changes::ACCENT_BAR_WIDTH)).flex_none())
+            .child(gutter(cx))
+            .when(!split, |el| el.child(gutter(cx)))
+            .child(
+                div()
+                    .w(px(if split {
+                        crate::changes::SPLIT_MARKER_WIDTH
+                    } else {
+                        crate::changes::MARKER_WIDTH
+                    }))
+                    .flex_none(),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl(px(if split {
+                        crate::changes::SPLIT_CODE_PADDING_LEFT
+                    } else {
+                        crate::changes::UNIFIED_CODE_PADDING_LEFT
+                    }))
+                    .child(bar(
+                        relative(WIDTHS[index % WIDTHS.len()]),
+                        8.0,
+                        index,
+                        view,
+                        theme,
+                        cx,
+                    )),
+            )
+    };
     let lines = (0..14)
         .map(|index| {
             div()
                 .h(px(crate::changes::diff_line_height(theme)))
                 .flex_none()
-                .px(px(Theme::SPACE_MD))
                 .flex()
-                .items_center()
-                .gap(px(16.0))
-                .child(bar(px(28.0), 8.0, index, view, theme, cx))
-                .child(bar(
-                    relative(WIDTHS[index % WIDTHS.len()] * 0.8),
-                    8.0,
-                    index,
-                    view,
-                    theme,
-                    cx,
-                ))
+                .child(cell(index, cx))
+                .when(split, |row| {
+                    row.child(
+                        div()
+                            .w(px(crate::changes::SPLIT_DIVIDER_WIDTH))
+                            .self_stretch()
+                            .flex_none()
+                            .bg(theme.border),
+                    )
+                    .child(cell(index, cx))
+                })
                 .into_any_element()
         })
         .collect::<Vec<_>>();
@@ -205,14 +323,22 @@ pub(crate) fn diff(view: EntityId, theme: &Theme, cx: &mut App) -> AnyElement {
         .flex()
         .flex_col()
         .child(header)
-        .child(div().py(px(8.0)).flex().flex_col().children(lines))
+        .child(
+            div()
+                .h(px(crate::changes::HUNK_HEADER_HEIGHT))
+                .flex_none()
+                .px(px(Theme::SPACE_MD))
+                .flex()
+                .items_center()
+                .child(bar(px(180.0), 10.0, 0, view, theme, cx)),
+        )
+        .child(div().flex().flex_col().children(lines))
         .into_any_element()
 }
 
 /// Rows of the changed-file tree.
 pub(crate) fn tree(view: EntityId, theme: &Theme, cx: &mut App) -> AnyElement {
     div()
-        .pt(px(4.0))
         .flex()
         .flex_col()
         .gap(px(1.0))

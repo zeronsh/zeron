@@ -105,8 +105,8 @@ pub(crate) fn diff_line_height(theme: &Theme) -> f32 {
     diff_text_size(theme) * (DIFF_LINE_HEIGHT / DIFF_TEXT_SIZE)
 }
 
-const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
-const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
+pub(crate) const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
+pub(crate) const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
 /// Breathing room after the widest source line when scrolled fully right.
 const CODE_PADDING_RIGHT: f32 = 24.0;
 

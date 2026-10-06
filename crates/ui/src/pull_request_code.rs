@@ -19,6 +19,46 @@ const STICKY_VEIL: f32 = 0.18;
 /// The stream card's 12px radius inside its 1px border.
 const CARD_INNER_RADIUS: f32 = 11.0;
 
+/// GPUI's overflow mask is rectangular. Cover the four small regions
+/// outside the inner arc after the stream and sticky layers have painted.
+/// This canvas has no hitbox, so it cannot steal folding or scroll input.
+fn stream_corners(theme: &Theme) -> impl IntoElement {
+    let background = theme.bg;
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let radius = CARD_INNER_RADIUS
+                .min(f32::from(bounds.size.width) / 2.0)
+                .min(f32::from(bounds.size.height) / 2.0);
+            let control = radius * (1.0 - 0.552_284_8);
+            window.paint_layer(bounds, |window| {
+                for (corner, dx, dy) in [
+                    (bounds.origin, 1.0, 1.0),
+                    (gpui::point(bounds.right(), bounds.top()), -1.0, 1.0),
+                    (gpui::point(bounds.left(), bounds.bottom()), 1.0, -1.0),
+                    (gpui::point(bounds.right(), bounds.bottom()), -1.0, -1.0),
+                ] {
+                    let point = |x, y| gpui::point(corner.x + px(x * dx), corner.y + px(y * dy));
+                    let mut path = gpui::PathBuilder::fill();
+                    path.move_to(point(0.0, 0.0));
+                    path.line_to(point(radius, 0.0));
+                    path.cubic_bezier_to(
+                        point(0.0, radius),
+                        point(control, 0.0),
+                        point(0.0, control),
+                    );
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, background);
+                    }
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// One entry of the virtualized review stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StreamRow {
@@ -458,7 +498,7 @@ impl PullRequestDetailPage {
             })
             .when(sticky, |el| el.block_mouse_except_scroll())
             // Follow the stream card's inner corner radius at the top edge.
-            .when(sticky || file == 0, |el| {
+            .when(!sticky && file == 0, |el| {
                 el.rounded_t(px(CARD_INNER_RADIUS))
             })
             .cursor_pointer()
@@ -533,7 +573,6 @@ impl PullRequestDetailPage {
         let header = if theme.is_frost() {
             div()
                 .w_full()
-                .rounded_t(px(CARD_INNER_RADIUS))
                 .bg(theme.bg.opacity(STICKY_VEIL))
                 .child(header)
                 .into_any_element()
@@ -546,11 +585,11 @@ impl PullRequestDetailPage {
                 .top(px(crate::changes::sticky_header_push_offset(next)))
                 .left_0()
                 .w_full()
-                .child(crate::frost::frosted(
-                    CARD_INNER_RADIUS,
+                .child(crate::frost::layered(crate::frost::frosted(
+                    0.0,
                     STICKY_BLUR,
                     header,
-                ))
+                )))
                 .into_any_element(),
         )
     }
@@ -867,6 +906,7 @@ impl PullRequestDetailPage {
             .map(|el| {
                 if loading {
                     el.child(crate::pull_request_skeleton::diff(
+                        self.review.split,
                         cx.entity_id(),
                         theme,
                         cx,
@@ -882,7 +922,8 @@ impl PullRequestDetailPage {
                     )
                     .children(self.sticky_header(theme, cx))
                 }
-            });
+            })
+            .child(stream_corners(theme));
         let editor = div()
             .relative()
             .flex_1()

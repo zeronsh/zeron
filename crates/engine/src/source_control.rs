@@ -165,17 +165,16 @@ impl ChangeRequestResolver {
     /// Resolve just the selected checkout's identity. Local Git only: no
     /// provider lookup, repository enumeration, or remote transport.
     pub async fn repository_for_checkout(&self, cwd: &Path) -> Option<String> {
-        let remote = self
-            .inspector
-            .git_optional(cwd, &["remote", "get-url", "origin"])
-            .await;
-        let remote = match remote {
-            Some(remote) => parse_git_remote(&remote)?,
-            None => {
-                let source = self.inspect_checkout(cwd).await.ok()?;
-                parse_git_remote(source.branch.remote_url.as_deref()?)?
+        let remote_url = match self.inspect_checkout(cwd).await {
+            Ok(source) => source.branch.remote_url?,
+            // An unborn or detached checkout still has a useful origin.
+            Err(_) => {
+                self.inspector
+                    .git_optional(cwd, &["remote", "get-url", "origin"])
+                    .await?
             }
         };
+        let remote = parse_git_remote(&remote_url)?;
         (remote.host.eq_ignore_ascii_case("github.com"))
             .then(|| format!("{}/{}", remote.owner, remote.repository))
     }
@@ -1668,6 +1667,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repository.as_deref(), Some("acme/zeron"));
+        // Repository grouping cannot identify a fork's GitHub slug. The
+        // selected branch's remote must win over an unrelated origin.
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/acme/upstream.git",
+            ],
+        );
+        run_git(
+            &checkout,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(&checkout, &["branch", "-M", "feature"]);
+        run_git(&checkout, &["config", "branch.feature.remote", "upstream"]);
+        let tracked: Option<String> = client
+            .call_as(
+                methods::GET_CHANGE_REQUEST_REPOSITORY,
+                json!({"cwd": checkout}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tracked.as_deref(), Some("acme/upstream"));
+        run_git(&checkout, &["checkout", "--detach", "--quiet"]);
+        let detached: Option<String> = client
+            .call_as(
+                methods::GET_CHANGE_REQUEST_REPOSITORY,
+                json!({"cwd": checkout}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detached.as_deref(), Some("acme/zeron"));
         let first: ChangeRequestPage = client.call_as(methods::LIST_CHANGE_REQUEST_PAGE,
             json!({"repository": repository, "filter": "reviewing", "targetDeviceId": core.device_id})).await.unwrap();
         assert_eq!(first.items[0].number, 123);
@@ -2114,28 +2157,6 @@ mod tests {
         assert_eq!(requests[0].env, [("GH_PROMPT_DISABLED".into(), "1".into())]);
         assert_eq!(requests[0].timeout, GITHUB_TIMEOUT);
         assert_eq!(requests[0].output_limit, GITHUB_OUTPUT_LIMIT);
-    }
-
-    #[tokio::test]
-    async fn pr_default_repository_uses_only_local_origin_metadata() {
-        let runner =
-            FakeProcessRunner::with_responses([command_success("git@github.com:acme/zeron.git\n")]);
-        let resolver = ChangeRequestResolver {
-            inspector: GitCheckoutInspector::new(runner.clone()),
-            github: GitHubCli::with_runner(runner.clone()),
-        };
-        assert_eq!(
-            resolver
-                .repository_for_checkout(Path::new("/checkout"))
-                .await
-                .as_deref(),
-            Some("acme/zeron")
-        );
-        let requests = runner.requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].program, "git");
-        assert_eq!(requests[0].args, ["remote", "get-url", "origin"]);
-        assert_eq!(requests[0].cwd.as_deref(), Some(Path::new("/checkout")));
     }
 
     #[tokio::test]

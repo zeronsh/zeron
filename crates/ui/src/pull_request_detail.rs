@@ -1282,6 +1282,15 @@ fn field(label: &str, value: String, first: bool, theme: &Theme) -> AnyElement {
             .child(value)
             .into_any_element()
     };
+    field_row(label, content, first, theme)
+}
+
+pub(crate) fn field_row(
+    label: &str,
+    content: AnyElement,
+    first: bool,
+    theme: &Theme,
+) -> AnyElement {
     let id = format!("pr-field-{label}");
     widgets::card_row(theme, first)
         .id(SharedString::from(id.clone()))
