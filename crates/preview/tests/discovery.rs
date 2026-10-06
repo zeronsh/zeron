@@ -157,3 +157,117 @@ async fn a_discovered_server_is_probed_once_not_every_cycle() {
     );
     service.shutdown().await;
 }
+
+/// Infisical's browser login decodes the first callback request as JSON. A
+/// discovery HEAD has no body and aborts that login with EOF. Even opening a
+/// connection to these one-shot listeners is outside preview discovery's remit.
+#[tokio::test]
+async fn authentication_callbacks_receive_no_discovery_connections() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _serial = SERIAL.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let ready = temp.path().join("callback-port");
+    let connections = temp.path().join("callback-connections");
+    let script = format!(
+        r#"import json,socket
+s=socket.socket()
+s.bind(('127.0.0.1',0))
+s.listen()
+open({ready:?},'w').write(str(s.getsockname()[1]))
+c,_=s.accept()
+open({connections:?},'a').write('connected\n')
+r=c.makefile('rb')
+request=r.readline()
+headers={{}}
+while True:
+    line=r.readline()
+    if line in (b'\r\n',b''): break
+    name,value=line.decode().split(':',1)
+    headers[name.lower()]=value.strip()
+body=r.read(int(headers.get('content-length','0')))
+if not body: raise RuntimeError('EOF')
+assert request.startswith(b'POST ')
+assert json.loads(body)=={{'code':'test-code'}}
+c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK')
+"#,
+        ready = ready.display().to_string(),
+        connections = connections.display().to_string(),
+    );
+    let mut callback = Child(
+        std::process::Command::new("python3")
+            .args([
+                "-c",
+                &script,
+                "login",
+                "--domain",
+                "https://app.infisical.com",
+            ])
+            .current_dir(&app)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let port: u16 = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(port) = std::fs::read_to_string(&ready)
+                .ok()
+                .and_then(|s| s.parse::<u16>().ok())
+            {
+                break port;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("callback did not start");
+    let server = launch(&app, true);
+    let service = PreviewService::new(
+        temp.path().join("names.json"),
+        "local".into(),
+        "Laptop".into(),
+    )
+    .unwrap();
+    let roots = vec![app];
+    service.start(Arc::new(move || roots.clone()), None).await;
+    wait(&service, Some(server.0.id())).await;
+    // Discovery actually runs, including multiple cycles after the ordinary
+    // development server is found. The callback must remain entirely untouched.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        !connections.exists(),
+        "preview discovery connected to the authentication callback"
+    );
+    assert!(callback.0.try_wait().unwrap().is_none());
+
+    // The real browser request can still finish the waiting sign-in.
+    let body = r#"{"code":"test-code"}"#;
+    let mut browser = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    browser
+        .write_all(
+            format!(
+                "POST / HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        browser.read_to_string(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(std::fs::read_to_string(connections).unwrap(), "connected\n");
+    assert!(callback.0.wait().unwrap().success());
+    service.shutdown().await;
+}

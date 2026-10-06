@@ -132,12 +132,12 @@ async fn fake_device_room() -> (String, tokio::task::JoinHandle<()>) {
 // ---------------------------------------------------------------------------
 
 /// Instant mock harness so a forwarded QueueCommand fully executes on the target.
-struct InstantHarness;
+struct InstantHarness(HarnessId);
 
 #[async_trait]
 impl Harness for InstantHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.0
     }
     fn display_name(&self) -> &str {
         "Instant"
@@ -161,7 +161,7 @@ impl Harness for InstantHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         Ok(futures::stream::iter([
             Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
+                harness: self.0,
                 model: "instant-1".into(),
                 tools: vec![],
                 cwd: "/tmp".into(),
@@ -183,8 +183,12 @@ impl Harness for InstantHarness {
 }
 
 fn registry() -> Arc<HarnessRegistry> {
+    registry_for(HarnessId::Mock)
+}
+
+fn registry_for(harness: HarnessId) -> Arc<HarnessRegistry> {
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(InstantHarness));
+    registry.register(Arc::new(InstantHarness(harness)));
     Arc::new(registry)
 }
 
@@ -1842,4 +1846,236 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
 
     core_a.shutdown().await;
     core_b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_entry_mutations_are_forwarded_to_the_owning_plain_folder() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let host = assemble(&dirs.path().join("host"), "mutation-host");
+    let _host_relay = host.start_host_relay(&relay_url);
+    let viewer = assemble(&dirs.path().join("viewer"), "mutation-viewer");
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    viewer.set_links(LinkCache::new(config));
+    let folder = dirs.path().join("plain-folder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("original.txt"), "host only").unwrap();
+    host.workspace
+        .create_space(
+            "mutation-space",
+            "mutation-host",
+            &folder.to_string_lossy(),
+            None,
+            false,
+        )
+        .unwrap();
+    let client = zeron_rpc::memory_client(viewer.rpc_service());
+    let page = client
+        .call(
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({"spaceId":"mutation-space","targetDeviceId":"mutation-host"}),
+        )
+        .await
+        .unwrap();
+    let entry = &page["entries"][0];
+    assert!(page["checkoutId"].as_str().unwrap().starts_with("folder-"));
+    let moved=client.call(methods::MOVE_WORKSPACE_ENTRY,serde_json::json!({
+        "spaceId":"mutation-space","targetDeviceId":"mutation-host","operationId":"remote-move",
+        "expectedCheckoutId":page["checkoutId"],"sourcePath":"original.txt","destinationPath":"renamed.txt",
+        "expectedSourceRevision":entry["mutationRevision"],"expectedKind":"file"
+    })).await.unwrap();
+    assert_eq!(moved["status"], "applied");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("renamed.txt")).unwrap(),
+        "host only"
+    );
+    let deleted=client.call(methods::DELETE_WORKSPACE_ENTRY,serde_json::json!({
+        "spaceId":"mutation-space","targetDeviceId":"mutation-host","operationId":"remote-delete",
+        "expectedCheckoutId":page["checkoutId"],"path":"renamed.txt",
+        "expectedSourceRevision":moved["entry"]["mutationRevision"],"expectedKind":"file","recursive":false
+    })).await.unwrap();
+    assert_eq!(deleted["status"], "applied");
+    assert!(!folder.join("renamed.txt").exists());
+    viewer.shutdown().await;
+    host.shutdown().await;
+}
+
+/// Full MCP discovery/create/converse flow over two real engines, a shared
+/// registry and the same device relay used by the routing tests above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_standalone_session_executes_on_the_selected_device() {
+    use serde_json::json;
+    use zeron_mcp::{Origin, Tools, Zeron};
+
+    let (relay_url, relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let a = assemble(&dirs.path().join("a"), "device-a");
+    // Mock is deliberately disabled in production catalogs. Offer a scripted
+    // Codex adapter on B so MCP exercises normal availability validation.
+    let remote_dir = dirs.path().join("b");
+    std::fs::create_dir_all(&remote_dir).unwrap();
+    std::fs::write(remote_dir.join("device-id"), "device-b").unwrap();
+    let profile = zeron_engine::EngineProfile::development(&remote_dir, "dev-org", "dev-user");
+    let remote_store = zeron_sync::DocsStore::open(profile.store_root()).unwrap();
+    let b = EngineCore::assemble_with_profile(
+        profile,
+        registry_for(HarnessId::Codex),
+        HarnessId::Codex,
+        None,
+    )
+    .unwrap();
+    let registry = zeron_sync::registry::mock_server::MockRegistryServer::start().await;
+    a.workspace.connect_registry_url(&registry.url());
+    b.workspace.connect_registry_url(&registry.url());
+    let host = b.start_host_relay(&relay_url);
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    a.set_links(LinkCache::new(config));
+    let client = zeron_rpc::memory_client(a.rpc_service());
+    let tools = Tools::new(Arc::new(Zeron::with_client(
+        client,
+        Origin {
+            chat_id: Some("coordinator".into()),
+            device_id: Some("device-a".into()),
+        },
+    )));
+    a.workspace
+        .create_chat("coordinator", None, Some("device-a"), None, None)
+        .unwrap();
+    let folder = dirs.path().join("remote-project");
+    std::fs::create_dir_all(&folder).unwrap();
+    b.workspace
+        .create_space(
+            "remote-project",
+            "device-b",
+            folder.to_str().unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let devices = tools.call("list_devices", json!({})).await.unwrap();
+        let projects = tools
+            .call("list_projects", json!({"device":"device-b"}))
+            .await;
+        if devices["devices"].as_array().unwrap().len() == 2
+            && projects
+                .as_ref()
+                .is_ok_and(|p| p["projects"].as_array().unwrap().len() == 1)
+            && tools
+                .call("list_harnesses", json!({"device":"device-b"}))
+                .await
+                .is_ok()
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "discovery did not converge"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let projects = tools
+        .call("list_projects", json!({"device":"device-b"}))
+        .await
+        .unwrap();
+    let project = projects["projects"][0]["id"].as_str().unwrap();
+    tools
+        .call(
+            "list_models",
+            json!({"device":"device-b", "harness":"codex"}),
+        )
+        .await
+        .unwrap();
+    let created = tools
+        .call(
+            "create_chat",
+            json!({
+                "kind":"chat", "device":"device-b", "project":project,
+                "harness":"codex", "title":"Remote MCP session", "prompt":"execute on B",
+                "wait":true, "timeout_secs":30
+            }),
+        )
+        .await
+        .unwrap();
+    let chat_id = created["chatId"].as_str().unwrap();
+    assert_eq!(created["kind"], "chat");
+    assert!(created["parentChatId"].is_null());
+    assert_eq!(created["deviceId"], "device-b");
+    assert_eq!(created["turn"]["outcome"], "completed", "{created}");
+    assert_eq!(created["turn"]["replies"][0]["text"], "remote reply");
+    assert_eq!(created["turn"]["replies"][0]["deviceId"], "device-b");
+    let chat = b.workspace.chat(chat_id).unwrap().unwrap();
+    assert_eq!(chat.space_id.as_deref(), Some(project));
+    assert!(
+        chat.parent_chat_id.is_none(),
+        "eligible for Sessions on every client"
+    );
+    assert!(
+        a.sessions.session_status(chat_id).is_none(),
+        "A must not execute the prompt"
+    );
+    assert!(
+        b.sessions.session_status(chat_id).is_some(),
+        "B actually ran the harness"
+    );
+    let read = tools
+        .call("read_chat", json!({"chat":chat_id}))
+        .await
+        .unwrap();
+    assert!(
+        read["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["role"] == "assistant"
+                && m["text"] == "remote reply"
+                && m["deviceId"] == "device-b")
+    );
+    let sent = tools
+        .call(
+            "send_message",
+            json!({
+                "chat":chat_id, "text":"a second remote turn", "wait":true, "timeout_secs":30
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["turn"]["outcome"], "completed", "{sent}");
+    assert_eq!(
+        sent["turn"]["replies"].as_array().unwrap().len(),
+        1,
+        "only the new turn"
+    );
+    assert_eq!(sent["turn"]["replies"][0]["deviceId"], "device-b");
+    let waited = tools
+        .call("wait_for_turn", json!({"chat":chat_id,"timeout_secs":2}))
+        .await
+        .unwrap();
+    assert_eq!(waited["turn"]["outcome"], "completed");
+    let interrupted = tools
+        .call("interrupt_chat", json!({"chat":chat_id}))
+        .await
+        .unwrap();
+    let interrupt_id = interrupted["commandId"].as_str().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        // Peer-relay delivery marks the processed-command ledger directly;
+        // the command row itself arrives separately through session-doc sync.
+        if remote_store.is_processed(interrupt_id).unwrap() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "interrupt must reach B's command ledger"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.shutdown().await;
+    b.shutdown().await;
+    drop(host);
+    relay.abort();
 }

@@ -10,10 +10,11 @@
 //! Attachments live only on the host device — every read proxies through the
 //! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
 //!
-//! `read_chunk` serves transcript images back in 45KB base64 chunks. Path jail:
+//! `read_chunk` serves attachments back in 45KB base64 chunks. Path jail:
 //! only files under the uploads dir or a workspace-known chat cwd are readable
-//! (the RPC layer supplies the cwd roots) — and only supported image types, as
-//! in zeron.
+//! (the RPC layer supplies the cwd roots). Workspace files must be supported
+//! image types, as in zeron; files in the uploads dir read back whatever their
+//! type, so a queued message can restore them for editing.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -354,8 +355,21 @@ impl Uploads {
         if meta.len() > MAX_BYTES {
             return Err(EngineError::Other("Attachment is too large".into()));
         }
-        let mime_type = mime_by_ext(&resolved)
-            .ok_or_else(|| EngineError::Other("Attachment is not a supported image".into()))?;
+        // Files the user attached themselves read back whatever their type (a
+        // queued message restores them for editing); other roots stay image-only.
+        let mime_type = match mime_by_ext(&resolved) {
+            Some(mime) => mime,
+            None if std::fs::canonicalize(&self.inner.dir)
+                .is_ok_and(|uploads| resolved.starts_with(uploads)) =>
+            {
+                "application/octet-stream"
+            }
+            None => {
+                return Err(EngineError::Other(
+                    "Attachment is not a supported image".into(),
+                ));
+            }
+        };
         Ok(InspectedFile {
             name: resolved
                 .file_name()
@@ -542,6 +556,35 @@ mod tests {
             ]
         );
         assert!(pending_refs_in("mentions pending://u1/x.png inline only").is_empty());
+    }
+
+    #[test]
+    fn uploaded_files_of_any_type_read_back_but_other_roots_stay_image_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        for (id, name, bytes) in [
+            ("u1", "notes.md", &b"# notes"[..]),
+            ("u2", "empty.bin", b""),
+        ] {
+            uploads.append(id, &BASE64.encode(bytes), Some(0)).unwrap();
+            let path = uploads.commit(id, name).unwrap();
+            let chunk = uploads.read_chunk(&path, 0, &[]).unwrap();
+            assert_eq!(chunk.mime_type, "application/octet-stream");
+            assert!(chunk.done);
+        }
+        // A non-image in a workspace root is still refused.
+        let notes = workspace.path().join("notes.md");
+        std::fs::write(&notes, "# not an upload").unwrap();
+        assert!(
+            uploads
+                .read_chunk(
+                    notes.to_str().unwrap(),
+                    0,
+                    &[workspace.path().to_path_buf()]
+                )
+                .is_err()
+        );
     }
 
     #[test]

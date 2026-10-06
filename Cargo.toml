@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/voice",
     "crates/theme",
     "crates/proto",
     "crates/preview",
@@ -21,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.99"
+version = "0.2.104"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -76,15 +77,15 @@ loro-protocol = "0.3"
 # Linux — the Metal path's snapshot/blur/composite, ported).
 # Paint-time rounded image masks (#9), bounded Windows backdrop blur and
 # translucent compositing, plus blur-aware scene batching (#10).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = [
+gpui = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "103f13da91ff2c7c52941bdc2b1910f29716dc19" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "4764fd002ab5894ec9413511d01d37481b2129ab" }
 
 # diffs
 similar = "2"

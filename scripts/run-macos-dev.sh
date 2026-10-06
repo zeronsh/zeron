@@ -13,6 +13,7 @@ APP="$DEV_ROOT/Zeron Dev.app"
 CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
+BUNDLE_ID="${ZERON_DEV_BUNDLE_ID:-sh.zeron.app.dev}"
 
 if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Zeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
@@ -23,10 +24,15 @@ cd "$ROOT"
 cargo build -p zeron
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
-install -m 755 "$ROOT/target/debug/zeron" "$CONTENTS/MacOS/zeron"
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+install -m 755 "$TARGET_DIR/debug/zeron" "$CONTENTS/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
+plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
+
+mkdir -p "$CONTENTS/Resources/licenses"
+cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/parakeet-v3.txt
 
 if [[ ! -f "$CONTENTS/Resources/zeron.icns" ]]; then
   ICONSET="$DEV_ROOT/zeron-dev.iconset"
@@ -47,13 +53,13 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --force --sign "$IDENTITY" --identifier sh.zeron.app.dev "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
-  codesign --force --sign - --identifier sh.zeron.app.dev "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
-echo "running Zeron Dev (bundle sh.zeron.app.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
+echo "running Zeron Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
 # LaunchServices must own the process. Launching Contents/MacOS/zeron directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the

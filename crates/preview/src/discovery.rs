@@ -1,5 +1,6 @@
 //! Observe only this user's listeners. HTTP probes run only after project
-//! ownership has been established from the process's actual working directory.
+//! ownership has been established from the process's actual working directory
+//! and commands performing authentication have been excluded.
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -22,6 +23,31 @@ pub struct Listener {
 impl Listener {
     pub fn belongs_to(&self, root: &Path) -> bool {
         self.cwd.starts_with(root)
+    }
+
+    /// A login CLI may open an HTTP listener in the project's cwd, but that
+    /// listener is a browser callback, not a development server. Some (such as
+    /// Infisical) abort the login on an unsolicited HEAD, so exclude explicit
+    /// authentication commands before connecting at all. Match whole arguments,
+    /// not paths, URLs or source strings that happen to mention authentication.
+    pub(crate) fn is_authentication_command(&self) -> bool {
+        self.args
+            .iter()
+            .skip(1)
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "login"
+                        | "auth"
+                        | "authenticate"
+                        | "signin"
+                        | "sign-in"
+                        | "sso"
+                        | "oauth"
+                        | "oauth2"
+                )
+            })
     }
 }
 
@@ -431,6 +457,53 @@ pub fn same_process(_pid: u32, _started_at: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authentication_commands_are_not_preview_candidates() {
+        let listener = |args: &[&str]| Listener {
+            pid: 1,
+            parent: 0,
+            cwd: "/project".into(),
+            args: args.iter().map(|arg| (*arg).into()).collect(),
+            started_at: 1,
+            address: "127.0.0.1:3000".parse().unwrap(),
+            zeron_owned: true,
+        };
+        for args in [
+            vec!["/usr/bin/infisical", "login"],
+            vec![
+                "infisical",
+                "--silent",
+                "login",
+                "--domain",
+                "https://app.infisical.com",
+            ],
+            vec!["gh", "auth", "login"],
+            vec!["aws", "sso", "login"],
+            vec!["gcloud", "auth", "application-default", "login"],
+            vec!["codex", "login"],
+            vec!["node", "/tools/firebase.js", "login"],
+            vec!["cli", "authenticate"],
+            vec!["cli", "signin"],
+            vec!["cli", "sign-in"],
+            vec!["cli", "oauth"],
+            vec!["cli", "oauth2"],
+        ] {
+            assert!(listener(&args).is_authentication_command(), "{args:?}");
+        }
+        for args in [
+            vec![],
+            vec!["node", "/project/auth/server.js"],
+            vec!["node", "/project/login.js"],
+            vec!["node", "/project/node_modules/vite/bin/vite.js"],
+            vec!["next", "dev"],
+            vec!["python3", "-m", "http.server", "3000"],
+            vec!["python3", "-c", "import auth; auth.serve()"],
+            vec!["server", "--auth", "--login-url=https://example.com/login"],
+            vec!["infisical", "run", "--", "node", "server.js", "login"],
+        ] {
+            assert!(!listener(&args).is_authentication_command(), "{args:?}");
+        }
+    }
     #[test]
     fn service_identity_ignores_port_configuration() {
         let args = |port: &str| vec!["node".into(), "api.js".into(), "--port".into(), port.into()];

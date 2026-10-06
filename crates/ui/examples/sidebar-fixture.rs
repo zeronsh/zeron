@@ -1,4 +1,5 @@
-//! Isolated native sidebar review fixture. ZERON_SIDEBAR_COMPACT / ZERON_SIDEBAR_HIDE_LABEL select layout.
+//! Isolated native sidebar review fixture. ZERON_SIDEBAR_COMPACT / ZERON_SIDEBAR_HIDE_LABEL select layout;
+//! ZERON_SIDEBAR_BY_PROJECT groups by project, with a remote clone of the local repository.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use zeron_ui::*;
 
@@ -14,7 +15,8 @@ fn main() -> anyhow::Result<()> {
         settings.sidebar_show_branch = true;
         settings.sidebar_compact = std::env::var_os("ZERON_SIDEBAR_COMPACT").is_some();
         settings.sidebar_show_project_label = std::env::var_os("ZERON_SIDEBAR_HIDE_LABEL").is_none();
-        settings.sidebar_organization = settings::SidebarOrganization::InOneList;
+        let by_project = std::env::var_os("ZERON_SIDEBAR_BY_PROJECT").is_some();
+        settings.sidebar_organization = if by_project { settings::SidebarOrganization::ByProject } else { settings::SidebarOrganization::InOneList };
         settings.sidebar_width = 310.0;
         settings.sidebar_pins_mut("local".into()).extend(["chat-0".into(), "chat-1".into()]);
         let project_path = data.join("fieldnotes");
@@ -75,6 +77,13 @@ fn main() -> anyhow::Result<()> {
                     change_request: Some(zeron_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/zeronsh/zeron/pull/412".into(), state: zeron_proto::ChangeRequestState::Open, base_ref: "main".into(), head_ref: source.branch.clone() }),
                 });
             }
+            if by_project {
+                s.spaces[0].repository_id = Some("github.com/zeronsh/fieldnotes".into());
+                s.spaces.push(serde_json::from_value(serde_json::json!({"id":"fieldnotes-remote","deviceId":"remote","path":"/projects/fieldnotes","repositoryId":"github.com/zeronsh/fieldnotes","createdAt":chrono::Utc::now()})).unwrap());
+                for ix in [3, 7] {
+                    s.chats[ix].space_id = Some("fieldnotes-remote".into());
+                }
+            }
             s.chats[4].last_message_at = Some(chrono::Utc::now());
             s.chats[8].archived = true;
             s
@@ -84,8 +93,11 @@ fn main() -> anyhow::Result<()> {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(1100.),px(800.))))),
             titlebar: Some(gpui::TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
             app_owns_titlebar_drag: true,
+            // Same backdrop as the app window, or the frosted surface has nothing to blur.
+            window_background: theme::Theme::of(cx).window_background_appearance(),
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
+        appearance::reapply_window_background(cx);
         state.update(cx, |_, cx| cx.notify());
         cx.activate(true);
     });

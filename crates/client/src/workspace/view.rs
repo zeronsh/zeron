@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use zeron_doc::WorkspaceState;
-use zeron_proto::view::{attention_rank, display_status};
+use zeron_proto::view::{attention_rank, display_status, project_key, representative_space};
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus,
     Device, Session, SidebarPreferences, Space,
@@ -131,6 +131,13 @@ pub struct ProjectView {
     pub device_online: bool,
     pub git_detected: bool,
     pub created_at_ms: i64,
+    /// The repository project this checkout belongs to
+    /// ([`zeron_proto::view::project_key`]): clones and worktrees of one
+    /// repository, on any device, share it.
+    pub group_key: String,
+    /// The group's name — its representative checkout's — shared by every
+    /// member, like `color_index`.
+    pub group_name: String,
     /// Most urgent indicator among its active sessions (Idle when none).
     pub indicator: ChatIndicator,
     pub unseen_count: u32,
@@ -411,6 +418,7 @@ fn hash_row(row: &SessionRow) -> u64 {
 }
 
 struct RowContext<'a> {
+    all_spaces: &'a [Space],
     spaces: HashMap<&'a str, &'a Space>,
     devices: HashMap<&'a str, &'a Device>,
     sessions: HashMap<&'a str, &'a Session>,
@@ -445,7 +453,8 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         .map(|space| ProjectRef {
             id: space.id.clone(),
             name: space.display_name().to_owned(),
-            color_index: project_color_index(&space.path),
+            // Clones of one repository share their representative's color.
+            color_index: project_color_index(&representative_space(rc.all_spaces, space).path),
         });
     let device = rc.devices.get(chat.device_id.as_str());
     let config = chat.config.as_ref();
@@ -536,6 +545,7 @@ pub(crate) fn derive(
         }
     }
     let rc = RowContext {
+        all_spaces: &state.spaces,
         spaces: state.spaces.iter().map(|s| (s.id.as_str(), s)).collect(),
         devices: state.devices.iter().map(|d| (d.id.as_str(), d)).collect(),
         sessions: state
@@ -617,11 +627,12 @@ pub(crate) fn derive(
                 .map(|r| r.indicator)
                 .min_by_key(|i| attention_rank(*i))
                 .unwrap_or(ChatIndicator::Idle);
+            let representative = representative_space(&state.spaces, space);
             ProjectView {
                 id: space.id.clone(),
                 name: space.display_name().to_owned(),
                 path: space.path.clone(),
-                color_index: project_color_index(&space.path),
+                color_index: project_color_index(&representative.path),
                 device_id: space.device_id.clone(),
                 device_name: rc
                     .devices
@@ -635,6 +646,8 @@ pub(crate) fn derive(
                 ),
                 git_detected: space.git_detected,
                 created_at_ms: space.created_at.timestamp_millis(),
+                group_key: project_key(space),
+                group_name: representative.display_name().to_owned(),
                 indicator,
                 unseen_count: sessions.iter().filter(|r| r.unseen).count() as u32,
                 sessions,
@@ -751,6 +764,9 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
         project.id.hash(&mut h);
         project.name.hash(&mut h);
         project.path.hash(&mut h);
+        project.color_index.hash(&mut h);
+        project.group_key.hash(&mut h);
+        project.group_name.hash(&mut h);
         project.device_name.hash(&mut h);
         project.device_online.hash(&mut h);
         project.git_detected.hash(&mut h);

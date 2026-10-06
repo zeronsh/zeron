@@ -46,6 +46,64 @@ const MAX_READ_CHUNKS: usize = 1_000;
 
 /// The body used for image-only sends (`use-attachments.ts`).
 pub const ATTACHMENT_ONLY_TEXT: &str = "See the attached image(s).";
+/// The body used when any attachment is not an image.
+pub const FILE_ATTACHMENT_ONLY_TEXT: &str = "See the attached file(s).";
+
+/// Whether `text` is the placeholder body of an attachments-only send.
+pub fn is_attachment_only_text(text: &str) -> bool {
+    text == ATTACHMENT_ONLY_TEXT || text == FILE_ATTACHMENT_ONLY_TEXT
+}
+
+/// The placeholder body for an attachments-only send of `paths`.
+pub fn attachment_only_text(paths: &[String]) -> &'static str {
+    if paths.iter().all(|path| is_image_path(path)) {
+        ATTACHMENT_ONLY_TEXT
+    } else {
+        FILE_ATTACHMENT_ONLY_TEXT
+    }
+}
+
+/// Whether an attachment ref names an image, as opposed to any other file.
+pub fn is_image_path(path: &str) -> bool {
+    format_by_extension(Path::new(path)).is_some()
+}
+
+pub use zeron_proto::attachment_mentions::attachment_display_name;
+
+/// Whether `mention` is the chip for the attachment at `path`.
+pub fn chip_names_attachment(
+    mention: &zeron_proto::attachment_mentions::AttachmentMention,
+    path: &str,
+) -> bool {
+    mention.names_attachment(path)
+}
+
+/// Number restored attachments after the chips in `text` that name them, so
+/// those chips stay live; an attachment no chip names is left unnumbered.
+pub fn pair_with_chips(text: &str, attachments: &mut [StagedAttachment]) {
+    let chips = zeron_proto::attachment_mentions::attachment_mentions(text);
+    for att in attachments {
+        att.mention = chips
+            .iter()
+            .find(|chip| chip_names_attachment(chip, &att.name))
+            .map(|chip| chip.index);
+    }
+}
+
+/// The attachments no chip in `text` stands for, in order. A chip is the
+/// attachment's handle wherever it shows, so only these still need a tile;
+/// anything a chip can't be matched to keeps its tile.
+pub fn unchipped_attachments<'a>(text: &str, paths: &'a [String]) -> Vec<&'a String> {
+    let mentions = zeron_proto::attachment_mentions::attachment_mentions(text);
+    paths
+        .iter()
+        .filter(|path| {
+            !mentions
+                .iter()
+                .any(|mention| chip_names_attachment(mention, path))
+        })
+        .collect()
+}
 
 /// How attachments ride the prompt (use-attachments.ts `withAttachments`):
 /// plain local paths appended to the text — the files are staged on the device
@@ -57,7 +115,7 @@ pub fn with_attachments(text: &str, paths: &[String]) -> String {
     }
     let refs: Vec<String> = paths.iter().map(|p| format!("- {p}")).collect();
     let body = if text.is_empty() {
-        ATTACHMENT_ONLY_TEXT
+        attachment_only_text(paths)
     } else {
         text
     };
@@ -153,7 +211,7 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
         };
     }
     ParsedUserMessage {
-        text: if body.trim() == ATTACHMENT_ONLY_TEXT {
+        text: if is_attachment_only_text(body.trim()) {
             String::new()
         } else {
             body.to_string()
@@ -169,10 +227,19 @@ pub fn user_message_rail_text(content: &str) -> String {
     if !parsed.text.trim().is_empty() {
         return parsed.text;
     }
+    let kind = if parsed
+        .attachments
+        .iter()
+        .all(|att| is_image_path(&att.path))
+    {
+        "image"
+    } else {
+        "file"
+    };
     match parsed.attachments.len() {
         0 => content.to_string(),
-        1 => "Attached image".to_string(),
-        n => format!("{n} attached images"),
+        1 => format!("Attached {kind}"),
+        n => format!("{n} attached {kind}s"),
     }
 }
 
@@ -180,21 +247,62 @@ pub fn user_message_rail_text(content: &str) -> String {
 // Staging (use-attachments.ts intake)
 // ---------------------------------------------------------------------------
 
-/// An image staged in the composer, before upload. The raw bytes live inside
-/// the [`Image`] (gpui decodes them at paint; the same Arc feeds thumbnails,
-/// the lightbox, the upload, and the post-send cache seed).
+/// What a staged attachment holds. Images keep their decoded-at-paint
+/// [`Image`], which feeds thumbnails, the lightbox, the upload and the
+/// post-send cache seed; any other file stays opaque bytes.
+#[derive(Clone)]
+pub enum AttachmentContent {
+    Image(Arc<Image>),
+    File(Arc<Vec<u8>>),
+}
+
+/// A file staged in the composer, before upload.
 #[derive(Clone)]
 pub struct StagedAttachment {
     pub id: String,
-    /// File name with a type-matching extension (use-attachments.ts
+    /// File name. Images carry a type-matching extension (use-attachments.ts
     /// `ensureExtension` — agents sniff images by extension).
     pub name: String,
-    pub image: Arc<Image>,
+    pub content: AttachmentContent,
+    /// The composer's chip number when a chip in the draft mentions this
+    /// attachment. `None` for attachments the prompt does not reference
+    /// (appshots, drafts restored from before chips).
+    pub mention: Option<u32>,
 }
 
 impl StagedAttachment {
     pub fn bytes(&self) -> &[u8] {
-        &self.image.bytes
+        match &self.content {
+            AttachmentContent::Image(image) => &image.bytes,
+            AttachmentContent::File(bytes) => bytes,
+        }
+    }
+
+    /// The picture, for attachments that are images.
+    pub fn image(&self) -> Option<&Arc<Image>> {
+        match &self.content {
+            AttachmentContent::Image(image) => Some(image),
+            AttachmentContent::File(_) => None,
+        }
+    }
+
+    fn new(name: String, content: AttachmentContent) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            content,
+            mention: None,
+        }
+    }
+
+    fn from_image(name: String, image: Image) -> Self {
+        Self::new(name, AttachmentContent::Image(Arc::new(image)))
+    }
+
+    fn from_file(name: &str, bytes: Vec<u8>) -> Self {
+        // Attachment refs ride the prompt one per line; a name must not add lines.
+        let name = name.replace(['\r', '\n'], "_");
+        Self::new(name, AttachmentContent::File(Arc::new(bytes)))
     }
 }
 
@@ -231,46 +339,104 @@ pub fn ensure_extension(name: &str, format: ImageFormat) -> String {
     }
 }
 
-/// Stage a file from disk (picker / drop / pasted path). `Err` carries the
-/// user-facing message (mirrors the old `onError` copy).
+/// Stage a file from disk (picker / drop / pasted path). An image keeps its
+/// thumbnail (a BMP is converted to PNG, which agents can read); any other
+/// regular file is staged as opaque bytes. `Err` carries the user-facing
+/// message (mirrors the old `onError` copy).
 pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
-    let display_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "image".to_string());
-    let Some(format) = format_by_extension(path) else {
-        return Err(format!("{display_name} is not a supported image."));
-    };
-    let meta = std::fs::metadata(path).map_err(|_| format!("{display_name} could not be read."))?;
-    if meta.len() > MAX_ATTACHMENT_BYTES {
-        return Err(format!("{display_name} is too large (24 MB max)."));
+    if format_by_extension(path).is_none() {
+        return stage_plain_file(path);
     }
-    let bytes = std::fs::read(path).map_err(|_| format!("{display_name} could not be read."))?;
-    Ok(StagedAttachment {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension(&display_name, format),
-        image: Arc::new(Image::from_bytes(format, bytes)),
-    })
+    let mut staged = stage_file_verbatim(path)?;
+    if let Some(image) = staged
+        .image()
+        .filter(|image| image.format == ImageFormat::Bmp)
+    {
+        let png =
+            bmp_to_png(image).map_err(|_| format!("{} is not a valid image.", staged.name))?;
+        staged.content = AttachmentContent::Image(Arc::new(png));
+        staged.name = Path::new(&staged.name)
+            .with_extension("png")
+            .to_string_lossy()
+            .into_owned();
+    }
+    Ok(staged)
 }
 
-/// Stage an image pasted from the clipboard.
-pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
-    let format = image.format;
-    StagedAttachment {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension("image", format),
-        image: Arc::new(image),
+/// Read a regular file within the attachment size limit. `Err` carries the
+/// user-facing message.
+fn read_regular_file(path: &Path, name: &str) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(path).map_err(|_| format!("{name} could not be read."))?;
+    if !meta.is_file() {
+        return Err(format!("{name} is not a file."));
     }
+    if meta.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!("{name} is too large (24 MB max)."));
+    }
+    std::fs::read(path).map_err(|_| format!("{name} could not be read."))
+}
+
+fn file_name(path: &Path, fallback: &str) -> String {
+    path.file_name().map_or_else(
+        || fallback.to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// Stage a file's bytes exactly as stored, for callers that decode the image
+/// themselves (wallpapers) rather than hand it to an agent.
+pub fn stage_file_verbatim(path: &Path) -> Result<StagedAttachment, String> {
+    let name = file_name(path, "image");
+    let Some(format) = format_by_extension(path) else {
+        return Err(format!("{name} is not a supported image."));
+    };
+    let bytes = read_regular_file(path, &name)?;
+    Ok(StagedAttachment::from_image(
+        ensure_extension(&name, format),
+        Image::from_bytes(format, bytes),
+    ))
+}
+
+/// Stage any other regular file as opaque bytes.
+fn stage_plain_file(path: &Path) -> Result<StagedAttachment, String> {
+    let name = file_name(path, "file");
+    let bytes = read_regular_file(path, &name)?;
+    Ok(StagedAttachment::from_file(&name, bytes))
+}
+
+/// Stage an image pasted from the clipboard. A BMP (what Windows puts there for
+/// a screenshot) is converted to PNG like [`stage_file`] does; one that won't
+/// decode stays as pasted.
+pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
+    let image = if image.format == ImageFormat::Bmp
+        && let Ok(png) = bmp_to_png(&image)
+    {
+        png
+    } else {
+        image
+    };
+    StagedAttachment::from_image(ensure_extension("image", image.format), image)
+}
+
+/// Windows screenshots are BMP, but no agent harness inlines BMP and the
+/// agent's `Read` tool can't decode one — so they go out as PNG.
+fn bmp_to_png(bmp: &Image) -> Result<Image, String> {
+    let decoded = image::load_from_memory_with_format(&bmp.bytes, image::ImageFormat::Bmp)
+        .map_err(|e| e.to_string())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    decoded
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(Image::from_bytes(ImageFormat::Png, png.into_inner()))
 }
 
 /// Stage native macOS capture bytes without a temporary file. The capture
 /// service already encoded PNG and enforces the shared size limit.
 pub fn stage_png_bytes(name: String, bytes: Vec<u8>) -> StagedAttachment {
-    StagedAttachment {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension(&name, ImageFormat::Png),
-        image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
-    }
+    StagedAttachment::from_image(
+        ensure_extension(&name, ImageFormat::Png),
+        Image::from_bytes(ImageFormat::Png, bytes),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -463,14 +629,15 @@ pub struct LoadedAttachmentImage {
 }
 
 /// `ReadAttachmentChunk` loop: 45KB base64 chunks until `done` (bounded, with
-/// the same stuck-offset guard as zeron's `readAttachmentImage`).
-pub async fn read_attachment_image(
+/// the same stuck-offset guard as zeron's `readAttachmentImage`). Returns the
+/// file's name, MIME type and bytes.
+async fn read_attachment_bytes(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     target_device_id: Option<&str>,
     path: &str,
     expected_raster_mime: Option<&str>,
-) -> Option<LoadedAttachmentImage> {
+) -> Option<(String, String, Vec<u8>)> {
     let mut name = String::new();
     let mut mime = String::new();
     let mut b64 = String::new();
@@ -496,10 +663,7 @@ pub async fn read_attachment_image(
             return None;
         }
         let data = chunk.get("data")?.as_str()?;
-        if expected_raster_mime.is_some()
-            && b64.len().saturating_add(data.len())
-                > (MAX_ATTACHMENT_BYTES as usize).div_ceil(3) * 4
-        {
+        if b64.len().saturating_add(data.len()) > (MAX_ATTACHMENT_BYTES as usize).div_ceil(3) * 4 {
             return None;
         }
         b64.push_str(data);
@@ -513,10 +677,46 @@ pub async fn read_attachment_image(
         }
         offset = next;
     }
-    if !done || b64.is_empty() {
+    if !done {
         return None;
     }
     let bytes = BASE64.decode(b64.as_bytes()).ok()?;
+    Some((name, mime, bytes))
+}
+
+/// Read back a staged file of any type (a queued message restored for editing).
+pub async fn read_attachment_file(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    target_device_id: Option<&str>,
+    path: &str,
+) -> Option<StagedAttachment> {
+    let (name, _, bytes) =
+        read_attachment_bytes(engine, executor, target_device_id, path, None).await?;
+    Some(StagedAttachment::from_file(
+        attachment_display_name(&name),
+        bytes,
+    ))
+}
+
+pub async fn read_attachment_image(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    target_device_id: Option<&str>,
+    path: &str,
+    expected_raster_mime: Option<&str>,
+) -> Option<LoadedAttachmentImage> {
+    let (name, mime, bytes) = read_attachment_bytes(
+        engine,
+        executor,
+        target_device_id,
+        path,
+        expected_raster_mime,
+    )
+    .await?;
+    if bytes.is_empty() {
+        return None;
+    }
     let image = if let Some(expected) = expected_raster_mime {
         if expected != mime
             || !matches!(
@@ -909,6 +1109,21 @@ pub fn seed_attachment(device_id: &str, path: &str, name: &str, image: Arc<Image
     store_loaded(device_id, path, name.to_string().into(), image);
 }
 
+/// [`seed_attachment`] for a staged attachment; a file that is not an image
+/// has no thumbnail to seed.
+pub fn seed_staged(device_id: &str, path: &str, att: &StagedAttachment) {
+    if let Some(image) = att.image() {
+        seed_attachment(device_id, path, &att.name, image.clone());
+    }
+}
+
+/// [`seed_attachment_alias`] for a staged attachment.
+pub fn seed_staged_alias(device_id: &str, upload_id: &str, att: &StagedAttachment) {
+    if let Some(image) = att.image() {
+        seed_attachment_alias(device_id, upload_id, &att.name, image.clone());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Preview lightbox (attachment-ui.tsx AttachmentPreviewDialog)
 // ---------------------------------------------------------------------------
@@ -919,6 +1134,8 @@ pub struct PreviewImage {
     pub name: SharedString,
     pub image: Arc<Image>,
     pub(crate) viewer: crate::image_viewer::ImageView,
+    /// Fill behind an image drawn on a transparent canvas (diagrams).
+    pub(crate) plate: Option<gpui::Hsla>,
 }
 
 impl PreviewImage {
@@ -927,7 +1144,13 @@ impl PreviewImage {
             name: name.into(),
             image,
             viewer: Default::default(),
+            plate: None,
         }
+    }
+
+    pub(crate) fn with_plate(mut self, plate: gpui::Hsla) -> Self {
+        self.plate = Some(plate);
+        self
     }
 }
 
@@ -969,9 +1192,14 @@ pub(crate) fn lightbox_with_size(
             })
     });
     let content = match natural_size {
-        Some(natural) => preview
-            .viewer
-            .render(preview.image.clone(), natural, None, window, cx),
+        Some(natural) => preview.viewer.render(
+            preview.image.clone(),
+            natural,
+            None,
+            preview.plate,
+            window,
+            cx,
+        ),
         None => div()
             .text_color(ink(0.6))
             .child("Loading image…")
@@ -1077,6 +1305,77 @@ mod tests {
     }
 
     #[test]
+    fn any_regular_file_stages_with_its_exact_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("notes.md", &b"# notes\n"[..]),
+            ("archive.tar.gz", &[0x1f, 0x8b, 0, 0xff][..]),
+            ("LICENSE", b"MIT"),
+            ("empty.txt", b""),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let staged = stage_file(&path).unwrap();
+            assert_eq!(staged.name, name);
+            assert_eq!(staged.bytes(), bytes);
+            assert!(staged.image().is_none());
+        }
+        // An image still keeps its thumbnail.
+        let png = dir.path().join("a.png");
+        std::fs::write(&png, b"not decoded here").unwrap();
+        assert!(stage_file(&png).unwrap().image().is_some());
+    }
+
+    #[test]
+    fn folders_and_oversize_files_are_refused_with_a_message() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(stage_file(dir.path()).err().unwrap().contains("not a file"));
+        let large = dir.path().join("large.bin");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_ATTACHMENT_BYTES + 1)
+            .unwrap();
+        assert!(stage_file(&large).err().unwrap().contains("too large"));
+        assert!(stage_file(&dir.path().join("missing.md")).is_err());
+    }
+
+    #[test]
+    fn a_staged_name_cannot_add_attachment_lines() {
+        let staged = StagedAttachment::from_file("a\n- injected.md", Vec::new());
+        assert_eq!(staged.name, "a_- injected.md");
+    }
+
+    #[test]
+    fn file_attachments_round_trip_with_their_own_placeholder() {
+        let only_files = with_attachments("", &["/uploads/ab12cd34-notes.md".to_string()]);
+        assert!(only_files.starts_with(FILE_ATTACHMENT_ONLY_TEXT));
+        let parsed = parse_user_message_images(&only_files);
+        assert_eq!(parsed.text, "");
+        assert_eq!(parsed.attachments[0].path, "/uploads/ab12cd34-notes.md");
+        assert_eq!(user_message_rail_text(&only_files), "Attached file");
+
+        // A mixed send reads as files; an image-only send is unchanged.
+        let mixed = with_attachments("", &["/a/cat.png".to_string(), "/a/notes.md".to_string()]);
+        assert!(mixed.starts_with(FILE_ATTACHMENT_ONLY_TEXT));
+        assert_eq!(user_message_rail_text(&mixed), "2 attached files");
+        let images = with_attachments("", &["/a/cat.png".to_string()]);
+        assert!(images.starts_with(ATTACHMENT_ONLY_TEXT));
+        assert!(is_attachment_only_text(ATTACHMENT_ONLY_TEXT));
+        assert!(is_attachment_only_text(FILE_ATTACHMENT_ONLY_TEXT));
+    }
+
+    #[test]
+    fn upload_prefixes_are_not_part_of_the_displayed_name() {
+        assert_eq!(attachment_display_name("ab12cd34-notes.md"), "notes.md");
+        assert_eq!(attachment_display_name("my-notes.md"), "my-notes.md");
+        assert_eq!(
+            attachment_display_name("zzzzzzzz-notes.md"),
+            "zzzzzzzz-notes.md"
+        );
+        assert_eq!(attachment_display_name("notes.md"), "notes.md");
+    }
+
+    #[test]
     fn with_attachments_round_trips_through_parse() {
         let paths = vec!["/data/uploads/ab-cat.png".to_string(), "/x/dog.jpg".into()];
         let content = with_attachments("look at these", &paths);
@@ -1174,6 +1473,72 @@ mod tests {
                 "ext {ext}"
             );
         }
+    }
+
+    /// A 1x1 32-bit BI_RGB bitmap as the Windows clipboard produces it: one
+    /// BGRX pixel, the fourth byte unused (zero).
+    fn clipboard_bmp() -> Vec<u8> {
+        let mut bmp = b"BM".to_vec();
+        // File size, reserved, pixel offset, header size, width, height.
+        for field in [58u32, 0, 54, 40, 1, 1] {
+            bmp.extend(field.to_le_bytes());
+        }
+        bmp.extend([1, 0, 32, 0]); // planes, bits per pixel
+        bmp.extend([0; 24]); // BI_RGB, image size, resolution, palette
+        bmp.extend([30, 20, 10, 0]);
+        bmp
+    }
+
+    #[test]
+    fn pasted_bmp_screenshot_is_staged_as_an_opaque_png() {
+        let staged = stage_clipboard_image(Image::from_bytes(ImageFormat::Bmp, clipboard_bmp()));
+        assert_eq!(staged.image().unwrap().format, ImageFormat::Png);
+        assert_eq!(staged.name, "image.png");
+        let png = image::load_from_memory(staged.bytes()).unwrap();
+        assert_eq!(png.into_rgba8().get_pixel(0, 0).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn bmp_file_is_staged_as_png_but_wallpapers_keep_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Screenshot 1.BMP");
+        std::fs::write(&path, clipboard_bmp()).unwrap();
+
+        let staged = stage_file(&path).unwrap();
+        assert_eq!(staged.image().unwrap().format, ImageFormat::Png);
+        assert_eq!(staged.name, "Screenshot 1.png");
+        assert!(image::load_from_memory(staged.bytes()).is_ok());
+
+        let verbatim = stage_file_verbatim(&path).unwrap();
+        assert_eq!(verbatim.image().unwrap().format, ImageFormat::Bmp);
+        assert_eq!(verbatim.name, "Screenshot 1.BMP");
+        assert_eq!(verbatim.bytes(), clipboard_bmp());
+    }
+
+    #[test]
+    fn non_bmp_files_are_staged_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        image::RgbImage::new(1, 1).save(&path).unwrap();
+        let staged = stage_file(&path).unwrap();
+        assert_eq!(staged.name, "shot.png");
+        assert_eq!(staged.bytes(), std::fs::read(&path).unwrap());
+    }
+
+    #[test]
+    fn undecodable_bmp_is_refused_for_files_and_kept_for_pastes() {
+        let broken = b"BM not really a bitmap".to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.bmp");
+        std::fs::write(&path, &broken).unwrap();
+        assert_eq!(
+            stage_file(&path).err().unwrap(),
+            "broken.bmp is not a valid image."
+        );
+
+        let pasted = stage_clipboard_image(Image::from_bytes(ImageFormat::Bmp, broken));
+        assert_eq!(pasted.image().unwrap().format, ImageFormat::Bmp);
+        assert_eq!(pasted.name, "image.bmp");
     }
 
     #[test]
@@ -1393,6 +1758,78 @@ mod generated_image_tests {
             zeron_rpc::RpcReply::value(
                 &serde_json::json!({"name":"generated.png", "mimeType":"image/png", "data":BASE64.encode(&self.bytes), "nextOffset": self.bytes.len(), "done":true}),
             )
+        }
+    }
+
+    struct FileRpc(Vec<u8>);
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for FileRpc {
+        async fn handle(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            zeron_rpc::RpcReply::value(&serde_json::json!({
+                "name": "ab12cd34-notes.md",
+                "mimeType": "application/octet-stream",
+                "data": BASE64.encode(&self.0),
+                "nextOffset": self.0.len(),
+                "done": true,
+            }))
+        }
+    }
+
+    #[test]
+    fn chips_stand_in_for_their_attachments() {
+        use zeron_proto::attachment_mentions::attachment_mention_link;
+        let paths: Vec<String> = [
+            "/uploads/ab12cd34-Image_1.png",
+            "pending://att-2/my notes.md",
+            "/uploads/ef56ab78-Image_3.png",
+            "/uploads/0a1b2c3d-Cargo.toml",
+        ]
+        .map(String::from)
+        .to_vec();
+        let text = format!(
+            "compare {} with {}",
+            attachment_mention_link(1, None),
+            attachment_mention_link(2, Some("my notes.md")),
+        );
+        // Image 3 and Cargo.toml have no chip, so they keep their tiles.
+        assert_eq!(unchipped_attachments(&text, &paths), [&paths[2], &paths[3]]);
+        // A committed upload sanitizes the name the chip still carries.
+        let committed = vec!["/uploads/12345678-my_notes.md".to_string()];
+        assert!(unchipped_attachments(&text, &committed).is_empty());
+        // Plain text keeps every tile.
+        assert_eq!(unchipped_attachments("Image 1", &paths).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_queued_file_reads_back_with_its_bytes_and_display_name() {
+        let executor = gpui_platform::background_executor();
+        for bytes in [b"# notes\n".to_vec(), Vec::new()] {
+            let engine = EngineHandle::from_test_client(zeron_rpc::memory_client(Arc::new(
+                FileRpc(bytes.clone()),
+            )));
+            let file = read_attachment_file(&engine, &executor, None, "/uploads/ab12cd34-notes.md")
+                .await
+                .unwrap();
+            assert_eq!(file.name, "notes.md");
+            assert_eq!(file.bytes(), bytes);
+            assert!(file.image().is_none());
+            // An image read-back never accepts an empty body.
+            if bytes.is_empty() {
+                let image = read_attachment_image(
+                    &engine,
+                    &executor,
+                    None,
+                    "/uploads/ab12cd34-notes.md",
+                    None,
+                )
+                .await;
+                assert!(image.is_none());
+            }
         }
     }
 

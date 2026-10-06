@@ -239,6 +239,146 @@ async fn repos_round_trip_add_branches_worktrees() {
 }
 
 #[tokio::test]
+async fn repository_identity_spans_worktrees_and_clones() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repos = test_repos(&temp.path().join("data"));
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let linked = temp.path().join("linked");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            linked.to_str().unwrap(),
+        ],
+    )
+    .await;
+
+    // The trunk's root commit: shared by worktrees, and by clones whatever
+    // their remotes say — an old name kept alive by a rename redirect, an
+    // SSH host alias, another transport.
+    let root = git_stdout(&repo, &["rev-list", "--max-parents=0", "HEAD"]).await;
+    let identity = repos.repository_identity(&repo).await.expect("identity");
+    assert_eq!(identity, format!("commit:{root}"));
+    assert_eq!(repos.repository_identity(&linked).await.unwrap(), identity);
+    git(
+        &repo,
+        &["remote", "add", "origin", "git@github-alias:zeronsh/old-name.git"],
+    )
+    .await;
+    let clone = temp.path().join("clone");
+    git(
+        temp.path(),
+        &["clone", "-q", repo.to_str().unwrap(), clone.to_str().unwrap()],
+    )
+    .await;
+    git(
+        &clone,
+        &["remote", "set-url", "origin", "https://github.com/zeronsh/new-name"],
+    )
+    .await;
+    assert_eq!(repos.repository_identity(&repo).await.unwrap(), identity);
+    assert_eq!(repos.repository_identity(&clone).await.unwrap(), identity);
+
+    // Folders below the top level stay their own projects: monorepo
+    // siblings differ, the same subfolder matches across clones.
+    for dir in [&repo, &clone] {
+        std::fs::create_dir_all(dir.join("apps/web")).unwrap();
+        std::fs::create_dir_all(dir.join("apps/api")).unwrap();
+    }
+    let web = repos
+        .repository_identity(&repo.join("apps/web"))
+        .await
+        .unwrap();
+    assert_eq!(web, format!("{identity}:apps/web"));
+    assert_ne!(
+        repos
+            .repository_identity(&repo.join("apps/api"))
+            .await
+            .unwrap(),
+        web
+    );
+    assert_eq!(
+        repos
+            .repository_identity(&clone.join("apps/web"))
+            .await
+            .unwrap(),
+        web
+    );
+
+    // An unrelated repository has its own root.
+    let other = temp.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q", "-b", "main"]).await;
+    std::fs::write(other.join("b.txt"), "unrelated\n").unwrap();
+    git(&other, &["add", "."]).await;
+    git(&other, &["commit", "-q", "-m", "other initial"]).await;
+    assert_ne!(repos.repository_identity(&other).await.unwrap(), identity);
+
+    // Merging an unrelated history in adds a root on a second parent; the
+    // trunk's root still names the repository.
+    git(&repo, &["fetch", "-q", other.to_str().unwrap(), "main"]).await;
+    git(
+        &repo,
+        &[
+            "merge",
+            "-q",
+            "--allow-unrelated-histories",
+            "-m",
+            "merge other",
+            "FETCH_HEAD",
+        ],
+    )
+    .await;
+    assert_eq!(repos.repository_identity(&repo).await.unwrap(), identity);
+
+    // A shallow clone can't vouch for its root: the remote names it.
+    let shallow = temp.path().join("shallow");
+    git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &format!("file://{}", repo.display()),
+            shallow.to_str().unwrap(),
+        ],
+    )
+    .await;
+    git(
+        &shallow,
+        &["remote", "set-url", "origin", "https://GitHub.com/ZeronSH/Zeron.git"],
+    )
+    .await;
+    assert_eq!(
+        repos.repository_identity(&shallow).await.unwrap(),
+        "github.com/zeronsh/zeron"
+    );
+
+    // No commits yet: the remote (origin, else the first), then a
+    // device-scoped local identity.
+    let empty = temp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    git(&empty, &["init", "-q", "-b", "main"]).await;
+    let local = repos.repository_identity(&empty).await.unwrap();
+    assert!(local.starts_with("local:"), "{local}");
+    git(
+        &empty,
+        &["remote", "add", "upstream", "git@github.com:Anara/Comet.git"],
+    )
+    .await;
+    assert_eq!(
+        repos.repository_identity(&empty).await.unwrap(),
+        "github.com/anara/comet"
+    );
+}
+
+#[tokio::test]
 async fn git_history_is_topological_paged_and_carries_public_refs() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("history-repo");
@@ -1328,6 +1468,7 @@ async fn spaces_sync_stamps_git_presence_and_reacts_to_git_init() {
     };
     assert!(!space.git_detected, "plain folder must read as non-git");
     assert!(space.checkout_id.is_none());
+    assert!(space.repository_id.is_none());
 
     // `git init` later flips the stamp (watcher and/or explicit recheck).
     git(&folder, &["init", "-b", "main"]).await;
@@ -1346,6 +1487,14 @@ async fn spaces_sync_stamps_git_presence_and_reacts_to_git_init() {
             .expect("watch alive");
     };
     assert!(space.checkout_id.is_some(), "git space gains a checkout id");
+    assert!(
+        space
+            .repository_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("local:")),
+        "remote-less git space gains a local repository id: {:?}",
+        space.repository_id
+    );
     core.shutdown().await;
 }
 

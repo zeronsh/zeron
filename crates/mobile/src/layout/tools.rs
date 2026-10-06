@@ -653,6 +653,7 @@ fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: b
             paints,
             links: Vec::new(),
             chip: (0.0, 0.0),
+            badges: Vec::new(),
         };
         prepared.push(ThoughtLine { indent, gutter, bars, body: Some(body) });
     }

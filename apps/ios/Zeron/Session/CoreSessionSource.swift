@@ -247,6 +247,15 @@ final class CoreSessionSource: SessionSource {
 
     private static let images = NSCache<NSString, UIImage>()
 
+    func image(_ reference: String) async -> UIImage? {
+        if let hit = Self.images.object(forKey: reference as NSString) { return hit }
+        guard let data = try? await client.readAttachment(deviceId: hostDevice, path: reference),
+              let image = await UIImage(data: data)?.byPreparingForDisplay()
+        else { return nil }
+        Self.images.setObject(image, forKey: reference as NSString)
+        return image
+    }
+
     func loadImage(_ reference: String, into view: UIImageView) {
         // Claim the view first: a slower load for a row it used to show
         // must not land on top of this one.

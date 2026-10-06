@@ -1339,6 +1339,14 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    // Codex's `update_plan` tool: the whole checklist, replaced
+                    // on every call, with an in-progress step.
+                    "turn/plan/updated" => {
+                        for ev in normalize::plan_update_events(&params) {
+                            if !send(&event_tx, ev).await { break 'main; }
+                        }
+                    }
+
                     "turn/completed" => {
                         let id = turn_id(&params);
                         router.note_completed(&id);

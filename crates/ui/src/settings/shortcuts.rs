@@ -230,53 +230,14 @@ impl ShortcutsPage {
             }
             RecordOutcome::Ignored => {}
             RecordOutcome::Set(combo) => {
-                if recording == ShortcutId::CaptureAppshot
-                    && crate::appshots::validate_shortcut(&combo).is_err()
-                {
-                    self.conflict_notice = Some(
-                        format!(
-                            "Use {} with a letter, number, function key or navigation key.",
-                            if cfg!(target_os = "macos") {
-                                "Control, Option or Command"
-                            } else {
-                                "Control or Alt"
-                            }
-                        )
-                        .into(),
-                    );
-                    self.stop_recording();
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                if send_combo_is_reserved(self.composer_send_behavior, &combo) {
-                    self.conflict_notice = Some(
-                        format!("{} is reserved for the composer.", display_combo(&combo)).into(),
-                    );
-                    self.stop_recording();
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                // A combo already bound elsewhere is REFUSED, naming the owner
-                // (zeron settings.shortcuts.tsx: "… is already assigned to …").
-                if let Some(owner) = conflict_owner(&self.keymap, recording, &combo) {
-                    self.conflict_notice = Some(
-                        format!(
-                            "{} is already assigned to {}.",
-                            display_combo(&combo),
-                            owner.label()
-                        )
-                        .into(),
-                    );
-                    self.stop_recording();
-                    cx.notify();
-                } else {
+                self.stop_recording();
+                self.conflict_notice =
+                    refusal(&self.keymap, self.composer_send_behavior, recording, &combo);
+                if self.conflict_notice.is_none() {
                     self.keymap.set(recording, combo);
-                    self.stop_recording();
-                    self.conflict_notice = None;
                     self.commit(cx);
                 }
+                cx.notify();
             }
         }
         cx.stop_propagation();
@@ -329,87 +290,28 @@ impl ShortcutsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let accent = theme.accent;
-        let combo = self.keymap.get(id).to_string();
-        let is_recording = recording == Some(id);
-        let non_default = combo != id.default_combo();
-        let chip_text: SharedString = if is_recording {
-            "Press keys…".into()
-        } else {
-            display_combo(&combo).into()
-        };
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(20.0))
-            .when(non_default && !is_recording, |el| {
-                el.child(
-                    div()
-                        .id(("shortcut-reset", ix))
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("Reset {} shortcut", id.label()))
-                        .min_h(px(24.0))
-                        .tab_index(0)
-                        .focus_visible(move |style| style.border_2().border_color(accent))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.keymap.reset(id);
-                            this.stop_recording();
-                            this.commit(cx);
-                        }))
-                        .child(SharedString::from("Reset")),
-                )
-            })
-            .child(
-                div()
-                    .id(("shortcut-combo", ix))
-                    .role(gpui::Role::Button)
-                    .aria_label(format!(
-                        "Change {} shortcut: {}",
-                        id.label(),
-                        display_combo(&combo)
-                    ))
-                    .tab_index(0)
-                    .min_w(px(96.0))
-                    .h(px(widgets::SELECT_HEIGHT))
-                    .px(px(12.0))
-                    .rounded(px(8.0))
-                    // Same glass wash as the settings dropdowns; the
-                    // transparent edge is held for the focus ring.
-                    .border_1()
-                    .border_color(gpui::transparent_black())
-                    .focus_visible(move |style| style.border_color(accent))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .cursor_pointer()
-                    .map(|el| {
-                        if is_recording {
-                            el.bg(accent.opacity(0.16))
-                                .border_color(accent.opacity(0.55))
-                                .text_color(theme.text)
-                        } else {
-                            let hover_key = format!("shortcut-combo-{ix}-hover");
-                            el.bg(crate::motion::hover_blend(
-                                &hover_key,
-                                widgets::select_fill(theme, false),
-                                widgets::select_fill(theme, true),
-                            ))
-                            .on_hover(crate::motion::hover_listener(hover_key))
-                            .text_color(theme.text)
-                        }
+        let page = cx.entity().downgrade();
+        let reset_page = page.clone();
+        binding_control(
+            id,
+            ix,
+            self.keymap.get(id),
+            recording == Some(id),
+            theme,
+            move |_, cx| {
+                reset_page
+                    .update(cx, |this, cx| {
+                        this.keymap.reset(id);
+                        this.stop_recording();
+                        this.commit(cx);
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_recording(id, window, cx);
-                    }))
-                    .child(chip_text),
-            )
+                    .ok();
+            },
+            move |window, cx| {
+                page.update(cx, |this, cx| this.start_recording(id, window, cx))
+                    .ok();
+            },
+        )
     }
 
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
@@ -459,6 +361,303 @@ impl popover::ScrollRailHost for ShortcutsPage {
     }
 }
 
+/// One rebindable shortcut on the settings page of the feature it drives
+/// (Settings → Voice). Records and refuses combos exactly like a Shortcuts
+/// row, then saves straight to the store and re-applies the keymap.
+pub struct ShortcutField {
+    id: ShortcutId,
+    focus: FocusHandle,
+    recording: bool,
+    recording_subscriptions: Option<[gpui::Subscription; 3]>,
+    notice: Option<SharedString>,
+}
+
+impl ShortcutField {
+    pub fn new(id: ShortcutId, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|field, _| {
+            if field.recording {
+                crate::appshots::set_recording(false);
+            }
+        })
+        .detach();
+        Self {
+            id,
+            focus: cx.focus_handle(),
+            recording: false,
+            recording_subscriptions: None,
+            notice: None,
+        }
+    }
+
+    fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.recording = true;
+        crate::appshots::set_recording(true);
+        let field = cx.entity().downgrade();
+        // Bound actions run before Div key listeners; intercept first so the
+        // chord being recorded (⌘D itself) never starts dictation.
+        let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+            let _ = field.update(cx, |field, cx| {
+                if field.focus.is_focused(window) {
+                    field.record_keystroke(&event.keystroke, cx);
+                }
+            });
+        });
+        let blur = cx.on_blur(&self.focus, window, |field, _, cx| {
+            field.stop_recording();
+            cx.notify();
+        });
+        // The Voice page outlives its window (closing it keeps the app
+        // running), and a close does not blur. Never leave Appshots'
+        // capture shortcut suspended.
+        let field = cx.entity().downgrade();
+        let closed = cx.on_window_closed(move |cx, _| {
+            field
+                .update(cx, |field, cx| {
+                    field.stop_recording();
+                    cx.notify();
+                })
+                .ok();
+        });
+        self.recording_subscriptions = Some([interceptor, blur, closed]);
+        self.notice = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn stop_recording(&mut self) {
+        if self.recording {
+            crate::appshots::set_recording(false);
+        }
+        self.recording = false;
+        self.recording_subscriptions = None;
+    }
+
+    fn record_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let mods = &keystroke.modifiers;
+        match record_key(
+            &keystroke.key,
+            mods.control,
+            mods.alt,
+            mods.shift,
+            mods.platform,
+        ) {
+            RecordOutcome::Cancelled => self.stop_recording(),
+            RecordOutcome::Ignored => {}
+            RecordOutcome::Set(combo) => {
+                self.stop_recording();
+                let current = crate::settings::current(cx);
+                self.notice = refusal(
+                    &current.keymap,
+                    current.composer_send_behavior,
+                    self.id,
+                    &combo,
+                );
+                if self.notice.is_none() {
+                    self.save(Some(combo), cx);
+                }
+            }
+        }
+        cx.notify();
+        cx.stop_propagation();
+    }
+
+    /// `None` restores the default binding.
+    fn save(&mut self, combo: Option<String>, cx: &mut Context<Self>) {
+        let id = self.id;
+        crate::settings::update(
+            crate::settings::SavePolicy::Immediate,
+            cx,
+            |settings| match combo {
+                Some(combo) => settings.keymap.set(id, combo),
+                None => settings.keymap.reset(id),
+            },
+        );
+        let current = crate::settings::current(cx);
+        crate::shell::apply_keymap(cx, &current.keymap, current.composer_send_behavior);
+        cx.notify();
+    }
+}
+
+impl Render for ShortcutField {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).for_settings_surface();
+        let combo = crate::settings::current(cx).keymap.get(self.id).to_string();
+        let ix = ShortcutId::ALL
+            .iter()
+            .position(|&id| id == self.id)
+            .unwrap_or(0);
+        let reset = cx.entity().downgrade();
+        let record = reset.clone();
+        let helper: Option<SharedString> = if self.recording {
+            Some("Press Escape to cancel.".into())
+        } else {
+            self.notice.clone()
+        };
+        div()
+            .id("shortcut-field")
+            .track_focus(&self.focus)
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(4.0))
+            .child(binding_control(
+                self.id,
+                ix,
+                &combo,
+                self.recording,
+                &theme,
+                move |_, cx| {
+                    reset
+                        .update(cx, |field, cx| {
+                            field.stop_recording();
+                            field.notice = None;
+                            field.save(None, cx);
+                        })
+                        .ok();
+                },
+                move |window, cx| {
+                    record
+                        .update(cx, |field, cx| field.start_recording(window, cx))
+                        .ok();
+                },
+            ))
+            .children(helper.map(|helper| {
+                div()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(helper)
+            }))
+    }
+}
+
+/// Reset (when customized) plus the click-to-record combo chip; recording
+/// inverts it to the accent wash. Shared by Settings → Shortcuts and the
+/// feature pages that own a shortcut ([`ShortcutField`]).
+fn binding_control(
+    id: ShortcutId,
+    ix: usize,
+    combo: &str,
+    is_recording: bool,
+    theme: &Theme,
+    on_reset: impl Fn(&mut Window, &mut gpui::App) + 'static,
+    on_record: impl Fn(&mut Window, &mut gpui::App) + 'static,
+) -> gpui::Div {
+    let accent = theme.accent;
+    let combo = combo.to_string();
+    let non_default = combo != id.default_combo();
+    let chip_text: SharedString = if is_recording {
+        "Press keys…".into()
+    } else {
+        display_combo(&combo).into()
+    };
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(20.0))
+        .when(non_default && !is_recording, |el| {
+            el.child(
+                div()
+                    .id(("shortcut-reset", ix))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Reset {} shortcut", id.label()))
+                    .min_h(px(24.0))
+                    .tab_index(0)
+                    .focus_visible(move |style| style.border_2().border_color(accent))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.text))
+                    .on_click(move |_, window, cx| on_reset(window, cx))
+                    .child(SharedString::from("Reset")),
+            )
+        })
+        .child(
+            div()
+                .id(("shortcut-combo", ix))
+                .role(gpui::Role::Button)
+                .aria_label(format!(
+                    "Change {} shortcut: {}",
+                    id.label(),
+                    display_combo(&combo)
+                ))
+                .tab_index(0)
+                .min_w(px(96.0))
+                .h(px(widgets::SELECT_HEIGHT))
+                .px(px(12.0))
+                .rounded(px(8.0))
+                // Same glass wash as the settings dropdowns; the
+                // transparent edge is held for the focus ring.
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .focus_visible(move |style| style.border_color(accent))
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(theme.font_mono.clone())
+                .text_size(crate::typography::ui_rems(12.0))
+                .cursor_pointer()
+                .map(|el| {
+                    if is_recording {
+                        el.bg(accent.opacity(0.16))
+                            .border_color(accent.opacity(0.55))
+                            .text_color(theme.text)
+                    } else {
+                        let hover_key = format!("shortcut-combo-{ix}-hover");
+                        el.bg(crate::motion::hover_blend(
+                            &hover_key,
+                            widgets::select_fill(theme, false),
+                            widgets::select_fill(theme, true),
+                        ))
+                        .on_hover(crate::motion::hover_listener(hover_key))
+                        .text_color(theme.text)
+                    }
+                })
+                .on_click(move |_, window, cx| on_record(window, cx))
+                .child(chip_text),
+        )
+}
+
+/// Why `combo` cannot be bound to `id`, if it cannot. Conflicts never
+/// persist; they're refused at record time, naming the owner (zeron
+/// settings.shortcuts.tsx: "… is already assigned to …"). Pure.
+fn refusal(
+    keymap: &KeymapConfig,
+    behavior: ComposerSendBehavior,
+    id: ShortcutId,
+    combo: &str,
+) -> Option<SharedString> {
+    if id == ShortcutId::CaptureAppshot && crate::appshots::validate_shortcut(combo).is_err() {
+        return Some(
+            format!(
+                "Use {} with a letter, number, function key or navigation key.",
+                if cfg!(target_os = "macos") {
+                    "Control, Option or Command"
+                } else {
+                    "Control or Alt"
+                }
+            )
+            .into(),
+        );
+    }
+    if send_combo_is_reserved(behavior, combo) {
+        return Some(format!("{} is reserved for the composer.", display_combo(combo)).into());
+    }
+    conflict_owner(keymap, id, combo).map(|owner| {
+        // Name the page for shortcuts that live on their feature's page.
+        let page = match group(owner) {
+            page @ ("Appshots" | "Voice") => format!(" in Settings → {page}"),
+            _ => String::new(),
+        };
+        format!(
+            "{} is already assigned to {}{page}.",
+            display_combo(combo),
+            owner.label()
+        )
+        .into()
+    })
+}
+
 /// The shortcut (other than `id`) already bound to `combo`, if any. Pure.
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
     ShortcutId::ALL
@@ -479,7 +678,7 @@ pub fn modifier_send_label(is_macos: bool) -> &'static str {
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 8] = [
+const GROUP_ORDER: [&str; 9] = [
     "Appearance",
     "Files",
     "Browser",
@@ -488,6 +687,7 @@ const GROUP_ORDER: [&str; 8] = [
     "Projects",
     "Jump to session",
     "Appshots",
+    "Voice",
 ];
 
 /// The section a shortcut's row renders under.
@@ -502,6 +702,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ToggleFiles
         | ShortcutId::ToggleTerminal => "Panels",
         ShortcutId::NewProject => "Projects",
+        ShortcutId::ToggleDictation => "Voice",
         ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
         | ShortcutId::NextSession
@@ -513,6 +714,13 @@ fn group(id: ShortcutId) -> &'static str {
 
 impl Render for ShortcutsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Feature pages (Voice) rebind their shortcut through the store. Read
+        // it back so a later commit here never republishes an older keymap.
+        if self.recording.is_none()
+            && let Some(store) = cx.try_global::<crate::settings::SettingsStore>()
+        {
+            self.keymap.clone_from(&store.current.keymap);
+        }
         if self.appshots_page {
             if std::mem::take(&mut self.appshots_focus_pending) {
                 window.focus(&self.focus, cx);
@@ -594,6 +802,45 @@ impl Render for ShortcutsPage {
                         cx.notify();
                     })),
             );
+        let compact_model_picker = crate::settings::compact_model_picker(cx);
+        let compact_model_picker_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(&theme, "Compact model picker"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![
+                            div()
+                                .child("Adjust effort with a slider, then open the model list when needed.")
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(&theme, compact_model_picker, "compact-model-picker")
+                    .id("compact-model-picker-toggle")
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Compact model picker")
+                    .aria_toggled(if compact_model_picker {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Debounced,
+                            cx,
+                            |settings| settings.compact_model_picker = !compact_model_picker,
+                        );
+                        cx.refresh_windows();
+                        cx.notify();
+                    })),
+            );
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -655,6 +902,7 @@ impl Render for ShortcutsPage {
                                         widgets::section_card(&theme)
                                             .child(send_behavior_row)
                                             .child(compact_mode_row)
+                                            .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
                                     )
                                     .child(self.thread_naming.clone()),
@@ -672,7 +920,8 @@ impl Render for ShortcutsPage {
         // own top margin is zeroed.
         let mut groups: Vec<gpui::AnyElement> = Vec::new();
         for name in GROUP_ORDER {
-            if name == "Appshots" {
+            // Feature pages own these: Settings → Appshots and → Voice.
+            if name == "Appshots" || name == "Voice" {
                 continue;
             }
             let mut card = widgets::section_card(&theme).mt_0();
@@ -798,6 +1047,84 @@ impl Render for ShortcutsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn voice_shortcut_records_on_its_own_page_and_shortcuts_reads_it_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        assert_eq!(ShortcutId::ToggleDictation.default_combo(), "mod-d");
+        assert_eq!(group(ShortcutId::ToggleDictation), "Voice");
+        let modifier = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        let (field, cx) =
+            cx.add_window_view(|_, cx| ShortcutField::new(ShortcutId::ToggleDictation, cx));
+        // A chord another shortcut owns is refused and the binding is kept.
+        field.update_in(cx, |field, window, cx| field.start_recording(window, cx));
+        cx.simulate_keystrokes(&format!("{modifier}-b"));
+        field.update(cx, |field, cx| {
+            assert!(!field.recording);
+            assert!(field.notice.is_some());
+            assert_eq!(
+                crate::settings::current(cx).keymap.toggle_dictation,
+                "mod-d"
+            );
+        });
+        field.update_in(cx, |field, window, cx| field.start_recording(window, cx));
+        cx.simulate_keystrokes(&format!("{modifier}-shift-v"));
+        field.update(cx, |field, cx| {
+            assert!(field.notice.is_none());
+            assert_eq!(
+                crate::settings::current(cx).keymap.toggle_dictation,
+                "mod-shift-v"
+            );
+        });
+        // Closing the window mid-recording (the app keeps running) must not
+        // leave Appshots' capture shortcut suspended.
+        field.update_in(cx, |field, window, cx| field.start_recording(window, cx));
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        field.update(cx, |field, _| assert!(!field.recording));
+        // Elsewhere, a clash with a feature page's shortcut says where it lives.
+        let notice = refusal(
+            &KeymapConfig::default(),
+            ComposerSendBehavior::Enter,
+            ShortcutId::ToggleSidebar,
+            "mod-d",
+        )
+        .unwrap();
+        assert!(
+            notice.ends_with("Hold to dictate in Settings → Voice."),
+            "{notice}"
+        );
+        // Settings → Shortcuts, opened later with an older copy, adopts the
+        // store's binding so its own commits cannot revert Voice's.
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            ShortcutsPage::new(
+                state,
+                KeymapConfig::default(),
+                false,
+                ComposerSendBehavior::Enter,
+                false,
+                false,
+                AppshotDestination::Automatic,
+                cx,
+            )
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        page.update(cx, |page, _| {
+            assert_eq!(page.keymap.toggle_dictation, "mod-shift-v");
+        });
+    }
 
     #[gpui::test]
     fn conversation_controls_work_after_moving_out_of_shortcuts(cx: &mut gpui::TestAppContext) {

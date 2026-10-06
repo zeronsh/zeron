@@ -6,9 +6,11 @@
 //! deliver a message to a chat in this state" choice the composer makes
 //! for humans.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
@@ -38,6 +40,9 @@ pub struct ToolDef {
 
 pub struct Tools {
     zeron: Arc<Zeron>,
+    // Remember successful sends on this MCP connection so wait_for_turn after
+    // wait:false also waits for a newly created chat with no session row yet.
+    pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -55,6 +60,10 @@ fn chat_key_schema(extra: Value) -> Value {
     json!({ "type": "object", "properties": properties, "required": ["chat"] })
 }
 
+fn device_schema() -> Value {
+    json!({ "type": "string", "description": "Host device id or exact name. Omit for the local engine." })
+}
+
 fn catalog() -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
@@ -69,21 +78,22 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_projects",
-            description: "Projects: a folder on a device. Each chat belongs to one project, which fixes its host device and working directory.",
-            input_schema: json!({ "type": "object", "properties": {} }),
+            description: "Projects: folders on specific devices. Filter by device (id or name); omit for all projects. Use ids when names or paths repeat.",
+            input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
             name: "list_harnesses",
-            description: "Agent harnesses (claude-code, codex, cursor, …) and whether each is available on this device.",
-            input_schema: json!({ "type": "object", "properties": {} }),
+            description: "Agent harnesses (claude-code, codex, cursor, …) available on the chosen device. Omit device for the local engine.",
+            input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
             name: "list_models",
-            description: "Models a harness offers on this device. Model ids are harness-specific strings; pass one to create_chat.",
+            description: "Models a harness offers on the chosen device (local engine when omitted). Model ids are harness-specific strings; pass one to create_chat.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "harness": { "type": "string", "description": "Harness id, e.g. claude-code or codex." }
+                    "harness": { "type": "string", "description": "Harness id, e.g. claude-code or codex." },
+                    "device": device_schema()
                 },
                 "required": ["harness"]
             }),
@@ -109,15 +119,16 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId). Optionally send a first prompt and wait for the reply. Returns the new chat id. For parallel delegation use create_chats, or leave wait=false on every launch and wait only after all chats have been started.",
+            description: "Create a standalone session visible in Sessions with kind chat, or a child with kind side. Omitted kind preserves the default: side with an origin/parent, standalone otherwise. A side chat cannot create chats. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. Returns the new chat id. For parallel delegation use create_chats, or leave wait=false on every launch and wait only after all chats have been started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Project id, path, or name. Required unless device is given." },
-                    "device": { "type": "string", "description": "Host device (id or name) for a project-less chat; defaults to this device." },
+                    "kind": { "type": "string", "enum": ["chat", "side"], "description": "chat: standalone, no parent allowed. side: requires parent or origin. Omit for legacy defaults." },
+                    "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
+                    "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
-                    "harness": { "type": "string", "description": "Harness id (see list_harnesses). Defaults to claude-code when available." },
-                    "model": { "type": "string", "description": "Model id from list_models. Omit for the harness default." },
+                    "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Defaults to claude-code when available." },
+                    "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
@@ -276,7 +287,7 @@ fn catalog() -> Vec<ToolDef> {
         (
             "create_chats",
             "create_chat",
-            "Create multiple independent side chats concurrently. Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
+            "Create multiple standalone or side chats concurrently (kind per request). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
         ),
         (
             "send_messages",
@@ -365,6 +376,7 @@ struct ChatArgs {
 #[derive(Deserialize)]
 struct ListModelsArgs {
     harness: String,
+    device: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -377,8 +389,35 @@ struct ListChatsArgs {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ChatKind {
+    Chat,
+    Side,
+}
+
+#[derive(Deserialize, Default)]
+struct DeviceArgs {
+    device: Option<String>,
+}
+
+/// Messages already in the transcript before a send. Replies are matched by
+/// id, not by time: `createdAt` is stamped on the host's clock, which can run
+/// behind the caller's when the chat lives on another device.
+#[derive(Clone, Default)]
+struct TurnStart {
+    message_ids: Vec<String>,
+}
+
+#[derive(Clone)]
+struct PendingTurn {
+    baseline: Option<Session>,
+    start: TurnStart,
+}
+
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
+    kind: Option<ChatKind>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -452,9 +491,10 @@ fn wait_duration(secs: Option<u64>) -> Duration {
         .min(MAX_WAIT)
 }
 
+#[cfg(test)]
 fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
 }
@@ -522,7 +562,10 @@ fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
 
 impl Tools {
     pub fn new(zeron: Arc<Zeron>) -> Self {
-        Self { zeron }
+        Self {
+            zeron,
+            pending_turns: Default::default(),
+        }
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
@@ -539,8 +582,8 @@ impl Tools {
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
-            "list_projects" => self.list_projects().await,
-            "list_harnesses" => self.list_harnesses().await,
+            "list_projects" => self.list_projects(parse(args)?).await,
+            "list_harnesses" => self.list_harnesses(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
             "list_chats" => self.list_chats(parse(args)?).await,
             "get_chat" => self.get_chat(parse(args)?).await,
@@ -563,7 +606,7 @@ impl Tools {
             "browser_screenshot" => self.browser_screenshot(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
         };
-        result.map_err(|e| e.to_string())
+        result.map_err(|e| format!("{e:#}"))
     }
 
     /// Poll every request together, including its optional wait. A waiting
@@ -641,8 +684,12 @@ impl Tools {
         }))
     }
 
-    async fn list_projects(&self) -> anyhow::Result<Value> {
-        let (spaces, devices) = tokio::try_join!(self.zeron.spaces(), self.zeron.devices())?;
+    async fn list_projects(&self, args: DeviceArgs) -> anyhow::Result<Value> {
+        let (mut spaces, devices) = tokio::try_join!(self.zeron.spaces(), self.zeron.devices())?;
+        if let Some(device) = args.device.as_deref() {
+            let device = self.zeron.resolve_device_id(Some(device)).await?;
+            spaces.retain(|s| s.device_id == device);
+        }
         let device_name = |id: &str| devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
         Ok(json!({
             "projects": spaces.iter().map(|s| json!({
@@ -656,8 +703,12 @@ impl Tools {
         }))
     }
 
-    async fn list_harnesses(&self) -> anyhow::Result<Value> {
-        let harnesses = self.zeron.harnesses().await?;
+    async fn list_harnesses(&self, args: DeviceArgs) -> anyhow::Result<Value> {
+        let device = match args.device.as_deref() {
+            Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
+            None => None,
+        };
+        let harnesses = self.zeron.harnesses_on(device.as_deref()).await?;
         Ok(json!({
             "harnesses": harnesses.iter().map(|h| json!({
                 "id": h.id,
@@ -673,7 +724,11 @@ impl Tools {
     async fn list_models(&self, args: ListModelsArgs) -> anyhow::Result<Value> {
         let harness: HarnessId =
             parse_enum("harness", &args.harness).map_err(anyhow::Error::msg)?;
-        let models = self.zeron.models(harness).await?;
+        let device = match args.device.as_deref() {
+            Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
+            None => None,
+        };
+        let models = self.zeron.models_on(harness, device.as_deref()).await?;
         Ok(json!({
             "harness": harness,
             "models": models.iter().map(|m| json!({
@@ -692,7 +747,11 @@ impl Tools {
             self.zeron.sessions()
         )?;
         if let Some(project) = args.project.as_deref() {
-            let space = self.zeron.resolve_space(project).await?;
+            let (space, _) = self
+                .zeron
+                .resolve_target(Some(project), args.device.as_deref())
+                .await?;
+            let space = space.expect("project provided");
             chats.retain(|c| c.space_id.as_deref() == Some(space.id.as_str()));
         }
         if args.device.is_some() {
@@ -726,7 +785,7 @@ impl Tools {
         let (spaces, sessions, entries) = tokio::try_join!(
             self.zeron.spaces(),
             self.zeron.sessions(),
-            self.zeron.transcript(&chat.id)
+            self.zeron.transcript_on(&chat.id, Some(&chat.device_id))
         )?;
         let rendered = render_entries(&entries, RenderOptions::default());
         let mut summary = summarize_chat(&chat, &spaces, &sessions);
@@ -744,28 +803,63 @@ impl Tools {
                 "Side chats cannot create chats. Ask your parent chat to create another side chat."
             );
         }
-        let harnesses = self.zeron.harnesses().await?;
+        // Parent: the explicit `parent` argument, else the chat this server
+        // speaks for. Resolved so a prefix/title works and a typo fails loud.
+        let explicit_parent = args
+            .parent
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+        anyhow::ensure!(
+            args.kind != Some(ChatKind::Chat) || explicit_parent.is_none(),
+            "kind chat cannot have a parent"
+        );
+        let parent_chat_id = if args.kind == Some(ChatKind::Chat) {
+            None
+        } else {
+            match explicit_parent {
+                Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
+                None => self.zeron.origin().chat_id.clone(),
+            }
+        };
+        anyhow::ensure!(
+            args.kind != Some(ChatKind::Side) || parent_chat_id.is_some(),
+            "kind side requires a parent or origin chat"
+        );
+        let kind = if parent_chat_id.is_some() {
+            ChatKind::Side
+        } else {
+            ChatKind::Chat
+        };
+
+        if let Some(parent) = parent_chat_id.as_deref() {
+            let chat = self.zeron.resolve_chat(parent).await?;
+            anyhow::ensure!(
+                chat.parent_chat_id.is_none(),
+                "Cannot create a child of a side chat. Choose a top-level parent chat."
+            );
+        }
+        let (space, device_id) = self
+            .zeron
+            .resolve_target(args.project.as_deref(), args.device.as_deref())
+            .await?;
+        let harnesses = self.zeron.harnesses_on(Some(&device_id)).await?;
         let harness = match args.harness.as_deref() {
             Some(raw) => {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
-                if let Some(info) = harnesses.iter().find(|h| h.id == id)
-                    && !info.available()
-                {
-                    anyhow::bail!(
-                        "harness {raw} is not available on this device (see list_harnesses)"
-                    );
-                }
+                anyhow::ensure!(
+                    harnesses.iter().any(|h| h.id == id && h.available()),
+                    "harness {raw} is not available on device {device_id} (see list_harnesses with device)"
+                );
                 id
             }
-            None => default_harness(&harnesses)?,
+            None => default_harness(&harnesses).with_context(|| format!("device {device_id}"))?,
         };
-        if let Some(model) = args.model.as_deref()
-            && let Ok(models) = self.zeron.models(harness).await
-            && !models.is_empty()
-            && !models.iter().any(|m| m.id == model)
-        {
-            anyhow::bail!(
-                "model {model:?} is not offered by {harness:?}; available: {}",
+        if let Some(model) = args.model.as_deref() {
+            let models = self.zeron.models_on(harness, Some(&device_id)).await?;
+            anyhow::ensure!(
+                models.iter().any(|m| m.id == model),
+                "model {model:?} is not offered by {harness:?} on device {device_id}; available: {}",
                 models
                     .iter()
                     .map(|m| m.id.as_str())
@@ -789,37 +883,6 @@ impl Tools {
             sandbox,
         };
 
-        let (space, device_id) = match args.project.as_deref() {
-            Some(project) => {
-                let space = self.zeron.resolve_space(project).await?;
-                let device_id = space.device_id.clone();
-                (Some(space), device_id)
-            }
-            None => (
-                None,
-                self.zeron.resolve_device_id(args.device.as_deref()).await?,
-            ),
-        };
-
-        // Parent: the explicit `parent` argument, else the chat this server
-        // speaks for. Resolved so a prefix/title works and a typo fails loud.
-        let parent_chat_id = match args
-            .parent
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-        {
-            Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
-            None => self.zeron.origin().chat_id.clone(),
-        };
-
-        if let Some(parent) = parent_chat_id.as_deref() {
-            let chat = self.zeron.resolve_chat(parent).await?;
-            anyhow::ensure!(
-                chat.parent_chat_id.is_none(),
-                "Cannot create a child of a side chat. Choose a top-level parent chat."
-            );
-        }
         let chat_id = uuid::Uuid::new_v4().to_string();
         let mut mutate = json!({
             "op": "createChat",
@@ -858,6 +921,7 @@ impl Tools {
 
         let mut result = json!({
             "chatId": chat_id,
+            "kind": kind,
             "deviceId": device_id,
             "project": space.as_ref().map(|s| json!({ "id": s.id, "name": s.display_name(), "path": s.path })),
             "harness": harness,
@@ -893,15 +957,18 @@ impl Tools {
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
                 .await?;
             result["sent"] = sent;
+            let pending = Arc::new(PendingTurn {
+                baseline: None,
+                // A new chat has no earlier messages.
+                start: TurnStart::default(),
+            });
+            self.pending_turns
+                .lock()
+                .await
+                .insert(chat.id.clone(), pending.clone());
             if args.wait {
                 result["turn"] = self
-                    .await_turn(
-                        &chat,
-                        None,
-                        true,
-                        wait_duration(args.timeout_secs),
-                        now_millis(),
-                    )
+                    .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
                     .await?;
             }
         }
@@ -910,7 +977,10 @@ impl Tools {
 
     async fn read_chat(&self, args: ReadChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let entries = self.zeron.transcript(&chat.id).await?;
+        let entries = self
+            .zeron
+            .transcript_on(&chat.id, Some(&chat.device_id))
+            .await?;
         let rendered = render_entries(
             &entries,
             RenderOptions {
@@ -950,7 +1020,7 @@ impl Tools {
         let (spaces, sessions, harnesses) = tokio::try_join!(
             self.zeron.spaces(),
             self.zeron.sessions(),
-            self.zeron.harnesses()
+            self.zeron.harnesses_on(Some(&chat.device_id))
         )?;
         let space = chat
             .space_id
@@ -958,7 +1028,13 @@ impl Tools {
             .and_then(|id| spaces.iter().find(|s| s.id == id));
         let baseline = session_for(&sessions, &chat);
         let mode = args.mode.as_deref().unwrap_or("auto");
-        let sent_at = now_millis();
+        let message_ids = self
+            .zeron
+            .transcript_on(&chat.id, Some(&chat.device_id))
+            .await?
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
         let body = self.attribute(&chat, text).await;
         let mut result = json!({
             "chatId": chat.id,
@@ -967,15 +1043,17 @@ impl Tools {
         result["sent"] = self
             .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
             .await?;
+        let pending = Arc::new(PendingTurn {
+            baseline,
+            start: TurnStart { message_ids },
+        });
+        self.pending_turns
+            .lock()
+            .await
+            .insert(chat.id.clone(), pending.clone());
         if args.wait {
             result["turn"] = self
-                .await_turn(
-                    &chat,
-                    baseline.as_ref(),
-                    true,
-                    wait_duration(args.timeout_secs),
-                    sent_at,
-                )
+                .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
                 .await?;
         }
         Ok(result)
@@ -983,9 +1061,23 @@ impl Tools {
 
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let turn = self
-            .await_turn(&chat, None, false, wait_duration(args.timeout_secs), 0)
-            .await?;
+        let pending = self.pending_turns.lock().await.get(&chat.id).cloned();
+        let turn = match pending {
+            Some(pending) => {
+                self.await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
+                    .await?
+            }
+            None => {
+                self.await_turn(
+                    &chat,
+                    None,
+                    false,
+                    wait_duration(args.timeout_secs),
+                    TurnStart::default(),
+                )
+                .await?
+            }
+        };
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
 
@@ -1012,7 +1104,10 @@ impl Tools {
         let request_id = match args.request_id {
             Some(id) => id,
             None => {
-                let entries = self.zeron.transcript(&chat.id).await?;
+                let entries = self
+                    .zeron
+                    .transcript_on(&chat.id, Some(&chat.device_id))
+                    .await?;
                 let rendered = render_entries(&entries, RenderOptions::default());
                 last_pending_input(&rendered)
                     .and_then(|p| {
@@ -1166,37 +1261,90 @@ impl Tools {
         }))
     }
 
+    async fn await_pending_turn(
+        &self,
+        chat: &Chat,
+        pending: Arc<PendingTurn>,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        let turn = self
+            .await_turn(
+                chat,
+                pending.baseline.as_ref(),
+                true,
+                timeout,
+                pending.start.clone(),
+            )
+            .await?;
+        if turn["timedOut"] == false {
+            let mut turns = self.pending_turns.lock().await;
+            // A concurrent send may already have installed a newer baseline.
+            if turns
+                .get(&chat.id)
+                .is_some_and(|p| Arc::ptr_eq(p, &pending))
+            {
+                turns.remove(&chat.id);
+            }
+        }
+        Ok(turn)
+    }
+
     /// Wait, then report the outcome with the assistant messages that
-    /// landed since `since_millis`.
+    /// are not in `start`'s baseline.
     async fn await_turn(
         &self,
         chat: &Chat,
         baseline: Option<&Session>,
         expect_turn: bool,
         timeout: Duration,
-        since_millis: i64,
+        start: TurnStart,
     ) -> anyhow::Result<Value> {
-        let (outcome, session) = self
+        let deadline = Instant::now() + timeout;
+        let (mut outcome, session) = self
             .zeron
             .wait_for_turn(chat, baseline, expect_turn, timeout)
             .await?;
-        let entries = self.zeron.transcript(&chat.id).await.unwrap_or_default();
-        let rendered = render_entries(&entries, RenderOptions::default());
-        let replies: Vec<&RenderedMessage> = rendered
-            .iter()
-            .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
-            .filter(|m| m.created_at >= since_millis.saturating_sub(2_000))
-            .collect();
-        let replies: Vec<&RenderedMessage> = if replies.is_empty() {
-            rendered
+        // Registry session updates can arrive before the separate transcript doc.
+        // Keep the same deadline while waiting for a response to this send.
+        let mut rendered = Vec::new();
+        let mut replies = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                if outcome == TurnOutcome::Completed && expect_turn {
+                    outcome = TurnOutcome::TimedOut;
+                }
+                break;
+            }
+            let entries = match tokio::time::timeout(
+                remaining,
+                self.zeron.transcript_on(&chat.id, Some(&chat.device_id)),
+            )
+            .await
+            {
+                Ok(entries) => entries?,
+                Err(_) => {
+                    outcome = TurnOutcome::TimedOut;
+                    break;
+                }
+            };
+            rendered = render_entries(&entries, RenderOptions::default());
+            replies = rendered
                 .iter()
-                .rev()
-                .find(|m| m.role == zeron_doc::MessageRole::Assistant)
-                .into_iter()
-                .collect()
-        } else {
-            replies
-        };
+                .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
+                .filter(|m| !start.message_ids.contains(&m.id))
+                .cloned()
+                .collect();
+            if !expect_turn
+                || outcome != TurnOutcome::Completed
+                || replies
+                    .iter()
+                    .any(|m| m.status != Some(zeron_doc::MessageStatus::Streaming))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100).min(remaining)).await;
+        }
         let (status, _) = status_of(session.as_ref());
         Ok(json!({
             "outcome": outcome,
@@ -1293,9 +1441,6 @@ impl Tools {
 
 /// claude-code when it is offered here, else the first available harness.
 fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
-    if harnesses.is_empty() {
-        return Ok(HarnessId::ClaudeCode);
-    }
     harnesses
         .iter()
         .find(|h| h.id == HarnessId::ClaudeCode && h.available())
@@ -1319,13 +1464,16 @@ mod tests {
     use std::sync::Mutex;
     use zeron_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
 
-    /// A fixed little workspace: one device, one project, one chat with a
-    /// two-message transcript. Writes are recorded for assertions.
+    /// Two devices with distinct catalogs and repeated project paths, plus
+    /// two chats with a two-message transcript. Writes are recorded for assertions.
     #[derive(Default)]
     struct World {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        beta_remote: bool,
+        catalog_error: Option<&'static str>,
+        reads: Mutex<Vec<(String, Value)>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1335,6 +1483,16 @@ mod tests {
     #[async_trait]
     impl RpcService for World {
         async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
+            if matches!(method, methods::LIST_HARNESSES | methods::LIST_MODELS) {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
+                if self.catalog_error == Some(method) {
+                    return Err(RpcError::Failed("catalog unavailable".into()));
+                }
+            }
+            let remote = params["targetDeviceId"] == "dev-remote";
             Ok(match method {
                 methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
                 methods::ENGINE_INFO => RpcReply::Value(json!({
@@ -1343,9 +1501,15 @@ mod tests {
                 methods::WATCH_DEVICES => stream(json!([{
                     "id": "dev-local", "name": "Laptop", "platform": "linux",
                     "lastSeenAt": null
-                }])),
+                }, {"id": "dev-remote", "name": "Worker", "platform": "linux", "lastSeenAt": null}])),
                 methods::WATCH_SPACES => stream(json!([{
                     "id": "space-1", "deviceId": "dev-local", "path": "/repo/comet",
+                    "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
+                }, {
+                    "id": "space-remote", "deviceId": "dev-remote", "path": "/repo/comet",
+                    "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
+                }, {
+                    "id": "space-unique", "deviceId": "dev-remote", "path": "/repo/unique",
                     "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
                 }])),
                 methods::WATCH_CHATS => stream(json!([
@@ -1356,18 +1520,25 @@ mod tests {
                         "createdAt": "2026-09-01T00:00:00Z"
                     },
                     {
-                        "id": "chat-beta-2", "deviceId": "dev-local", "title": "Beta",
+                        "id": "chat-beta-2", "deviceId": if self.beta_remote { "dev-remote" } else { "dev-local" }, "title": "Beta",
                         "parentChatId": self.beta_parent,
                         "archived": false, "spaceId": "space-1",
                         "createdAt": "2026-09-02T00:00:00Z"
                     }
                 ])),
                 methods::WATCH_SESSIONS => stream(json!([])),
+                methods::LIST_HARNESSES if remote => RpcReply::Value(json!([
+                    {"id":"codex", "name":"Remote Codex", "installed":true},
+                    {"id":"cursor", "name":"Disabled Cursor", "installed":true, "enabled":false}
+                ])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
                       "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
                       "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
+                ])),
+                methods::LIST_MODELS if remote => RpcReply::Value(json!([
+                    {"id":"remote-model", "label":"Remote model"}
                 ])),
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
@@ -1529,7 +1700,7 @@ mod tests {
         let err = tools
             .call(
                 "create_chat",
-                json!({ "project": "comet", "model": "nope" }),
+                json!({ "project": "space-1", "model": "nope" }),
             )
             .await
             .unwrap_err();
@@ -1538,7 +1709,7 @@ mod tests {
         let created = tools
             .call(
                 "create_chat",
-                json!({ "project": "/repo/comet", "model": "sonnet", "title": "Review", "prompt": "go" }),
+                json!({ "project": "space-1", "model": "sonnet", "title": "Review", "prompt": "go" }),
             )
             .await
             .unwrap();
@@ -1570,7 +1741,7 @@ mod tests {
             },
         );
         let created = tools
-            .call("create_chat", json!({ "project": "/repo/comet" }))
+            .call("create_chat", json!({ "project": "space-1" }))
             .await
             .unwrap();
         assert_eq!(created["parentChatId"], "chat-beta-2");
@@ -1583,7 +1754,7 @@ mod tests {
         let created = tools
             .call(
                 "create_chat",
-                json!({ "project": "/repo/comet", "parent": "Alpha" }),
+                json!({ "project": "space-1", "parent": "Alpha" }),
             )
             .await
             .unwrap();
@@ -1591,7 +1762,7 @@ mod tests {
         let err = tools
             .call(
                 "create_chat",
-                json!({ "project": "/repo/comet", "parent": "nope" }),
+                json!({ "project": "space-1", "parent": "nope" }),
             )
             .await
             .unwrap_err();
@@ -1716,7 +1887,7 @@ mod tests {
                 device_id: None,
             },
         );
-        for args in [json!({}), json!({"parent":"Alpha"})] {
+        for args in [json!({}), json!({"parent":"Alpha"}), json!({"kind":"chat"})] {
             assert!(
                 side.call("create_chat", args)
                     .await
@@ -1725,7 +1896,10 @@ mod tests {
             );
         }
         let batch = side
-            .call("create_chats", json!({"requests":[{}, {"parent":"Alpha"}]}))
+            .call(
+                "create_chats",
+                json!({"requests":[{}, {"parent":"Alpha"}, {"kind":"chat"}]}),
+            )
             .await
             .unwrap();
         assert!(
@@ -1743,6 +1917,478 @@ mod tests {
                 .contains("child of a side chat")
         );
         assert!(world.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn kinds_preserve_defaults_and_reject_invalid_arguments_before_writing() {
+        let world = Arc::new(World::default());
+        let root = tools(world.clone(), Origin::default());
+        for args in [
+            json!({"kind":"side"}),
+            json!({"kind":"unknown"}),
+            json!({"kind":"chat", "parent":"Alpha", "title":"must not write"}),
+        ] {
+            assert!(root.call("create_chat", args).await.is_err());
+        }
+        assert!(world.writes.lock().unwrap().is_empty());
+        let from_chat = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        );
+        for (args, kind, parent) in [
+            (json!({"kind":"chat"}), "chat", Value::Null),
+            (json!({"kind":"chat", "parent":"  "}), "chat", Value::Null),
+            (json!({"kind":"side"}), "side", json!("chat-alpha-1")),
+            (json!({}), "side", json!("chat-alpha-1")),
+            (json!({"parent":"Beta"}), "side", json!("chat-beta-2")),
+        ] {
+            let created = from_chat.call("create_chat", args).await.unwrap();
+            assert_eq!(created["kind"], kind);
+            assert_eq!(created["parentChatId"], parent);
+            let writes = world.writes.lock().unwrap();
+            let row = &writes.last().unwrap().1;
+            if kind == "chat" {
+                assert!(row.get("parentChatId").is_none());
+            } else {
+                assert_eq!(row["parentChatId"], parent);
+            }
+        }
+        assert_eq!(
+            root.call("create_chat", json!({})).await.unwrap()["kind"],
+            "chat"
+        );
+        assert_eq!(
+            root.call("create_chat", json!({"kind":"side", "parent":"Alpha"}))
+                .await
+                .unwrap()["kind"],
+            "side"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_and_device_resolution_scopes_names_and_exact_paths() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        for args in [
+            json!({"project":"comet"}),
+            json!({"project":"/repo/comet"}),
+            json!({"project":"space-1", "device":"Worker"}),
+            json!({"project":"missing", "device":"Worker"}),
+            json!({"device":"missing"}),
+        ] {
+            let error = tools.call("create_chat", args).await.unwrap_err();
+            assert!(world.writes.lock().unwrap().is_empty(), "{error}");
+        }
+        let error = tools
+            .call("create_chat", json!({"project":"/repo/comet"}))
+            .await
+            .unwrap_err();
+        for candidate in ["space-1", "space-remote", "dev-local", "dev-remote"] {
+            assert!(error.contains(candidate), "{error}");
+        }
+        for project in ["comet", "/repo/comet", "space-remote"] {
+            let created = tools
+                .call("create_chat", json!({"project":project,"device":"Worker"}))
+                .await
+                .unwrap();
+            assert_eq!(created["deviceId"], "dev-remote");
+            assert_eq!(created["project"]["id"], "space-remote");
+            assert_eq!(created["harness"], "codex");
+        }
+        let created = tools
+            .call("create_chat", json!({"project":"unique"}))
+            .await
+            .unwrap();
+        assert_eq!(created["deviceId"], "dev-remote");
+        let created = tools
+            .call("create_chat", json!({"device":"dev-remote"}))
+            .await
+            .unwrap();
+        assert!(created["project"].is_null());
+        assert_eq!(created["deviceId"], "dev-remote");
+        let created = tools.call("create_chat", json!({})).await.unwrap();
+        assert_eq!(created["deviceId"], "dev-local");
+    }
+
+    #[tokio::test]
+    async fn discovery_and_creation_use_the_selected_hosts_catalogs() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        assert_eq!(
+            tools.call("list_projects", json!({})).await.unwrap()["projects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let projects = tools
+            .call("list_projects", json!({"device":"Worker"}))
+            .await
+            .unwrap();
+        assert_eq!(projects["projects"].as_array().unwrap().len(), 2);
+        assert!(
+            projects["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["deviceId"] == "dev-remote")
+        );
+        assert_eq!(
+            tools.call("list_harnesses", json!({})).await.unwrap()["harnesses"][0]["id"],
+            "claude-code"
+        );
+        assert_eq!(
+            tools
+                .call("list_harnesses", json!({"device":"Worker"}))
+                .await
+                .unwrap()["harnesses"][0]["id"],
+            "codex"
+        );
+        assert_eq!(
+            tools
+                .call("list_models", json!({"harness":"codex", "device":"Worker"}))
+                .await
+                .unwrap()["models"][0]["id"],
+            "remote-model"
+        );
+        assert_eq!(
+            tools
+                .call("list_models", json!({"harness":"claude-code"}))
+                .await
+                .unwrap()["models"][0]["id"],
+            "opus"
+        );
+        for args in [
+            json!({"device":"Worker", "harness":"claude-code"}),
+            json!({"device":"Worker", "harness":"cursor"}),
+            json!({"device":"Laptop", "harness":"codex"}),
+            json!({"device":"Laptop", "harness":"mock"}),
+            json!({"device":"Worker", "harness":"codex", "model":"opus"}),
+        ] {
+            assert!(tools.call("create_chat", args).await.is_err());
+            assert!(world.writes.lock().unwrap().is_empty());
+        }
+        let created = tools
+            .call(
+                "create_chat",
+                json!({"device":"Worker", "harness":"codex", "model":"remote-model"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["harness"], "codex");
+        assert_eq!(created["model"], "remote-model");
+        for method in [methods::LIST_HARNESSES, methods::LIST_MODELS] {
+            let broken = Arc::new(World {
+                catalog_error: Some(method),
+                ..Default::default()
+            });
+            let tools = self::tools(broken.clone(), Origin::default());
+            let error = tools
+                .call(
+                    "create_chat",
+                    json!({"device":"Worker", "model":"remote-model"}),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("dev-remote") && error.contains("catalog unavailable"),
+                "{error}"
+            );
+            assert!(broken.writes.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_send_selects_the_remote_default_harness() {
+        let world = Arc::new(World {
+            beta_remote: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            world.reads.lock().unwrap().last().unwrap().1["targetDeviceId"],
+            "dev-remote"
+        );
+        assert_eq!(
+            world.writes.lock().unwrap().last().unwrap().1["command"]["request"]["harness"],
+            "codex"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_preserves_order_and_errors_per_request() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        );
+        let result = tools
+            .call(
+                "create_chats",
+                json!({"requests":[
+                    {"kind":"chat", "device":"Worker", "project":"comet"},
+                    {"kind":"chat", "parent":"Alpha"},
+                    {"kind":"side", "project":"space-1"},
+                    {"kind":"bogus"}
+                ]}),
+            )
+            .await
+            .unwrap();
+        let results = &result["results"];
+        assert_eq!(results[0]["result"]["kind"], "chat");
+        assert_eq!(results[0]["result"]["deviceId"], "dev-remote");
+        assert_eq!(results[1]["isError"], true);
+        assert_eq!(results[2]["result"]["kind"], "side");
+        assert_eq!(results[2]["result"]["parentChatId"], "chat-alpha-1");
+        assert_eq!(results[3]["isError"], true);
+        for i in 0..4 {
+            assert_eq!(results[i]["index"], i);
+        }
+        assert_eq!(world.writes.lock().unwrap().len(), 2);
+    }
+
+    /// Sessions and transcripts are independently delivered. The command reply
+    /// is deliberately slow, so the assistant starts before QueueCommand returns.
+    struct DelayedTurn {
+        world: World,
+        sent: Mutex<Option<(i64, Instant, String)>>,
+        reply_delay: Duration,
+        never_reply: bool,
+        /// Host clock offset: a remote engine stamps createdAt on its own clock.
+        host_skew_millis: i64,
+    }
+
+    #[async_trait]
+    impl RpcService for DelayedTurn {
+        async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
+            match method {
+                methods::WATCH_CHATS => {
+                    let reply = self.world.handle(method, params).await?;
+                    let RpcReply::Stream(mut rows) = reply else {
+                        unreachable!()
+                    };
+                    let mut rows = rows.next().await.unwrap();
+                    if let Some((_, _, chat)) = self.sent.lock().unwrap().as_ref()
+                        && chat != "chat-beta-2"
+                    {
+                        rows.as_array_mut().unwrap().push(json!({
+                            "id": chat, "deviceId":"dev-remote", "archived":false,
+                            "createdAt":chrono::Utc::now(), "config":{"harness":"codex", "sandbox":"workspace-write"}
+                        }));
+                    }
+                    Ok(stream(rows))
+                }
+                methods::QUEUE_COMMAND => {
+                    let reply = self.world.handle(method, params.clone()).await?;
+                    *self.sent.lock().unwrap() = Some((
+                        now_millis(),
+                        Instant::now(),
+                        params["chatId"].as_str().unwrap().into(),
+                    ));
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    Ok(reply)
+                }
+                methods::WATCH_SESSIONS => {
+                    let sent = self.sent.lock().unwrap().clone();
+                    let Some((_, _, chat)) = sent else {
+                        return Ok(stream(json!([])));
+                    };
+                    Ok(RpcReply::Stream(
+                        futures::stream::once(async { json!([]) })
+                            .chain(futures::stream::once(async move {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                json!([{"chatId":chat, "deviceId":"dev-remote", "status":"idle",
+                                "updatedAt":chrono::Utc::now(), "lastCompletedTurn":"new-turn"}])
+                            }))
+                            .boxed(),
+                    ))
+                }
+                methods::WATCH_DOC_MESSAGES => {
+                    let sent = self.sent.lock().unwrap().clone();
+                    // Only the existing chat has history. Its previous reply
+                    // shares the send's timestamp, so only its id tells them apart.
+                    let mut messages = json!([]);
+                    if params["chatId"] == "chat-beta-2" {
+                        let created_at = sent.as_ref().map_or_else(now_millis, |(t, _, _)| *t);
+                        messages.as_array_mut().unwrap().push(json!({
+                            "id":"previous-reply", "role":"assistant", "createdAt":created_at,
+                            "deviceId":"dev-remote", "status":"complete", "parts":[{"kind":"text", "id":"t", "text":"old reply"}]
+                        }));
+                    }
+                    if let Some((timestamp, started, _)) = sent
+                        && started.elapsed() >= self.reply_delay
+                        && !self.never_reply
+                    {
+                        messages.as_array_mut().unwrap().push(json!({
+                            "id":"new-reply", "role":"assistant", "createdAt":timestamp + self.host_skew_millis,
+                            "deviceId":"dev-remote", "status":"complete", "parts":[{"kind":"text", "id":"t", "text":"new reply"}]
+                        }));
+                    }
+                    Ok(stream(json!({"reset":messages})))
+                }
+                _ => self.world.handle(method, params).await,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_allows_a_missing_session_and_a_late_remote_transcript() {
+        for create in [true, false] {
+            let service = Arc::new(DelayedTurn {
+                world: World {
+                    beta_remote: true,
+                    ..Default::default()
+                },
+                sent: Mutex::new(None),
+                reply_delay: Duration::from_millis(450),
+                never_reply: false,
+                host_skew_millis: 0,
+            });
+            let tools = Tools::new(Arc::new(Zeron::with_client(
+                memory_client(service),
+                Origin::default(),
+            )));
+            let (name, args) = if create {
+                (
+                    "create_chat",
+                    json!({"kind":"chat", "device":"Worker", "prompt":"go", "wait":true, "timeout_secs":2}),
+                )
+            } else {
+                (
+                    "send_message",
+                    json!({"chat":"Beta", "text":"go", "wait":true, "timeout_secs":2}),
+                )
+            };
+            let result = tools.call(name, args).await.unwrap();
+            assert_eq!(result["turn"]["outcome"], "completed", "{result}");
+            assert_eq!(
+                result["turn"]["replies"].as_array().unwrap().len(),
+                1,
+                "{result}"
+            );
+            assert_eq!(result["turn"]["replies"][0]["text"], "new reply");
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_wait_after_nonblocking_send_keeps_the_send_baseline() {
+        for create in [true, false] {
+            let service = Arc::new(DelayedTurn {
+                world: World {
+                    beta_remote: true,
+                    ..Default::default()
+                },
+                sent: Mutex::new(None),
+                reply_delay: Duration::from_millis(450),
+                never_reply: false,
+                host_skew_millis: 0,
+            });
+            let tools = Tools::new(Arc::new(Zeron::with_client(
+                memory_client(service),
+                Origin::default(),
+            )));
+            let sent = if create {
+                tools
+                    .call(
+                        "create_chat",
+                        json!({"kind":"chat", "device":"Worker", "prompt":"go", "wait":false}),
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                tools
+                    .call(
+                        "send_message",
+                        json!({"chat":"Beta", "text":"go", "wait":false}),
+                    )
+                    .await
+                    .unwrap()
+            };
+            let result = tools
+                .call(
+                    "wait_for_turn",
+                    json!({"chat":sent["chatId"], "timeout_secs":2}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["turn"]["outcome"], "completed", "{result}");
+            assert_eq!(result["turn"]["replies"].as_array().unwrap().len(), 1);
+            assert_eq!(result["turn"]["replies"][0]["text"], "new reply");
+        }
+    }
+
+    /// A remote host stamps replies on its own clock. One running behind the
+    /// caller must not hide the reply to this send.
+    #[tokio::test]
+    async fn wait_returns_the_reply_from_a_host_whose_clock_is_behind() {
+        for create in [true, false] {
+            let service = Arc::new(DelayedTurn {
+                world: World {
+                    beta_remote: true,
+                    ..Default::default()
+                },
+                sent: Mutex::new(None),
+                reply_delay: Duration::from_millis(100),
+                never_reply: false,
+                host_skew_millis: -30_000,
+            });
+            let tools = Tools::new(Arc::new(Zeron::with_client(
+                memory_client(service),
+                Origin::default(),
+            )));
+            let (name, args) = if create {
+                (
+                    "create_chat",
+                    json!({"kind":"chat", "device":"Worker", "prompt":"go", "wait":true, "timeout_secs":2}),
+                )
+            } else {
+                (
+                    "send_message",
+                    json!({"chat":"Beta", "text":"go", "wait":true, "timeout_secs":2}),
+                )
+            };
+            let result = tools.call(name, args).await.unwrap();
+            assert_eq!(result["turn"]["outcome"], "completed", "{result}");
+            let replies = result["turn"]["replies"].as_array().unwrap();
+            assert!(replies.iter().any(|r| r["text"] == "new reply"), "{result}");
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_session_without_new_transcript_times_out_without_old_reply() {
+        let service = Arc::new(DelayedTurn {
+            world: World {
+                beta_remote: true,
+                ..Default::default()
+            },
+            sent: Mutex::new(None),
+            reply_delay: Duration::ZERO,
+            never_reply: true,
+            host_skew_millis: 0,
+        });
+        let tools = Tools::new(Arc::new(Zeron::with_client(
+            memory_client(service),
+            Origin::default(),
+        )));
+        let result = tools
+            .call(
+                "send_message",
+                json!({"chat":"Beta", "text":"go", "wait":true, "timeout_secs":1}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["turn"]["outcome"], "timedOut");
+        assert_eq!(result["turn"]["replies"], json!([]));
     }
 
     #[tokio::test]

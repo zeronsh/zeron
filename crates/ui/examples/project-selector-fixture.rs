@@ -1,5 +1,6 @@
 //! Native project selector review fixture, with isolated synthetic data.
 //! Run under a desktop/Xvfb, then click the sidebar's "All projects" selector.
+//! ZERON_FIXTURE_PROJECT=<space id> starts the new-session canvas on that project.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use zeron_ui::*;
 
@@ -38,11 +39,14 @@ fn main() {
             s.chats_synced = true;
             s.spaces_synced = true;
             s.spaces = serde_json::from_value(serde_json::json!([
-                {"id":"a","deviceId":"local","path":"/projects/anara","createdAt":"2026-09-15T00:00:00Z"},
-                {"id":"b","deviceId":"remote","path":"/projects/anara","createdAt":"2026-09-15T00:00:00Z"},
+                {"id":"a","deviceId":"local","path":"/projects/anara","repositoryId":"github.com/anara/anara","createdAt":"2026-09-15T00:00:00Z"},
+                {"id":"b","deviceId":"remote","path":"/projects/anara","repositoryId":"github.com/anara/anara","createdAt":"2026-09-15T00:00:00Z"},
                 {"id":"c","deviceId":"long","path":"/projects/design-system-with-a-long-project-name","createdAt":"2026-09-15T00:00:00Z"},
                 {"id":"d","deviceId":"unknown","path":"/projects/fieldnotes","createdAt":"2026-09-15T00:00:00Z"}
             ])).unwrap();
+            if let Ok(space) = std::env::var("ZERON_FIXTURE_PROJECT") {
+                s.selected_space = Some(space);
+            }
             s
         });
         let boot = EngineBootConfig { data_dir: data, ipc_port: 0, edge_url: String::new(),

@@ -69,6 +69,12 @@ remain opaque because in-app backdrop blur is not supported. The pinned
 [Zui DirectX fix](https://github.com/zeronsh/zui/pull/7) supplies the renderer
 layout and edge-fade corrections.
 
+When Windows disables **Animation effects**, Zeron's **Reduce motion: System**
+setting skips transitions and gives activity grids a gentle 2.4-second brightness
+pulse. **Reduce motion: On** keeps those indicators still; **Off** restores the
+usual travelling wave. **Pause animations in background** also pauses activity
+grids when the main window loses focus.
+
 ## Verification
 
 [Windows CI](../../.github/workflows/windows.yml) builds the release application

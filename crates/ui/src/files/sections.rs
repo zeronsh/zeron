@@ -18,12 +18,13 @@ use std::hash::{Hash, Hasher};
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, EntityId, MouseButton, ScrollHandle,
+    Animation, AnimationExt as _, AnyElement, Context, Entity, EntityId, MouseButton, ScrollHandle,
     SharedString, div, prelude::*, px,
 };
 use zeron_doc::{MessagePart, SubagentStatus};
 use zeron_proto::{Chat, ChatIndicator};
 
+use crate::composer::ComposerInput;
 use crate::icons::{self, icon};
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -123,6 +124,12 @@ pub(super) struct ExplorerSections {
     /// re-renders the explorer when a section's contents actually changed —
     /// not on every streamed transcript delta.
     fingerprint: u64,
+    /// The side chat whose title the shell is editing in place, and its
+    /// field — drawn over that row's title.
+    chat_rename: Option<(String, Entity<ComposerInput>)>,
+    /// A section opened to reveal a renamed row: its motion starts on the
+    /// render that knows the body height.
+    reveal: Option<Section>,
 }
 
 impl Default for ExplorerSections {
@@ -140,6 +147,8 @@ impl Default for ExplorerSections {
             .into_iter()
             .collect(),
             fingerprint: 0,
+            chat_rename: None,
+            reveal: None,
         }
     }
 }
@@ -175,6 +184,24 @@ impl ExplorerSections {
         );
         let open = self.is_open(section);
         self.open.insert(section, !open);
+    }
+
+    /// Start the opening motion of a section a reveal opened.
+    fn begin_reveal(&mut self, section: Section, height: f32) {
+        if self.reveal != Some(section) || !self.is_open(section) {
+            return;
+        }
+        self.reveal = None;
+        let epoch = self.motion.get(&section).map_or(1, |m| m.epoch + 1);
+        self.motion.insert(
+            section,
+            DisclosureMotion {
+                epoch,
+                from: 0.0,
+                to: height,
+                started: std::time::Instant::now(),
+            },
+        );
     }
 
     fn scroll(&self, section: Section) -> ScrollHandle {
@@ -393,6 +420,47 @@ fn chrome_height() -> f32 {
 }
 
 impl FilesSurface {
+    /// Show (or clear) the shell's inline rename of one of the Chats rows.
+    pub(crate) fn set_chat_rename(
+        &mut self,
+        rename: Option<(String, Entity<ComposerInput>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = |rename: &Option<(String, Entity<ComposerInput>)>| {
+            rename
+                .as_ref()
+                .map(|(id, input)| (id.clone(), input.entity_id()))
+        };
+        if key(&self.sections.chat_rename) != key(&rename) {
+            if let Some((chat_id, _)) = &rename {
+                self.reveal_chat_row(chat_id, cx);
+            }
+            self.sections.chat_rename = rename;
+            cx.notify();
+        }
+    }
+
+    /// Open the Chats section, page it, and scroll its list so `chat_id`'s
+    /// row shows — the inline rename's field must never sit on a hidden row.
+    fn reveal_chat_row(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let rows = child_chat_rows(self.state.read(cx), &self.chat_id, Utc::now());
+        let Some(index) = rows.iter().position(|row| row.chat_id == chat_id) else {
+            return;
+        };
+        if !self.sections.is_open(Section::Chats) {
+            self.sections.open.insert(Section::Chats, true);
+            self.sections.reveal = Some(Section::Chats);
+        }
+        // Page in the same steps "Show more" takes.
+        if index >= self.sections.shown(Section::Chats) {
+            self.sections.shown.insert(
+                Section::Chats,
+                INITIAL_ROWS + (index + 1 - INITIAL_ROWS).div_ceil(PAGE_ROWS) * PAGE_ROWS,
+            );
+        }
+        self.sections.scroll(Section::Chats).scroll_to_item(index);
+    }
+
     /// Re-render only when the footer's contents changed.
     pub(super) fn refresh_sections(&mut self, cx: &mut Context<Self>) {
         let fingerprint = fingerprint(self.state.read(cx), &self.chat_id, Utc::now());
@@ -495,7 +563,7 @@ impl FilesSurface {
             .child(
                 header_action(
                     "files-sections-fork",
-                    icons::GIT_BRANCH,
+                    icons::FORK,
                     "Fork this chat",
                     theme,
                 )
@@ -520,6 +588,7 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.sections.is_open(section);
+        self.sections.begin_reveal(section, height);
         // The collapsed header carries the count; open, the rows speak.
         let label: SharedString = if open || count == 0 {
             section.label().into()
@@ -769,7 +838,7 @@ impl FilesSurface {
                 .child(
                     pill_button(
                         "files-sections-empty-fork",
-                        icons::GIT_BRANCH,
+                        icons::FORK,
                         "Fork",
                         theme,
                     )
@@ -811,12 +880,36 @@ impl FilesSurface {
             );
             let open_id = row.chat_id.clone();
             let menu_id = row.chat_id.clone();
+            let rename_input = self
+                .sections
+                .chat_rename
+                .as_ref()
+                .filter(|(id, _)| *id == row.chat_id)
+                .map(|(_, input)| input.clone());
+            let title = match rename_input {
+                Some(input) => crate::shell::chat_title_editor(
+                    format!("files-chat-title-editor-{}", row.chat_id).into(),
+                    input,
+                    theme,
+                ),
+                None => row_title(
+                    format!("files-chat-title-{}", row.chat_id),
+                    row.title.clone(),
+                )
+                .into_any_element(),
+            };
             list = list.child(
                 compact_row(format!("files-chat-{}", row.chat_id), theme)
                     .aria_label(SharedString::from(format!("Open side chat {}", row.title)))
-                    .on_click(cx.listener(move |_, _, _, cx| {
+                    .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
                         cx.stop_propagation();
-                        cx.emit(FilesEvent::OpenChildChat(open_id.clone()));
+                        // The first click opened the tab; the second edits
+                        // the title in place.
+                        if event.click_count() >= 2 {
+                            cx.emit(FilesEvent::RenameChildChat(open_id.clone()));
+                        } else {
+                            cx.emit(FilesEvent::OpenChildChat(open_id.clone()));
+                        }
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -829,10 +922,7 @@ impl FilesSurface {
                         }),
                     )
                     .child(glyph)
-                    .child(row_title(
-                        format!("files-chat-title-{}", row.chat_id),
-                        row.title.clone(),
-                    ))
+                    .child(title)
                     .children(row.change_request.clone().map(|summary| {
                         crate::change_requests::pull_request_badge(
                             format!("files-chat-pr-{}", row.chat_id).into(),
@@ -1266,6 +1356,108 @@ mod tests {
         assert_eq!(rows[0].title.as_ref(), "New side chat");
         assert_eq!(rows[1].title.as_ref(), "Investigate caching");
         assert_eq!(rows[0].status, ChatIndicator::Idle);
+    }
+
+    #[gpui::test]
+    fn double_clicked_side_chat_asks_for_an_inline_rename(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, MouseDownEvent, MouseUpEvent};
+
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update(cx, |files, cx| {
+            files.state.update(cx, |state, _| {
+                let mut side = chat("side", Some("chat"), 1);
+                side.title = Some("Side work".into());
+                state.chats.push(side);
+            });
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+        let row = cx.debug_bounds("files-chat-title-side").unwrap();
+        for click_count in [1, 2] {
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: row.center(),
+                click_count,
+                ..Default::default()
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: row.center(),
+                click_count,
+                ..Default::default()
+            });
+        }
+        cx.run_until_parked();
+        {
+            let events = events.borrow();
+            assert!(matches!(&events[..], [
+                FilesEvent::OpenChildChat(open),
+                FilesEvent::RenameChildChat(rename),
+            ] if open == "side" && rename == "side"));
+        }
+
+        // The shell's field replaces the row title while the edit is open.
+        let input = cx.update(|_, cx| cx.new(|cx| ComposerInput::new("Session title", cx)));
+        files.update(cx, |files, cx| {
+            files.set_chat_rename(Some(("side".into(), input)), cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-chat-title-editor-side").is_some());
+        assert!(cx.debug_bounds("files-chat-title-side").is_none());
+        files.update(cx, |files, cx| files.set_chat_rename(None, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-chat-title-side").is_some());
+    }
+
+    #[gpui::test]
+    fn inline_rename_reveals_a_side_chat_in_a_collapsed_paged_section(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update(cx, |files, cx| {
+            files.state.update(cx, |state, _| {
+                for ix in 0..12 {
+                    state
+                        .chats
+                        .push(chat(&format!("side-{ix:02}"), Some("chat"), ix));
+                }
+            });
+            files.sections.toggle(Section::Chats, 0.0, 0.0);
+            assert!(!files.sections.is_open(Section::Chats));
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+
+        // Newest first: side-11 is the twelfth row, past the first page.
+        let input = cx.update(|_, cx| cx.new(|cx| ComposerInput::new("Session title", cx)));
+        files.update(cx, |files, cx| {
+            files.set_chat_rename(Some(("side-11".into(), input)), cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        files.read_with(cx, |files, _| {
+            assert!(files.sections.is_open(Section::Chats));
+            assert_eq!(
+                files.sections.shown(Section::Chats),
+                INITIAL_ROWS + PAGE_ROWS
+            );
+            // The reveal became the section's opening motion.
+            assert_eq!(files.sections.reveal, None);
+            assert_eq!(files.sections.motion[&Section::Chats].from, 0.0);
+        });
+        assert!(cx.debug_bounds("files-chat-title-editor-side-11").is_some());
     }
 
     #[test]

@@ -1,0 +1,21 @@
+[package]
+name = "zeron-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+parakeet-rs = "=0.3.8"
+cpal = "=0.17.3"
+rubato = "=0.16.2"
+reqwest.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hound = "3.5"
+tempfile.workspace = true

@@ -122,6 +122,30 @@ pub fn sort_spaces(spaces: &mut [Space]) {
     });
 }
 
+/// The project a space belongs to: spaces sharing a repository identity —
+/// clones and worktrees of one repository, on any device — are one project.
+/// A space without an identity is a project of its own. Pure.
+pub fn project_key(space: &Space) -> String {
+    match space.repository_id.as_deref() {
+        Some(repository_id) => format!("repo:{repository_id}"),
+        None => space.id.clone(),
+    }
+}
+
+/// The space that speaks for `space`'s whole project: the oldest member, id
+/// tiebreak. Its name and color stand for every member, and the choice is
+/// the same on every device, so a repository looks alike everywhere. Pure.
+pub fn representative_space<'a>(spaces: &'a [Space], space: &'a Space) -> &'a Space {
+    let Some(repository_id) = space.repository_id.as_deref() else {
+        return space;
+    };
+    spaces
+        .iter()
+        .filter(|s| s.repository_id.as_deref() == Some(repository_id))
+        .min_by_key(|s| (s.created_at, s.id.as_str()))
+        .unwrap_or(space)
+}
+
 /// Sidebar order: `last_message_at` desc, falling back to `created_at`; ties
 /// break by `created_at` desc then id so the sort is total and stable across
 /// devices. Pure.
@@ -173,6 +197,40 @@ pub fn gate_phase(
                 Some(AuthState::SignedOut) | None => GatePhase::SignIn,
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    fn space(id: &str, device: &str, repository: Option<&str>, minutes: i64) -> Space {
+        Space {
+            id: id.into(),
+            device_id: device.into(),
+            path: format!("/{device}/{id}"),
+            name: None,
+            git_detected: repository.is_some(),
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: repository.map(str::to_string),
+            created_at: DateTime::<Utc>::UNIX_EPOCH + chrono::TimeDelta::minutes(minutes),
+        }
+    }
+
+    #[test]
+    fn spaces_sharing_a_repository_are_one_project_led_by_the_oldest() {
+        let spaces = vec![
+            space("laptop", "mac", Some("github.com/o/r"), 2),
+            space("server", "vps", Some("github.com/o/r"), 1),
+            space("notes", "mac", None, 0),
+        ];
+        assert_eq!(project_key(&spaces[0]), "repo:github.com/o/r");
+        assert_eq!(project_key(&spaces[0]), project_key(&spaces[1]));
+        assert_eq!(project_key(&spaces[2]), "notes");
+        assert_eq!(representative_space(&spaces, &spaces[0]).id, "server");
+        assert_eq!(representative_space(&spaces, &spaces[1]).id, "server");
+        assert_eq!(representative_space(&spaces, &spaces[2]).id, "notes");
     }
 }
 

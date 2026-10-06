@@ -383,6 +383,92 @@ impl FileTreeModel {
         }
     }
 
+    /// Re-key a confirmed move without throwing away expansion or selection.
+    pub fn relocate_subtree(
+        &mut self,
+        old: &str,
+        new: &str,
+        entry: Option<WorkspaceEntry>,
+    ) -> bool {
+        if old.is_empty() || old == new || is_descendant(new, old) {
+            return false;
+        }
+        let remap = |path: &str| -> String {
+            if path == old {
+                new.to_string()
+            } else if is_descendant(path, old) {
+                format!("{new}{}", &path[old.len()..])
+            } else {
+                path.to_string()
+            }
+        };
+        if !self.nodes.contains_key(old) {
+            return false;
+        }
+        let old_parent = parent_path(old).unwrap();
+        let new_parent = parent_path(new).unwrap();
+        if let Some(parent) = self.nodes.get_mut(&old_parent) {
+            parent.children.retain(|p| p != old);
+        }
+        let nodes = std::mem::take(&mut self.nodes);
+        for (path, mut node) in nodes {
+            let next = remap(&path);
+            node.entry.path = next.clone();
+            if path == old {
+                node.entry.name = new.rsplit('/').next().unwrap_or(new).into();
+            }
+            node.children = node.children.iter().map(|p| remap(p)).collect();
+            if is_descendant(&path, old) || path == old {
+                node.stale = true;
+                if node.entry.kind == WorkspaceEntryKind::Directory {
+                    node.load = DirectoryLoadState::Unloaded;
+                }
+            }
+            self.nodes.insert(next, node);
+        }
+        if let Some(entry) = entry {
+            if let Some(node) = self.nodes.get_mut(new) {
+                node.entry = entry;
+            }
+        }
+        self.expanded = self.expanded.iter().map(|p| remap(p)).collect();
+        self.selected = self.selected.as_deref().map(remap);
+        let mut ancestor = Some(new_parent.clone());
+        while let Some(path) = ancestor {
+            self.expanded.insert(path.clone());
+            ancestor = parent_path(&path);
+        }
+        self.listing_children.clear();
+        if let Some(parent) = self.nodes.get_mut(&new_parent) {
+            if !parent.children.iter().any(|p| p == new) {
+                parent.children.push(new.into());
+            }
+        }
+        for parent in [&old_parent, &new_parent] {
+            if let Some(node) = self.nodes.get_mut(parent) {
+                node.stale = true;
+                node.load = DirectoryLoadState::Unloaded;
+                let mut children = std::mem::take(&mut node.children);
+                children.sort_by(|a, b| compare_paths(&self.nodes, a, b));
+                self.nodes.get_mut(parent).unwrap().children = children;
+            }
+        }
+        self.rebuild_visible_rows();
+        true
+    }
+
+    /// Invalidate asynchronous listings without resetting the visible tree.
+    pub fn invalidate_loads(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.listing_children.clear();
+        for node in self.nodes.values_mut() {
+            if matches!(node.load, DirectoryLoadState::Loading { .. }) {
+                node.load = DirectoryLoadState::Unloaded;
+                node.stale = true;
+            }
+        }
+    }
+
     pub fn remove(&mut self, path: &str) -> bool {
         if path.is_empty() || !self.nodes.contains_key(path) {
             return false;
@@ -556,6 +642,7 @@ impl FileTreeModel {
 
 fn root_entry() -> WorkspaceEntry {
     WorkspaceEntry {
+        mutation_revision: None,
         path: String::new(),
         name: String::new(),
         kind: WorkspaceEntryKind::Directory,
@@ -614,6 +701,7 @@ mod tests {
 
     fn entry(path: &str, kind: WorkspaceEntryKind) -> WorkspaceEntry {
         WorkspaceEntry {
+            mutation_revision: None,
             path: path.into(),
             name: path.rsplit('/').next().unwrap_or(path).into(),
             kind,
@@ -630,11 +718,43 @@ mod tests {
         next_cursor: Option<&str>,
     ) -> WorkspaceDirectoryPage {
         WorkspaceDirectoryPage {
+            checkout_id: None,
+            mutation_capabilities: None,
             directory: directory.into(),
             entries,
             next_cursor: next_cursor.map(str::to_string),
             truncated: next_cursor.is_some(),
         }
+    }
+
+    #[test]
+    fn relocation_keeps_descendants_selection_and_expansion() {
+        let mut tree = FileTreeModel::new();
+        tree.begin_load("", None, tree.generation());
+        tree.apply_page(
+            page(
+                "",
+                vec![
+                    entry("a", WorkspaceEntryKind::Directory),
+                    entry("b", WorkspaceEntryKind::Directory),
+                ],
+                None,
+            ),
+            tree.generation(),
+        );
+        tree.expand("a");
+        tree.begin_load("a", None, tree.generation());
+        tree.apply_page(
+            page("a", vec![entry("a/child", WorkspaceEntryKind::File)], None),
+            tree.generation(),
+        );
+        tree.select("a/child");
+        assert!(tree.relocate_subtree("a", "b/a", None));
+        assert!(tree.is_expanded("b/a"));
+        assert_eq!(tree.selected(), Some("b/a/child"));
+        assert!(tree.node("a").is_none());
+        assert!(tree.node("b/a/child").is_some());
+        assert!(!tree.relocate_subtree("a", "b/a", None));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //!
 //! A space is a synced (device, folder) pair; the folder need NOT be a git
 //! repo. This service watches the workspace `spaces` rows owned by THIS device
-//! and keeps their `gitDetected`/`checkoutId` stamps truthful:
+//! and keeps their `gitDetected`/`checkoutId`/`repositoryId` stamps truthful:
 //!
 //! - recheck on boot / when a space row is first observed;
 //! - a non-recursive `notify` watcher on the space folder — `.git` appearing or
@@ -211,16 +211,26 @@ async fn entry_task(
 /// Probe git presence and stamp the row — write only on change.
 async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) {
     let detected = inner.repos.is_repo(path).await;
-    let checkout_id = if detected {
-        match inner.repos.checkout_identity(path).await {
+    let (checkout_id, repository_id) = if detected {
+        let checkout_id = match inner.repos.checkout_identity(path).await {
             Ok(identity) => Some(identity.id),
             Err(err) => {
                 tracing::debug!(space = %space_id, error = %err, "spaces: checkout identity failed");
                 None
             }
-        }
+        };
+        // `None` = the check failed; the row keeps its last identity below
+        // rather than regrouping the sidebar on a transient git error.
+        let repository_id = match inner.repos.repository_identity(path).await {
+            Ok(identity) => Some(Some(identity)),
+            Err(err) => {
+                tracing::debug!(space = %space_id, error = %err, "spaces: repository identity failed");
+                None
+            }
+        };
+        (checkout_id, repository_id)
     } else {
-        None
+        (None, Some(None))
     };
     let current = match inner.workspace.read_spaces() {
         Ok(spaces) => spaces.into_iter().find(|s| s.id == space_id),
@@ -232,13 +242,19 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
     let Some(current) = current else {
         return; // deleted while checking
     };
-    if current.git_detected == detected && current.checkout_id == checkout_id {
+    let repository_id = repository_id.unwrap_or_else(|| current.repository_id.clone());
+    if current.git_detected == detected
+        && current.checkout_id == checkout_id
+        && current.repository_id == repository_id
+    {
         return; // unchanged — no oplog growth
     }
-    match inner
-        .workspace
-        .set_space_git(space_id, detected, checkout_id.as_deref())
-    {
+    match inner.workspace.set_space_git(
+        space_id,
+        detected,
+        checkout_id.as_deref(),
+        repository_id.as_deref(),
+    ) {
         Ok(_) => {
             tracing::info!(space = %space_id, git = detected, "space git presence updated");
         }

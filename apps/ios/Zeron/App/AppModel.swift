@@ -476,7 +476,7 @@ final class AppModel {
     }
 
     var projectOptions: [ProjectOption] {
-        rawProjects.map { ProjectOption(id: $0.id, name: $0.name, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, colorIndex: Int($0.colorIndex)) }
+        rawProjects.map { ProjectOption(id: $0.id, name: $0.name, path: $0.path, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, groupKey: $0.groupKey, groupName: $0.groupName, colorIndex: Int($0.colorIndex)) }
     }
 
     var hostOptions: [HostOption] {

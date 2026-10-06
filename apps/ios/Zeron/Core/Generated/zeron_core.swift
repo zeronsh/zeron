@@ -6238,6 +6238,14 @@ public struct ProjectView: Equatable, Hashable {
     public var gitDetected: Bool
     public var createdAtMs: Int64
     /**
+     * Shared by every checkout of one repository, on any device.
+     */
+    public var groupKey: String
+    /**
+     * The repository group's name, shared like `color_index`.
+     */
+    public var groupName: String
+    /**
      * Most urgent indicator among its active sessions.
      */
     public var indicator: ChatIndicator
@@ -6250,6 +6258,12 @@ public struct ProjectView: Equatable, Hashable {
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(id: String, name: String, path: String, colorIndex: UInt32, deviceId: String, deviceName: String?, deviceOnline: Bool, gitDetected: Bool, createdAtMs: Int64, 
+        /**
+         * Shared by every checkout of one repository, on any device.
+         */groupKey: String, 
+        /**
+         * The repository group's name, shared like `color_index`.
+         */groupName: String, 
         /**
          * Most urgent indicator among its active sessions.
          */indicator: ChatIndicator, unseenCount: UInt32, 
@@ -6265,6 +6279,8 @@ public struct ProjectView: Equatable, Hashable {
         self.deviceOnline = deviceOnline
         self.gitDetected = gitDetected
         self.createdAtMs = createdAtMs
+        self.groupKey = groupKey
+        self.groupName = groupName
         self.indicator = indicator
         self.unseenCount = unseenCount
         self.sessions = sessions
@@ -6295,6 +6311,8 @@ public struct FfiConverterTypeProjectView: FfiConverterRustBuffer {
                 deviceOnline: FfiConverterBool.read(from: &buf), 
                 gitDetected: FfiConverterBool.read(from: &buf), 
                 createdAtMs: FfiConverterInt64.read(from: &buf), 
+                groupKey: FfiConverterString.read(from: &buf), 
+                groupName: FfiConverterString.read(from: &buf), 
                 indicator: FfiConverterTypeChatIndicator.read(from: &buf), 
                 unseenCount: FfiConverterUInt32.read(from: &buf), 
                 sessions: FfiConverterSequenceTypeSessionRow.read(from: &buf)
@@ -6311,6 +6329,8 @@ public struct FfiConverterTypeProjectView: FfiConverterRustBuffer {
         FfiConverterBool.write(value.deviceOnline, into: &buf)
         FfiConverterBool.write(value.gitDetected, into: &buf)
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterString.write(value.groupKey, into: &buf)
+        FfiConverterString.write(value.groupName, into: &buf)
         FfiConverterTypeChatIndicator.write(value.indicator, into: &buf)
         FfiConverterUInt32.write(value.unseenCount, into: &buf)
         FfiConverterSequenceTypeSessionRow.write(value.sessions, into: &buf)

@@ -265,6 +265,7 @@ impl Shell {
                     + SIDEBAR_LIST_GAP * rows.len().saturating_sub(1) as f32
             };
         let motion_key = format!("custom:{id}");
+        self.begin_queued_sidebar_reveal(&motion_key, open, height);
         let hover_id = id.clone();
         let toggle_id = id.clone();
         let toggle_motion = motion_key.clone();

@@ -13,7 +13,11 @@ fn main() -> anyhow::Result<()> {
         let mut settings = settings::UiSettings::default();
         settings.sidebar_show_branch = true;
         if let Ok(path) = std::env::var("ZERON_FIXTURE_BACKGROUND") {
-            settings.new_thread_composer_background = Some(settings::NewThreadComposerBackground { path, name: "Uploaded background".into() });
+            settings.new_thread_composer_background = Some(settings::NewThreadComposerBackground {
+                path,
+                name: "Uploaded background".into(),
+                adjustment: settings::NewThreadBackgroundAdjustment::default(),
+            });
         }
         if let Some(folder) = std::env::var_os("ZERON_FIXTURE_WALLPAPER_FOLDER") {
             settings.wallpaper_folder = Some(folder.into());

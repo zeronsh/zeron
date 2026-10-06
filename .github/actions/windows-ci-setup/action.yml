@@ -1,0 +1,54 @@
+name: Windows CI setup
+description: >-
+  Prepare a Windows runner for the Windows test jobs: toolchain, shader
+  compiler, a cheaper release profile for the CI builds, and the Rust cache.
+
+runs:
+  using: composite
+  steps:
+    - name: Disable Defender real-time scanning
+      shell: pwsh
+      # Hosted runners are ephemeral and only build this repository; scanning
+      # every file rustc writes slows builds down. Best effort: warn and carry
+      # on if the runner image does not allow it.
+      run: |
+        try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop }
+        catch { Write-Warning "Could not disable Defender real-time scanning: $_" }
+    - name: Rust toolchain
+      shell: pwsh
+      run: rustup show active-toolchain || rustup toolchain install
+    - name: Locate Windows SDK shader compiler
+      shell: pwsh
+      run: |
+        $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+          Sort-Object FullName -Descending | Select-Object -First 1
+        if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+        "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+    - name: Cheaper release profile for CI builds
+      shell: pwsh
+      # CI only: the binaries built and tested here are NOT the shipped ones
+      # (release.yml still builds those with the committed profile). Thin LTO is
+      # off and the workspace's own crates are built at opt-level 0; third-party
+      # dependencies (gpui, tokio, ...) keep the release opt-level. Written to
+      # $CARGO_HOME/config.toml so Cargo.toml is untouched and every cargo
+      # invocation in the job, including the ones inside
+      # scripts/package-windows.ps1, picks it up.
+      run: |
+        $members = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages.name
+        $config = @('[profile.release]', 'lto = false')
+        foreach ($name in $members) {
+          $config += "[profile.release.package.`"$name`"]"
+          $config += 'opt-level = 0'
+        }
+        $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+        Add-Content -LiteralPath (Join-Path $cargoHome 'config.toml') -Value $config
+        Write-Host "opt-level 0 for $($members.Count) workspace crates: $($members -join ', ')"
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        # Only main writes the cache; PRs restore it.
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+        cache-on-failure: true
+        # Workspace crates are rebuilt on every change anyway and are cheap at
+        # opt-level 0, so keep them out of the cache. Each job gets its own
+        # cache (rust-cache keys on the job id by default).
+        cache-workspace-crates: false

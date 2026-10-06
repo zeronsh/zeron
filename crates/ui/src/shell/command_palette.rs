@@ -205,7 +205,7 @@ impl Shell {
         }
         self.close_command_palette(window, cx);
         match entry {
-            Entry::NewChat => self.open_new_session(cx),
+            Entry::NewChat => self.open_new_session(None, cx),
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => self.open_last_settings(cx),
             Entry::Theme(_) => unreachable!(),
@@ -337,6 +337,7 @@ impl Shell {
                     false,
                     None,
                     None,
+                    false,
                     Some(&query),
                     &theme,
                     cx,

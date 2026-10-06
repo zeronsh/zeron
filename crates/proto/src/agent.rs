@@ -415,11 +415,78 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
     "subagent_type",
 ];
 
+/// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
+/// distinguish the item being worked on from those still waiting; Codex and
+/// Cursor only report done / not done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TodoStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl TodoStatus {
+    /// Decode a harness status string. Anything unrecognised (including
+    /// `cancelled`) is `Pending`: not finished, not being worked on.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "completed" | "complete" | "done" => Self::Completed,
+            "in_progress" | "inProgress" | "in-progress" | "active" => Self::InProgress,
+            _ => Self::Pending,
+        }
+    }
+}
+
+/// One checklist entry.
+///
+/// `done` is the original wire field and stays authoritative for completion,
+/// so docs written before `status` existed (and readers that ignore it) keep
+/// working. `status` is additive and written only when it adds information —
+/// i.e. for an in-progress item; a missing or unreadable value derives from
+/// `done`. Build items with [`TodoItem::new`] to keep the two consistent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
     pub text: String,
     pub done: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_todo_status"
+    )]
+    pub status: Option<TodoStatus>,
+}
+
+impl TodoItem {
+    pub fn new(text: impl Into<String>, status: TodoStatus) -> Self {
+        Self {
+            text: text.into(),
+            done: status == TodoStatus::Completed,
+            status: (status == TodoStatus::InProgress).then_some(status),
+        }
+    }
+
+    /// Effective status: `done` wins, then the explicit status, else pending.
+    pub fn status(&self) -> TodoStatus {
+        if self.done {
+            TodoStatus::Completed
+        } else {
+            self.status.unwrap_or_default()
+        }
+    }
+}
+
+/// A status this build does not know (a future `blocked`, say) must not fail
+/// the whole tool call — the part would vanish from the transcript. Treat it
+/// as absent so the item falls back to `done`.
+fn lenient_todo_status<'de, D>(deserializer: D) -> Result<Option<TodoStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// A slash command advertised by the agent (ACP `availableCommands`): typed as
@@ -809,5 +876,70 @@ mod generated_image_tests {
         assert_eq!(value["type"], "generatedImage");
         assert_eq!(value["mimeType"], "image/png");
         assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+    }
+}
+
+#[cfg(test)]
+mod todo_item_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_items_without_status_derive_from_done() {
+        let done: TodoItem = serde_json::from_value(json!({ "text": "a", "done": true })).unwrap();
+        let open: TodoItem = serde_json::from_value(json!({ "text": "b", "done": false })).unwrap();
+        assert_eq!(done.status(), TodoStatus::Completed);
+        assert_eq!(open.status(), TodoStatus::Pending);
+        assert_eq!(open.status, None);
+    }
+
+    #[test]
+    fn only_in_progress_adds_a_field_so_other_docs_are_unchanged() {
+        let pending = serde_json::to_value(TodoItem::new("a", TodoStatus::Pending)).unwrap();
+        let done = serde_json::to_value(TodoItem::new("b", TodoStatus::Completed)).unwrap();
+        let active = serde_json::to_value(TodoItem::new("c", TodoStatus::InProgress)).unwrap();
+        assert_eq!(pending, json!({ "text": "a", "done": false }));
+        assert_eq!(done, json!({ "text": "b", "done": true }));
+        assert_eq!(
+            active,
+            json!({ "text": "c", "done": false, "status": "inProgress" })
+        );
+    }
+
+    #[test]
+    fn unknown_status_falls_back_to_done_instead_of_failing_the_call() {
+        let call: ToolCall = serde_json::from_value(json!({
+            "kind": "todo",
+            "items": [
+                { "text": "a", "done": false, "status": "blocked" },
+                { "text": "b", "done": true, "status": 7 },
+            ]
+        }))
+        .unwrap();
+        let ToolCall::Todo { items } = call else {
+            panic!("expected a todo call");
+        };
+        assert_eq!(items[0].status(), TodoStatus::Pending);
+        assert_eq!(items[1].status(), TodoStatus::Completed);
+    }
+
+    #[test]
+    fn done_outranks_a_stale_status() {
+        let item = TodoItem {
+            text: "a".into(),
+            done: true,
+            status: Some(TodoStatus::InProgress),
+        };
+        assert_eq!(item.status(), TodoStatus::Completed);
+    }
+
+    #[test]
+    fn harness_status_strings_decode() {
+        assert_eq!(TodoStatus::parse("completed"), TodoStatus::Completed);
+        assert_eq!(TodoStatus::parse("in_progress"), TodoStatus::InProgress);
+        assert_eq!(TodoStatus::parse("inProgress"), TodoStatus::InProgress);
+        assert_eq!(TodoStatus::parse("pending"), TodoStatus::Pending);
+        assert_eq!(TodoStatus::parse("cancelled"), TodoStatus::Pending);
+        assert_eq!(TodoStatus::parse(""), TodoStatus::Pending);
     }
 }

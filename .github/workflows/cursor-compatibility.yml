@@ -9,6 +9,16 @@ on:
       - 'Cargo.lock'
       - 'scripts/*cursor-sdk*'
       - '.github/workflows/cursor-*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/harness/**'
+      - 'crates/doc/**'
+      - 'crates/engine/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/*cursor-sdk*'
+      - '.github/workflows/cursor-*.yml'
   workflow_dispatch:
   workflow_call:
 permissions:
@@ -18,11 +28,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
-      - uses: Swatinem/rust-cache@v2
       - name: Dependency updater validation
         run: python3 scripts/test-update-cursor-sdk.py
       - name: Install the exact SDK selected by this engine
@@ -31,14 +40,21 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/cursor-sdk-contract" --ignore-scripts --no-audit --no-fund "$pin"
       - name: Actual SDK token expiry, stream invalidation, and transient auth recovery
         run: node scripts/test-cursor-sdk-auth.mjs "$RUNNER_TEMP/cursor-sdk-contract/node_modules/@cursor/sdk"
-      - name: Harness compatibility, steering, and session recovery
-        run: cargo test --locked -p zeron-harness
-      - name: Durable commands and engine message delivery
-        run: |
-          cargo test --locked -p zeron-doc
-          cargo test --locked -p zeron-engine --test message_queue
-          cargo test --locked -p zeron-engine --lib sessions::tests
-      - name: Native Pi RPC driver
-        run: |
-          cargo test --locked -p zeron-harness --features native-fixture --test pi_rpc
-          cargo test --locked -p zeron-engine --test pi_resume
+
+  # The Rust half (harness compatibility, steering, session recovery, durable
+  # commands, message delivery, native Pi RPC) is part of the `core-tests` job
+  # of ui-tests.yml, which already runs on pull requests and on main with a
+  # superset of this workflow's paths. Run it here only for the callers that
+  # do not get that: release.yml (tag push), cursor-sdk-update.yml (manual
+  # dispatch on the update branch) and manual runs.
+  rust-tests:
+    if: ${{ github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: core # saved by core-tests in ui-tests.yml
+      - name: Harness, engine, sync, update, doc and preview tests
+        run: scripts/ci/test-core.sh

@@ -35,6 +35,7 @@ install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
 install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
+cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
@@ -55,6 +56,10 @@ if [ ! -x "$DEST/zeron" ]; then
   cp -R "$HERE/." "$STAGE/"
   rm -rf "$DEST"
   mv "$STAGE" "$DEST"
+fi
+if ! "$DEST/zeron" --version >/dev/null; then
+  echo "Zeron could not start; see the loader error above. Install the missing runtime libraries (including ALSA, libasound.so.2), then retry." >&2
+  exit 1
 fi
 ln -sfn "$DEST" "$APP_ROOT/current"
 mkdir -p "$HOME/.local/bin"

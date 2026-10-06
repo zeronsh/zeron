@@ -276,7 +276,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
     version
 }
 
-fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
+pub(crate) fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
     String::from_utf8_lossy(bytes)
         .split_whitespace()
         .find_map(|word| {

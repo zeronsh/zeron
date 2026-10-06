@@ -188,8 +188,14 @@ impl Shell {
         name.update(cx, |input, cx| input.set_text(draft.name, cx));
         let command = cx.new(|cx| ComposerInput::new("Command", cx));
         command.update(cx, |input, cx| input.set_text(draft.command, cx));
-        let name_events = cx.subscribe(&name, |_: &mut Shell, _, _, cx| cx.notify());
-        let command_events = cx.subscribe(&command, |_: &mut Shell, _, _, cx| cx.notify());
+        let name_events = cx.subscribe(
+            &name,
+            |_: &mut Shell, _, _: &crate::composer::ComposerInputEvent, cx| cx.notify(),
+        );
+        let command_events = cx.subscribe(
+            &command,
+            |_: &mut Shell, _, _: &crate::composer::ComposerInputEvent, cx| cx.notify(),
+        );
         self.project_actions.editor = Some(ProjectActionEditor {
             key,
             action_id,

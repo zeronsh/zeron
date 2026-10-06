@@ -1892,6 +1892,25 @@ async fn drive_run(
         Ok(stream) => stream,
         Err(err) => {
             let message = err.to_string();
+            tracing::warn!(chat = %chat_id, harness = ?harness_id, error = %message, "run failed to start");
+            // The journal alone is live-only: without an entry the transcript
+            // shows "Run failed" with no reason (an OpenCode server that never
+            // booted looked exactly like that).
+            let parts = [MessagePart::Error {
+                id: "e0".into(),
+                message: message.clone(),
+            }];
+            if let Err(err) = finish_segment(
+                &doc,
+                None,
+                &new_id(),
+                &device_id,
+                now_ms(),
+                &parts,
+                MessageStatus::Complete,
+            ) {
+                tracing::warn!(chat = %chat_id, error = %err, "start failure entry failed");
+            }
             inner.publish(
                 &chat_id,
                 &AgentEvent::Error {
@@ -2350,6 +2369,17 @@ async fn drive_run(
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if done {
                 settled_subagents.insert(parent_tool_use_id.clone());
+                if !chip_streaming {
+                    // A resumed run can finish an older chip without ever
+                    // opening a sink. The chip's lifecycle is independent of
+                    // whether this run received transcript content.
+                    let _ = doc_ref.update_subagent_chip(
+                        parent_tool_use_id,
+                        None,
+                        subagent_chip_update(sub_event),
+                        None,
+                    );
+                }
             }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
@@ -2369,16 +2399,6 @@ async fn drive_run(
                 if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
                     flush_at = tokio::time::Instant::now()
                         + std::time::Duration::from_millis(STREAM_COMMIT_MS);
-                }
-                if !chip_streaming && done {
-                    // In-place chip refresh on lifecycle transitions only —
-                    // content never rewrites the parent doc.
-                    let _ = doc_ref.update_subagent_chip(
-                        parent_tool_use_id,
-                        None,
-                        subagent_chip_update(sub_event),
-                        None,
-                    );
                 }
                 if done {
                     let status = match sub_event.as_ref() {

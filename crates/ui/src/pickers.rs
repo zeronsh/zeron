@@ -11,7 +11,10 @@
 //! in free functions with unit tests; RPC results land in [`Loadable`] slots
 //! rendered as skeletons / inline errors with Retry.
 
-use std::collections::HashMap;
+mod compact;
+
+use crate::roll_text::{roll_text, rolling};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -241,8 +244,28 @@ pub fn offered_options(
 // Pure: folder-browser navigation (used by the shell's add-space flow)
 // ---------------------------------------------------------------------------
 
+/// Whether `path` is drive-rooted (`C:`, `C:\…`, `C:/…`). Judged by shape,
+/// not `cfg`: the device being browsed may be a Windows machine reached from
+/// any platform.
+fn is_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes.get(2).is_none_or(|b| matches!(b, b'/' | b'\\'))
+}
+
 /// Parent of an absolute path; `None` at the filesystem root.
 pub fn parent_path(path: &str) -> Option<String> {
+    if is_windows_path(path) {
+        let (drive, rest) = path.split_at(2);
+        let rest = rest.trim_matches(['/', '\\']);
+        if rest.is_empty() {
+            return None; // drive root
+        }
+        let parent = rest.rfind(['/', '\\']).map_or("", |at| &rest[..at]);
+        return Some(format!("{drive}\\{parent}"));
+    }
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         return None; // was "/" (or empty)
@@ -256,8 +279,10 @@ pub fn parent_path(path: &str) -> Option<String> {
 
 /// Join a listing path and an entry name.
 pub fn child_path(base: &str, name: &str) -> String {
-    if base.ends_with('/') {
+    if base.ends_with(['/', '\\']) {
         format!("{base}{name}")
+    } else if is_windows_path(base) {
+        format!("{base}\\{name}")
     } else {
         format!("{base}/{name}")
     }
@@ -302,13 +327,29 @@ pub fn segment_target(names: &[&str], query: &str) -> Option<usize> {
     hits.next().is_none().then_some(ix)
 }
 
-/// Interpret a palette query as a typed path jump: absolute (`/disk2/projects`)
-/// or home-relative (`~`, `~/github`). Returns the absolute path to browse,
-/// trailing slash trimmed. `home` is the device's resolved home — `None`
-/// until the first listing lands, when `~` can't expand yet. A query like
-/// `~foo` is a folder name, not a path.
+/// Whether a palette query is path-shaped (absolute, home-relative or
+/// drive-rooted) rather than a folder name to filter by.
+pub fn is_typed_path(query: &str) -> bool {
+    query.starts_with(['/', '~']) || is_windows_path(query)
+}
+
+/// Interpret a palette query as a typed path jump: absolute (`/disk2/projects`),
+/// drive-rooted (`D:\projects`) or home-relative (`~`, `~/github`). Returns the
+/// absolute path to browse, trailing separator trimmed. `home` is the device's
+/// resolved home — `None` until the first listing lands, when `~` can't expand
+/// yet. A query like `~foo` is a folder name, not a path.
 pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
     let query = query.trim();
+    if is_windows_path(query) {
+        let path = query.replace('/', "\\");
+        let trimmed = path.trim_end_matches('\\');
+        // `D:` and `D:\` both mean the drive root.
+        return Some(if trimmed.len() == 2 {
+            format!("{trimmed}\\")
+        } else {
+            trimmed.to_string()
+        });
+    }
     if let Some(rest) = query.strip_prefix('~') {
         let home = home?.trim_end_matches('/');
         if rest.is_empty() {
@@ -334,10 +375,17 @@ pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
 
 /// Breadcrumb segments for a path: `(label, full path)`, root first.
 pub fn breadcrumbs(path: &str) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = vec![("/".to_string(), "/".to_string())];
-    let mut acc = String::new();
-    for segment in path.split('/').filter(|s| !s.is_empty()) {
-        acc.push('/');
+    let (drive, sep, rest) = if is_windows_path(path) {
+        let (drive, rest) = path.split_at(2);
+        (drive, '\\', rest)
+    } else {
+        ("", '/', path)
+    };
+    let root = format!("{drive}{sep}");
+    let mut out = vec![(root.clone(), root)];
+    let mut acc = drive.to_string();
+    for segment in rest.split(['/', sep]).filter(|s| !s.is_empty()) {
+        acc.push(sep);
         acc.push_str(segment);
         out.push((segment.to_string(), acc.clone()));
     }
@@ -358,12 +406,46 @@ pub fn browser_rows(listing: &FolderListing) -> Vec<&zeron_proto::FolderEntry> {
 /// the first Down lands on row 0.
 const NO_ACTIVE_ROW: usize = usize::MAX;
 
+/// One project-picker row: every space of a project
+/// ([`zeron_proto::view::project_key`]), named for its representative.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectRow {
+    key: String,
+    name: String,
+}
+
+/// One device-picker row: a device, and the picked project's checkout on it.
+#[derive(Clone, Debug, PartialEq)]
+struct DeviceRow {
+    device_id: String,
+    name: String,
+    /// The project's space on this device; `None` when no project is picked.
+    space: Option<Space>,
+    /// The checkout's path, when the device holds several of the project.
+    detail: Option<String>,
+}
+
+/// What names the selected model, shared by the composer chip and the
+/// compact panel so the two never disagree about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ModelName {
+    /// The catalog row's label, else the remembered pick's, else the id.
+    Named(SharedString),
+    /// Nothing names it yet, but the harness or model catalog that would
+    /// is still on its way.
+    Loading,
+    /// Nothing offers a model: no agents at all, or a provider whose
+    /// catalog came back empty or failed with no pick remembered.
+    None { no_agents: bool },
+}
+
 /// Which pane the harness/model picker's icon rail is showing (t3code
 /// ModelPickerContent `selectedInstanceId | "favorites"`). `Harness` means
 /// "the effective harness's list" — the rail has no browse-without-commit
 /// state; clicking a brand icon picks that harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ModelRail {
+    All,
     Favorites,
     #[default]
     Harness,
@@ -526,8 +608,21 @@ pub struct Pickers {
     menu_geometry: HashMap<PickerKind, popover::MenuGeometry>,
     model_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     // Keep the open menu anchored while its selected label and options change.
-    open_model_width: Option<gpui::Pixels>,
+    /// The model chip glides to its content's width as the model, effort
+    /// or fast tier changes; `chip_resizing` clips instead of truncating
+    /// while it moves.
+    chip_width: Option<compact::ScalarTransition>,
+    chip_resizing: bool,
     open_model_height: f32,
+    compact_model_list: bool,
+    /// The model list's provider tab strip: its sideways scroll, and the
+    /// tab last brought into view as the list scrolled.
+    compact_strip_scroll: gpui::ScrollHandle,
+    compact_strip_viewed: Option<usize>,
+    effort_dragging: bool,
+    compact_motion: compact::CompactMotion,
+    compact_keyboard: bool,
+    effort_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     open: popover::Popup<PickerKind>,
     /// The harness/model picker's rail selection (favorites vs the effective
     /// harness's list). Re-primed on every open.
@@ -550,9 +645,26 @@ pub struct Pickers {
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
     model_refresh_errors: HashMap<HarnessId, String>,
+    /// The loaded harness list belongs to the previous device: reload it
+    /// once, keeping its rows on screen meanwhile (see the state observer).
+    harnesses_stale: bool,
+    /// The stale harness list's reload is in flight (one request).
+    harnesses_revalidating: bool,
+    /// Loaded model slots still holding the previous device's catalog: shown
+    /// while the new device's reload runs, never used to resolve a send, and
+    /// cleared only when the new device's answer lands (a failure replaces
+    /// the rows rather than keeping the wrong device's).
+    stale_models: HashSet<HarnessId>,
+    /// Stale slots whose reload is in flight (one request per slot).
+    revalidating: HashSet<HarnessId>,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
+    /// The previous project's resolved ref, shown ONLY by the checkout and
+    /// branch chip labels until this project's refs land — so a project
+    /// switch never blinks them through "Select ref". Never read by the
+    /// popover or the send plan.
+    held_ref: Option<RepoRef>,
     /// Highlighted row in the open list (keyboard nav).
     active: usize,
     /// Models-list scroll — keyboard nav keeps the highlighted row in view.
@@ -665,6 +777,7 @@ impl Pickers {
             ComposerInputEvent::PastedImages(_)
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
+            | ComposerInputEvent::OpenAttachment(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
@@ -687,22 +800,36 @@ impl Pickers {
             // (and possibly the device) changed under them.
             let space = state.read(cx).selected_space.clone();
             let device = state.read(cx).effective_device_id();
-            if space != this.space_owner || device != this.device_owner {
+            let device_changed = device != this.device_owner;
+            if space != this.space_owner || device_changed {
                 this.space_owner = space;
                 this.device_owner = device;
-                this.target_generation = this.target_generation.wrapping_add(1);
                 this.setting_menu = None;
                 this.setting_bounds = None;
+                this.held_ref = this.selected_ref().cloned().or(this.held_ref.take());
                 this.refs_task = None;
-                this.load_task = None;
                 this.config.branch = None;
                 this.config.checkout = CheckoutKind::default();
                 this.refs = Loadable::Idle;
                 this.refs_space = None;
-                // Catalogs are per-DEVICE (fetched from the space's host):
-                // a space switch may land on another device, so refetch.
-                this.harnesses = Loadable::Idle;
-                this.models.clear();
+            }
+            // Catalogs are per-DEVICE (fetched from the space's host), so a
+            // project switch on the same device keeps them. A device switch
+            // revalidates against the new host with the loaded rows still on
+            // screen, so the model chip never blanks; in-flight loads for
+            // the old host are discarded by the generation bump and restart.
+            if device_changed {
+                this.target_generation = this.target_generation.wrapping_add(1);
+                this.load_task = None;
+                this.harnesses_revalidating = false;
+                if matches!(this.harnesses, Loadable::Ready(_)) {
+                    this.harnesses_stale = true;
+                } else {
+                    this.harnesses = Loadable::Idle;
+                }
+                this.models.retain(|_, slot| matches!(slot, Loadable::Ready(_)));
+                this.stale_models = this.models.keys().copied().collect();
+                this.revalidating.clear();
                 this.model_refresh_errors.clear();
                 this.catalog_rev += 1;
             }
@@ -753,8 +880,16 @@ impl Pickers {
             target_generation: 0,
             menu_geometry: HashMap::new(),
             model_trigger_bounds: None,
-            open_model_width: None,
+            chip_width: None,
+            chip_resizing: false,
             open_model_height: model_menu_height(0),
+            compact_model_list: false,
+            compact_strip_scroll: gpui::ScrollHandle::new(),
+            compact_strip_viewed: None,
+            effort_dragging: false,
+            compact_motion: compact::CompactMotion::default(),
+            compact_keyboard: false,
+            effort_bounds: None,
             config: DraftConfig::default(),
             title,
             defaults,
@@ -777,8 +912,13 @@ impl Pickers {
             harnesses: Loadable::Idle,
             models: HashMap::new(),
             model_refresh_errors: HashMap::new(),
+            harnesses_stale: false,
+            harnesses_revalidating: false,
+            stale_models: HashSet::new(),
+            revalidating: HashSet::new(),
             refs: Loadable::Idle,
             refs_space: None,
+            held_ref: None,
             active: 0,
             model_scroll: gpui::UniformListScrollHandle::new(),
             model_rows_cache: std::cell::RefCell::new(None),
@@ -891,8 +1031,12 @@ impl Pickers {
         // New-chat canvas: the remembered last-used harness (sticky defaults),
         // when the loaded catalog still offers it (the device may have
         // disabled it in Settings → Providers since).
+        // A list still from the previous device reads as not loaded: it may
+        // offer harnesses this device lacks, and what the chip shows must be
+        // what a send would carry.
+        let fresh = self.harnesses.ready().filter(|_| !self.harnesses_stale);
         if let Some(harness) = self.defaults.harness {
-            let offered = match self.harnesses.ready() {
+            let offered = match fresh {
                 Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
                 None => true, // catalog not loaded yet — trust the memory
             };
@@ -904,9 +1048,7 @@ impl Pickers {
         // harness first, and resolving chips against it would boot the
         // new-chat canvas onto "Mock" instead of Claude Code + its default
         // model (it stays available under `ZERON_HARNESS=mock`).
-        self.harnesses
-            .ready()
-            .and_then(|list| offered_harnesses(list).first().map(|d| d.id))
+        fresh.and_then(|list| offered_harnesses(list).first().map(|d| d.id))
     }
 
     /// Effective model id: the draft pick, the selected chat's config, or (on
@@ -931,15 +1073,30 @@ impl Pickers {
     /// Effective reasoning — always concrete once the model is known: the
     /// draft pick / chat config / remembered default, clamped to the selected
     /// model's ladder, falling back to the model's default level.
-    fn effective_reasoning(&self, cx: &App) -> Option<ReasoningLevel> {
-        let explicit = self.config.reasoning.or_else(|| {
+    /// The reasoning level picked, configured or remembered — before any
+    /// clamping to the selected model's ladder.
+    fn explicit_reasoning(&self, cx: &App) -> Option<ReasoningLevel> {
+        self.config.reasoning.or_else(|| {
             match self.state.read(cx).selected_chat_row() {
                 Some(chat) => chat.config.as_ref().and_then(|c| c.reasoning),
-                // New chat: the remembered last-used level.
-                None => self.defaults.reasoning,
+                // New chat: the level last used with this model, else the
+                // last-used level overall.
+                None => self
+                    .effective_harness(cx)
+                    .and_then(|h| self.defaults.reasoning_for(h, self.effective_model_id(cx)))
+                    .or(self.defaults.reasoning),
             }
-        });
-        if self.selected_model(cx).is_none() {
+        })
+    }
+
+    fn effective_reasoning(&self, cx: &App) -> Option<ReasoningLevel> {
+        let explicit = self.explicit_reasoning(cx);
+        // The old device's ladder must not clamp the chip's level either:
+        // a send in this window carries the unclamped value.
+        let stale = self
+            .effective_harness(cx)
+            .is_some_and(|h| self.stale_models.contains(&h));
+        if stale || self.selected_model(cx).is_none() {
             // Catalog not loaded yet: show the explicit value as-is (nothing
             // to clamp against); it resolves to a concrete level on load.
             return explicit;
@@ -958,6 +1115,29 @@ impl Pickers {
             return None;
         }
         selected_catalog_model(models, selected)
+    }
+
+    fn model_name(&self, cx: &App) -> ModelName {
+        if self.no_agents_available() && self.effective_harness(cx).is_none() {
+            return ModelName::None { no_agents: true };
+        }
+        if let Some(label) = self.selected_model_label(cx) {
+            return ModelName::Named(label.into());
+        }
+        // A list still from the previous device is loading for this one.
+        let catalog_loading = self.harnesses_stale
+            || matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
+        let models_loading = self.effective_harness(cx).is_some_and(|harness| {
+            !matches!(
+                self.models.get(&harness),
+                Some(Loadable::Ready(_)) | Some(Loadable::Error(_))
+            )
+        });
+        if catalog_loading || models_loading {
+            ModelName::Loading
+        } else {
+            ModelName::None { no_agents: false }
+        }
     }
 
     fn selected_model_label(&self, cx: &App) -> Option<String> {
@@ -1017,8 +1197,10 @@ impl Pickers {
     /// enabled). False while the catalog is still loading or failed
     /// (nothing to conclude yet; offline sends must not be blocked on it).
     pub fn no_agents_available(&self) -> bool {
+        // The previous device's list can't speak for this one.
         self.harnesses
             .ready()
+            .filter(|_| !self.harnesses_stale)
             .is_some_and(|list| self.offered(list).is_empty())
     }
 
@@ -1038,8 +1220,20 @@ impl Pickers {
     /// `Mutate createChat`: concrete model + reasoning whenever the catalog is
     /// loaded (no "engine picks a default" passthrough).
     pub fn resolved(&self, cx: &App) -> ResolvedRunConfig {
+        let harness = self.effective_harness(cx);
+        // A catalog still from the previous device must not pick for this
+        // one (its default model, its effort ladder): send only what was
+        // chosen or remembered, as when no catalog has loaded.
+        if harness.is_some_and(|h| self.stale_models.contains(&h)) {
+            return ResolvedRunConfig {
+                harness,
+                model: self.effective_model_id(cx).map(str::to_string),
+                reasoning: self.explicit_reasoning(cx),
+                model_options: self.explicit_options(cx),
+            };
+        }
         ResolvedRunConfig {
-            harness: self.effective_harness(cx),
+            harness,
             model: self
                 .selected_model(cx)
                 .map(|m| m.id.clone())
@@ -1080,6 +1274,7 @@ impl Pickers {
     /// Outside clicks and navigation keep focus at the clicked destination.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.focus_on_mount = false;
+        self.effort_dragging = false;
         self.cancel_setting_hover();
         self.setting_menu = None;
         self.setting_bounds = None;
@@ -1135,8 +1330,12 @@ impl Pickers {
             return;
         }
         if kind == PickerKind::HarnessModel {
-            self.open_model_width = self.model_trigger_bounds.map(|bounds| bounds.size.width);
             self.open_model_height = model_menu_height(self.setting_groups(cx).len());
+            self.compact_model_list = false;
+            self.compact_strip_viewed = None;
+            self.effort_dragging = false;
+            self.compact_keyboard = false;
+            self.compact_motion = compact::CompactMotion::default();
         }
         self.open.open(kind);
         self.focus_on_mount = true;
@@ -1171,7 +1370,9 @@ impl Pickers {
             self.config.harness = None;
             self.model_rail = ModelRail::Harness;
         } else if kind == PickerKind::HarnessModel {
-            self.model_rail = if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
+            self.model_rail = if self.compact_model_picker(cx) {
+                ModelRail::All
+            } else if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
             } else {
                 ModelRail::Harness
@@ -1186,7 +1387,7 @@ impl Pickers {
             },
             PickerKind::Branch => self.selected_ref_index(cx),
             PickerKind::HarnessModel => self.selected_model_index(cx),
-            PickerKind::Space => self.selected_space_index(cx),
+            PickerKind::Space => self.selected_project_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
         };
         if kind == PickerKind::HarnessModel {
@@ -1266,7 +1467,9 @@ impl Pickers {
         let reload = match self.harnesses {
             Loadable::Idle => true,
             Loadable::Loading => false,
-            Loadable::Ready(_) | Loadable::Error(_) => force,
+            Loadable::Ready(_) | Loadable::Error(_) => {
+                force || (self.harnesses_stale && !self.harnesses_revalidating)
+            }
         };
         if !reload {
             return;
@@ -1274,6 +1477,9 @@ impl Pickers {
         let Some(engine) = self.engine(cx) else {
             return;
         };
+        if self.harnesses_stale {
+            self.harnesses_revalidating = true;
+        }
         let target = self.space_target(cx);
         let generation = self.target_generation;
         if !matches!(self.harnesses, Loadable::Ready(_)) {
@@ -1299,6 +1505,8 @@ impl Pickers {
                 if pickers.target_generation != generation {
                     return;
                 }
+                pickers.harnesses_stale = false;
+                pickers.harnesses_revalidating = false;
                 pickers.catalog_rev += 1;
                 pickers.harnesses = match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
@@ -1343,7 +1551,11 @@ impl Pickers {
         let reload = match self.models.get(&harness) {
             None | Some(Loadable::Idle) => true,
             Some(Loadable::Loading) => false,
-            Some(Loadable::Ready(_)) | Some(Loadable::Error(_)) => force,
+            Some(Loadable::Ready(_)) | Some(Loadable::Error(_)) => {
+                force
+                    || (self.stale_models.contains(&harness)
+                        && !self.revalidating.contains(&harness))
+            }
         };
         if !reload {
             return;
@@ -1351,6 +1563,9 @@ impl Pickers {
         let Some(engine) = self.engine(cx) else {
             return;
         };
+        if self.stale_models.contains(&harness) {
+            self.revalidating.insert(harness);
+        }
         let target = self.space_target(cx);
         let generation = self.target_generation;
         if !matches!(self.models.get(&harness), Some(Loadable::Ready(_))) {
@@ -1410,11 +1625,27 @@ impl Pickers {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
-                pickers.apply_model_catalog(harness, loaded, cx);
+                pickers.land_model_reload(harness, loaded, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// A model load for the current device landed. A slot that still held
+    /// the previous device's rows is current again either way — on failure
+    /// the error replaces those rows instead of being retained under them.
+    fn land_model_reload(
+        &mut self,
+        harness: HarnessId,
+        loaded: Loadable<Vec<Model>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.revalidating.remove(&harness);
+        if self.stale_models.remove(&harness) && matches!(loaded, Loadable::Error(_)) {
+            self.models.remove(&harness);
+        }
+        self.apply_model_catalog(harness, loaded, cx);
     }
 
     fn apply_model_catalog(
@@ -1508,6 +1739,7 @@ impl Pickers {
                 .call(methods::LIST_REFS, serde_json::Value::Object(params))
                 .await;
             this.update(cx, |pickers, cx| {
+                pickers.held_ref = None;
                 pickers.refs = match result {
                     Ok(value) => match serde_json::from_value::<Vec<RepoRef>>(value) {
                         Ok(refs) => Loadable::Ready(refs),
@@ -1635,7 +1867,7 @@ impl Pickers {
             // provider settings so both the picker and first createChat use the
             // new harness, even when its model catalog has not loaded yet.
             let model = self.defaults.model_for(harness).map(|m| m.id.clone());
-            let reasoning = self.defaults.reasoning;
+            let reasoning = self.defaults.reasoning_for(harness, model.as_deref());
             let options = model
                 .as_deref()
                 .and_then(|model| self.defaults.model_options_for(harness, model))
@@ -1688,7 +1920,9 @@ impl Pickers {
             self.update_chat_config(cx, move |config| config.model = Some(model_id));
         } else {
             // New chat: draft pick + sticky last-used memory for this harness.
+            // Effort follows the model: its own remembered level, if any.
             self.config.model = Some(model_id.clone());
+            self.config.reasoning = None;
             if let Some(harness) = self.effective_harness(cx) {
                 let label = self
                     .models
@@ -1710,7 +1944,13 @@ impl Pickers {
             self.update_chat_config(cx, move |config| config.reasoning = Some(level));
         } else {
             self.config.reasoning = Some(level);
-            self.defaults.reasoning = Some(level);
+            if let Some(harness) = self.effective_harness(cx) {
+                let model = self.effective_model_id(cx).map(str::to_owned);
+                self.defaults
+                    .remember_reasoning(harness, model.as_deref(), level);
+            } else {
+                self.defaults.reasoning = Some(level);
+            }
             self.save_defaults();
         }
         cx.notify();
@@ -1996,6 +2236,8 @@ impl Pickers {
     fn activate_model_row(&mut self, cx: &mut Context<Self>) {
         if self.setting_menu.is_some() {
             self.activate_setting_choice(cx);
+        } else if self.compact_model_picker(cx) && self.compact_model_list {
+            self.activate_model_index(self.active, cx);
         } else if let Some(index) = self.active.checked_sub(self.model_rows_len(cx)) {
             if let Some(group) = self.setting_groups(cx).get(index) {
                 self.open_setting(SettingScope::Tray, group.id.clone(), cx);
@@ -2022,20 +2264,35 @@ impl Pickers {
             self.pick_harness(row.harness, cx);
         }
         self.pick_model(row.model.id, cx);
+        if self.compact_model_picker(cx) {
+            self.compact_model_list = false;
+            self.focus_on_mount = true;
+        }
     }
 
     /// Star/unstar a model and persist it with the sticky defaults.
     fn toggle_model_favorite(&mut self, harness: HarnessId, model: &str, cx: &mut Context<Self>) {
         self.reload_defaults();
+        let keyboard_row = (self.compact_model_picker(cx) && self.compact_keyboard)
+            .then(|| self.model_rows(cx).get(self.active).cloned())
+            .flatten();
         self.defaults.toggle_favorite(harness, model);
         self.persist_defaults();
         self.catalog_rev += 1;
-        // Starring REORDERS the list (stars float to the top / leave the
-        // favorites view) — re-home the keyboard highlight onto the SELECTED
-        // row so exactly one row reads highlighted afterwards. Following the
-        // starred row instead left its cursor wash next to the selected
-        // row's ring: "two highlighted rows" (user report, twice).
+        // Pointer interactions retain the selected-row highlight after sorting.
         self.active = self.selected_model_index(cx);
+        // Keyboard focus follows identity, independently of selection styling.
+        if let Some(row) = keyboard_row {
+            self.active = self
+                .model_rows(cx)
+                .iter()
+                .position(|candidate| {
+                    candidate.harness == row.harness && candidate.model.id == row.model.id
+                })
+                .unwrap_or(self.active);
+            self.model_scroll
+                .scroll_to_item(self.active, gpui::ScrollStrategy::Nearest);
+        }
         cx.notify();
     }
 
@@ -2088,6 +2345,20 @@ impl Pickers {
             .or_else(|| self.selected_ref().map(|r| r.name.clone()))
     }
 
+    /// The ref the checkout and branch chips name: the resolved one, else —
+    /// while a project switch's refs load — the previous project's.
+    fn display_ref(&self) -> Option<&RepoRef> {
+        match self.refs {
+            Loadable::Idle | Loadable::Loading => self.selected_ref().or(self.held_ref.as_ref()),
+            _ => self.selected_ref(),
+        }
+    }
+
+    fn display_ref_is_worktree(&self) -> bool {
+        self.display_ref()
+            .is_some_and(|row| row.worktree_path.is_some())
+    }
+
     /// The existing worktree the picked ref is materialized in, if any.
     fn selected_ref_worktree(&self) -> Option<String> {
         self.selected_ref().and_then(|r| r.worktree_path.clone())
@@ -2117,7 +2388,7 @@ impl Pickers {
         match self.config.checkout {
             CheckoutKind::NewWorktree => "New worktree",
             CheckoutKind::Local => {
-                if self.selected_ref_worktree().is_some() {
+                if self.display_ref_is_worktree() {
                     "Current worktree"
                 } else {
                     "Current checkout"
@@ -2129,63 +2400,98 @@ impl Pickers {
     /// Label of the ref trigger: `From <ref>` only when a NEW worktree will be
     /// created off it (t3code `getBranchTriggerLabel`); the bare name otherwise.
     fn ref_label(&self) -> SharedString {
-        match (self.config.checkout, self.effective_ref_name()) {
+        let name = self
+            .config
+            .branch
+            .clone()
+            .or_else(|| self.display_ref().map(|row| row.name.clone()));
+        match (self.config.checkout, name) {
             (_, None) => SharedString::from("Select ref"),
             (CheckoutKind::NewWorktree, Some(name)) => SharedString::from(format!("From {name}")),
             (CheckoutKind::Local, Some(name)) => SharedString::from(name),
         }
     }
 
-    // ---- the space picker (new-session canvas) ----
+    // ---- the project picker (new-session canvas) ----
 
-    /// The picker's project rows: scoped to the canvas's device — the device
-    /// switcher narrows the list, projects on other devices don't show
-    /// (pick the device first, then its project). Unscoped only while the
-    /// device is still unknown (pre-probe boot).
-    fn scoped_space_rows(&self, cx: &App) -> Vec<Space> {
+    /// The picker's project rows: one per project across every device —
+    /// clones and worktrees sharing a repository identity are one row, named
+    /// for their representative. The device chip then picks which checkout.
+    fn project_rows(&self, cx: &App) -> Vec<ProjectRow> {
         let state = self.state.read(cx);
-        let device = state.effective_device_id();
-        state
-            .spaces_sorted()
-            .into_iter()
-            .filter(|s| match device.as_deref() {
-                Some(d) => s.device_id == d,
-                None => true,
-            })
-            .cloned()
-            .collect()
+        let mut rows: Vec<ProjectRow> = Vec::new();
+        for space in &state.spaces {
+            let key = zeron_proto::view::project_key(space);
+            if rows.iter().any(|row| row.key == key) {
+                continue;
+            }
+            rows.push(ProjectRow {
+                key,
+                name: state.representative_space(space).display_name().to_string(),
+            });
+        }
+        rows.sort_by_key(|row| (row.name.to_lowercase(), row.key.clone()));
+        rows
     }
 
-    /// [`Self::scoped_space_rows`] matching the search query, ranked
+    /// [`Self::project_rows`] matching the search query, ranked
     /// (`popover::filter_indices`).
-    fn filtered_space_rows(&self, cx: &App) -> Vec<Space> {
+    fn filtered_project_rows(&self, cx: &App) -> Vec<ProjectRow> {
         let query = self.search.read(cx).text().to_string();
-        let spaces = self.scoped_space_rows(cx);
-        let names: Vec<String> = spaces
-            .iter()
-            .map(|s| s.display_name().to_string())
-            .collect();
+        let rows = self.project_rows(cx);
+        let names: Vec<String> = rows.iter().map(|row| row.name.clone()).collect();
         popover::filter_indices(&query, &names)
             .into_iter()
-            .map(|ix| spaces[ix].clone())
+            .map(|ix| rows[ix].clone())
             .collect()
     }
 
     /// Current project row on an unsearched open, or the final opt-out row.
     /// An implicit empty selection has no highlight until the user navigates.
-    fn selected_space_index(&self, cx: &App) -> usize {
+    fn selected_project_index(&self, cx: &App) -> usize {
         if self.state.read(cx).no_project {
-            return self.scoped_space_rows(cx).len();
+            return self.project_rows(cx).len();
         }
         let selected = self
             .state
             .read(cx)
             .selected_space_row()
-            .map(|s| s.id.clone());
+            .map(zeron_proto::view::project_key);
         selected
-            .as_deref()
-            .and_then(|id| self.scoped_space_rows(cx).iter().position(|s| s.id == id))
+            .and_then(|key| self.project_rows(cx).iter().position(|row| row.key == key))
             .unwrap_or(NO_ACTIVE_ROW)
+    }
+
+    /// Pick a project, keeping the device when it has a checkout of it:
+    /// the current checkout, else one on the current device, else this
+    /// device's, else the first.
+    fn pick_project(&mut self, key: String, cx: &mut Context<Self>) {
+        let space_id = {
+            let state = self.state.read(cx);
+            let Some(member) = state
+                .spaces
+                .iter()
+                .find(|s| zeron_proto::view::project_key(s) == key)
+            else {
+                return;
+            };
+            let members = state.project_members(member);
+            let selected = state.selected_space_row().map(|s| s.id.clone());
+            let device = state.effective_device_id();
+            members
+                .iter()
+                .find(|s| selected.as_deref() == Some(s.id.as_str()))
+                .or_else(|| {
+                    members
+                        .iter()
+                        .find(|s| device.as_deref() == Some(s.device_id.as_str()))
+                })
+                .or(members.first())
+                .map(|s| s.id.clone())
+        };
+        if let Some(space_id) = space_id {
+            self.pick_space(space_id, cx);
+        }
     }
 
     /// Re-home the canvas onto another project. The state observer does the
@@ -2237,11 +2543,39 @@ impl Pickers {
         }
     }
 
-    /// Devices in picker order: this device first, then by name.
-    fn device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
+    /// The device picker's rows. With a project picked: its checkouts, one
+    /// row per device (this device first), with the path when a device holds
+    /// several. Without one: every device — project-less sessions run in its
+    /// home.
+    fn device_rows(&self, cx: &App) -> Vec<DeviceRow> {
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
-        let mut devices: Vec<zeron_proto::Device> = state.devices.clone();
+        let device_name = |id: &str| {
+            state
+                .device_name(id)
+                .unwrap_or("Unknown device")
+                .to_string()
+        };
+        if let Some(space) = state.selected_space_row() {
+            let members = state.project_members(space);
+            return members
+                .iter()
+                .map(|member| {
+                    let shared = members
+                        .iter()
+                        .filter(|other| other.device_id == member.device_id)
+                        .count()
+                        > 1;
+                    DeviceRow {
+                        device_id: member.device_id.clone(),
+                        name: device_name(&member.device_id),
+                        space: Some((*member).clone()),
+                        detail: shared.then(|| member.path.clone()),
+                    }
+                })
+                .collect();
+        }
+        let mut devices: Vec<&zeron_proto::Device> = state.devices.iter().collect();
         devices.sort_by_key(|d| {
             (
                 local.as_deref() != Some(d.id.as_str()),
@@ -2250,14 +2584,28 @@ impl Pickers {
             )
         });
         devices
+            .into_iter()
+            .map(|device| DeviceRow {
+                device_id: device.id.clone(),
+                name: device.name.clone(),
+                space: None,
+                detail: None,
+            })
+            .collect()
     }
 
     /// [`Self::device_rows`] filtered by the search box (same ranked
     /// substring match as the project rows).
-    fn filtered_device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
+    fn filtered_device_rows(&self, cx: &App) -> Vec<DeviceRow> {
         let query = self.search.read(cx).text().to_string();
         let rows = self.device_rows(cx);
-        let names: Vec<String> = rows.iter().map(|d| d.name.clone()).collect();
+        let names: Vec<String> = rows
+            .iter()
+            .map(|row| match &row.detail {
+                Some(detail) => format!("{} {detail}", row.name),
+                None => row.name.clone(),
+            })
+            .collect();
         popover::filter_indices(&query, &names)
             .into_iter()
             .map(|ix| rows[ix].clone())
@@ -2265,26 +2613,51 @@ impl Pickers {
     }
 
     fn selected_device_index(&self, cx: &App) -> usize {
-        let effective = self.state.read(cx).effective_device_id();
+        let (selected, effective) = {
+            let state = self.state.read(cx);
+            (
+                state.selected_space_row().map(|s| s.id.clone()),
+                state.effective_device_id(),
+            )
+        };
         self.device_rows(cx)
             .iter()
-            .position(|d| Some(d.id.as_str()) == effective.as_deref())
+            .position(|row| match &row.space {
+                Some(space) => selected.as_deref() == Some(space.id.as_str()),
+                None => effective.as_deref() == Some(row.device_id.as_str()),
+            })
             .unwrap_or(0)
     }
 
-    /// The device popover: search + one row per device (name, muted "offline"
-    /// tag, check on the canvas's effective device).
+    /// A device row picks the project's checkout there, or — without a
+    /// project — the device itself.
+    fn pick_device_row(&mut self, row: DeviceRow, cx: &mut Context<Self>) {
+        match row.space {
+            Some(space) => self.pick_space(space.id, cx),
+            None => self.pick_device(row.device_id, cx),
+        }
+    }
+
+    /// The device popover: search + one row per device (name, muted path when
+    /// a device holds several checkouts of the project, offline glyph, check
+    /// on the canvas's target).
     fn render_device_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let now = chrono::Utc::now();
         let rows = self.filtered_device_rows(cx);
-        let (effective, local, online): (Option<String>, Option<String>, Vec<bool>) = {
+        let (selected_space, effective, local, online): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Vec<bool>,
+        ) = {
             let state = self.state.read(cx);
             (
+                state.selected_space_row().map(|s| s.id.clone()),
                 state.effective_device_id(),
                 state.local_device_id.clone(),
                 rows.iter()
-                    .map(|d| state.device_online(&d.id, now))
+                    .map(|row| state.device_online(&row.device_id, now))
                     .collect(),
             )
         };
@@ -2308,11 +2681,16 @@ impl Pickers {
                         .gap(px(2.0))
                         .max_h(px(self.list_budget(64.0)))
                         .children(rows.into_iter().zip(online).enumerate().map(
-                            |(ix, (device, online))| {
-                                let is_local = local.as_deref() == Some(device.id.as_str());
-                                let label: SharedString = device.name.clone().into();
-                                let is_selected = effective.as_deref() == Some(device.id.as_str());
-                                let pick_id = device.id.clone();
+                            |(ix, (row, online))| {
+                                let is_local = local.as_deref() == Some(row.device_id.as_str());
+                                let label: SharedString = row.name.clone().into();
+                                let is_selected = match &row.space {
+                                    Some(space) => {
+                                        selected_space.as_deref() == Some(space.id.as_str())
+                                    }
+                                    None => effective.as_deref() == Some(row.device_id.as_str()),
+                                };
+                                let detail = row.detail.clone().map(SharedString::from);
                                 popover::menu_row_nav(
                                     &theme,
                                     is_selected,
@@ -2321,9 +2699,28 @@ impl Pickers {
                                 )
                                 .id(("device-row", ix))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.pick_device(pick_id.clone(), cx);
+                                    this.pick_device_row(row.clone(), cx);
                                 }))
-                                .child(div().flex_1().min_w_0().truncate().child(label))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_row()
+                                        .items_baseline()
+                                        .gap(px(6.0))
+                                        .child(div().flex_none().child(label))
+                                        .when_some(detail, |el, detail| {
+                                            el.child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_size(crate::typography::ui_rems(10.0))
+                                                    .text_color(theme.text_muted)
+                                                    .child(detail),
+                                            )
+                                        }),
+                                )
                                 // The local device wears a muted right-aligned "You"
                                 // instead of a "(this device)" suffix in the name.
                                 .when(is_local, |el| {
@@ -2358,26 +2755,24 @@ impl Pickers {
             .into_any_element()
     }
 
-    /// The project popover: search + one row per project on the picked device
-    /// (check on the current pick), then "New project…" and the opt-out rows. Rows
-    /// are device-scoped, so no per-row `@ device` tag — the device chip next
-    /// door names the host.
+    /// The project popover: search + one row per project across devices
+    /// (check on the current pick), then "New project…" and the opt-out rows.
+    /// No per-row `@ device` tag — the device chip next door picks the host.
     fn render_space_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let rows = self.filtered_space_rows(cx);
+        let rows = self.filtered_project_rows(cx);
         let selected = self
             .state
             .read(cx)
             .selected_space_row()
-            .map(|s| s.id.clone());
+            .map(zeron_proto::view::project_key);
         let active = self.active;
         let no_project_index = rows.len();
         let scrollbar = popover::rail(self, "space-scrollbar", &theme, cx);
         let body: AnyElement = if rows.is_empty() {
-            // Distinguish "the filter ate everything" from "this device has
-            // no projects yet" — the scoped list makes the latter common.
+            // Distinguish "the filter ate everything" from "no projects yet".
             let empty: &str = if self.search.read(cx).text().is_empty() {
-                "No projects on this device."
+                "No projects yet."
             } else {
                 "No projects match."
             };
@@ -2397,10 +2792,10 @@ impl Pickers {
                         .flex_col()
                         .gap(px(2.0))
                         .max_h(px(self.list_budget(152.0)))
-                        .children(rows.into_iter().enumerate().map(|(ix, space)| {
-                            let label: SharedString = space.display_name().to_string().into();
-                            let is_selected = selected.as_deref() == Some(space.id.as_str());
-                            let pick_id = space.id.clone();
+                        .children(rows.into_iter().enumerate().map(|(ix, row)| {
+                            let label: SharedString = row.name.into();
+                            let is_selected = selected.as_deref() == Some(row.key.as_str());
+                            let key = row.key;
                             popover::menu_row_nav(
                                 &theme,
                                 is_selected,
@@ -2409,7 +2804,7 @@ impl Pickers {
                             )
                             .id(("space-row", ix))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.pick_space(pick_id.clone(), cx);
+                                this.pick_project(key.clone(), cx);
                             }))
                             .child(div().flex_1().min_w_0().truncate().child(label))
                         })),
@@ -2488,17 +2883,17 @@ impl Pickers {
             self.pick_ref(row, cx);
         }
         if self.open_kind() == Some(PickerKind::Space) {
-            let rows = self.filtered_space_rows(cx);
-            if let Some(space) = rows.get(self.active) {
-                self.pick_space(space.id.clone(), cx);
+            let rows = self.filtered_project_rows(cx);
+            if let Some(row) = rows.get(self.active) {
+                self.pick_project(row.key.clone(), cx);
             } else if self.active == rows.len() {
                 self.pick_no_project(cx);
             }
         }
         if self.open_kind() == Some(PickerKind::Device)
-            && let Some(device) = self.filtered_device_rows(cx).into_iter().nth(self.active)
+            && let Some(row) = self.filtered_device_rows(cx).into_iter().nth(self.active)
         {
-            self.pick_device(device.id, cx);
+            self.pick_device_row(row, cx);
         }
         // Palette-search Enter submits the highlighted model or setting.
         if self.open_kind() == Some(PickerKind::HarnessModel) {
@@ -2512,6 +2907,23 @@ impl Pickers {
         // animation — keys must not drive a dying popover.
         if !self.open.is_open() {
             return;
+        }
+        if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
+            // Escape only steps back a page or closes a submenu: it should
+            // not light focus rings on the controls it returns to. The next
+            // navigation key brings them back.
+            self.compact_keyboard = event.keystroke.key != "escape";
+            if self.compact_model_list
+                && event.keystroke.modifiers.platform
+                && event.keystroke.modifiers.shift
+                && event.keystroke.key.eq_ignore_ascii_case("f")
+            {
+                if let Some(row) = self.model_rows(cx).get(self.active).cloned() {
+                    self.toggle_model_favorite(row.harness, &row.model.id, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
         }
         if self.setting_menu.is_some() {
             match event.keystroke.key.as_str() {
@@ -2541,7 +2953,19 @@ impl Pickers {
             cx.notify();
             return;
         }
+        if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
+            if !self.compact_model_list {
+                self.compact_panel_key(event, cx);
+                return;
+            }
+            if event.keystroke.key == "escape" {
+                self.show_compact_panel(cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
         if event.keystroke.key == "right"
+            && !self.compact_model_picker(cx)
             && self.open_kind() == Some(PickerKind::HarnessModel)
             && self.active >= self.model_rows_len(cx)
         {
@@ -2579,9 +3003,14 @@ impl Pickers {
                     Some(PickerKind::Checkout) => 2,
                     // Continue from model rows into the pinned settings triggers.
                     Some(PickerKind::HarnessModel) => {
-                        self.model_rows_len(cx) + self.setting_groups(cx).len()
+                        self.model_rows_len(cx)
+                            + if self.compact_model_picker(cx) {
+                                0
+                            } else {
+                                self.setting_groups(cx).len()
+                            }
                     }
-                    Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 1,
+                    Some(PickerKind::Space) => self.filtered_project_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
                     None => 0,
                 };
@@ -2634,6 +3063,7 @@ impl Pickers {
 
     fn measure_trigger(&self, kind: PickerKind, cx: &Context<Self>) -> impl IntoElement {
         let entity = cx.entity().downgrade();
+        let compact = kind == PickerKind::HarnessModel && self.compact_model_picker(cx);
         // New-thread model and workspace menus open down, matching the
         // centered composer's layout. In-thread menus retain adaptive placement.
         let below = (self.title.is_some() || self.state.read(cx).selected_chat.is_none())
@@ -2654,21 +3084,25 @@ impl Pickers {
                 // Prefer below on the new-chat canvas only when it can fit
                 // useful content. Tall drafts/attachments can put the trigger
                 // near the window bottom; retain adaptive placement there.
-                if below && space_below >= 180.0 {
+                let prefer_below = below && space_below >= 180.0;
+                if prefer_below {
                     geometry = popover::MenuGeometry {
                         height: space_below,
                         below: true,
+                    };
+                }
+                // The compact card opens down on the new-chat canvas like the
+                // standard menu, and up from the docked composer.
+                if compact && !prefer_below {
+                    geometry = popover::MenuGeometry {
+                        height: (f32::from(bounds.top()) - 14.0).clamp(0.0, 640.0),
+                        below: false,
                     };
                 }
                 entity
                     .update(cx, |this, cx| {
                         if kind == PickerKind::HarnessModel {
                             this.model_trigger_bounds = Some(bounds);
-                            if this.mounted_kind() == Some(kind) && this.open_model_width.is_none()
-                            {
-                                this.open_model_width = Some(bounds.size.width);
-                                cx.notify();
-                            }
                         }
                         if this.menu_geometry.get(&kind) != Some(&geometry) {
                             this.menu_geometry.insert(kind, geometry);
@@ -2684,6 +3118,63 @@ impl Pickers {
     }
 
     // ---- render ----
+
+    /// The model chip's content width (padding, brand slot, label, effort
+    /// and fast mark), eased toward on every change. The chip is anchored at
+    /// its trailing edge beside Send, as is its popover, so only its leading
+    /// edge moves and an open card stays put while the selection updates.
+    #[allow(clippy::too_many_arguments)]
+    fn model_chip_width(
+        &mut self,
+        window: &mut Window,
+        label: &SharedString,
+        suffix: Option<&SharedString>,
+        label_loading: bool,
+        fast: bool,
+        cx: &App,
+    ) -> f32 {
+        const GAP: f32 = 6.0;
+        let size = crate::typography::ui_rems(12.0).to_pixels(window.rem_size());
+        let mut font = window.text_style().font();
+        font.weight = gpui::FontWeight::MEDIUM;
+        let measure = |text: &SharedString| -> f32 {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            f32::from(
+                window
+                    .text_system()
+                    .shape_line(text.clone(), size, &[run], None)
+                    .width,
+            )
+            .ceil()
+        };
+        let label_width = if label_loading { 56.0 } else { measure(label) };
+        let mut width = 2.0 * 6.0 + 16.0 + GAP + label_width;
+        if let Some(suffix) = suffix {
+            width += GAP + measure(suffix);
+        }
+        if fast {
+            width += GAP + 13.0;
+        }
+        let target = width.min(248.0);
+        let (value, moving) = compact::ScalarTransition::sample(
+            &mut self.chip_width,
+            target,
+            std::time::Instant::now(),
+            cx.reduce_motion(),
+        );
+        self.chip_resizing = moving;
+        if moving {
+            window.request_animation_frame();
+        }
+        value
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn trigger_chip(
@@ -2714,6 +3205,7 @@ impl Pickers {
         // this picker's entity.
         let id: SharedString = format!("{base}-{}", cx.entity_id()).into();
         let open = self.open_kind() == Some(kind);
+        let resizing = kind == PickerKind::HarnessModel && self.chip_resizing;
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
@@ -2723,10 +3215,6 @@ impl Pickers {
             .id(id.clone())
             .h(px(32.0))
             .max_w(px(248.0))
-            .when(
-                kind == PickerKind::HarnessModel && self.mounted_kind() == Some(kind),
-                |chip| chip.when_some(self.open_model_width, |chip, width| chip.w(width)),
-            )
             // Shrinkable under row pressure — four footer chips share one
             // line; without min_w_0 they overflowed and painted overlapped.
             .min_w_0()
@@ -2734,7 +3222,7 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            // The model trigger sits immediately beside the attachment.
+            // The model trigger sits beside the right-hand composer actions.
             // Its own padding participates in that visible gap; footer and
             // destination triggers keep their wider independent hit areas.
             .px(px(if kind == PickerKind::HarnessModel {
@@ -2790,10 +3278,22 @@ impl Pickers {
                 },
             )
             .when(label_loading, |el| {
+                // Nothing is named on screen: the label rolls in from empty.
+                rolling(format!("{id}-label"), SharedString::default(), true);
                 el.child(popover::skeleton_bar(56.0, cx.entity_id(), cx))
             })
             .when(!label_loading, |el| {
-                el.child(div().min_w_0().truncate().child(label))
+                // A changing label rolls (Scritto-style); at rest it is the
+                // plain truncating label, or the clip-don't-ellipsize variant
+                // while the model chip's width glides.
+                let rolling = rolling(format!("{id}-label"), label.clone(), cx.reduce_motion());
+                el.child(match rolling {
+                    Some(rolling) => rolling,
+                    None if resizing => {
+                        resizing_chip_text(format!("{id}-label").into(), 1.0, None, label)
+                    }
+                    None => div().min_w_0().truncate().child(label).into_any_element(),
+                })
             })
             // The effort half of the combined model+effort chip (and the space
             // chip's "@ device" tag): muted, no icon — one button, two tones.
@@ -2801,14 +3301,27 @@ impl Pickers {
             // pressure the suffix yields FIRST (large shrink factor) so the
             // model name — the run's identity — truncates last.
             .when_some(suffix, |el, (suffix, tint)| {
-                el.child(
+                let color = tint.unwrap_or(theme.text_muted.opacity(0.7));
+                let rolling = rolling(format!("{id}-suffix"), suffix.clone(), cx.reduce_motion());
+                el.child(if let Some(rolling) = rolling {
+                    div()
+                        .flex()
+                        .flex_shrink(1000.0)
+                        .min_w_0()
+                        .text_color(color)
+                        .child(rolling)
+                        .into_any_element()
+                } else if resizing {
+                    resizing_chip_text(format!("{id}-suffix").into(), 1000.0, Some(color), suffix)
+                } else {
                     div()
                         .flex_shrink(1000.0)
                         .min_w_0()
+                        .text_color(color)
                         .truncate()
-                        .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7)))
-                        .child(suffix),
-                )
+                        .child(suffix)
+                        .into_any_element()
+                })
             })
     }
 
@@ -2866,7 +3379,7 @@ impl Pickers {
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
             )
-            .child(div().min_w_0().truncate().child(label))
+            .child(roll_text(format!("{id}-label"), label, cx.reduce_motion()))
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
@@ -2878,13 +3391,31 @@ impl Pickers {
     /// A read-only footer label (locked sessions — t3code's
     /// `resolveLockedWorkspaceLabel` span).
     fn footer_label(icon_path: &'static str, label: SharedString, theme: &Theme) -> gpui::Div {
+        Self::footer_label_shell(icon_path, theme)
+            .max_w(px(160.0))
+            .child(div().min_w_0().truncate().child(label))
+    }
+
+    /// A [`Self::footer_label`] that takes whatever width the row leaves it
+    /// and fades its tail only when that isn't enough.
+    fn footer_faded_label(
+        id: &'static str,
+        icon_path: &'static str,
+        label: SharedString,
+        theme: &Theme,
+    ) -> gpui::Div {
+        Self::footer_label_shell(icon_path, theme).child(crate::shell::sidebar_faded_label(
+            id.into(),
+            false,
+            label,
+        ))
+    }
+
+    fn footer_label_shell(icon_path: &'static str, theme: &Theme) -> gpui::Div {
         div()
             .h(px(20.0))
-            // Four of these share one row now (device, project, checkout,
-            // ref): cap each early and let them SHRINK (`min_w_0`) — without
-            // it the clusters overflowed into each other and the labels
-            // painted overlapped (user report).
-            .max_w(px(160.0))
+            // Labels SHRINK (`min_w_0`) — without it the clusters overflowed
+            // into each other and the labels painted overlapped (user report).
             .min_w_0()
             .flex()
             .flex_row()
@@ -2897,13 +3428,14 @@ impl Pickers {
             .child(
                 crate::icons::icon(icon_path)
                     .size(px(12.0))
+                    .flex_none()
                     .text_color(theme.text_muted.opacity(0.6)),
             )
-            .child(div().min_w_0().truncate().child(label))
     }
 
-    /// New-session destination controls. Machine and project form the
-    /// original chip-only cluster floating above the composer's trailing edge.
+    /// New-session destination controls: the project, then the device it
+    /// runs on, as a chip-only cluster floating above the composer's trailing
+    /// edge.
     pub fn render_new_thread_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let closing = (self.open.closing_since(), self.menu_geometry().below);
@@ -2962,17 +3494,17 @@ impl Pickers {
             .items_center()
             .gap(px(4.0))
             .child(attach_overlay_end(
-                device_chip,
-                &mut overlay,
-                PickerKind::Device,
-                "device-popover",
-                closing,
-            ))
-            .child(attach_overlay_end(
                 project_chip,
                 &mut overlay,
                 PickerKind::Space,
                 "project-popover",
+                closing,
+            ))
+            .child(attach_overlay_end(
+                device_chip,
+                &mut overlay,
+                PickerKind::Device,
+                "device-popover",
                 closing,
             ))
             .into_any_element()
@@ -3006,9 +3538,9 @@ impl Pickers {
             }
             _ => None,
         };
-        let kind_icon = match (self.config.checkout, self.selected_ref_worktree().is_some()) {
+        let kind_icon = match (self.config.checkout, self.display_ref_is_worktree()) {
             (CheckoutKind::Local, false) => crate::icons::FOLDER,
-            _ => crate::icons::FOLDER_WITH_FILES,
+            _ => crate::icons::WORKTREE,
         };
         let checkout_chip = self.footer_chip(
             PickerKind::Checkout,
@@ -3088,7 +3620,7 @@ impl Pickers {
             };
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
             let (icon_path, label) = if is_worktree {
-                (crate::icons::FOLDER_WITH_FILES, "Worktree")
+                (crate::icons::WORKTREE, "Worktree")
             } else {
                 (crate::icons::FOLDER, "Local checkout")
             };
@@ -3109,7 +3641,8 @@ impl Pickers {
                 .items_center()
                 .gap(px(4.0))
                 .min_w_0()
-                .child(Self::footer_label(
+                .child(Self::footer_faded_label(
+                    "composer-session-branch",
                     crate::icons::GIT_BRANCH,
                     chat.branch
                         .clone()
@@ -3170,9 +3703,9 @@ impl Pickers {
             &theme,
             cx,
         );
-        let kind_icon = match (self.config.checkout, self.selected_ref_worktree().is_some()) {
+        let kind_icon = match (self.config.checkout, self.display_ref_is_worktree()) {
             (CheckoutKind::Local, false) => crate::icons::FOLDER,
-            _ => crate::icons::FOLDER_WITH_FILES,
+            _ => crate::icons::WORKTREE,
         };
         let kind_chip = self.footer_chip(
             PickerKind::Checkout,
@@ -3263,6 +3796,9 @@ impl Pickers {
         popover::popover_card_flush(&theme)
             .w(px(width))
             .h(px(self.menu_geometry().height.min(self.open_model_height)))
+            .when(self.compact_model_picker(cx), |el| {
+                el.h(px(self.compact_motion.frame_height))
+            })
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
@@ -3351,7 +3887,9 @@ impl Pickers {
     /// through the exit animation, and the rail must keep measuring the
     /// closing menu's own handle, not `menu_scroll`'s idle geometry.
     fn active_menu_scroll(&self) -> gpui::ScrollHandle {
-        if self.mounted_kind() == Some(PickerKind::HarnessModel) {
+        if self.mounted_kind() == Some(PickerKind::HarnessModel)
+            && (self.model_rail != ModelRail::All || self.compact_model_list)
+        {
             self.model_scroll_base()
         } else {
             self.menu_scroll.clone()
@@ -3526,7 +4064,7 @@ impl Pickers {
             "Current checkout"
         };
         let local_icon = if has_worktree {
-            crate::icons::FOLDER_WITH_FILES
+            crate::icons::WORKTREE
         } else {
             crate::icons::FOLDER
         };
@@ -3535,7 +4073,7 @@ impl Pickers {
             (
                 CheckoutKind::NewWorktree,
                 "New worktree",
-                crate::icons::FOLDER_WITH_FILES,
+                crate::icons::WORKTREE,
             ),
         ];
         let active = self.active;
@@ -3580,8 +4118,15 @@ impl Pickers {
     /// Model picker with favorites and harness tabs above a scoped search.
     /// Existing chats show only their own harness tab and models.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.compact_model_picker(cx);
         let height = self.menu_geometry().height.min(self.open_model_height);
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
+        let list_height = if compact {
+            compact::compact_list_height(self.model_rows_len(cx))
+                .min((height - compact::LIST_HEADER - 2.0).max(0.0))
+        } else {
+            list_height
+        };
 
         let theme = Theme::of(cx).for_popup();
 
@@ -3745,6 +4290,10 @@ impl Pickers {
                 );
         }
 
+        if compact {
+            tabs = self.compact_model_back_header(cx);
+        }
+
         // ── search row: icon + borderless input over a full-bleed hairline.
         //    The placeholder names the scope — the query never leaves the
         //    viewed tab (user request; the old global search hid the rail).
@@ -3882,7 +4431,8 @@ impl Pickers {
         // ── traits tray: the reasoning ladder + model options PINNED under
         //    the list (the separate Traits popover folded in here — user
         //    request). Hidden entirely when the selected model has neither.
-        let has_tray = self.title.is_none()
+        let has_tray = !compact
+            && self.title.is_none()
             && (!self.trait_ladder(cx).is_empty()
                 || self
                     .selected_model(cx)
@@ -3924,6 +4474,9 @@ impl Pickers {
         row: &ModelRowData,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.compact_model_picker(cx) {
+            return self.render_compact_model_row(ix, row, cx);
+        }
         let theme = Theme::of(cx).for_popup();
         let effective = self.effective_harness(cx);
         let is_selected = Some(row.harness) == effective
@@ -4295,11 +4848,19 @@ impl Pickers {
     }
 
     /// The tray's settings. A model configured in place keeps them in its
-    /// hover card only.
+    /// hover card only — except in the compact picker, whose panel is the
+    /// one place the selected model's settings live.
     fn setting_groups(&self, cx: &App) -> Vec<SettingGroup> {
         // Titles always run at minimal reasoning with no model options.
-        if self.title.is_some() || self.selected_model(cx).is_some_and(configured_in_place) {
+        if self.title.is_some() {
             return Vec::new();
+        }
+        if self.selected_model(cx).is_some_and(configured_in_place) {
+            return if self.compact_model_picker(cx) {
+                card_order(self.live_groups(cx))
+            } else {
+                Vec::new()
+            };
         }
         self.live_groups(cx)
     }
@@ -4595,6 +5156,12 @@ impl Pickers {
             .into_iter()
             .filter(|g| tray || !is_toggle(g));
         for (ix, group) in groups.enumerate() {
+            if tray
+                && self.compact_model_picker(cx)
+                && !Self::compact_option_visible(&group.id, &self.compact_hidden_options(cx))
+            {
+                continue;
+            }
             let open = self.setting_scope == scope && self.setting_menu.as_ref() == Some(&group.id);
             let value = group
                 .choices
@@ -4615,7 +5182,11 @@ impl Pickers {
             )
             .id((row_id, ix))
             .relative()
-            .h(px(30.0))
+            .h(px(if self.compact_model_picker(cx) {
+                26.0
+            } else {
+                30.0
+            }))
             .py(px(0.0))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if tray {
@@ -4823,13 +5394,129 @@ impl Pickers {
                     .child(row),
             );
         }
+        // The compact panel's own inset already closes the card below the
+        // last row; a second one left the bottom twice as deep as the sides.
+        let compact = tray && self.compact_model_picker(cx);
         div()
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .py(px(popover::CARD_INSET))
+            .pt(px(popover::CARD_INSET))
+            .when(!compact, |el| el.pb(px(popover::CARD_INSET)))
             .children(rows)
             .into_any_element()
+    }
+}
+
+/// Readable interaction state for the isolated compact-picker fixture.
+#[cfg(feature = "compact-picker-fixture")]
+pub struct CompactPickerFixtureState {
+    pub model_list: bool,
+    pub explicit_reasoning: Option<ReasoningLevel>,
+    pub reasoning: Option<ReasoningLevel>,
+    pub fast: bool,
+    pub focused_model: Option<String>,
+    pub focused_model_favorite: bool,
+}
+
+/// Synthetic catalog and assertions for the isolated compact-picker fixture.
+/// None of this is linked into production builds.
+#[cfg(feature = "compact-picker-fixture")]
+impl Pickers {
+    pub fn fixture_compact_catalog(&mut self, cx: &mut Context<Self>) {
+        self.config.harness = Some(HarnessId::Codex);
+        self.config.model = Some("gpt-5.4".into());
+        self.config.reasoning = None;
+        self.defaults
+            .model_options_mut(HarnessId::Codex, "gpt-5.4")
+            .clear();
+        self.harnesses = Loadable::Ready(
+            serde_json::from_value(serde_json::json!([
+                {
+                    "id":"codex",
+                    "name":"Codex",
+                    "installed":true,
+                    "enabled":true,
+                    "supportsSteering":true,
+                    "steeringMode":"step-boundary",
+                    "reasoningLevels":[]
+                }
+            ]))
+            .unwrap(),
+        );
+        self.models.insert(
+            HarnessId::Codex,
+            Loadable::Ready(
+                serde_json::from_value(serde_json::json!([
+                    {
+                        "id":"gpt-5.4",
+                        "label":"GPT-5.4",
+                        "description":"Best for complex coding and reasoning",
+                        "reasoningLevels":["low","medium","high","xhigh"],
+                        "options":[
+                            {
+                                "id":"serviceTier",
+                                "label":"Service tier",
+                                "defaultChoice":"standard",
+                                "choices":[
+                                    {"id":"standard","label":"Standard"},
+                                    {"id":"fast","label":"Fast"}
+                                ]
+                            },
+                            {
+                                "id":"contextWindow",
+                                "label":"Context window",
+                                "defaultChoice":"standard",
+                                "choices":[
+                                    {"id":"standard","label":"Standard"},
+                                    {"id":"1m","label":"1M tokens"}
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "id":"gpt-5.3-codex",
+                        "label":"GPT-5.3 Codex",
+                        "description":"Optimized for agentic coding"
+                    },
+                    {
+                        "id":"gpt-5.2",
+                        "label":"GPT-5.2",
+                        "description":"General purpose reasoning"
+                    },
+                    {
+                        "id":"gpt-5.1-codex-mini",
+                        "label":"GPT-5.1 Codex Mini",
+                        "description":"Fast, efficient coding"
+                    }
+                ]))
+                .unwrap(),
+            ),
+        );
+        self.compact_model_list = false;
+        self.compact_keyboard = false;
+        self.active = 0;
+        self.catalog_rev += 1;
+        cx.notify();
+    }
+
+    pub fn fixture_compact_state(&self, cx: &App) -> CompactPickerFixtureState {
+        let focused = self
+            .compact_model_list
+            .then(|| self.model_rows(cx).get(self.active).cloned())
+            .flatten();
+        CompactPickerFixtureState {
+            model_list: self.compact_model_list,
+            explicit_reasoning: self.config.reasoning,
+            reasoning: self.effective_reasoning(cx),
+            fast: self
+                .compact_fast_choice(cx)
+                .is_some_and(|(_, _, _, fast)| fast),
+            focused_model_favorite: focused
+                .as_ref()
+                .is_some_and(|row| self.defaults.is_favorite(row.harness, &row.model.id)),
+            focused_model: focused.map(|row| row.model.id),
+        }
     }
 }
 
@@ -4949,6 +5636,7 @@ fn scoped_model_rows<'a>(
         ambiguous: false,
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
+        ModelRail::All => true,
         ModelRail::Favorites => is_favorite(descriptor.id, &model.id),
         ModelRail::Harness => Some(descriptor.id) == effective,
     };
@@ -4985,21 +5673,30 @@ fn scoped_model_rows<'a>(
                 input_ix += 1;
             }
         }
-        ranked.sort_by_key(|(rank, unstarred, ix, _)| (*rank, *unstarred, *ix));
+        ranked.sort_by_key(|(rank, unstarred, ix, _)| {
+            if rail == ModelRail::All {
+                (*unstarred, *rank, *ix)
+            } else {
+                (*rank, *unstarred, *ix)
+            }
+        });
         return ranked.into_iter().map(|(_, _, _, row)| row).collect();
     }
     match rail {
-        ModelRail::Favorites => {
+        ModelRail::All | ModelRail::Favorites => {
             let mut rows = Vec::new();
             for descriptor in descriptors {
                 let Some(models) = models_for(descriptor.id) else {
                     continue;
                 };
                 for model in models {
-                    if is_favorite(descriptor.id, &model.id) {
+                    if rail == ModelRail::All || is_favorite(descriptor.id, &model.id) {
                         rows.push(row(descriptor, model));
                     }
                 }
+            }
+            if rail == ModelRail::All {
+                rows.sort_by_key(|row| !is_favorite(row.harness, &row.model.id));
             }
             rows
         }
@@ -5220,6 +5917,64 @@ fn model_menu_budgets(height: f32, setting_count: usize) -> (f32, f32) {
     (body - tray, tray)
 }
 
+/// Chip text while the chip's width animates: clipped rather than
+/// ellipsized (an ellipsis would flicker in and out each frame), with the
+/// clip edge faded so a half-shown glyph never ends in a hard cut. The ramp
+/// is as wide as the hidden text, so it is zero exactly at the clip edge.
+fn resizing_chip_text(
+    id: SharedString,
+    shrink: f32,
+    color: Option<gpui::Hsla>,
+    text: SharedString,
+) -> AnyElement {
+    let overflow = gpui::ScrollHandle::new();
+    crate::edge_fade::edge_faded(
+        16.0,
+        false,
+        false,
+        div()
+            .id(id)
+            .flex_shrink(shrink)
+            .min_w_0()
+            .overflow_hidden()
+            .track_scroll(&overflow)
+            .flex()
+            .when_some(color, |el, color| el.text_color(color))
+            .child(div().flex_none().whitespace_nowrap().child(text)),
+    )
+    .fade_right(true)
+    .fade_scroll_x(&overflow)
+    .into_any_element()
+}
+
+/// Fast mode's `(on, off)` choices, whatever form a harness gives it: a
+/// `fastMode`/`fast_mode` on/off toggle (Claude), Cursor's `fast` true/false,
+/// or a tier/speed option offering `fast` (Codex, Devin). Off is the default
+/// when fast isn't, else the other choice — Cursor runs some models fast by
+/// default. Every model then gets the same fast-mode UI.
+fn fast_mode_values(option: &zeron_proto::ModelOption) -> Option<(&str, &str)> {
+    let has = |id: &str| option.choices.iter().any(|choice| choice.id == id);
+    let on = if matches!(option.id.as_str(), "fastMode" | "fast_mode") && has("on") {
+        "on"
+    } else if option.id == "fast" && has("true") {
+        "true"
+    } else if has("fast") {
+        "fast"
+    } else {
+        return None;
+    };
+    let off = if option.default_choice != on && has(&option.default_choice) {
+        option.default_choice.as_str()
+    } else {
+        option
+            .choices
+            .iter()
+            .map(|choice| choice.id.as_str())
+            .find(|id| *id != on)?
+    };
+    Some((on, off))
+}
+
 /// Attach the (single) open popover above a selector trigger.
 fn attach_overlay(
     chip: gpui::Stateful<gpui::Div>,
@@ -5352,6 +6107,7 @@ impl Render for Pickers {
         // loaded, so that's a conclusion, not a loading gap) — the chip says
         // so instead of wearing a brand mark for an agent that can't run.
         let no_agents = self.no_agents_available() && self.effective_harness(cx).is_none();
+        let model_name = self.model_name(cx);
         let model_label: SharedString = if let Some(title) = &self.title {
             // The saved choice, not the tab being browsed.
             match (title.harness, title.model.as_deref()) {
@@ -5367,19 +6123,16 @@ impl Render for Pickers {
                     .unwrap_or_else(|| id.to_owned())
                     .into(),
             }
-        } else if no_agents {
-            SharedString::from("No agents available")
         } else {
-            let label = self.selected_model_label(cx);
-            label.map(SharedString::from).unwrap_or_default()
+            match &model_name {
+                ModelName::Named(label) => label.clone(),
+                ModelName::None { no_agents: true } => "No agents available".into(),
+                ModelName::Loading | ModelName::None { .. } => SharedString::default(),
+            }
         };
-        let catalog_loading = matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
-        let models_loading = self.effective_harness(cx).is_some_and(|harness| {
-            !matches!(
-                self.models.get(&harness),
-                Some(Loadable::Ready(_)) | Some(Loadable::Error(_))
-            )
-        });
+        // A list still from the previous device is loading for this one.
+        let catalog_loading = self.harnesses_stale
+            || matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
         // Harness unknown while the catalog resolves: the pixel-glyph loader
         // instead of guessing a brand mark.
         let chip_icon_loading = self.title.is_none()
@@ -5388,8 +6141,7 @@ impl Render for Pickers {
             && catalog_loading;
         // Harness known but nothing names the model yet (fresh install, no
         // remembered pick): a ghost label instead of a bare icon.
-        let chip_label_loading =
-            !no_agents && model_label.is_empty() && (catalog_loading || models_loading);
+        let chip_label_loading = self.title.is_none() && model_name == ModelName::Loading;
         let chip_harness = match &self.title {
             Some(title) => title.harness,
             None => self.effective_harness(cx),
@@ -5404,10 +6156,9 @@ impl Render for Pickers {
             ),
         };
         // The chip names the model and its effort only; the other options
-        // (context, fast mode, ...) live in the popover. The effort brightens
-        // when it departs from the model's default.
+        // (context, fast mode, ...) live in the popover. The effort always
+        // reads in the muted second tone, default or not (user request).
         let effort = self.effective_reasoning(cx);
-        let effort_customized = effort != default_reasoning(&self.trait_ladder(cx));
         // Render the open popover's body first (mutable borrow), then the
         // chips. Branch/Checkout render in the composer FOOTER row (see
         // `render_footer`), not here.
@@ -5419,38 +6170,76 @@ impl Render for Pickers {
             | Some(PickerKind::Space)
             | Some(PickerKind::Device) => None,
             Some(PickerKind::HarnessModel) => {
-                let content = self.render_harness_model_popover(cx);
-                Some((
-                    PickerKind::HarnessModel,
-                    // Compact single-harness pane (t3 ModelPickerContent
-                    // shrunk to its tabbed layout).
-                    self.popover_frame_flush(304.0, content, cx),
-                ))
+                let menu = if self.compact_model_picker(cx) {
+                    self.render_compact_menu(window, cx)
+                } else {
+                    let content = self.render_harness_model_popover(cx);
+                    self.popover_frame_flush(304.0, content, cx)
+                };
+                Some((PickerKind::HarnessModel, menu))
             }
             None => None,
         };
 
-        // The composer places this model chip beside the attachment button:
+        // The composer places this model chip beside microphone and Send:
         // brand icon + model name, then the effort as the chip's muted second
-        // tone. No suffix when the model has no reasoning ladder, nor for the
-        // title picker (titles always run at minimal reasoning).
-        let chip_suffix = effort.filter(|_| self.title.is_none()).map(|level| {
-            (
-                SharedString::from(reasoning_label(level)),
-                effort_customized.then(|| theme.text.opacity(0.85)),
-            )
+        // tone — the ladder's level, else an effort option's choice (Cursor).
+        // None for the title picker (titles always run at minimal reasoning).
+        let chip_suffix = effort
+            .filter(|_| self.title.is_none())
+            .map(|level| (SharedString::from(reasoning_label(level)), None))
+            .or_else(|| {
+                self.title
+                    .is_none()
+                    .then(|| self.compact_effort(cx))
+                    .flatten()
+                    .and_then(|e| e.labels.get(e.selected).cloned())
+                    .map(|label| (label, None))
+            });
+        let fast = self.selected_model(cx).is_some_and(|model| {
+            model.options.iter().any(|option| {
+                fast_mode_values(option).is_some_and(|(on, _)| {
+                    self.resolved(cx)
+                        .model_options
+                        .get(&option.id)
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(&option.default_choice)
+                        == on
+                })
+            })
         });
-        let model_chip = self.trigger_chip(
-            PickerKind::HarnessModel,
-            model_label,
-            true,
-            Some(harness_icon),
-            chip_icon_loading,
+        let chip_width = self.model_chip_width(
+            window,
+            &model_label,
+            chip_suffix.as_ref().map(|(text, _)| text),
             chip_label_loading,
-            chip_suffix,
-            &theme,
+            fast,
             cx,
         );
+        let model_chip = self
+            .trigger_chip(
+                PickerKind::HarnessModel,
+                model_label,
+                true,
+                Some(harness_icon),
+                chip_icon_loading,
+                chip_label_loading,
+                chip_suffix,
+                &theme,
+                cx,
+            )
+            .when(fast, |chip| {
+                chip.child(motion::fast_tier(
+                    "composer-fast-tier",
+                    div().flex_none().child(
+                        crate::icons::icon(crate::icons::FAST_TIER_BOLD)
+                            .size(px(13.0))
+                            .text_color(theme.accent),
+                    ),
+                ))
+            });
+        let model_chip = model_chip.w(px(chip_width));
+        // Both presentations align to the chip's trailing edge beside Send.
         let model_chip = attach_overlay_end(
             model_chip,
             &mut overlay,
@@ -5999,11 +6788,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_fast_mode_encoding_gets_the_same_controls() {
+        let option = |id: &str, choices: &[&str], default: &str| ModelOption {
+            id: id.into(),
+            label: id.into(),
+            choices: choices
+                .iter()
+                .map(|c| ModelOptionChoice {
+                    id: (*c).into(),
+                    label: (*c).into(),
+                })
+                .collect(),
+            default_choice: default.into(),
+        };
+        // Codex tier, Claude toggle, ACP speed and the snake_case toggle.
+        assert_eq!(
+            fast_mode_values(&option("serviceTier", &["default", "fast"], "default")),
+            Some(("fast", "default"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("fastMode", &["off", "on"], "off")),
+            Some(("on", "off"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("speed", &["standard", "fast"], "standard")),
+            Some(("fast", "standard"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("fast_mode", &["off", "on"], "off")),
+            Some(("on", "off"))
+        );
+        // Cursor's true/false switch, off by default (Opus) and on by
+        // default (Grok, Composer): both still toggle between the two.
+        assert_eq!(
+            fast_mode_values(&option("fast", &["false", "true"], "false")),
+            Some(("true", "false"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("fast", &["false", "true"], "true")),
+            Some(("true", "false"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("serviceTier", &["default", "fast"], "fast")),
+            Some(("fast", "default"))
+        );
+        // Not fast mode: other toggles, including Cursor's true/false ones.
+        assert_eq!(
+            fast_mode_values(&option("thinking", &["off", "on"], "off")),
+            None
+        );
+        assert_eq!(
+            fast_mode_values(&option("thinking", &["false", "true"], "true")),
+            None
+        );
+        assert_eq!(
+            fast_mode_values(&option("contextWindow", &["200k", "1m"], "200k")),
+            None
+        );
+    }
+
     #[gpui::test]
-    fn open_model_trigger_keeps_its_width_across_model_and_option_changes(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| cx.set_global(Theme::dark()));
+    fn open_model_trigger_follows_the_selection_while_open(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            // Settle the width glide in one frame.
+            motion::set_reduced_motion(cx, true);
+        });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut pickers = Pickers::new(state, cx);
@@ -6037,15 +6888,18 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
                 .unwrap();
             handle
-                .read_with(cx, |pickers, _| pickers.model_trigger_bounds.unwrap())
+                .read_with(cx, |pickers, _| {
+                    pickers.model_trigger_bounds.unwrap().size.width
+                })
                 .unwrap()
         };
-        let before = draw(cx);
+        let short = draw(cx);
         handle
             .update(cx, |pickers, window, cx| {
                 pickers.open_model_menu(window, cx)
             })
             .unwrap();
+        let mut widths = Vec::new();
         for (model, fast) in [("long", false), ("long", true), ("short", false)] {
             handle
                 .update(cx, |pickers, _, cx| {
@@ -6060,12 +6914,14 @@ mod tests {
                     cx.notify();
                 })
                 .unwrap();
-            assert_eq!(
-                draw(cx),
-                before,
-                "open trigger moved for {model}, fast={fast}"
-            );
+            widths.push(draw(cx));
         }
+        // The open chip names the live selection instead of keeping the
+        // width it opened with: longer for the long model, longer again
+        // with its effort and fast mark, and back once the short one returns.
+        assert!(widths[0] > short, "{widths:?} vs {short:?}");
+        assert!(widths[1] > widths[0], "{widths:?}");
+        assert_eq!(widths[2], short);
     }
 
     #[gpui::test]
@@ -6294,6 +7150,7 @@ mod tests {
                 git_detected: true,
                 git_checked_at: None,
                 checkout_id: None,
+                repository_id: None,
                 created_at: chrono::Utc::now(),
             }]);
             state
@@ -6313,14 +7170,302 @@ mod tests {
             assert!(pickers.defaults.no_project);
             assert!(pickers.state.read(cx).auto_selected);
             assert!(pickers.defaults.project.is_none());
-            assert_eq!(pickers.selected_space_index(cx), 1);
+            assert_eq!(pickers.selected_project_index(cx), 1);
         });
         state.update(cx, |state, cx| state.select_device("remote".into(), cx));
         cx.run_until_parked();
         pickers.update(cx, |pickers, cx| {
             assert_eq!(pickers.space_target(cx).as_deref(), Some("remote"));
-            assert_eq!(pickers.selected_space_index(cx), 0); // empty device
-            assert!(pickers.target_generation >= 2);
+            // Projects list across devices; the opt-out row stays picked.
+            assert_eq!(pickers.selected_project_index(cx), 1);
+            // Only the device switch re-targets the per-device catalogs; the
+            // same-device projectless pick kept them.
+            assert_eq!(pickers.target_generation, 1);
+        });
+    }
+
+    fn git_space(id: &str, device: &str) -> Space {
+        Space {
+            id: id.into(),
+            device_id: device.into(),
+            path: format!("/{device}/{id}"),
+            name: None,
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn repo_ref(name: &str, current: bool, worktree: Option<&str>) -> RepoRef {
+        RepoRef {
+            name: name.into(),
+            current,
+            worktree_path: worktree.map(str::to_string),
+        }
+    }
+
+    #[gpui::test]
+    fn project_switch_on_one_device_keeps_the_model_catalog(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.apply_model_catalog(
+                HarnessId::Codex,
+                Loadable::Ready(vec![bare_model("gpt", "GPT")]),
+                cx,
+            );
+            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+        });
+        state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
+        cx.run_until_parked();
+        pickers.update(cx, |pickers, cx| {
+            // Same host: the catalog stands, the chip never blanks.
+            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            assert!(matches!(pickers.harnesses, Loadable::Ready(_)));
+            assert!(!pickers.harnesses_stale && pickers.stale_models.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn device_switch_revalidates_the_catalog_without_blanking(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "remote")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            // A picked harness keeps the chip naming its model throughout.
+            pickers.config.harness = Some(HarnessId::Codex);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.apply_model_catalog(
+                HarnessId::Codex,
+                Loadable::Ready(vec![bare_model("gpt", "GPT")]),
+                cx,
+            );
+            pickers.models.insert(HarnessId::ClaudeCode, Loadable::Loading);
+        });
+        state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
+        cx.run_until_parked();
+        pickers.update(cx, |pickers, cx| {
+            // Old rows stay on screen, marked for one reload from the new host;
+            // a load in flight for the old host restarts instead.
+            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            assert!(pickers.harnesses_stale);
+            assert_eq!(pickers.stale_models, HashSet::from([HarnessId::Codex]));
+            assert!(!pickers.models.contains_key(&HarnessId::ClaudeCode));
+            // The old device's catalog never picks for the new one: with no
+            // explicit or remembered model, a send leaves the choice to the
+            // new device instead of carrying the old catalog's default.
+            assert_eq!(pickers.resolved(cx).model, None);
+            // A failed reload replaces the old device's rows — it is not
+            // retained like a same-device refresh failure.
+            pickers.land_model_reload(
+                HarnessId::Codex,
+                Loadable::Error("device offline".into()),
+                cx,
+            );
+            assert!(pickers.stale_models.is_empty());
+            assert!(matches!(
+                pickers.models.get(&HarnessId::Codex),
+                Some(Loadable::Error(_))
+            ));
+            assert_ne!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            // With nothing picked or remembered, the old device's harness list
+            // doesn't choose either — for the chip or a send.
+            pickers.config.harness = None;
+            assert!(pickers.harnesses_stale);
+            assert_eq!(pickers.effective_harness(cx), None);
+            assert_eq!(pickers.resolved(cx).harness, None);
+            // ...and the chip reads as loading, never blank.
+            assert_eq!(pickers.model_name(cx), ModelName::Loading);
+        });
+    }
+
+    #[gpui::test]
+    fn same_device_refresh_failure_keeps_the_loaded_rows(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.apply_model_catalog(
+                HarnessId::Codex,
+                Loadable::Ready(vec![bare_model("gpt", "GPT")]),
+                cx,
+            );
+            pickers.land_model_reload(HarnessId::Codex, Loadable::Error("flaky".into()), cx);
+            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            assert!(matches!(
+                pickers.models.get(&HarnessId::Codex),
+                Some(Loadable::Ready(_))
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn project_switch_holds_the_ref_labels_until_refs_land(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, _| {
+            pickers.refs = Loadable::Ready(vec![
+                repo_ref("main", false, None),
+                repo_ref("feature", true, Some("/wt/feature")),
+            ]);
+            pickers.refs_space = Some("a".into());
+            assert_eq!(pickers.ref_label(), SharedString::from("feature"));
+            assert_eq!(pickers.checkout_label(), "Current worktree");
+        });
+        state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
+        cx.run_until_parked();
+        pickers.update(cx, |pickers, cx| {
+            // The chips keep naming the last ref while b's refs load...
+            assert!(matches!(pickers.refs, Loadable::Idle));
+            assert_eq!(pickers.ref_label(), SharedString::from("feature"));
+            assert_eq!(pickers.checkout_label(), "Current worktree");
+            // ...but nothing that acts on refs sees a's rows.
+            assert!(pickers.filtered_ref_rows(cx).is_empty());
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::CurrentCheckout { branch: None }
+            );
+            pickers.refs = Loadable::Ready(vec![repo_ref("trunk", true, None)]);
+            pickers.held_ref = None; // as the refs load does on landing
+            assert_eq!(pickers.ref_label(), SharedString::from("trunk"));
+            assert_eq!(pickers.checkout_label(), "Current checkout");
+        });
+    }
+
+    #[gpui::test]
+    fn project_picker_lists_repositories_then_their_devices(cx: &mut gpui::TestAppContext) {
+        let space = |id: &str, device: &str, name: &str, repository: Option<&str>, minutes| Space {
+            id: id.into(),
+            device_id: device.into(),
+            path: format!("/{device}/{id}"),
+            name: Some(name.into()),
+            git_detected: repository.is_some(),
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: repository.map(str::to_string),
+            created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+                + chrono::TimeDelta::minutes(minutes),
+        };
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("mac".into());
+            state.devices = ["mac", "vps"]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "name": id.to_uppercase(), "platform": "macos", "lastSeenAt": null
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            state.apply_spaces(vec![
+                space("notes", "mac", "notes", None, 0),
+                space("server", "vps", "comet", Some("github.com/o/comet"), 1),
+                space(
+                    "laptop",
+                    "mac",
+                    "comet-laptop",
+                    Some("github.com/o/comet"),
+                    2,
+                ),
+                space(
+                    "server-wt",
+                    "vps",
+                    "comet-wt",
+                    Some("github.com/o/comet"),
+                    3,
+                ),
+            ]);
+            state.selected_space = Some("notes".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            // One row per repository, named for its oldest checkout.
+            let rows: Vec<(String, String)> = pickers
+                .project_rows(cx)
+                .into_iter()
+                .map(|row| (row.name, row.key))
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    ("comet".into(), "repo:github.com/o/comet".into()),
+                    ("notes".into(), "notes".into())
+                ]
+            );
+            // Picking it keeps the canvas on this device's checkout.
+            pickers.pick_project("repo:github.com/o/comet".into(), cx);
+            assert_eq!(
+                pickers.state.read(cx).selected_space.as_deref(),
+                Some("laptop")
+            );
+            assert_eq!(pickers.selected_project_index(cx), 0);
+            // The device picker offers only the project's checkouts; a device
+            // holding two is told apart by path.
+            let devices: Vec<(String, Option<String>)> = pickers
+                .device_rows(cx)
+                .into_iter()
+                .map(|row| (row.device_id, row.detail))
+                .collect();
+            assert_eq!(
+                devices,
+                [
+                    ("mac".into(), None),
+                    ("vps".into(), Some("/vps/server".into())),
+                    ("vps".into(), Some("/vps/server-wt".into())),
+                ]
+            );
+            let server = pickers.device_rows(cx).remove(1);
+            pickers.pick_device_row(server, cx);
+            assert_eq!(
+                pickers.state.read(cx).selected_space.as_deref(),
+                Some("server")
+            );
+            assert_eq!(pickers.selected_device_index(cx), 1);
+            // Without a project, every device is offered.
+            pickers.pick_no_project(cx);
+            let devices: Vec<(String, bool)> = pickers
+                .device_rows(cx)
+                .into_iter()
+                .map(|row| (row.device_id, row.space.is_some()))
+                .collect();
+            assert_eq!(devices, [("mac".into(), false), ("vps".into(), false)]);
+        });
+        // A device switch keeps the project when the device has a checkout.
+        state.update(cx, |state, cx| {
+            state.select_space(Some("laptop".into()), cx);
+            state.select_device("vps".into(), cx);
+            assert_eq!(state.selected_space.as_deref(), Some("server"));
         });
     }
 
@@ -7215,6 +8360,669 @@ mod tests {
             supports_steering: false,
         }
     }
+    #[gpui::test]
+    fn model_name_never_reads_select_model_while_anything_can_still_name_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let named = |label: &str| ModelName::Named(label.into());
+        handle
+            .update(cx, |picker, _, cx| {
+                // Harness catalog still loading, a pick remembered: named.
+                picker.config.harness = Some(HarnessId::Codex);
+                picker.defaults.remember_model(
+                    HarnessId::Codex,
+                    "gpt-6-luna".into(),
+                    "GPT-6-Luna".into(),
+                );
+                assert_eq!(picker.model_name(cx), named("GPT-6-Luna"));
+                // Model catalog loading, pick remembered: still named.
+                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+                picker.models.insert(HarnessId::Codex, Loadable::Loading);
+                assert_eq!(picker.model_name(cx), named("GPT-6-Luna"));
+                // A draft id the catalog never learned keeps its id.
+                picker.config.model = Some("gpt-7".into());
+                assert_eq!(picker.model_name(cx), named("gpt-7"));
+                // Nothing picked or remembered while loading: loading, not
+                // "Select model".
+                picker.config.model = None;
+                picker.defaults.model_by_harness.clear();
+                assert_eq!(picker.model_name(cx), ModelName::Loading);
+                picker.harnesses = Loadable::Loading;
+                assert_eq!(picker.model_name(cx), ModelName::Loading);
+                // Catalog in, nothing remembered: its default model.
+                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+                picker.models.insert(
+                    HarnessId::Codex,
+                    Loadable::Ready(vec![bare_model("gpt-a", "A"), bare_model("gpt-b", "B")]),
+                );
+                assert_eq!(picker.model_name(cx), named("A"));
+                // Only a provider with nothing to offer is unnamed.
+                picker
+                    .models
+                    .insert(HarnessId::Codex, Loadable::Ready(Vec::new()));
+                assert_eq!(picker.model_name(cx), ModelName::None { no_agents: false });
+                picker
+                    .models
+                    .insert(HarnessId::Codex, Loadable::Error("offline".into()));
+                assert_eq!(picker.model_name(cx), ModelName::None { no_agents: false });
+                // ...and a remembered pick names it even then.
+                picker.defaults.remember_model(
+                    HarnessId::Codex,
+                    "gpt-6-luna".into(),
+                    "GPT-6-Luna".into(),
+                );
+                assert_eq!(picker.model_name(cx), named("GPT-6-Luna"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_panel_shortcuts_drive_models_providers_and_effort(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let laddered = |id: &str, label: &str| {
+            let mut model = bare_model(id, label);
+            model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
+            model
+        };
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut picker = Pickers::new(state, cx);
+            picker.config.harness = Some(HarnessId::Codex);
+            picker.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::ClaudeCode, "Claude"),
+            ]);
+            picker.models.insert(
+                HarnessId::Codex,
+                Loadable::Ready(vec![
+                    laddered("model", "Model"),
+                    laddered("other", "Other model"),
+                    laddered("third", "Third model"),
+                ]),
+            );
+            picker.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![laddered("claude", "Claude model")]),
+            );
+            picker
+        });
+        handle
+            .update(cx, |picker, window, cx| picker.open_model_menu(window, cx))
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        // Down opens the list on the model after the selected one; Enter
+        // picks it and lands back on the panel.
+        cx.simulate_keystrokes(handle.into(), "down");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(picker.compact_model_list);
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "other");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "enter");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(!picker.compact_model_list);
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
+            })
+            .unwrap();
+        // Up opens it on the model before; Escape steps back without a pick.
+        cx.simulate_keystrokes(handle.into(), "up");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(picker.compact_model_list);
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "model");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "escape");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(!picker.compact_model_list);
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
+            })
+            .unwrap();
+        // In the list, ⌘⇧F stars the highlighted model without picking it,
+        // and the highlight follows that model through the re-sort.
+        cx.simulate_keystrokes(handle.into(), "down");
+        cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(picker.defaults.is_favorite(HarnessId::Codex, "third"));
+                assert_eq!(picker.active, 0, "Favorite should move to the first row");
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "third");
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(!picker.defaults.is_favorite(HarnessId::Codex, "third"));
+                assert_eq!(
+                    picker.active, 2,
+                    "Focus must follow the unstarred model back"
+                );
+                assert_eq!(picker.model_rows(cx)[picker.active].model.id, "third");
+            })
+            .unwrap();
+        // Tab cycles providers in place, each at its last-used model.
+        cx.simulate_keystrokes(handle.into(), "escape");
+        cx.simulate_keystrokes(handle.into(), "tab");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert!(!picker.compact_model_list);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "tab");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::Codex));
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            })
+            .unwrap();
+        // Left/Right and Home/End set the effort, one haptic per change
+        // and none at an unchanged endpoint.
+        let haptics_before = handle
+            .read_with(cx, |_, _| crate::haptics::step_count())
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "home home");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::Low))
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "right right left right");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
+                assert_eq!(crate::haptics::step_count() - haptics_before, 4);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_panel_lists_settings_of_models_configured_in_place(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let option = |id: &str, label: &str, choices: &[(&str, &str)]| ModelOption {
+            id: id.into(),
+            label: label.into(),
+            default_choice: choices[0].0.into(),
+            choices: choices
+                .iter()
+                .map(|(id, label)| ModelOptionChoice {
+                    id: (*id).into(),
+                    label: (*label).into(),
+                })
+                .collect(),
+        };
+        handle
+            .update(cx, |pickers, _, cx| {
+                let mut fusion = bare_model("fusion", "Fusion");
+                fusion.reasoning_levels = vec![ReasoningLevel::Medium, ReasoningLevel::High];
+                fusion.options = vec![
+                    option(
+                        "sidekick",
+                        "Sidekick",
+                        &[("swe-2", "SWE-2"), ("swe-3", "SWE-3")],
+                    ),
+                    option("lead", "Lead", &[("fable", "Fable"), ("sol", "Sol")]),
+                ];
+                pickers.config.harness = Some(HarnessId::Devin);
+                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Devin, "Devin")]);
+                pickers.models.insert(
+                    HarnessId::Devin,
+                    Loadable::Ready(vec![bare_model("adaptive", "Adaptive"), fusion]),
+                );
+                pickers.pick_model("fusion".into(), cx);
+                // No hover card in the compact panel: Lead leads, as in the card.
+                let hidden = pickers.compact_hidden_options(cx);
+                let visible: Vec<_> = pickers
+                    .setting_groups(cx)
+                    .into_iter()
+                    .filter(|g| Pickers::compact_option_visible(&g.id, &hidden))
+                    .map(|g| g.id)
+                    .collect();
+                assert_eq!(
+                    visible,
+                    [
+                        ModelSetting::Option("lead".into()),
+                        ModelSetting::Option("sidekick".into())
+                    ]
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_fast_button_toggles_cursor_fast_by_default_models(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        handle
+            .update(cx, |pickers, window, cx| {
+                let mut grok = bare_model("grok-4.6", "Grok 4.6");
+                grok.options = vec![ModelOption {
+                    id: "fast".into(),
+                    label: "Fast".into(),
+                    default_choice: "true".into(),
+                    choices: [("false", "false"), ("true", "Fast\u{200b}")]
+                        .iter()
+                        .map(|(id, label)| ModelOptionChoice {
+                            id: (*id).into(),
+                            label: (*label).into(),
+                        })
+                        .collect(),
+                }];
+                pickers.config.harness = Some(HarnessId::Cursor);
+                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Cursor, "Cursor")]);
+                pickers
+                    .models
+                    .insert(HarnessId::Cursor, Loadable::Ready(vec![grok]));
+                pickers.pick_model("grok-4.6".into(), cx);
+                // On by default: the button starts lit and turning it off is
+                // an explicit pick; turning it back on returns to the default.
+                let (option, next, default, fast) = pickers.compact_fast_choice(cx).unwrap();
+                assert_eq!((next.as_str(), default, fast), ("false", false, true));
+                pickers.pick_option(option, next, default, cx);
+                let (option, next, default, fast) = pickers.compact_fast_choice(cx).unwrap();
+                assert_eq!((next.as_str(), default, fast), ("true", true, false));
+                pickers.pick_option(option, next, default, cx);
+                assert!(pickers.compact_fast_choice(cx).unwrap().3);
+                assert!(!pickers.explicit_options(cx).contains_key("fast"));
+                // F on the open panel flips it the same way.
+                pickers.open.open(PickerKind::HarnessModel);
+                let key = |key: &str| KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                pickers.on_key_down(&key("f"), window, cx);
+                assert!(!pickers.compact_fast_choice(cx).unwrap().3);
+                pickers.on_key_down(&key("cmd-f"), window, cx);
+                assert!(!pickers.compact_fast_choice(cx).unwrap().3);
+                pickers.on_key_down(&key("f"), window, cx);
+                assert!(pickers.compact_fast_choice(cx).unwrap().3);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_list_hides_loading_and_failed_harnesses(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut picker = Pickers::new(state, cx);
+            picker.config.harness = Some(HarnessId::Codex);
+            picker.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::ClaudeCode, "Claude"),
+                descriptor(HarnessId::Grok, "Grok"),
+            ]);
+            picker.models.insert(
+                HarnessId::Codex,
+                Loadable::Ready(vec![bare_model("model", "Model")]),
+            );
+            picker.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Error("Catalog timed out".into()),
+            );
+            picker.models.insert(HarnessId::Grok, Loadable::Loading);
+            picker
+        });
+        handle
+            .update(cx, |picker, window, cx| {
+                picker.open_model_menu(window, cx);
+                picker.show_compact_models(cx);
+                assert_eq!(picker.model_rows_len(cx), 1);
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        // Only the ready model is navigable: no status rows follow it.
+        cx.simulate_keystrokes(handle.into(), "down");
+        handle
+            .read_with(cx, |picker, _| assert_eq!(picker.active, 0))
+            .unwrap();
+        handle
+            .update(cx, |picker, _, cx| {
+                picker.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![bare_model("claude", "Claude model")]),
+                );
+                picker.catalog_rev += 1;
+                // A provider's models become directly selectable when its
+                // catalog finishes loading; no provider-page detour is needed.
+                assert_eq!(picker.model_rows_len(cx), 2);
+                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
+                picker.activate_model_index(1, cx);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude"));
+                picker.show_compact_models(cx);
+                assert_eq!(picker.model_rows_len(cx), 2);
+                assert_eq!(picker.model_rows(cx)[picker.active].harness, HarnessId::ClaudeCode);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_slider_drives_cursor_effort_option(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        handle
+            .update(cx, |picker, _, cx| {
+                // Cursor's shape: no reasoning ladder, effort as an option.
+                let mut opus = bare_model("claude-opus-5", "Claude Opus 5");
+                opus.options = vec![ModelOption {
+                    id: "effort".into(),
+                    label: "Effort".into(),
+                    default_choice: "high".into(),
+                    choices: [("low", "Low"), ("medium", "Medium"), ("high", "High")]
+                        .iter()
+                        .map(|(id, label)| ModelOptionChoice {
+                            id: (*id).into(),
+                            label: (*label).into(),
+                        })
+                        .collect(),
+                }];
+                picker.config.harness = Some(HarnessId::Cursor);
+                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Cursor, "Cursor")]);
+                picker
+                    .models
+                    .insert(HarnessId::Cursor, Loadable::Ready(vec![opus]));
+                picker.pick_model("claude-opus-5".into(), cx);
+                let effort = picker.compact_effort(cx).unwrap();
+                assert_eq!(effort.labels, ["Low", "Medium", "High"]);
+                assert_eq!(effort.selected, 2);
+                // The slider owns it: no Effort row in the panel.
+                assert_eq!(picker.compact_hidden_options(cx), ["effort"]);
+                picker.pick_compact_effort(effort, 0, cx);
+                assert_eq!(picker.resolved(cx).model_options["effort"], "low");
+                assert_eq!(picker.compact_effort(cx).unwrap().selected, 0);
+                // Back to the default clears the explicit pick.
+                let effort = picker.compact_effort(cx).unwrap();
+                picker.pick_compact_effort(effort, 2, cx);
+                assert!(!picker.explicit_options(cx).contains_key("effort"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn switching_provider_restores_its_last_model_and_effort(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let laddered = |id: &str, label: &str| {
+            let mut model = bare_model(id, label);
+            model.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ];
+            model
+        };
+        handle
+            .update(cx, |picker, _, cx| {
+                picker.harnesses = Loadable::Ready(vec![
+                    descriptor(HarnessId::Codex, "Codex"),
+                    descriptor(HarnessId::ClaudeCode, "Claude"),
+                ]);
+                picker.models.insert(
+                    HarnessId::Codex,
+                    Loadable::Ready(vec![laddered("gpt-a", "A"), laddered("gpt-b", "B")]),
+                );
+                picker.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![laddered("opus", "Opus")]),
+                );
+                picker.pick_harness(HarnessId::Codex, cx);
+                picker.pick_model("gpt-b".into(), cx);
+                picker.pick_reasoning(ReasoningLevel::Low, cx);
+                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                picker.pick_reasoning(ReasoningLevel::High, cx);
+                // Back to Codex: its last model, at that model's last effort.
+                picker.pick_compact_provider(HarnessId::Codex, cx);
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("gpt-b"));
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::Low));
+                // A model with no effort of its own takes the last one used
+                // anywhere (High, on Claude).
+                picker.pick_model("gpt-a".into(), cx);
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
+                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("opus"));
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
+                // The list's tabs are its provider groups, in list order;
+                // starring adds a Starred tab ahead of them, holding the
+                // starred models from every provider.
+                picker.show_compact_models(cx);
+                assert_eq!(
+                    picker.compact_groups(cx),
+                    vec![(Some(HarnessId::Codex), 0), (Some(HarnessId::ClaudeCode), 2)]
+                );
+                picker.toggle_model_favorite(HarnessId::Codex, "gpt-a", cx);
+                assert_eq!(
+                    picker.compact_groups(cx),
+                    vec![
+                        (None, 0),
+                        (Some(HarnessId::Codex), 1),
+                        (Some(HarnessId::ClaudeCode), 2),
+                    ]
+                );
+                let rows = picker.model_rows(cx);
+                assert_eq!(
+                    (rows[0].harness, rows[0].model.id.as_str()),
+                    (HarnessId::Codex, "gpt-a")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_picker_shares_selection_reset_and_thread_restrictions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut picker = Pickers::new(state, cx);
+            picker.config.harness = Some(HarnessId::Codex);
+            picker.config.model = Some("codex-model".into());
+            picker.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::ClaudeCode, "Claude"),
+            ]);
+            let mut model = bare_model("codex-model", "Codex model");
+            model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
+            picker
+                .models
+                .insert(HarnessId::Codex, Loadable::Ready(vec![model]));
+            picker.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![bare_model("claude-model", "Claude model")]),
+            );
+            picker
+        });
+        handle
+            .update(cx, |picker, window, cx| {
+                picker.open_model_menu(window, cx);
+                assert!(!picker.compact_model_list);
+                // Models from every offered provider are directly selectable.
+                picker.show_compact_models(cx);
+                assert_eq!(picker.model_rows_len(cx), 2);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
+                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
+                // Searching must also find another provider's model.
+                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
+                picker.activate_model_index(0, cx);
+                assert!(!picker.compact_model_list);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude-model"));
+                picker.pick_harness(HarnessId::Codex, cx);
+                // Clicking a foreign-provider row works without a search too.
+                picker.show_compact_models(cx);
+                picker.activate_model_index(1, cx);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                picker.pick_harness(HarnessId::Codex, cx);
+                // Switching provider (Tab on the panel) lands back on the
+                // panel at that provider's model.
+                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                assert!(!picker.compact_model_list);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude-model"));
+                picker.pick_harness(HarnessId::Codex, cx);
+                picker.pick_model("codex-model".into(), cx);
+                picker.pick_reasoning(ReasoningLevel::Low, cx);
+                assert_eq!(picker.config.model.as_deref(), Some("codex-model"));
+                picker.state.update(cx, |state, cx| {
+                    state.selected_chat = Some("thread".into());
+                    cx.notify();
+                });
+                picker.show_compact_models(cx);
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
+                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                assert_eq!(picker.model_rows_len(cx), 0);
+                picker.search.update(cx, |input, cx| input.set_text("", cx));
+                // A chat's provider is fixed: one tab, its own.
+                assert_eq!(
+                    picker.compact_groups(cx),
+                    vec![(Some(HarnessId::Codex), 0)]
+                );
+                picker.compact_model_list = false;
+                picker.focus_on_mount = true;
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .read_with(cx, |picker, _| assert!(picker.effort_bounds.is_some()))
+            .unwrap();
+        handle
+            .update(cx, |picker, _, cx| {
+                picker.show_compact_models(cx);
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("no-matching-model", cx));
+                picker.active = 0;
+                picker.activate_model_row(cx);
+                assert!(
+                    picker.setting_menu.is_none(),
+                    "Empty search must not activate hidden settings"
+                );
+                picker.search.update(cx, |input, cx| input.set_text("", cx));
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    }
+
+    #[test]
+    fn compact_all_models_keeps_favorites_first_in_catalog_and_search() {
+        let descriptors = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude"),
+            descriptor(HarnessId::Codex, "Codex"),
+        ];
+        let claude = vec![
+            bare_model("plain-a", "Model A"),
+            bare_model("star-a", "My Model A"),
+        ];
+        let codex = vec![
+            bare_model("plain-b", "Model B"),
+            bare_model("star-b", "My Model B"),
+        ];
+        for query in ["", "model"] {
+            let rows = scoped_model_rows(
+                query,
+                ModelRail::All,
+                Some(HarnessId::Codex),
+                &descriptors,
+                |harness| match harness {
+                    HarnessId::ClaudeCode => Some(claude.as_slice()),
+                    HarnessId::Codex => Some(codex.as_slice()),
+                    _ => None,
+                },
+                |_, id| id.starts_with("star"),
+            );
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.model.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["star-a", "star-b", "plain-a", "plain-b"]
+            );
+        }
+    }
 
     #[test]
     fn tab_search_never_leaves_the_viewed_harness() {
@@ -7488,6 +9296,28 @@ mod tests {
     }
 
     #[test]
+    fn windows_folder_paths_and_breadcrumbs() {
+        assert_eq!(
+            parent_path(r"D:\Random\zeron"),
+            Some(r"D:\Random".to_string())
+        );
+        assert_eq!(parent_path(r"D:\Random"), Some(r"D:\".to_string()));
+        assert_eq!(parent_path(r"D:\Random\"), Some(r"D:\".to_string()));
+        assert_eq!(parent_path(r"D:\"), None);
+        assert_eq!(parent_path("D:"), None);
+        assert_eq!(child_path(r"D:\", "Random"), r"D:\Random");
+        assert_eq!(child_path(r"D:\Random", "zeron"), r"D:\Random\zeron");
+        let crumbs = breadcrumbs(r"D:\Random\zeron");
+        let labels: Vec<&str> = crumbs.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, [r"D:\", "Random", "zeron"]);
+        assert_eq!(crumbs[0].1, r"D:\");
+        assert_eq!(crumbs[1].1, r"D:\Random");
+        assert_eq!(breadcrumbs(r"D:\").len(), 1);
+        assert!(!is_windows_path("/D:/x"));
+        assert!(!is_windows_path("ab:/x"));
+    }
+
+    #[test]
     fn completion_prefix_lengths() {
         // Case-insensitive; the length indexes into the NAME's bytes.
         assert_eq!(completion_prefix_len("Documents", "doc"), Some(3));
@@ -7537,6 +9367,26 @@ mod tests {
         // `~` can't expand before the device's home is known.
         assert_eq!(typed_path_target("~/github", None), None);
         assert_eq!(typed_path_target("/disk2", None), Some("/disk2".into()));
+    }
+
+    #[test]
+    fn typed_path_target_accepts_windows_drive_paths() {
+        let home = Some(r"C:\Users\wing");
+        assert_eq!(typed_path_target(r"D:\", home), Some(r"D:\".into()));
+        assert_eq!(typed_path_target("D:", home), Some(r"D:\".into()));
+        assert_eq!(typed_path_target("D:/", home), Some(r"D:\".into()));
+        assert_eq!(
+            typed_path_target(r"D:\Random\zeron\", home),
+            Some(r"D:\Random\zeron".into())
+        );
+        // Forward slashes normalise so the crumb trail can match the path.
+        assert_eq!(
+            typed_path_target("D:/Random/zeron", None),
+            Some(r"D:\Random\zeron".into())
+        );
+        assert!(is_typed_path(r"D:\x"));
+        assert!(is_typed_path("/x") && is_typed_path("~"));
+        assert!(!is_typed_path("src") && !is_typed_path("ab:/x"));
     }
 
     #[test]

@@ -7,10 +7,11 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - '.github/actions/linux-ci/**'
+      - 'scripts/ci/**'
+      - 'scripts/*cursor-sdk*'
+      - '.github/workflows/cursor-*.yml'
       - 'scripts/test-linux-browser.sh'
-      - 'scripts/run-macos-browser-fixture.sh'
-      - 'dist/macos/Info.plist'
-      - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
   push:
     branches: [main]
@@ -19,10 +20,11 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - '.github/actions/linux-ci/**'
+      - 'scripts/ci/**'
+      - 'scripts/*cursor-sdk*'
+      - '.github/workflows/cursor-*.yml'
       - 'scripts/test-linux-browser.sh'
-      - 'scripts/run-macos-browser-fixture.sh'
-      - 'dist/macos/Info.plist'
-      - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
   workflow_dispatch:
 
@@ -31,226 +33,72 @@ permissions:
 
 concurrency:
   group: ui-tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  changes:
+  # Every Linux Rust test that is not UI: one build, one nextest run (see
+  # scripts/ci/test-core.sh). Replaces session-sync-regressions and the Rust
+  # steps of cursor-compatibility and preview-tests.
+  core-tests:
     runs-on: ubuntu-24.04
-    permissions:
-      pull-requests: read
-    outputs:
-      ios: ${{ steps.filter.outputs.result }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/github-script@v8
-        id: filter
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
         with:
-          script: |
-            // Preserve iOS coverage for main pushes and manual runs.
-            if (context.eventName !== 'pull_request') return true;
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              ...context.repo,
-              pull_number: context.payload.pull_request.number,
-              per_page: 100,
-            });
-            // Run conservatively if the API did not return the full diff.
-            if (files.length < context.payload.pull_request.changed_files) return true;
-            // The app links the Rust mobile core and everything it depends on.
-            const mobileCore = ['crates/mobile/', 'crates/client/', 'crates/text/', 'crates/markdown/',
-              'crates/doc/', 'crates/sync/', 'crates/proto/', 'crates/rpc/', 'crates/syntax/',
-              'scripts/ios/'];
-            const affectsIOS = path => path?.startsWith('apps/ios/')
-              || mobileCore.some(prefix => path?.startsWith(prefix))
-              || path === 'Cargo.lock'
-              || path === 'Cargo.toml'
-              || path === 'rust-toolchain.toml'
-              || path === '.github/workflows/ui-tests.yml';
-            return files.some(file => affectsIOS(file.filename)
-              || affectsIOS(file.previous_filename));
-
-  session-sync-regressions:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: OpenCode protocol and permission regressions
-        run: |
-          cargo test --locked -p zeron-harness --lib opencode::
-          cargo test --locked -p zeron-harness --test opencode
-      - name: Durable session publication and recovery
-        run: |
-          cargo test --locked -p zeron-sync --lib
-          cargo test --locked -p zeron-update --lib
-          cargo test --locked -p zeron-engine --lib --test session_publication --test restart_resume --test codex_subagents --test local_profiles
+          rust-cache: core
+          save-rust-cache: 'true'
+      - name: Harness, engine, sync, update, doc and preview tests
+        run: scripts/ci/test-core.sh
 
   ui-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: GPUI system dependencies
-        run: |
-          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
-          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev \
-            libfontconfig1-dev libfreetype-dev libasound2-dev \
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: ui
+          save-rust-cache: 'true'
+          apt-cache: gpui
+          apt-packages: >-
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+            libx11-dev libxcb1-dev libx11-xcb-dev
+            libfontconfig1-dev libfreetype-dev libasound2-dev
             libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
       - name: UI and headless layout regressions
-        run: cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
-
-  macos-frame-recovery:
-    runs-on: macos-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Check out pinned GPUI for native frame-source tests
-        shell: bash
-        run: |
-          rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
-          git init frame-source-tests
-          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
-          git -C frame-source-tests fetch --depth=1 origin "$rev"
-          git -C frame-source-tests checkout --detach FETCH_HEAD
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          workspaces: |
-            .
-            frame-source-tests
-      - name: Check macOS application
-        run: cargo check --release --locked -p zeron
-      - name: Updater tests (bundle staging, install detection)
-        run: cargo test --release --locked -p zeron-update
-      - name: Native diff font geometry regression
-        run: cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1
-      - name: Native notification click regressions
-        run: |
-          cargo test --release --locked -p zeron-ui --lib notify::tests:: -- --test-threads=1
-      - name: Build native browser fixture
-        run: cargo build --release --locked -p zeron-ui --example browser-fixture --example preview-fixture --features browser-fixture
-      - name: Native browser regression and screenshots
-        timeout-minutes: 3
-        env:
-          RUST_BACKTRACE: 1
-        run: |
-          bash scripts/run-macos-browser-fixture.sh target/release/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
-          test -f "$RUNNER_TEMP/browser-captures/result.txt"
-      - name: Upload browser screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-macos-captures
-          path: ${{ runner.temp }}/browser-captures
-          if-no-files-found: ignore
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Install preview fixture server
-        run: npm ci --prefix edge
-      - name: Project discovery, stable URLs and HMR in native WebKit
-        timeout-minutes: 3
-        env:
-          ZERON_PREVIEW_AUTO_OPEN: 1
-        run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
-          test -f "$RUNNER_TEMP/preview-captures/result.txt"
-      - name: Upload preview screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: preview-macos-captures
-          path: ${{ runner.temp }}/preview-captures
-          if-no-files-found: ignore
-      - name: Native frame-source recovery regression
-        working-directory: frame-source-tests
-        run: cargo test --release --locked -p gpui_macos --test frame_source_recovery
-
-  ios-tests:
-    needs: changes
-    if: needs.changes.outputs.ios == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@v4
-      - name: Select an available iPhone simulator
-        run: |
-          python3 - <<'PYTHON'
-          import json, os, subprocess
-          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"]))["devices"]
-          iphones = [device for runtime, group in devices.items() if "iOS" in runtime
-                     for device in group if device["name"].startswith("iPhone")]
-          if not iphones:
-              raise SystemExit("No iPhone simulator is installed")
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
-          PYTHON
-      - name: Rust toolchain + iOS targets
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ios-core
-      - name: Rust mobile core tests
-        run: cargo test --locked -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
-      - name: Generated Swift bindings are current
-        run: |
-          scripts/ios/build-core.sh iphonesimulator
-          git diff --exit-code -- apps/ios/Zeron/Core/Generated
-      - name: Run iOS unit tests
-        working-directory: apps/ios
-        run: |
-          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
-            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
-            -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
-            -only-testing:ZeronTests CODE_SIGNING_ALLOWED=NO test
-      - name: Upload iOS test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-test-results
-          path: ${{ runner.temp }}/ios-tests.xcresult
-          if-no-files-found: ignore
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib
 
   linux-browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Native browser and GPUI dependencies
-        run: |
-          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
-          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev \
-            libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake \
-            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xdotool openbox \
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          # Same dependency graph as ui-tests, which saves this cache on main.
+          rust-cache: ui
+          apt-cache: browser
+          apt-recommends: 'true'
+          apt-packages: >-
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+            libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev
+            libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake
+            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xdotool openbox
             weston ffmpeg imagemagick fonts-noto-cjk
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
       - name: Build browser fixture
-        run: cargo build --release --locked -p zeron-ui --example browser-fixture --features browser-fixture
+        run: cargo build --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: X11 and Wayland browser regressions
         timeout-minutes: 5
         env:
           RUST_LOG: gpui_wgpu=info
+          BROWSER_FIXTURE_BINARY: target/debug/examples/browser-fixture
         run: |
           scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/default"
           VK_DRIVER_FILES=/dev/null scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/opengl"
       - name: Upload native browser evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-browser
           path: ${{ runner.temp }}/linux-browser

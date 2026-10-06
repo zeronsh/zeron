@@ -284,6 +284,36 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertFalse(use.exists)
     }
 
+    /// Clones of one repository are one project; the host chip then picks
+    /// which checkout runs the session.
+    func testProjectPickerGroupsClonesAndHostPicksCheckout() {
+        let app = launch(["-route", "new"])
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let zeron = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'zeron'"))
+        XCTAssertTrue(zeron.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(zeron.count, 1, "one entry for both clones")
+        snapshot(app, "project-menu")
+        zeron.firstMatch.tap()
+        let host = app.buttons["composer-chip-host"]
+        XCTAssertTrue(host.waitForExistence(timeout: 5))
+        host.tap()
+        func item(_ name: String) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
+        }
+        XCTAssertTrue(item("hetzner-01").waitForExistence(timeout: 5))
+        XCTAssertTrue(item("MacBook Pro").exists)
+        XCTAssertFalse(item("Mac Studio").exists, "only hosts with a checkout")
+        snapshot(app, "host-menu")
+        item("hetzner-01").tap()
+        let moved = NSPredicate(format: "label CONTAINS 'hetzner-01'")
+        expectation(for: moved, evaluatedWith: host)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(project.label.contains("zeron"), "the project stays picked")
+        snapshot(app, "picked-clone")
+    }
+
     func testToolGroupExpandsAndShowsDetail() {
         let app = launch(["-route", "chat:chat-veil"])
         let expand = app.buttons["Expand"].firstMatch

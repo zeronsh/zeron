@@ -289,7 +289,9 @@ impl Render for DevicesPage {
             let rename_name = device.name.clone();
             let mut meta: Vec<AnyElement> = vec![
                 div()
-                    .child(SharedString::from(platform_label(&device.platform).to_string()))
+                    .child(SharedString::from(
+                        platform_label(&device.platform).to_string(),
+                    ))
                     .into_any_element(),
             ];
             if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
@@ -340,9 +342,11 @@ impl Render for DevicesPage {
                             .role(gpui::Role::Button)
                             .aria_label(format!("Copy device ID {}", device.id))
                             .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.copy_id(copy_id.clone(), cx);
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.copy_id(copy_id.clone(), cx);
+                                },
+                            )),
                         )
                         .child(
                             widgets::text_action(&theme, widgets::ActionTone::Filled, "Rename")

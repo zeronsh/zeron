@@ -505,6 +505,66 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        // Dev/testing knob: `ZERON_MOCK_TODO=1` appends a checklist the agent
+        // works through — one `Todo` call rewritten in place per step, the way
+        // TodoWrite does — so the todo panel's open / fold / finished states
+        // can be watched live (pace it with `ZERON_MOCK_DELAY_MS`).
+        let mock_todo = std::env::var("ZERON_MOCK_TODO")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0");
+        let todo_events = mock_todo
+            .then(|| {
+                const STEPS: [&str; 8] = [
+                    "Read the fold path in crates/doc",
+                    "Add the status field to TodoItem",
+                    "Map in-progress in every normalizer",
+                    "Write the fold-window view model",
+                    "Render the todo tray above the composer",
+                    "Persist open state per chat",
+                    "Run the unit tests",
+                    "Write the design note",
+                ];
+                let list = |active: usize| zeron_proto::ToolCall::Todo {
+                    items: STEPS
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, text)| {
+                            zeron_proto::TodoItem::new(
+                                *text,
+                                match ix.cmp(&active) {
+                                    std::cmp::Ordering::Less => zeron_proto::TodoStatus::Completed,
+                                    std::cmp::Ordering::Equal => {
+                                        zeron_proto::TodoStatus::InProgress
+                                    }
+                                    std::cmp::Ordering::Greater => zeron_proto::TodoStatus::Pending,
+                                },
+                            )
+                        })
+                        .collect(),
+                };
+                let mut events = vec![AgentEvent::TextDelta {
+                    text: "\n### Todo check\n\nWorking through the checklist.\n\n".into(),
+                }];
+                // Steps 0..=8: the last write has every item completed.
+                for active in 0..=STEPS.len() {
+                    events.push(AgentEvent::ToolCall {
+                        id: "mock-todo".into(),
+                        call: list(active),
+                    });
+                    events.push(AgentEvent::ToolResult {
+                        id: "mock-todo".into(),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    });
+                    events.push(AgentEvent::TextDelta {
+                        text: format!("Update {} written.\n\n", active + 1),
+                    });
+                }
+                events
+            })
+            .into_iter()
+            .flatten();
         let events: Vec<Result<AgentEvent, HarnessError>> = body
             .iter()
             .cycle()
@@ -513,6 +573,7 @@ impl Harness for MockHarness {
             .chain(thinking_events)
             .chain(code_tool_events)
             .chain(subagent_events)
+            .chain(todo_events)
             .chain(code_event)
             .chain(table_event)
             .chain(mend_event)

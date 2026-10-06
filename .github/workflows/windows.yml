@@ -36,32 +36,21 @@ permissions:
 
 concurrency:
   group: windows-tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
     shell: pwsh
 
 jobs:
-  tests:
+  # The original single serial job is split into three independent jobs so they
+  # run in parallel. Together they run exactly the commands the single job ran.
+  ui-tests:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Locate Windows SDK shader compiler
-        run: |
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          cache-workspace-crates: true
-      - name: Native harness security and integration tests
-        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/windows-ci-setup
       - name: UI tests
         env:
           RUST_BACKTRACE: '1'
@@ -73,22 +62,47 @@ jobs:
           cargo test --release --locked -p zeron-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
           $headlessResult = $LASTEXITCODE
           if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
-      - name: Build application
-        run: cargo build --release --locked -p zeron
-      - name: Verify portable and installer packaging
-        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
-      - name: Installer install/uninstall
-        run: ./scripts/test-windows-installer.ps1
+
+  # The crate suites compile different package sets, so the two jobs below each
+  # build what they need in parallel instead of one job building them in turn.
+  harness-app-tests:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/windows-ci-setup
+      - name: Native harness security and integration tests
+        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
         run: cargo test --release --locked -p zeron -p zeron-update
+
+  engine-tests:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/windows-ci-setup
       - name: Engine unit tests
         run: cargo test --release --locked -p zeron-engine --lib
       - name: Harness catalog and login tests
         run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
       - name: Auth integration tests
         run: cargo test --release --locked -p zeron-engine --test auth
+
+  app:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/windows-ci-setup
+      - name: Build application
+        run: cargo build --release --locked -p zeron
+      - name: Verify portable and installer packaging
+        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+      - name: Installer install/uninstall
+        run: ./scripts/test-windows-installer.ps1
       - name: GUI subsystem and redirected CLI output
         run: ./scripts/test-windows-startup.ps1
       - name: CLI startup without HOME
@@ -131,7 +145,7 @@ jobs:
         run: cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
       - name: Upload GUI test binaries
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-gui-binaries
           path: |
@@ -142,12 +156,12 @@ jobs:
 
   native-gui:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
-    needs: tests
+    needs: app
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-gui-binaries
           path: target/release
@@ -157,7 +171,7 @@ jobs:
         run: ./scripts/test-windows-rendering.ps1
       - name: Upload GUI test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-native-probes
           path: |

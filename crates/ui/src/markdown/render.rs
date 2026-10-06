@@ -8,7 +8,7 @@
 //! chunk opacity veil over the text runs (see [`super::veil`]) — opacity only,
 //! zero translate, applied after layout-relevant properties are fixed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -109,8 +109,18 @@ pub struct TaskUi {
 
 #[derive(Clone)]
 pub struct MediaUi {
-    pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramUi>>,
-    pub image: Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>,
+    pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
+    /// `None` keeps inline images in their ordinary text rendering.
+    pub image: Option<Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>>,
+}
+
+/// How a Mermaid fence presents itself on the owning surface.
+pub enum DiagramView {
+    /// The ordinary source fence, unchanged (no diagram is available yet).
+    Source,
+    /// The source fence, flagged with the reason it cannot be drawn.
+    Failed(SharedString),
+    Diagram(DiagramUi),
 }
 
 pub struct DiagramUi {
@@ -366,7 +376,7 @@ impl Render for CodeScrollbarDragGhost {
     }
 }
 
-struct CodeBlockTooltip(&'static str);
+struct CodeBlockTooltip(SharedString);
 
 impl Render for CodeBlockTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -379,9 +389,10 @@ impl Render for CodeBlockTooltip {
             .border_color(theme.border_strong)
             .bg(theme.surface_raised)
             .shadow_md()
+            .max_w(px(360.0))
             .text_size(px(11.0))
             .text_color(theme.text)
-            .child(self.0)
+            .child(self.0.clone())
     }
 }
 
@@ -917,7 +928,10 @@ fn render_table(
                 TableAlign::Center => cell.text_center(),
                 TableAlign::Right => cell.text_right(),
             };
-            if opts.media.is_some()
+            if opts
+                .media
+                .as_ref()
+                .is_some_and(|media| media.image.is_some())
                 && all[r]
                     .get(c)
                     .is_some_and(|runs| runs.iter().any(|run| run.style.image.is_some()))
@@ -1213,6 +1227,7 @@ pub(super) fn flat_text_presented_element(
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_, hitbox, window, _| {
+            let surface = PAINTING_SURFACE.with(Cell::get);
             for range in &code_ranges {
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
                     window.paint_quad(quad(
@@ -1225,7 +1240,7 @@ pub(super) fn flat_text_presented_element(
                     ));
                 }
             }
-            if let Some(range) = super::selection::wash_range(&sel_key) {
+            if let Some(range) = super::selection::wash_range(surface, &sel_key) {
                 let range = offsets
                     .as_ref()
                     .map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()));
@@ -1245,6 +1260,7 @@ pub(super) fn flat_text_presented_element(
             // mouse listeners.
             REGISTRY.with(|r| {
                 r.borrow_mut().push(RegEntry {
+                    surface,
                     key: sel_key.clone(),
                     text: flat_text.clone(),
                     layout: layout.clone(),
@@ -1255,6 +1271,7 @@ pub(super) fn flat_text_presented_element(
                 window,
                 hitbox,
                 &sel_key,
+                surface,
                 &flat_text,
                 &layout,
                 offsets.clone(),
@@ -1354,7 +1371,8 @@ fn paint_text_selection_with_wash(
     layout: &gpui::TextLayout,
     wash: Hsla,
 ) {
-    if let Some(range) = super::selection::wash_range(key) {
+    let surface = PAINTING_SURFACE.with(Cell::get);
+    if let Some(range) = super::selection::wash_range(surface, key) {
         for rect in range_rects(layout, &range, 0.0, 0.0) {
             window.paint_quad(quad(
                 rect,
@@ -1368,13 +1386,14 @@ fn paint_text_selection_with_wash(
     }
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
+            surface,
             key: key.clone(),
             text: text.clone(),
             layout: layout.clone(),
             offsets: None,
         })
     });
-    register_selection_listeners(window, hitbox, key, text, layout, None);
+    register_selection_listeners(window, hitbox, key, surface, text, layout, None);
 }
 
 /// The wrapping div shared by every selectable text region: markdown
@@ -1418,6 +1437,9 @@ fn code_line_selection_key(row_key: &str, code_ix: usize, line_ix: usize) -> std
 /// continuity model that lets a drag span paragraphs/list items (Zed gets
 /// this for free from its single-element markdown; our tree rebuilds it).
 struct RegEntry {
+    /// Which painted transcript this element belongs to (see
+    /// `selection_frame_reset_for`); 0 for surfaces that never share a frame.
+    surface: u64,
     key: std::sync::Arc<str>,
     text: SharedString,
     layout: gpui::TextLayout,
@@ -1426,6 +1448,11 @@ struct RegEntry {
 
 thread_local! {
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
+    /// The surface currently painting: set by its reset canvas, which paints
+    /// before any of its text, and stamped onto each entry it registers.
+    static PAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
+    /// Surfaces whose reset painted since the latest one's previous reset.
+    static PAINTED_SURFACES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -1466,13 +1493,38 @@ pub(super) fn selection_test_snapshot(
 /// the transcript root (before any markdown), so each frame's registry holds
 /// exactly that frame's visible text elements in paint order.
 pub fn selection_frame_reset() -> impl IntoElement {
+    selection_frame_reset_for(0)
+}
+
+/// `selection_frame_reset` for one of several surfaces painted in the same
+/// frame (the main chat beside a side chat or subagent tab). It clears only
+/// its own surface's entries and stamps the text painted after it, so
+/// another transcript's reset can't wipe this one's drag anchor.
+///
+/// A surface that stops painting (closed side chat or subagent tab) never
+/// resets again, so its entries are dropped once a full cycle of this
+/// surface's resets passes without it.
+pub fn selection_frame_reset_for(surface: u64) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        |_, _, _, _| {
-            REGISTRY.with(|r| {
-                r.borrow_mut()
-                    .retain(|e| !selection_scope(&e.key).is_empty())
-            })
+        move |_, _, _, _| {
+            PAINTING_SURFACE.with(|s| s.set(surface));
+            PAINTED_SURFACES.with(|painted| {
+                let mut painted = painted.borrow_mut();
+                // Seeing this surface again closes a cycle: `painted` now
+                // holds every surface still on screen.
+                let cycle = painted.contains(&surface);
+                REGISTRY.with(|r| {
+                    r.borrow_mut().retain(|e| {
+                        !selection_scope(&e.key).is_empty()
+                            || (e.surface != surface && (!cycle || painted.contains(&e.surface)))
+                    })
+                });
+                if cycle {
+                    painted.clear();
+                }
+                painted.push(surface);
+            });
         },
     )
     .absolute()
@@ -1509,18 +1561,32 @@ pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
 }
 
 /// `(element index, byte offset)` for a window position: the registered
-/// element whose vertical band contains it, else the nearest by vertical
-/// distance (a drag past the gutter or between blocks clamps sensibly).
+/// element whose bounds contain it, else the nearest horizontally within the
+/// closest vertical band. Vertical distance stays primary so dragging beyond
+/// a short paragraph's edge keeps selecting that line. Horizontal distance
+/// distinguishes side-by-side text such as table cells and their padding.
 fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
     REGISTRY.with(|r| {
         let reg = r.borrow();
         let anchor = super::selection::anchor_key().unwrap_or_default();
-        let mut best: Option<(usize, f32)> = None;
+        // A drag only resolves against its own surface, so a second
+        // transcript on screen can't capture it.
+        let anchor_surface = super::selection::anchor_surface();
+        let mut best: Option<(usize, f32, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
-            if selection_scope(&entry.key) != selection_scope(&anchor) {
+            if selection_scope(&entry.key) != selection_scope(&anchor)
+                || entry.surface != anchor_surface
+            {
                 continue;
             }
             let b = entry.layout.bounds();
+            let dx = if position.x < b.left() {
+                f32::from(b.left() - position.x)
+            } else if position.x > b.right() {
+                f32::from(position.x - b.right())
+            } else {
+                0.0
+            };
             let dy = if position.y < b.top() {
                 f32::from(b.top() - position.y)
             } else if position.y > b.bottom() {
@@ -1528,14 +1594,14 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
             } else {
                 0.0
             };
-            if best.is_none_or(|(_, d)| dy < d) {
-                best = Some((ei, dy));
+            if best.is_none_or(|(_, best_dy, best_dx)| (dy, dx) < (best_dy, best_dx)) {
+                best = Some((ei, dy, dx));
             }
-            if dy == 0.0 {
+            if dy == 0.0 && dx == 0.0 {
                 break;
             }
         }
-        let (ei, _) = best?;
+        let (ei, _, _) = best?;
         let ix = match reg[ei].layout.index_for_position(position) {
             Ok(ix) | Err(ix) => ix,
         };
@@ -1559,7 +1625,7 @@ fn resolve_drag(head: (usize, usize)) -> bool {
         let filtered: Vec<_> = reg
             .iter()
             .enumerate()
-            .filter(|(_, e)| selection_scope(&e.key) == scope)
+            .filter(|(_, e)| selection_scope(&e.key) == scope && e.surface == entry.surface)
             .collect();
         let Some(index) = filtered.iter().position(|(ix, _)| *ix == head.0) else {
             return false;
@@ -1589,6 +1655,7 @@ fn register_selection_listeners(
     window: &mut Window,
     hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
+    surface: u64,
     text: &SharedString,
     layout: &gpui::TextLayout,
     offsets: Option<super::link_presentation::OffsetMap>,
@@ -1611,12 +1678,12 @@ fn register_selection_listeners(
                 match e.click_count {
                     2 => {
                         let range = super::selection::word_range(&text, ix);
-                        super::selection::begin_with_span(&key, &text, range);
+                        super::selection::begin_with_span_in(surface, &key, &text, range);
                     }
                     n if n >= 3 => {
-                        super::selection::begin_with_span(&key, &text, 0..text.len());
+                        super::selection::begin_with_span_in(surface, &key, &text, 0..text.len());
                     }
-                    _ => super::selection::begin(&key, ix),
+                    _ => super::selection::begin_in(surface, &key, ix),
                 }
                 window.refresh();
             } else if super::selection::clear_if_owner(&key) {
@@ -1752,7 +1819,7 @@ fn text_element(
     opts: &RenderOptions,
     theme: &Theme,
 ) -> AnyElement {
-    if let Some(media) = &opts.media {
+    if let Some(image_ui) = opts.media.as_ref().and_then(|media| media.image.as_ref()) {
         if runs.iter().any(|run| run.style.image.is_some()) {
             let mut elements = Vec::new();
             let mut start = 0;
@@ -1770,7 +1837,7 @@ fn text_element(
                             theme,
                         ));
                     }
-                    elements.push((media.image)(
+                    elements.push(image_ui(
                         image,
                         format!("{}-image-{ix}-{index}", opts.row_key).into(),
                         theme,
@@ -1967,7 +2034,27 @@ fn render_code_block(
     if language.is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
         if let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref()) {
             let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
-            let diagram = handler(code, frame_id.clone(), theme);
+            let diagram = match handler(code, frame_id.clone(), theme) {
+                DiagramView::Source => {
+                    return render_code_block_source(
+                        language, code, top_ix, ix, opts, theme, highlight,
+                    );
+                }
+                DiagramView::Failed(reason) => {
+                    let notice = code_notice(format!("{frame_id}-failure").into(), reason, theme);
+                    return render_code_block_source_with_actions(
+                        language,
+                        code,
+                        top_ix,
+                        ix,
+                        opts,
+                        theme,
+                        highlight,
+                        vec![notice],
+                    );
+                }
+                DiagramView::Diagram(diagram) => diagram,
+            };
             let toggle = diagram.toggle_source.clone();
             let toggle_action = code_icon_action(
                 format!("{frame_id}-source-toggle").into(),
@@ -2031,11 +2118,31 @@ fn code_icon_action(
             cx.stop_propagation();
             handler(window, cx);
         })
-        .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label)).into())
+        .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label.into())).into())
         .child(
             crate::icons::icon(icon_path)
                 .size(px(13.0))
                 .text_color(theme.text_muted),
+        )
+        .into_any_element()
+}
+
+/// A passive header marker whose tooltip explains why a fence stays source.
+fn code_notice(id: SharedString, message: SharedString, theme: &Theme) -> AnyElement {
+    div()
+        .id(id)
+        .size(px(CODE_ACTION_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(move |_, cx| {
+            let message = message.clone();
+            cx.new(move |_| CodeBlockTooltip(message)).into()
+        })
+        .child(
+            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                .size(px(13.0))
+                .text_color(theme.warning_muted),
         )
         .into_any_element()
 }
@@ -2073,7 +2180,7 @@ fn code_copy_button(
                 cx.stop_propagation();
                 handler(ix, code_text.clone(), window, cx);
             })
-            .tooltip(|_, cx| cx.new(|_| CodeBlockTooltip("Copy code")).into())
+            .tooltip(|_, cx| cx.new(|_| CodeBlockTooltip("Copy code".into())).into())
             .child(
                 crate::icons::icon(if copied {
                     crate::icons::CHECK
@@ -2261,11 +2368,14 @@ fn render_code_block_source_with_actions(
             })
             .tooltip(move |_, cx| {
                 cx.new(move |_| {
-                    CodeBlockTooltip(if fit_content {
-                        "Use horizontal scrolling"
-                    } else {
-                        "Fit content"
-                    })
+                    CodeBlockTooltip(
+                        if fit_content {
+                            "Use horizontal scrolling"
+                        } else {
+                            "Fit content"
+                        }
+                        .into(),
+                    )
                 })
                 .into()
             })
@@ -2557,6 +2667,401 @@ mod tests {
                     root.child(div().absolute().inset_0().occlude())
                 })
         }
+    }
+
+    struct MarkdownSelectionHarness;
+
+    impl Render for MarkdownSelectionHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let source = "# Heading\n\nBefore **bold** and *italic* with `code`.\n\n\
+                | Agent | Branch | Target |\n\
+                | --- | --- | --- |\n\
+                | linux | `lab-linux` | Linux jobs, ten minutes or less. This long target wraps across several visual lines in its cell. |\n\
+                | macos | `lab-macos` | macOS jobs |\n\n\
+                > A **quoted** paragraph.\n\n\
+                - A list with `inline code`.\n\n\
+                After the table.";
+            div()
+                .size_full()
+                .child(selection_frame_reset())
+                .child(render_tree(
+                    &parse_full(source),
+                    &RenderOptions::settled("markdown-selection-test".into()),
+                    &theme,
+                    window,
+                    &|_| None,
+                ))
+        }
+    }
+
+    fn selection_key_for_text(text: &str) -> String {
+        REGISTRY.with(|registry| {
+            registry
+                .borrow()
+                .iter()
+                .find(|entry| entry.text.as_ref() == text)
+                .unwrap_or_else(|| panic!("missing painted text: {text}"))
+                .key
+                .to_string()
+        })
+    }
+
+    fn selection_position(key: &str, ix: usize) -> gpui::Point<gpui::Pixels> {
+        let (_, layout, _) = selection_test_snapshot(key);
+        layout.position_for_index(ix).expect("text position")
+            + point(px(0.1), layout.line_height() / 2.0)
+    }
+
+    #[gpui::test]
+    fn markdown_drag_tracks_each_table_column_and_wrapped_cell(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| MarkdownSelectionHarness);
+        cx.simulate_resize(size(px(560.0), px(800.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+
+        let target = "Linux jobs, ten minutes or less. This long target wraps across several visual lines in its cell.";
+        let target_key = selection_key_for_text(target);
+        assert!(selection_test_bounds(&target_key).size.height > px(MD_LINE_HEIGHT));
+        // Every column must track the pointer, including later visual lines
+        // in a wrapped cell, and a drag must contract and reverse normally.
+        for text in ["linux", "lab-linux", target, "lab-macos", "macOS jobs"] {
+            let key = selection_key_for_text(text);
+            let start = selection_position(&key, 1);
+            let end = selection_position(&key, text.len() - 1);
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: start,
+                click_count: 1,
+                ..Default::default()
+            });
+            for (position, expected) in [
+                (end, &text[1..text.len() - 1]),
+                (start, ""),
+                (selection_position(&key, 0), &text[..1]),
+            ] {
+                cx.simulate_event(gpui::MouseMoveEvent {
+                    position,
+                    pressed_button: Some(gpui::MouseButton::Left),
+                    ..Default::default()
+                });
+                assert_eq!(
+                    super::super::selection::selected_text().unwrap_or_default(),
+                    expected,
+                    "drag inside {text}"
+                );
+            }
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position: selection_position(&key, 0),
+                ..Default::default()
+            });
+            super::super::selection::clear_if_owner(&key);
+        }
+    }
+
+    #[gpui::test]
+    fn markdown_drag_clamps_in_cell_padding_and_outside_paragraphs(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| MarkdownSelectionHarness);
+        cx.simulate_resize(size(px(560.0), px(800.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        for text in [
+            "linux",
+            "lab-linux",
+            "lab-macos",
+            "macOS jobs",
+            "A quoted paragraph.",
+        ] {
+            let key = selection_key_for_text(text);
+            let bounds = selection_test_bounds(&key);
+            // Padding belongs to the nearest cell, even if an earlier column
+            // has text at the same y. Each side clamps to that cell's endpoint.
+            for (position, expected) in [
+                (
+                    point(
+                        bounds.right() + px(4.0),
+                        selection_position(&key, text.len()).y,
+                    ),
+                    &text[1..],
+                ),
+                (
+                    point(bounds.left() - px(4.0), selection_position(&key, 0).y),
+                    &text[..1],
+                ),
+            ] {
+                cx.simulate_event(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: selection_position(&key, 1),
+                    click_count: 1,
+                    ..Default::default()
+                });
+                cx.simulate_event(gpui::MouseMoveEvent {
+                    position,
+                    pressed_button: Some(gpui::MouseButton::Left),
+                    ..Default::default()
+                });
+                let selected = super::super::selection::selected_text();
+                super::super::selection::end_active_drag();
+                super::super::selection::clear_if_owner(&key);
+                assert_eq!(selected.as_deref(), Some(expected), "padding beside {text}");
+            }
+        }
+        // A far-right drag on a short heading must stay on that line instead
+        // of jumping to a wider paragraph below (Euclidean nearest is wrong).
+        let key = selection_key_for_text("Heading");
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: selection_position(&key, 0),
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: selection_position(&key, 0) + point(px(1000.0), px(0.0)),
+            pressed_button: Some(gpui::MouseButton::Left),
+            ..Default::default()
+        });
+        let selected = super::super::selection::selected_text();
+        super::super::selection::end_active_drag();
+        super::super::selection::clear_if_owner(&key);
+        assert_eq!(selected.as_deref(), Some("Heading"));
+    }
+
+    #[gpui::test]
+    fn markdown_drag_crosses_cells_and_formatted_blocks_in_document_order(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| MarkdownSelectionHarness);
+        cx.simulate_resize(size(px(560.0), px(800.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let branch_key = selection_key_for_text("lab-linux");
+        let target = "Linux jobs, ten minutes or less. This long target wraps across several visual lines in its cell.";
+        let target_key = selection_key_for_text(target);
+        let macos_key = selection_key_for_text("lab-macos");
+        let before_key = selection_key_for_text("Before bold and italic with code.");
+        let after_key = selection_key_for_text("After the table.");
+        for (anchor_key, anchor_ix, head_key, head_ix, expected) in [
+            (
+                &branch_key,
+                4,
+                &target_key,
+                10,
+                "linux\nLinux jobs".to_string(),
+            ),
+            (
+                &target_key,
+                10,
+                &branch_key,
+                4,
+                "linux\nLinux jobs".to_string(),
+            ),
+            (
+                &branch_key,
+                4,
+                &macos_key,
+                3,
+                format!("linux\n{target}\nmacos\nlab"),
+            ),
+            (
+                &before_key,
+                0,
+                &after_key,
+                16,
+                format!(
+                    "Before bold and italic with code.\nAgent\nBranch\nTarget\nlinux\nlab-linux\n{target}\nmacos\nlab-macos\nmacOS jobs\nA quoted paragraph.\nA list with inline code.\nAfter the table."
+                ),
+            ),
+        ] {
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: selection_position(anchor_key, anchor_ix),
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position: selection_position(head_key, head_ix),
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            let selected = super::super::selection::selected_text();
+            super::super::selection::end_active_drag();
+            super::super::selection::clear_if_owner(anchor_key);
+            assert_eq!(selected.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    /// Two transcripts painted side by side (main chat + side chat or subagent
+    /// tab), each opening with its own `selection_frame_reset()`. A side
+    /// chat's forked history repeats its parent's row keys: `prefixes` equal.
+    struct TwoPaneSelectionHarness {
+        prefixes: [&'static str; 2],
+        second_pane: bool,
+    }
+
+    impl TwoPaneSelectionHarness {
+        fn new(prefixes: [&'static str; 2]) -> Self {
+            Self {
+                prefixes,
+                second_pane: true,
+            }
+        }
+    }
+
+    impl Render for TwoPaneSelectionHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let pane = |prefix: &str, surface: u64| {
+                let opts = RenderOptions::settled(prefix.to_string().into());
+                div()
+                    .w(px(320.0))
+                    .h_full()
+                    .child(selection_frame_reset_for(surface))
+                    .child(text_element(
+                        &[InlineRun {
+                            text: "alpha beta gamma delta".into(),
+                            style: InlineStyle::default(),
+                        }],
+                        MD_TEXT_SIZE,
+                        MD_LINE_HEIGHT,
+                        false,
+                        0,
+                        0,
+                        &opts,
+                        &theme,
+                    ))
+            };
+            div()
+                .size_full()
+                .flex()
+                .child(pane(self.prefixes[0], 1))
+                .when(self.second_pane, |el| el.child(pane(self.prefixes[1], 2)))
+        }
+    }
+
+    #[gpui::test]
+    fn dragging_selects_text_in_every_pane_of_a_two_transcript_layout(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| TwoPaneSelectionHarness::new(["pane-a", "pane-b"]));
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        // Each pane is 320px wide; drag across the start of its text. The
+        // last-painted pane is the control: it always worked.
+        for (name, left) in [("pane-b", 320.0), ("pane-a", 0.0)] {
+            let start = point(px(left + 1.0), px(9.0));
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: start,
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position: start + point(px(60.0), px(0.0)),
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            let selected = super::super::selection::selected_text();
+            super::super::selection::end_active_drag();
+            super::super::selection::clear_if_owner(&format!("{name}:0"));
+            assert!(
+                selected.is_some_and(|text| !text.is_empty()),
+                "a drag in {name} must select text"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn a_forked_pane_sharing_keys_keeps_its_selection_to_itself(cx: &mut TestAppContext) {
+        use super::super::selection;
+        let _selection = selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| TwoPaneSelectionHarness::new(["fork", "fork"]));
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        // Both panes paint `fork:0`. Whichever pane the drag starts in, it
+        // must select there (the other pane's same-key listener must not
+        // clear it) and wash only there.
+        for (surface, other, left) in [(1, 2, 0.0), (2, 1, 320.0)] {
+            let start = point(px(left + 1.0), px(9.0));
+            let end = start + point(px(60.0), px(0.0));
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: start,
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position: end,
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position: end,
+                ..Default::default()
+            });
+            let selected = selection::selected_text();
+            let washed = selection::wash_range(surface, "fork:0");
+            let leaked = selection::wash_range(other, "fork:0");
+            selection::clear_if_owner("fork:0");
+            let selected = selected.unwrap_or_default();
+            assert!(
+                "alpha beta gamma delta".starts_with(&selected) && !selected.is_empty(),
+                "a drag in surface {surface} copies its own text, got {selected:?}"
+            );
+            assert_eq!(washed, Some(0..selected.len()), "surface {surface} washes");
+            assert_eq!(leaked, None, "surface {other} stays unwashed");
+        }
+    }
+
+    #[gpui::test]
+    fn a_closed_pane_leaves_no_registry_entries_behind(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (view, cx) =
+            cx.add_window_view(|_, _| TwoPaneSelectionHarness::new(["pane-a", "pane-b"]));
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        let entries = |surface: u64| {
+            REGISTRY.with(|r| r.borrow().iter().filter(|e| e.surface == surface).count())
+        };
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        assert!(entries(2) > 0);
+
+        // The side chat closes: its reset never paints again.
+        view.update(cx, |harness, cx| {
+            harness.second_pane = false;
+            cx.notify();
+        });
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        assert_eq!(entries(2), 0, "the closed pane's text is dropped");
+        assert!(entries(1) > 0, "the open pane keeps its text");
     }
 
     #[gpui::test]

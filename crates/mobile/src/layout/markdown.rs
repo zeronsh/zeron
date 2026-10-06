@@ -35,6 +35,9 @@ pub(crate) struct PText {
     pub links: Vec<String>,
     /// Chip rect within a line box: (top offset, height).
     pub chip: (f32, f32),
+    /// Spans painted as mention chips (the desktop's file badge: a soft pill
+    /// with an icon well at its start), with each one's icon.
+    pub badges: Vec<(usize, String)>,
 }
 
 pub(crate) struct PCode {
@@ -168,6 +171,7 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
         paints,
         links,
         chip: ((lh - chip_h) / 2.0, chip_h),
+        badges: Vec::new(),
     }
 }
 
@@ -210,6 +214,7 @@ pub(crate) fn prepare_plain(
         }],
         links: Vec::new(),
         chip: (0.0, 0.0),
+        badges: Vec::new(),
     }
 }
 
@@ -387,6 +392,7 @@ fn prepare_code(ctx: &mut Ctx, language: Option<&str>, code: &str) -> PCode {
             .collect(),
         links: Vec::new(),
         chip: (0.0, 0.0),
+        badges: Vec::new(),
     };
     let label = language.filter(|l| !l.is_empty()).map(|l| {
         let (size, lh) = TYPE.small;
@@ -460,6 +466,21 @@ pub(crate) fn place_text(t: &PText, x: f32, y: f32, width: f32, out: Option<&mut
             }
             if paint.chip {
                 out.fill(x + f.x, top + t.chip.0, f.width, t.chip.1, 5.0, ColorRole::InlineCodeBackground);
+            }
+            if let Some((_, icon)) = t.badges.iter().find(|(span, _)| *span == f.span) {
+                let (chip_top, chip_h) = t.chip;
+                out.fill(x + f.x, top + chip_top, f.width, chip_h, 5.0, ColorRole::ToolBadge);
+                if f.range.start == span.range.start {
+                    let well = chip_h - 2.0;
+                    let (wx, wy) = (x + f.x + 1.0, top + chip_top + 1.0);
+                    out.fill(wx, wy, well, well, 4.0, ColorRole::ToolWell);
+                    let size = well - 4.0;
+                    out.widget(
+                        WidgetKind::Icon { name: icon.clone(), color: ColorRole::TextSoft },
+                        (wx + (well - size) / 2.0, wy + (well - size) / 2.0, size, size),
+                        None,
+                    );
+                }
             }
             if f.utf16.is_empty() {
                 continue;

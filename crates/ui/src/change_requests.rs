@@ -393,6 +393,7 @@ mod tests {
             git_detected: true,
             git_checked_at: None,
             checkout_id: Some("checkout".into()),
+            repository_id: None,
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
         }
     }

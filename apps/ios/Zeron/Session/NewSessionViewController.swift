@@ -16,11 +16,16 @@ struct NewSessionDraft: Equatable, Codable {
 struct ProjectOption: Equatable {
     let id: String
     let name: String
+    let path: String
     let device: String
     /// Display name of `device` (never show the id).
     let deviceName: String
     let online: Bool
     let git: Bool
+    /// Shared by every checkout of one repository, on any device; with
+    /// `groupName` and `colorIndex` they read as one project.
+    let groupKey: String
+    let groupName: String
     let colorIndex: Int
 }
 
@@ -231,10 +236,20 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private var project: ProjectOption? { app.projectOptions.first { $0.id == draft.projectId } }
     private var deviceId: String { project?.device ?? draft.hostId ?? "" }
 
+    /// Checkouts of the picked project, one per row of the host menu.
+    private var checkouts: [ProjectOption] {
+        guard let p = project else { return [] }
+        return app.projectOptions
+            .filter { $0.groupKey == p.groupKey }
+            .sorted { ($0.deviceName.lowercased(), $0.path) < ($1.deviceName.lowercased(), $1.path) }
+    }
+
     private func refreshChips() {
         var chips: [ComposerChip] = []
         if let p = project {
-            chips.append(ComposerChip(id: "project", title: p.name, symbol: nil, icon: ProjectTile.image(name: p.name, colorIndex: p.colorIndex)))
+            // The project, then the host it runs on.
+            chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
+            chips.append(ComposerChip(id: "host", title: p.deviceName, symbol: "desktopcomputer"))
             if p.git {
                 chips.append(ComposerChip(id: "branch", title: draft.worktree ? "New worktree" : (draft.branch ?? "Current branch"), symbol: nil, icon: BranchIcon.sized()))
             }
@@ -262,20 +277,27 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
     }
 
+    /// One entry per project — checkouts of one repository, on any device,
+    /// are one entry listing their hosts; the host chip then picks which.
     private func projectMenu() -> UIMenu {
-        let byDevice = Dictionary(grouping: app.projectOptions, by: \.device)
-        var sections: [UIMenuElement] = byDevice.keys.sorted { (byDevice[$0]?.first?.deviceName ?? "") < (byDevice[$1]?.first?.deviceName ?? "") }.map { device in
-            let items = byDevice[device]!
-            let name = items.first?.deviceName ?? "Host"
-            return UIMenu(title: name + (items.first?.online == false ? " · offline" : ""), options: .displayInline, children: items.map { p in
-                UIAction(title: p.name, image: UIImage(systemName: p.git ? "folder.badge.gearshape" : "folder"), state: p.id == draft.projectId ? .on : .off) { [weak self] _ in
-                    self?.draft.projectId = p.id
-                    self?.draft.hostId = nil
-                    self?.draft.branch = nil
-                    self?.loadModels()
-                }
-            })
+        var groups: [[ProjectOption]] = []
+        for p in app.projectOptions {
+            if let i = groups.firstIndex(where: { $0[0].groupKey == p.groupKey }) {
+                groups[i].append(p)
+            } else {
+                groups.append([p])
+            }
         }
+        groups.sort { $0[0].groupName.localizedCaseInsensitiveCompare($1[0].groupName) == .orderedAscending }
+        let picked = project?.groupKey
+        var sections: [UIMenuElement] = [UIMenu(options: .displayInline, children: groups.map { members in
+            let first = members[0]
+            var hosts: [String] = []
+            for m in members where !hosts.contains(m.deviceName) { hosts.append(m.deviceName) }
+            return UIAction(title: first.groupName, subtitle: hosts.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.joined(separator: ", "), image: ProjectTile.image(name: first.groupName, colorIndex: first.colorIndex, side: 18), state: first.groupKey == picked ? .on : .off) { [weak self] _ in
+                self?.pickProject(members)
+            }
+        })]
         sections.append(UIMenu(options: .displayInline, children: [
             UIAction(title: "No Project…", image: UIImage(systemName: "tray"), state: draft.projectId == nil ? .on : .off) { [weak self] _ in
                 guard let self else { return }
@@ -298,8 +320,37 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         return UIMenu(title: "Project", children: sections)
     }
 
+    /// Keep the host when it has a checkout of the project, else the first
+    /// reachable one.
+    private func pickProject(_ members: [ProjectOption]) {
+        let pick = members.first { $0.id == draft.projectId }
+            ?? members.first { $0.device == deviceId }
+            ?? members.first(where: \.online)
+            ?? members[0]
+        pickCheckout(pick)
+    }
+
+    private func pickCheckout(_ p: ProjectOption) {
+        if p.id != draft.projectId { draft.branch = nil }
+        draft.projectId = p.id
+        draft.hostId = nil
+        loadModels()
+    }
+
+    /// With a project: its checkouts, by host (the path tells apart several
+    /// on one host). Without: every host — project-less sessions run in its
+    /// home.
     private func hostMenu() -> UIMenu {
-        UIMenu(title: "Run on", children: app.hostOptions.map { h in
+        let checkouts = self.checkouts
+        if !checkouts.isEmpty {
+            return UIMenu(title: "Run on", children: checkouts.map { p in
+                let shared = checkouts.filter { $0.device == p.device }.count > 1
+                return UIAction(title: p.deviceName, subtitle: shared ? p.path : (p.online ? "Online" : "Offline"), image: UIImage(systemName: "desktopcomputer"), state: p.id == draft.projectId ? .on : .off) { [weak self] _ in
+                    self?.pickCheckout(p)
+                }
+            })
+        }
+        return UIMenu(title: "Run on", children: app.hostOptions.map { h in
             UIAction(title: h.name, subtitle: h.online ? "Online" : "Offline", image: UIImage(systemName: "desktopcomputer"), state: h.id == draft.hostId ? .on : .off) { [weak self] _ in
                 self?.draft.hostId = h.id
                 self?.loadModels()

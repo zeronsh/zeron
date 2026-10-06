@@ -121,7 +121,9 @@ pub fn is_openable_login_url(url: &str) -> bool {
         "https" => true,
         "http" => {
             let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-            let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+            let authority = authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host);
             let host = match authority.strip_prefix('[') {
                 Some(v6) => v6.split(']').next().unwrap_or(""),
                 None => authority.split(':').next().unwrap_or(""),
@@ -1185,7 +1187,10 @@ impl AccountsPage {
         // line, so a failed probe never changes the row's height.
         let usage: AnyElement = if account.usage_windows.is_empty() {
             meta.extend(self.render_usage_missing(account, theme));
-            div().w(px(USAGE_COLUMN_WIDTH)).flex_none().into_any_element()
+            div()
+                .w(px(USAGE_COLUMN_WIDTH))
+                .flex_none()
+                .into_any_element()
         } else {
             let resets = account
                 .usage_windows
@@ -1371,7 +1376,9 @@ impl AccountsPage {
                     .flex_1()
                     .min_w_0()
                     .child(widgets::row_title(theme, email.clone()).truncate())
-                    .when(!meta.is_empty(), |el| el.child(widgets::meta_line(theme, meta))),
+                    .when(!meta.is_empty(), |el| {
+                        el.child(widgets::meta_line(theme, meta))
+                    }),
             )
             .child(usage)
             .child(
@@ -2218,7 +2225,9 @@ impl Render for AccountsPage {
 mod tests {
     #[test]
     fn only_web_and_loopback_login_urls_open() {
-        assert!(is_openable_login_url("https://claude.com/cai/oauth/authorize?x=1"));
+        assert!(is_openable_login_url(
+            "https://claude.com/cai/oauth/authorize?x=1"
+        ));
         assert!(is_openable_login_url("http://localhost:1455/auth/callback"));
         assert!(is_openable_login_url("http://127.0.0.1:8080/"));
         assert!(is_openable_login_url("http://[::1]:9000/cb"));

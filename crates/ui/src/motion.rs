@@ -21,6 +21,8 @@
 //! switch; pure helpers take the flag explicitly where they run outside elements.
 //! [`ReduceMotion`] drives that switch from the OS accessibility setting or the
 //! user's override, and optionally from main-window focus.
+//! Activity grids use [`ActivityPulse`] to retain a gentle brightness cue under
+//! system reduced motion; explicit On and background pause keep them still.
 //!
 //! translateY is implemented as a relative-position `top` inset: taffy applies
 //! relative insets after layout, so — like a CSS transform — siblings never move.
@@ -122,8 +124,57 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
         return 0.0;
     }
     pulse_lease_every(view, stride, cx);
+    pulse_phase(spec, cx)
+}
+
+fn pulse_phase(spec: &MotionSpec, cx: &mut App) -> f32 {
     let clock = cx.default_global::<PulseClock>();
     (clock.epoch.elapsed().as_secs_f32() / spec.total().as_secs_f32()).fract()
+}
+
+/// Activity feedback uses a slow, uniform brightness pulse when the system
+/// reduces motion. Explicit On and background pause still stop all animation.
+/// Decorative animation continues to use the reduced-motion-gated helpers.
+#[derive(Clone, Copy)]
+pub struct ActivityPulse {
+    phase: f32,
+    subtle: bool,
+}
+
+impl ActivityPulse {
+    pub fn opacity(&self, cell_phase: f32, dim: f32) -> f32 {
+        if self.subtle {
+            // No travelling chase or size change, just a gentle 2.4s fade.
+            0.6 + 0.2 * pulse_wave(self.phase)
+        } else {
+            gspin_opacity(self.phase + cell_phase, dim)
+        }
+    }
+}
+
+pub fn activity_pulse(view: EntityId, cx: &mut App) -> ActivityPulse {
+    activity_pulse_every(view, 1, cx)
+}
+
+pub fn activity_pulse_slow(view: EntityId, cx: &mut App) -> ActivityPulse {
+    activity_pulse_every(view, 2, cx)
+}
+
+fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPulse {
+    let subtle = cx.reduce_motion();
+    let animate = !subtle
+        || cx.try_global::<MotionState>().is_some_and(|state| {
+            state.preference == ReduceMotion::System
+                && state.system
+                && !(state.pause_in_background && !state.active)
+        });
+    let phase = if animate {
+        schedule_pulse_every(view, if subtle { 2 } else { stride }, cx);
+        pulse_phase(if subtle { &ZERON_PULSE } else { &GRADIENT_SPIN }, cx)
+    } else {
+        0.0
+    };
+    ActivityPulse { phase, subtle }
 }
 
 /// Schedule cosmetic animation through the same bounded clock as loaders.
@@ -137,6 +188,10 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
     if cx.reduce_motion() {
         return;
     }
+    schedule_pulse_every(view, stride, cx);
+}
+
+fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
     let clock = cx.default_global::<PulseClock>();
     let now = Instant::now();
     clock
@@ -409,6 +464,9 @@ pub const EASE_TAILWIND: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 /// CSS `transition-colors` default: 150ms over [`EASE_TAILWIND`] — the temporal
 /// blend every interactive hover wash rides in the original.
 pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
+/// Zeron Icons (icons.zeron.sh) state morph: `--zi-duration: 280ms` over
+/// `cubic-bezier(.22, 1, .36, 1)` — the sidebar glyph's panel open ↔ closed.
+pub const GLYPH_STATE: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
 /// Zeron loader pulse period: 2.4s.
 pub const ZERON_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// Gradient matrix spinner wave period: 750ms.
@@ -544,6 +602,35 @@ where
         el.relative()
             .opacity(0.3 + 0.7 * t)
             .top(px(-2.0 * (1.0 - t)))
+    })
+}
+
+/// [`menu_in`] travelling from the trigger's side: `from` is the signed
+/// starting offset (negative above the resting place for dropdowns,
+/// positive below it for menus that open upward).
+pub fn menu_in_from<E>(id: impl Into<ElementId>, from: f32, element: E) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, MENU_IN.animation(), move |el, t| {
+        el.relative()
+            .opacity(0.3 + 0.7 * t)
+            .top(px(from * (1.0 - t)))
+    })
+}
+
+/// [`menu_out`] retreating toward the trigger by half the entrance travel.
+pub fn menu_out_toward<E>(
+    id: impl Into<ElementId>,
+    toward: f32,
+    t: f32,
+    element: E,
+) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, MENU_OUT.animation(), move |el, _| {
+        el.relative().opacity(1.0 - t).top(px(toward * 0.5 * t))
     })
 }
 
@@ -806,6 +893,128 @@ pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
 }
 
 // ---------------------------------------------------------------------------
+// Two-state glyph morphs (CSS `transition` on a `data-state` flip)
+// ---------------------------------------------------------------------------
+//
+// Zeron Icons morph between two states (the sidebar glyph's panel narrows when
+// the sidebar closes). Same manual clock and liveness rules as the hover
+// fades, but keyed by the element's *state* rather than pointer events: the
+// first read of a key snaps to its state (mounting never replays a morph), a
+// flip re-anchors at the current value so a mid-flight toggle reverses
+// smoothly, and an entry unread for a full frame is pruned.
+
+#[derive(Debug, Clone, Copy)]
+struct StateEntry {
+    origin: f32,
+    target: f32,
+    started: Instant,
+    spec: MotionSpec,
+    seen: u64,
+}
+
+impl StateEntry {
+    fn duration(&self) -> Duration {
+        self.spec.total().mul_f32(speed_scale())
+    }
+
+    fn value(&self, now: Instant) -> f32 {
+        let duration = self.duration();
+        let elapsed = now.saturating_duration_since(self.started);
+        if duration.is_zero() || elapsed >= duration {
+            return self.target;
+        }
+        let raw = elapsed.as_secs_f32() / duration.as_secs_f32();
+        lerp(self.origin, self.target, self.spec.progress(raw))
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        self.origin == self.target || now.saturating_duration_since(self.started) >= self.duration()
+    }
+}
+
+/// Per-key state-morph store. Pure core (explicit `now`) — unit-testable.
+#[derive(Default)]
+pub struct StateMorphs {
+    entries: HashMap<String, StateEntry>,
+    frame: u64,
+}
+
+impl StateMorphs {
+    /// Progress (0 = off, 1 = on) of `key` toward `on` at `now`; stamps
+    /// liveness. Reduced motion snaps a flip straight to its endpoint.
+    pub fn value_at(
+        &mut self,
+        key: &str,
+        on: bool,
+        spec: MotionSpec,
+        reduced: bool,
+        now: Instant,
+    ) -> f32 {
+        let target = if on { 1.0 } else { 0.0 };
+        let frame = self.frame;
+        let Some(entry) = self.entries.get_mut(key) else {
+            self.entries.insert(
+                key.to_string(),
+                StateEntry {
+                    origin: target,
+                    target,
+                    started: now,
+                    spec,
+                    seen: frame,
+                },
+            );
+            return target;
+        };
+        if entry.target != target {
+            let current = entry.value(now);
+            *entry = StateEntry {
+                origin: if reduced { target } else { current },
+                target,
+                started: now,
+                spec,
+                seen: frame,
+            };
+        }
+        entry.seen = frame;
+        entry.value(now)
+    }
+
+    /// Once-per-frame bookkeeping: prune unmounted entries and report whether
+    /// any morph is still mid-flight (→ keep frames coming).
+    pub fn tick_at(&mut self, now: Instant) -> bool {
+        self.frame += 1;
+        let frame = self.frame;
+        let mut active = false;
+        self.entries.retain(|_, entry| {
+            if entry.seen + 1 < frame {
+                return false;
+            }
+            active |= !entry.settled(now);
+            true
+        });
+        active
+    }
+}
+
+thread_local! {
+    static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
+}
+
+/// Morph progress (0..1) of `key` toward `on` this frame.
+pub fn state_t(key: &str, on: bool, spec: MotionSpec, reduced: bool) -> f32 {
+    STATE_MORPHS.with(|morphs| {
+        morphs
+            .borrow_mut()
+            .value_at(key, on, spec, reduced, Instant::now())
+    })
+}
+
+/// Frame-drive hook, beside [`hover_fades_active`]: call ONCE per window frame.
+pub fn state_morphs_active() -> bool {
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().tick_at(Instant::now()))
+}
+
+// ---------------------------------------------------------------------------
 // Reduced motion
 // ---------------------------------------------------------------------------
 
@@ -1046,6 +1255,171 @@ fn refresh_system(_cx: &mut App) {}
 #[cfg(test)]
 mod tests {
     #[test]
+    fn reduced_activity_pulse_is_slow_uniform_and_gentle() {
+        for phase in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9] {
+            let pulse = ActivityPulse {
+                phase,
+                subtle: true,
+            };
+            let opacity = pulse.opacity(0.0, 0.1);
+            assert!((0.6..=0.8).contains(&opacity));
+            assert_eq!(opacity, pulse.opacity(0.5, 0.1), "no travelling wave");
+        }
+        let rest = ActivityPulse {
+            phase: 0.0,
+            subtle: true,
+        }
+        .opacity(0.0, 0.1);
+        let crest = ActivityPulse {
+            phase: 0.5,
+            subtle: true,
+        }
+        .opacity(0.0, 0.1);
+        assert!(
+            crest > rest,
+            "the activity cue must visibly change brightness"
+        );
+    }
+
+    #[gpui::test]
+    fn activity_pulse_honors_explicit_on_and_background_pause(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(|cx| {
+            for (preference, system, pause_in_background, active, animates) in [
+                (ReduceMotion::On, false, false, true, false),
+                (ReduceMotion::On, true, false, true, false),
+                (ReduceMotion::System, true, true, false, false),
+                (ReduceMotion::Off, true, true, false, false),
+                (ReduceMotion::System, true, true, true, true),
+                (ReduceMotion::System, true, false, false, true),
+                (ReduceMotion::System, false, false, true, true),
+                (ReduceMotion::Off, true, false, true, true),
+            ] {
+                cx.set_global(MotionState {
+                    preference,
+                    pause_in_background,
+                    system,
+                    active,
+                });
+                apply(cx);
+                let view = cx.new(|_| ());
+                let pulse = activity_pulse(view.entity_id(), cx);
+                let leased = cx
+                    .try_global::<PulseClock>()
+                    .is_some_and(|clock| clock.leases.contains_key(&view.entity_id()));
+                assert_eq!(
+                    leased, animates,
+                    "{preference:?}, system={system}, pause={pause_in_background}, active={active}"
+                );
+                if reduced_motion(cx) {
+                    assert!(pulse.subtle);
+                    let decorative_view = cx.new(|_| ());
+                    assert_eq!(
+                        pulse_delta(&ZERON_PULSE, decorative_view.entity_id(), cx),
+                        0.0
+                    );
+                    assert!(!cx.try_global::<PulseClock>().is_some_and(|clock| {
+                        clock.leases.contains_key(&decorative_view.entity_id())
+                    }));
+                }
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn cached_activity_loaders_keep_renewing_under_system_reduced_motion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext as _, Context, ParentElement as _, Render};
+
+        struct Loaders;
+        impl Render for Loaders {
+            fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = crate::theme::Theme::dark();
+                gpui::div()
+                    .child(crate::loaders::gradient_spinner(
+                        "working",
+                        &theme,
+                        2.5,
+                        cx.entity_id(),
+                        cx,
+                    ))
+                    .child(crate::loaders::mini_glyph_spinner(
+                        "sidebar-working",
+                        2.0,
+                        theme.glyph,
+                        cx.entity_id(),
+                        cx,
+                    ))
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_global(MotionState {
+                preference: ReduceMotion::System,
+                pause_in_background: false,
+                system: true,
+                active: true,
+            });
+            apply(cx);
+        });
+        let window = cx.add_window(|_, _| Loaders);
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        cx.run_until_parked();
+        for _ in 0..20 {
+            cx.background_executor.advance_clock(PULSE_TICK);
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        }
+        cx.update(|cx| {
+            let clock = cx.global::<PulseClock>();
+            assert!(clock.tick >= 20);
+            assert_eq!(
+                clock.leases.len(),
+                2,
+                "transcript and cached sidebar loader"
+            );
+            assert!(
+                clock.leases.values().all(|lease| lease.stride == 2),
+                "both loaders renew at 15Hz"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn system_reduced_motion_keeps_activity_loaders_ticking(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(|cx| {
+            cx.set_global(MotionState {
+                preference: ReduceMotion::System,
+                pause_in_background: false,
+                system: true,
+                active: true,
+            });
+            apply(cx);
+            assert!(reduced_motion(cx));
+
+            let view = cx.new(|_| ());
+            drop(crate::loaders::gradient_spinner(
+                "working",
+                &crate::theme::Theme::dark(),
+                2.5,
+                view.entity_id(),
+                cx,
+            ));
+            assert!(
+                cx.try_global::<PulseClock>()
+                    .is_some_and(|clock| clock.leases.contains_key(&view.entity_id())),
+                "a working indicator must keep receiving ticks with system reduced motion"
+            );
+        });
+    }
+
+    #[test]
     fn pulse_stride_reestablishes_after_each_paint() {
         let now = Instant::now();
         let mut lease = PulseLease {
@@ -1264,6 +1638,38 @@ mod tests {
     }
 
     #[test]
+    fn state_morph_snaps_on_mount_and_reverses_continuously() {
+        let mut morphs = StateMorphs::default();
+        let t0 = Instant::now();
+        let ms = |m: u64| t0 + Duration::from_millis(m);
+        let morph = |m: &mut StateMorphs, on, at| m.value_at("glyph", on, GLYPH_STATE, false, at);
+
+        // First sight lands on the state — no replay at mount.
+        assert_eq!(morph(&mut morphs, true, t0), 1.0);
+        assert!(!morphs.tick_at(t0));
+
+        // Flip: starts from 1, mid-flight strictly between, lands at 0.
+        assert_eq!(morph(&mut morphs, false, ms(10)), 1.0);
+        let mid = morph(&mut morphs, false, ms(80));
+        assert!(mid > 0.0 && mid < 1.0, "mid-flight: {mid}");
+        assert!(morphs.tick_at(ms(80)));
+
+        // Reverse mid-flight re-anchors — no jump — then lands at 1.
+        let at_flip = morph(&mut morphs, true, ms(80));
+        assert!((at_flip - mid).abs() < 1e-4, "continuity: {mid} vs {at_flip}");
+        assert_eq!(morph(&mut morphs, true, ms(400)), 1.0);
+        assert!(!morphs.tick_at(ms(400)));
+
+        // Reduced motion snaps a flip.
+        assert_eq!(morphs.value_at("glyph", false, GLYPH_STATE, true, ms(500)), 0.0);
+
+        // Unread for a full frame: pruned (a remount snaps again).
+        morphs.tick_at(ms(600));
+        morphs.tick_at(ms(700));
+        assert!(morphs.entries.is_empty());
+    }
+
+    #[test]
     fn hover_fade_reduced_motion_snaps() {
         let mut fades = HoverFades::default();
         let t0 = Instant::now();
@@ -1419,3 +1825,13 @@ mod tests {
 #[cfg(windows)]
 #[path = "motion/windows_pulse.rs"]
 mod windows_pulse;
+
+/// A bounded activation sheen for Fast service tier; GPUI handles reduced motion.
+pub fn fast_tier(
+    id: impl Into<ElementId>,
+    element: impl IntoElement + gpui::Styled + 'static,
+) -> impl IntoElement {
+    element.with_animation(id, Animation::new(Duration::from_millis(700)), |el, t| {
+        el.opacity(1.0 - 0.35 * (1.0 - t) * (std::f32::consts::PI * t).sin())
+    })
+}

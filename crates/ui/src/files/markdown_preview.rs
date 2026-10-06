@@ -239,14 +239,29 @@ impl MarkdownPreview {
             480.0,
         );
         let mut retired = Vec::new();
+        // Admission accounts current rasters, so a sharper one must still fit
+        // the document budget.
+        let mut used: usize = self
+            .images
+            .values()
+            .chain(self.diagrams.values())
+            .filter_map(|m| m.as_ref().ok())
+            .map(|m| m.bytes)
+            .sum();
         for media in self
             .images
             .values_mut()
             .chain(self.diagrams.values_mut())
             .filter_map(|m| m.as_mut().ok())
         {
-            let next = media.preview_for_view(target, window.scale_factor());
+            let others = used - media.bytes;
+            let next = media.preview_within(
+                target,
+                window.scale_factor(),
+                MAX_MEDIA_BYTES.saturating_sub(others),
+            );
             if !Arc::ptr_eq(&media.image, &next.image) {
+                used = others + next.bytes;
                 retired.push(std::mem::replace(media, next));
                 self.media_dirty = true;
             }
@@ -966,38 +981,22 @@ impl MarkdownPreview {
         loaded: &crate::image_media::MediaImage,
         id: gpui::SharedString,
         name: String,
+        plate: Option<gpui::Hsla>,
         weak: gpui::WeakEntity<Self>,
     ) -> AnyElement {
-        use gpui::StyledImage as _;
-        let preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
+        let mut preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
+        preview.plate = plate;
         let source = loaded.clone();
-        div()
-            .id(id)
-            .w_full()
-            .max_w(px(loaded.width))
-            .mx_auto()
-            .max_h(px(480.0))
-            .aspect_ratio(loaded.width / loaded.height)
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label("Enlarge image")
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                let _ = weak.update(cx, |view, cx| {
-                    view.close_media_preview(cx);
-                    view.zoom_source = Some(source.clone());
-                    preview.viewer.reset();
-                    view.preview_image = Some(preview.clone());
-                    window.focus(&view.preview_focus, cx);
-                    cx.notify();
-                });
-            })
-            .child(
-                gpui::img(loaded.image.clone())
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Contain),
-            )
-            .into_any_element()
+        crate::image_media::preview_element(loaded, id, move |window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.close_media_preview(cx);
+                view.zoom_source = Some(source.clone());
+                preview.viewer.reset();
+                view.preview_image = Some(preview.clone());
+                window.focus(&view.preview_focus, cx);
+                cx.notify();
+            });
+        })
     }
 
     #[cfg(test)]
@@ -1129,6 +1128,7 @@ impl MarkdownPreview {
                                 loaded,
                                 format!("{id}-image").into(),
                                 "Mermaid diagram".into(),
+                                Some(crate::markdown::mermaid::Palette::plate(theme)),
                                 diagram_owner.clone(),
                             ),
                             Some(Err(error)) => div()
@@ -1147,7 +1147,7 @@ impl MarkdownPreview {
                                 })
                                 .into_any_element(),
                         };
-                        render::DiagramUi {
+                        render::DiagramView::Diagram(render::DiagramUi {
                             body,
                             show_source: source_shown,
                             toggle_source: Rc::new(move |_, cx| {
@@ -1159,16 +1159,13 @@ impl MarkdownPreview {
                                     cx.notify();
                                 });
                             }),
-                        }
+                        })
                     })),
-                    image: Rc::new(move |image, id, theme| match images.get(&image.source) {
-                        Some(Ok(loaded)) => {
-                            let mut el =
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .child(Self::media_element(
+                    image: Some(Rc::new(move |image, id, theme| {
+                        match images.get(&image.source) {
+                            Some(Ok(loaded)) => {
+                                let mut el = div().flex().flex_col().gap(px(4.0)).child(
+                                    Self::media_element(
                                         loaded,
                                         id,
                                         if image.alt.is_empty() {
@@ -1176,12 +1173,17 @@ impl MarkdownPreview {
                                         } else {
                                             image.alt.clone()
                                         },
+                                        None,
                                         image_owner.clone(),
-                                    ));
-                            if let Some(target) = image.link.clone() {
-                                let link = image_link.clone();
-                                el = el.child(
-                                    super::toolbar_button("markdown-image-link", "Open image link")
+                                    ),
+                                );
+                                if let Some(target) = image.link.clone() {
+                                    let link = image_link.clone();
+                                    el = el.child(
+                                        super::toolbar_button(
+                                            "markdown-image-link",
+                                            "Open image link",
+                                        )
                                         .on_click(move |_, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
@@ -1196,51 +1198,52 @@ impl MarkdownPreview {
                                                 .size(px(crate::surface_chrome::ICON_SIZE))
                                                 .text_color(theme.text_muted),
                                         ),
-                                );
+                                    );
+                                }
+                                el.into_any_element()
                             }
-                            el.into_any_element()
-                        }
-                        state => {
-                            let text = if image.source.starts_with("https://")
-                                || image.source.starts_with("http://")
-                            {
-                                format!("{} — {}", image.alt, image.source)
-                            } else {
-                                format!(
-                                    "{} — {}",
-                                    image.alt,
-                                    state
-                                        .and_then(|s| s.as_ref().err())
-                                        .map(String::as_str)
-                                        .unwrap_or(if image_allowed.contains(&image.source) {
-                                            "Loading image…"
-                                        } else {
-                                            "Document image preview limit reached"
+                            state => {
+                                let text = if image.source.starts_with("https://")
+                                    || image.source.starts_with("http://")
+                                {
+                                    format!("{} — {}", image.alt, image.source)
+                                } else {
+                                    format!(
+                                        "{} — {}",
+                                        image.alt,
+                                        state
+                                            .and_then(|s| s.as_ref().err())
+                                            .map(String::as_str)
+                                            .unwrap_or(if image_allowed.contains(&image.source) {
+                                                "Loading image…"
+                                            } else {
+                                                "Document image preview limit reached"
+                                            })
+                                    )
+                                };
+                                let target = image.source.clone();
+                                let external =
+                                    target.starts_with("https://") || target.starts_with("http://");
+                                div()
+                                    .id(id)
+                                    .text_color(theme.text_muted)
+                                    .child(text)
+                                    .when(external, |el| {
+                                        let link = image_link.clone();
+                                        el.cursor_pointer().on_click(move |_, window, cx| {
+                                            render::activate_link(
+                                                render::LinkTarget::new(&target, &target),
+                                                render::LinkAction::Primary,
+                                                Some(&link),
+                                                window,
+                                                cx,
+                                            );
                                         })
-                                )
-                            };
-                            let target = image.source.clone();
-                            let external =
-                                target.starts_with("https://") || target.starts_with("http://");
-                            div()
-                                .id(id)
-                                .text_color(theme.text_muted)
-                                .child(text)
-                                .when(external, |el| {
-                                    let link = image_link.clone();
-                                    el.cursor_pointer().on_click(move |_, window, cx| {
-                                        render::activate_link(
-                                            render::LinkTarget::new(&target, &target),
-                                            render::LinkAction::Primary,
-                                            Some(&link),
-                                            window,
-                                            cx,
-                                        );
                                     })
-                                })
-                                .into_any_element()
+                                    .into_any_element()
+                            }
                         }
-                    }),
+                    })),
                 });
                 opts.link = Some(link.clone());
                 opts.copy = Some(self.copy_ui_for(&opts.row_key, cx));

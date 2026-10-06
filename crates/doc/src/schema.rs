@@ -1553,6 +1553,64 @@ mod tests {
     }
 
     #[test]
+    fn todo_status_survives_the_doc_and_refreshes_in_place() {
+        use zeron_proto::{TodoItem, TodoStatus};
+        let todo = |items: Vec<TodoItem>| MessagePart::Tool {
+            // The ACP/Codex plan reuses one id for every update.
+            id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+            call: ToolCall::Todo { items },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        let doc = SessionDoc::init("c1").unwrap();
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
+        let first = todo(vec![
+            TodoItem::new("read", TodoStatus::InProgress),
+            TodoItem::new("fix", TodoStatus::Pending),
+        ]);
+        w.sync(std::slice::from_ref(&first)).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, vec![first]);
+        // The next plan update rewrites the same part, in-progress moved on.
+        let second = todo(vec![
+            TodoItem::new("read", TodoStatus::Completed),
+            TodoItem::new("fix", TodoStatus::InProgress),
+        ]);
+        w.sync(std::slice::from_ref(&second)).unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[0].parts, vec![second]);
+    }
+
+    #[test]
+    fn legacy_todo_part_without_status_still_reads() {
+        // Written by a build that only knew `done`.
+        let part: DocPartJson = serde_json::from_value(serde_json::json!({
+            "id": "t", "kind": "tool", "isError": false,
+            "call": { "kind": "todo", "items": [
+                { "text": "a", "done": true }, { "text": "b", "done": false }
+            ]}
+        }))
+        .unwrap();
+        let MessagePart::Tool {
+            call: ToolCall::Todo { items },
+            ..
+        } = from_doc_part(part)
+        else {
+            panic!("a legacy todo part must still decode");
+        };
+        assert_eq!(items[0].status(), zeron_proto::TodoStatus::Completed);
+        assert_eq!(items[1].status(), zeron_proto::TodoStatus::Pending);
+    }
+
+    #[test]
     fn segment_sync_persists_subagent_chip_fields_on_live_parts() {
         // The eager-done world's OTHER path: the chip mutates while its
         // segment still streams (codex fan-outs) — update_part_fields must

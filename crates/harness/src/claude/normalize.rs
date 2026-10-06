@@ -2,7 +2,7 @@
 //! decoding, error-code mapping).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, TodoItem, ToolCall};
+use zeron_proto::{AgentEvent, DoneStatus, HarnessId, TodoItem, TodoStatus, ToolCall};
 
 use super::wire::{ContentBlock, Frame};
 
@@ -106,9 +106,11 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: str_field(t, "content"),
-                    done: t.get("status").and_then(Value::as_str) == Some("completed"),
+                .map(|t| {
+                    TodoItem::new(
+                        str_field(t, "content"),
+                        TodoStatus::parse(t.get("status").and_then(Value::as_str).unwrap_or("")),
+                    )
                 })
                 .collect(),
         },
@@ -191,6 +193,8 @@ pub(crate) struct Normalizer {
     /// re-keys them onto the spawn chip's feed (the wire never echoes the
     /// steer on the child feed — live-verified 2.1.228).
     agent_tasks: std::collections::HashMap<String, String>,
+    /// Later tool calls that wake the same task → its original spawn.
+    agent_tool_spawns: std::collections::HashMap<String, String>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -212,10 +216,114 @@ impl Normalizer {
             saw_init: false,
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
+            agent_tool_spawns: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
         }
+    }
+
+    /// Restore only spawn identity from Claude's native history. The CLI
+    /// does not replay task_started when --resume starts a new process.
+    /// Session ids are global; search project directories rather than
+    /// duplicating the CLI's cwd encoding (including long-path hashing).
+    /// Long sessions' histories run to hundreds of MB: the scan runs off the
+    /// runtime and only parses lines that can name a spawn or its agent.
+    pub async fn for_resume(config_root: &std::path::Path, session_id: &str) -> Self {
+        let config_root = config_root.to_owned();
+        let session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || Self::restore_spawns(&config_root, &session_id))
+            .await
+            .unwrap_or_else(|_| Self::new())
+    }
+
+    fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> Self {
+        use std::io::BufRead as _;
+        let mut norm = Self::new();
+        if session_id.is_empty()
+            || !session_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return norm;
+        }
+        let Ok(projects) = std::fs::read_dir(config_root.join("projects")) else {
+            return norm;
+        };
+        let Some(file) = projects.flatten().find_map(|project| {
+            std::fs::File::open(project.path().join(format!("{session_id}.jsonl"))).ok()
+        }) else {
+            return norm;
+        };
+        let mut reader = std::io::BufReader::with_capacity(1 << 16, file);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            // Torn lines and older/newer unknown shapes are harmless.
+            let Ok(text) = std::str::from_utf8(&line) else {
+                continue;
+            };
+            if !(text.contains("\"Agent\"")
+                || text.contains("\"Task\"")
+                || text.contains("agentId"))
+            {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            // A subagent's own nested spawns are not chips on this chat.
+            if record.get("isSidechain").and_then(Value::as_bool) == Some(true)
+                || !record.get("parent_tool_use_id").is_none_or(Value::is_null)
+            {
+                continue;
+            }
+            let Some(blocks) = record.pointer("/message/content").and_then(Value::as_array) else {
+                continue;
+            };
+            match record.get("type").and_then(Value::as_str) {
+                Some("assistant") => {
+                    for block in blocks {
+                        if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                            && matches!(
+                                block.get("name").and_then(Value::as_str),
+                                Some("Agent" | "Task")
+                            )
+                            && let Some(id) = block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty())
+                        {
+                            norm.agent_spawn_tools.insert(id.to_owned());
+                        }
+                    }
+                }
+                Some("user") => {
+                    if let Some(agent) = record
+                        .pointer("/toolUseResult/agentId")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        && let Some(spawn) = blocks
+                            .iter()
+                            .filter(|b| {
+                                b.get("type").and_then(Value::as_str) == Some("tool_result")
+                            })
+                            .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+                            .find(|id| norm.agent_spawn_tools.contains(*id))
+                    {
+                        norm.agent_tasks
+                            .entry(agent.to_owned())
+                            .or_insert_with(|| spawn.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        norm
     }
 
     /// Rotate the assistant message id for a steer boundary; returns
@@ -237,16 +345,22 @@ impl Normalizer {
                 // Surface it as the subagent's tagged Done so the chip flips
                 // done/failed and the transcript freezes.
                 if f.subtype == "task_notification" {
-                    let Some(parent) = f.tool_use_id.as_deref().filter(|t| !t.is_empty()) else {
+                    // A resumed task's notification may carry SendMessage's
+                    // id, or omit the tool id entirely. Its task id is stable.
+                    let parent = f
+                        .task_id
+                        .as_deref()
+                        .and_then(|task| self.agent_tasks.get(task).map(String::as_str))
+                        .or_else(|| f.tool_use_id.as_deref().filter(|t| !t.is_empty()));
+                    let Some(parent) = parent else {
                         return Vec::new();
                     };
                     // Only a KNOWN spawn settles as a subagent. Background
                     // SHELL tasks (`Bash` with `run_in_background`) settle
                     // through this same subtype carrying the Bash call's id —
                     // tagging that Done would bind a subagent ref onto an
-                    // ordinary Run chip. A real spawn's tool_use frame always
-                    // precedes its notification on the wire, so the set is
-                    // populated by the time a genuine one arrives.
+                    // ordinary Run chip. Spawn ids are learned from live
+                    // calls/task starts or restored from the native history.
                     if !self.agent_spawn_tools.contains(parent) {
                         return Vec::new();
                     }
@@ -279,8 +393,13 @@ impl Normalizer {
                         f.tool_use_id.as_deref().filter(|t| !t.is_empty()),
                     )
                 {
-                    self.agent_tasks.insert(task.to_owned(), tool.to_owned());
-                    self.agent_spawn_tools.insert(tool.to_owned());
+                    let spawn = self
+                        .agent_tasks
+                        .entry(task.to_owned())
+                        .or_insert_with(|| tool.to_owned());
+                    self.agent_spawn_tools.insert(spawn.clone());
+                    self.agent_tool_spawns
+                        .insert(tool.to_owned(), spawn.clone());
                     return Vec::new();
                 }
                 if f.subtype != "init" || self.saw_init {
@@ -311,6 +430,7 @@ impl Normalizer {
                     return Vec::new();
                 }
                 if let Some(parent) = &f.parent_tool_use_id {
+                    let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
                     return match f.event.delta.kind.as_str() {
                         "text_delta" => vec![tag(
                             parent,
@@ -350,6 +470,7 @@ impl Normalizer {
 
             Frame::Assistant(f) => {
                 if let Some(parent) = &f.parent_tool_use_id {
+                    let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
                     // Subagent content, attributed. The 2.1.x wire streams NO
                     // tagged partial deltas (live-verified): a subagent's text
                     // arrives only as full text blocks on its tagged
@@ -386,7 +507,7 @@ impl Normalizer {
                     return out;
                 }
                 // Record spawn tool ids up front: `task_notification` keys on
-                // them, and only foreground spawns ever get a `task_started`.
+                // them; a task may finish before a `task_started` arrives.
                 for b in f.message.blocks() {
                     if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
                         self.agent_spawn_tools.insert(b.id.clone());
@@ -485,6 +606,7 @@ impl Normalizer {
 
             Frame::User(f) => {
                 if let Some(parent) = &f.parent_tool_use_id {
+                    let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
                     let mut out: Vec<AgentEvent> = f
@@ -683,10 +805,27 @@ mod tests {
                 &json!({"todos": [{"content": "t", "status": "completed"}]})
             ),
             ToolCall::Todo {
-                items: vec![TodoItem {
-                    text: "t".into(),
-                    done: true
-                }]
+                items: vec![TodoItem::new("t", TodoStatus::Completed)]
+            }
+        );
+        // Claude's in-progress state survives; unknown/missing reads as pending.
+        assert_eq!(
+            decode_tool_use(
+                "TodoWrite",
+                &json!({"todos": [
+                    {"content": "a", "status": "completed"},
+                    {"content": "b", "status": "in_progress", "activeForm": "Doing b"},
+                    {"content": "c", "status": "pending"},
+                    {"content": "d"},
+                ]})
+            ),
+            ToolCall::Todo {
+                items: vec![
+                    TodoItem::new("a", TodoStatus::Completed),
+                    TodoItem::new("b", TodoStatus::InProgress),
+                    TodoItem::new("c", TodoStatus::Pending),
+                    TodoItem::new("d", TodoStatus::Pending),
+                ]
             }
         );
         assert_eq!(
@@ -1022,6 +1161,130 @@ mod tests {
                 r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn resumed_task_notifications_settle_the_original_spawn() {
+        for notification in [
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","status":"stopped"}"#,
+        ] {
+            let mut norm = Normalizer::new();
+            for raw in [
+                r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"Keep going."}}]}}"#,
+                r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+            ] {
+                norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+            }
+            let events = norm.normalize(
+                crate::claude::wire::parse_frame(notification).unwrap(),
+                false,
+            );
+            let expected = if notification.contains("completed") {
+                DoneStatus::Completed
+            } else {
+                DoneStatus::Interrupted
+            };
+            assert_eq!(
+                events,
+                vec![tag(
+                    "toolu_spawn",
+                    AgentEvent::Done {
+                        status: expected,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }
+                )]
+            );
+            // The next steer must still use the original transcript too.
+            let events = norm.normalize(crate::claude::wire::parse_frame(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send2","name":"SendMessage","input":{"to":"a1","message":"One more check."}}]}}"#,
+            ).unwrap(), false);
+            assert!(
+                events.iter().any(|e| matches!(e,
+                    AgentEvent::Subagent { parent_tool_use_id, event }
+                        if parent_tool_use_id == "toolu_spawn"
+                            && matches!(event.as_ref(), AgentEvent::UserMessage { .. })
+                )),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resumed_child_frames_use_the_original_transcript() {
+        let mut norm = Normalizer::new();
+        for raw in [
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+        ] {
+            norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+        }
+        for raw in [
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_send","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"working"}}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_send","message":{"content":[{"type":"text","text":"finished"}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_send","message":{"content":[{"type":"tool_result","tool_use_id":"child-tool"}]}}"#,
+        ] {
+            let events = norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+            assert!(!events.is_empty());
+            assert!(events.iter().all(|e| matches!(e,
+                AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == "toolu_spawn"
+            )), "{events:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resumed_session_restores_task_ids_from_the_native_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/encoded-project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("session-1.jsonl"), concat!(
+            "not json\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_spawn","name":"Agent","input":{"description":"scout"}}]}}"#,
+            "\n",
+            r#"{"type":"user","toolUseResult":{"agentId":"a1","status":"async_launched"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_spawn"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"continue"}}]}}"#,
+            "\n",
+            r#"{"type":"user","toolUseResult":{"agentId":"a1"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_send"}]}}"#,
+            "\n",
+            // A subagent's own nested spawn is not a chip on this chat.
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"toolu_nested","name":"Agent","input":{"description":"deeper"}}]}}"#,
+            "\n",
+            r#"{"type":"user","isSidechain":true,"toolUseResult":{"agentId":"a2"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_nested"}]}}"#,
+            "\n{torn tail"
+        )).unwrap();
+        let mut norm = Normalizer::for_resume(root.path(), "session-1").await;
+        assert!(!norm.agent_spawn_tools.contains("toolu_nested"));
+        assert!(!norm.agent_tasks.contains_key("a2"));
+        // The revived process has no original spawn frame on its wire.
+        norm.normalize(crate::claude::wire::parse_frame(
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+        ).unwrap(), false);
+        let events = norm.normalize(crate::claude::wire::parse_frame(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
+        ).unwrap(), false);
+        assert_eq!(
+            events,
+            vec![tag(
+                "toolu_spawn",
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }
+            )]
+        );
+        assert!(!norm.saw_init, "history must not consume the live init");
+        assert!(
+            Normalizer::for_resume(root.path(), "missing")
+                .await
+                .agent_tasks
+                .is_empty()
         );
     }
 

@@ -60,6 +60,12 @@ fn raster_size(
     size
 }
 
+/// Memory a prepared SVG holds: its source and wrapper copies, plus both the
+/// CPU pixels and GPU texture of one raster.
+fn svg_retained_bytes(svg: &str, raster: (u32, u32)) -> usize {
+    svg.len() * 2 + 1024 + raster.0 as usize * raster.1 as usize * 8
+}
+
 impl MediaImage {
     /// Preserve the sanitized vector source; only the outer raster viewport changes.
     pub(crate) fn for_view(&self, viewport: (f32, f32), dpi: f32, pixels: usize) -> Self {
@@ -82,11 +88,22 @@ impl MediaImage {
             image: Arc::new(Image::from_bytes(ImageFormat::Svg, wrapper.into_bytes())),
             width: self.width,
             height: self.height,
-            bytes: self
-                .bytes
-                .max(svg.len() * 2 + 1024 + size.0 as usize * size.1 as usize * 8),
+            bytes: svg_retained_bytes(svg, size),
             svg: self.svg.clone(),
             raster_size: Some(size),
+        }
+    }
+
+    /// Re-rasterize for a new view only when the variant fits the memory the
+    /// owner can still spend (`available`, excluding this media). A larger
+    /// raster that does not fit keeps the current one: slightly softer, never
+    /// over budget.
+    pub(crate) fn preview_within(&self, viewport: (f32, f32), dpi: f32, available: usize) -> Self {
+        let next = self.preview_for_view(viewport, dpi);
+        if next.bytes > self.bytes && next.bytes > available {
+            self.clone()
+        } else {
+            next
         }
     }
 
@@ -115,6 +132,36 @@ impl MediaImage {
         }
         self.for_view(viewport, dpi, pixels)
     }
+}
+
+/// Prepared media centered at its natural size within the reading column,
+/// capped at 480px tall. A click requests the enlarged lightbox.
+pub(crate) fn preview_element(
+    loaded: &MediaImage,
+    id: gpui::SharedString,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::AnyElement {
+    use gpui::{InteractiveElement as _, IntoElement as _, StyledImage as _, prelude::*};
+    gpui::div()
+        .id(id)
+        .w_full()
+        .max_w(gpui::px(loaded.width))
+        .mx_auto()
+        .max_h(gpui::px(480.0))
+        .aspect_ratio(loaded.width / loaded.height)
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label("Enlarge image")
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
+        .child(
+            gpui::img(loaded.image.clone())
+                .size_full()
+                .object_fit(gpui::ObjectFit::Contain),
+        )
+        .into_any_element()
 }
 
 pub(crate) fn svg_options() -> usvg::Options<'static> {
@@ -157,15 +204,14 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
         if svg.len() > zeron_proto::MAX_WORKSPACE_IMAGE_BYTES {
             return Err("Prepared SVG exceeds preview size limit".into());
         }
-        let maximum = raster_size(width, height, (900.0, 480.0), 4.0, PREVIEW_PIXELS);
-        // Reserve the largest admitted preview across supported display densities,
-        // including both CPU pixels and GPU texture, plus source and wrapper.
-        let retained = svg.len() * 2 + 1024 + maximum.0 as usize * maximum.1 as usize * 8;
+        // Account the raster that exists, not the largest one any view could
+        // request: owners re-check their budget before a larger re-raster
+        // (`MediaImage::preview_within`).
         let media = MediaImage {
             image: Arc::new(Image::from_bytes(ImageFormat::Svg, Vec::new())),
             width,
             height,
-            bytes: retained,
+            bytes: svg_retained_bytes(&svg, (0, 0)),
             svg: Some(Arc::from(svg)),
             raster_size: None,
         };
@@ -349,6 +395,32 @@ mod tests {
                 assert!(Arc::ptr_eq(&fallback.image, &media.image));
             }
         }
+    }
+
+    #[test]
+    fn svg_accounting_follows_the_current_raster_and_upgrades_respect_budget() {
+        let media = decode_image(
+            "image/svg+xml",
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100"/></svg>"#.to_vec(),
+        )
+        .unwrap();
+        let exact = |m: &MediaImage| {
+            let (w, h) = m.raster_size.unwrap();
+            m.svg.as_ref().unwrap().len() * 2 + 1024 + w as usize * h as usize * 8
+        };
+        // A small diagram no longer reserves the largest preview any view
+        // could ask for (900x480 at 4x).
+        assert_eq!(media.bytes, exact(&media));
+        assert!(media.bytes < 1024 * 1024);
+        let sharper = media.preview_within((900.0, 480.0), 4.0, usize::MAX);
+        assert!(sharper.bytes > media.bytes);
+        assert_eq!(sharper.bytes, exact(&sharper));
+        // Without room for the larger raster, the current one stays.
+        let held = media.preview_within((900.0, 480.0), 4.0, media.bytes);
+        assert!(Arc::ptr_eq(&held.image, &media.image));
+        // A smaller raster frees memory and is always taken.
+        let smaller = sharper.preview_within((100.0, 50.0), 1.0, 0);
+        assert!(smaller.bytes < sharper.bytes);
     }
 
     #[test]

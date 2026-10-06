@@ -239,6 +239,94 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
     core.shutdown().await;
 }
 
+/// A file that is not an image rides the same deferred-run transport: it waits
+/// for its bytes, runs with the committed path, and reads back as opaque bytes
+/// so a queued message can be restored for editing.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_with_a_non_image_file_defers_executes_and_reads_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(AckHarness));
+    let core = EngineCore::assemble(
+        &tmp.path().join("data"),
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine core assembles");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": CHAT, "deviceId": core.device_id }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace
+        .rename_chat(CHAT, "Pre-titled")
+        .expect("rename chat");
+
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-file-1", "pending://att-2/notes.md"))
+        .expect("queue run command");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        complete_assistant_count(&core),
+        0,
+        "run must defer while the file is in transit"
+    );
+
+    client
+        .call(
+            zeron_rpc::methods::UPLOAD_CHUNK,
+            serde_json::json!({ "uploadId": "att-2", "seq": 0, "data": BASE64.encode(b"# notes") }),
+        )
+        .await
+        .expect("upload chunk");
+    client
+        .call(
+            zeron_rpc::methods::UPLOAD_COMMIT,
+            serde_json::json!({ "uploadId": "att-2", "fileName": "notes.md" }),
+        )
+        .await
+        .expect("upload commit");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "deferred run to execute",
+    )
+    .await;
+
+    let user_text = entries(&core)
+        .iter()
+        .find(|e| e.role == MessageRole::User)
+        .and_then(|e| {
+            e.parts.iter().find_map(|p| match p {
+                zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .expect("user entry persisted");
+    assert!(!user_text.contains("pending://"), "{user_text}");
+    let committed = user_text
+        .lines()
+        .find(|line| line.ends_with("att-2-notes.md"))
+        .and_then(|line| line.strip_prefix("- "))
+        .unwrap_or_else(|| panic!("committed path missing: {user_text}"));
+
+    // Restoring the queued message for editing reads the file back.
+    let chunk = client
+        .call(
+            zeron_rpc::methods::READ_ATTACHMENT_CHUNK,
+            serde_json::json!({ "path": committed, "offset": 0 }),
+        )
+        .await
+        .expect("read back the uploaded file");
+    assert_eq!(chunk["mimeType"], "application/octet-stream");
+    assert_eq!(chunk["data"], BASE64.encode(b"# notes"));
+
+    core.shutdown().await;
+}
+
 /// Mobile sends made while a turn runs park on the shared queue with
 /// `pending://` refs (the bytes chase them over the peer link). The queue
 /// drain must wait for those bytes and hand the harness the committed local

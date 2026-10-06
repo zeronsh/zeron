@@ -178,8 +178,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             last_ago_ms: 10 * MIN,
             ..chat(
                 "chat-cjk",
-                Some("space-zeron"),
-                MAC,
+                Some("space-zeron-vps"),
+                VPS,
                 "多言語テキストのレイアウト 🌏",
                 "日本語の長い段落です。",
             )
@@ -246,8 +246,13 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             git_detected: git,
             git_checked_at: git.then(|| ms(now)),
             checkout_id: git.then(|| format!("co-{id}")),
+            repository_id: None,
             created_at: ms(now - ago),
         };
+    let zeron = |mut space: Space| {
+        space.repository_id = Some("github.com/zeronsh/zeron".into());
+        space
+    };
     vec![
         space(
             "space-blog",
@@ -257,7 +262,23 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             false,
             20 * DAY,
         ),
-        space("space-zeron", MAC, "/Users/dev/zeron", None, true, 9 * DAY),
+        zeron(space(
+            "space-zeron",
+            MAC,
+            "/Users/dev/zeron",
+            None,
+            true,
+            9 * DAY,
+        )),
+        // A second clone of the same repository on the VPS.
+        zeron(space(
+            "space-zeron-vps",
+            VPS,
+            "/srv/src/zeron",
+            None,
+            true,
+            6 * DAY,
+        )),
         space("space-edge", VPS, "/srv/deploys/edge", None, true, 4 * DAY),
         space(
             "space-mobile",

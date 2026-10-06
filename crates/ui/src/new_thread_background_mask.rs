@@ -1,6 +1,7 @@
 //! Paint-time source-alpha feather. Resizing changes only GPU parameters, not
 //! the image identity, pixels, atlas entry, or an asynchronous raster job.
-use gpui::{Bounds, ImageAlphaMask, Pixels, RenderImage, Window, point, px, size};
+use crate::settings::NewThreadBackgroundAdjustment;
+use gpui::{Bounds, Corners, ImageAlphaMask, Pixels, Point, RenderImage, Window, point, px, size};
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 // Reveal half-strength artwork through the cutout's darkest area. The main
@@ -8,6 +9,122 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 pub(crate) const CUTOUT_REVEAL_OPACITY: f32 = 0.5;
 
 pub(crate) type SurfaceBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
+
+#[derive(Clone, Copy)]
+struct FittedGeometry {
+    bounds: Bounds<Pixels>,
+    width: f32,
+    height: f32,
+    overflow_x: f32,
+    overflow_y: f32,
+}
+
+fn fitted_geometry(
+    source_width: f32,
+    source_height: f32,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+) -> Option<FittedGeometry> {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    if width <= 0.0
+        || height <= 0.0
+        || !width.is_finite()
+        || !height.is_finite()
+        || source_width <= 0.0
+        || source_height <= 0.0
+        || !source_width.is_finite()
+        || !source_height.is_finite()
+    {
+        return None;
+    }
+
+    let adjustment = adjustment.normalized();
+    let cover = (width / source_width).max(height / source_height);
+    let fitted_width = (source_width * cover * adjustment.zoom).max(width);
+    let fitted_height = (source_height * cover * adjustment.zoom).max(height);
+    let overflow_x = (fitted_width - width).max(0.0);
+    let overflow_y = (fitted_height - height).max(0.0);
+    let fitted = Bounds::new(
+        point(
+            bounds.left() - px(overflow_x * adjustment.focal_x),
+            bounds.top() - px(overflow_y * adjustment.focal_y),
+        ),
+        size(px(fitted_width), px(fitted_height)),
+    );
+    Some(FittedGeometry {
+        bounds: fitted,
+        width: fitted_width,
+        height: fitted_height,
+        overflow_x,
+        overflow_y,
+    })
+}
+
+fn source_geometry(
+    source: &RenderImage,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+) -> Option<FittedGeometry> {
+    let source_size = source.size(0);
+    fitted_geometry(
+        source_size.width.0 as f32,
+        source_size.height.0 as f32,
+        bounds,
+        adjustment,
+    )
+}
+
+/// Translate a direct-manipulation drag into viewport-independent framing.
+pub(crate) fn pan_adjustment(
+    source: &RenderImage,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+    delta: Point<Pixels>,
+) -> NewThreadBackgroundAdjustment {
+    let adjustment = adjustment.normalized();
+    let Some(geometry) = source_geometry(source, bounds, adjustment) else {
+        return adjustment;
+    };
+    let mut next = adjustment;
+    if geometry.overflow_x > 0.0 {
+        next.focal_x -= f32::from(delta.x) / geometry.overflow_x;
+    }
+    if geometry.overflow_y > 0.0 {
+        next.focal_y -= f32::from(delta.y) / geometry.overflow_y;
+    }
+    next.normalized()
+}
+
+/// Preserve the source pixel beneath `anchor` while changing magnification.
+pub(crate) fn zoom_adjustment_around(
+    source: &RenderImage,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+    zoom: f32,
+    anchor: Point<Pixels>,
+) -> NewThreadBackgroundAdjustment {
+    let adjustment = adjustment.normalized();
+    let Some(previous) = source_geometry(source, bounds, adjustment) else {
+        return adjustment;
+    };
+    let mut next = NewThreadBackgroundAdjustment { zoom, ..adjustment }.normalized();
+    let Some(fitted) = source_geometry(source, bounds, next) else {
+        return adjustment;
+    };
+
+    let source_x = f32::from(anchor.x - previous.bounds.left()) / previous.width;
+    let source_y = f32::from(anchor.y - previous.bounds.top()) / previous.height;
+    if fitted.overflow_x > 0.0 {
+        let desired_left = f32::from(anchor.x) - source_x * fitted.width;
+        next.focal_x = (f32::from(bounds.left()) - desired_left) / fitted.overflow_x;
+    }
+    if fitted.overflow_y > 0.0 {
+        let desired_top = f32::from(anchor.y) - source_y * fitted.height;
+        next.focal_y = (f32::from(bounds.top()) - desired_top) / fitted.overflow_y;
+    }
+    next.normalized()
+}
 
 fn mask(bounds: Bounds<Pixels>, composer: Bounds<Pixels>, cutout: bool) -> ImageAlphaMask {
     let height = f32::from(bounds.size.height);
@@ -46,6 +163,44 @@ fn mask(bounds: Bounds<Pixels>, composer: Bounds<Pixels>, cutout: bool) -> Image
     }
 }
 
+fn adjusted_image_paint(
+    source: &RenderImage,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+    corner_radii: Corners<Pixels>,
+) -> Option<(Bounds<Pixels>, Bounds<Pixels>, Corners<Pixels>)> {
+    let fitted = source_geometry(source, bounds, adjustment)?;
+    Some((bounds, fitted.bounds, corner_radii))
+}
+
+fn paint_adjusted_with_mask(
+    source: Arc<RenderImage>,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+    corner_radii: Corners<Pixels>,
+    mask: Option<ImageAlphaMask>,
+    window: &mut Window,
+) {
+    let Some((visible, fitted, corner_radii)) =
+        adjusted_image_paint(&source, bounds, adjustment, corner_radii)
+    else {
+        return;
+    };
+    let _ = window.paint_image_fitted_masked(visible, fitted, corner_radii, source, 0, false, mask);
+}
+
+/// Paint the exact responsive crop used by the new-thread hero, without its
+/// composer mask. Appearance uses this for a faithful adjustment preview.
+pub(crate) fn paint_adjusted(
+    source: Arc<RenderImage>,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+    corner_radii: Corners<Pixels>,
+    window: &mut Window,
+) {
+    paint_adjusted_with_mask(source, bounds, adjustment, corner_radii, None, window);
+}
+
 /// All elements have finished prepaint before this reads the measured surface,
 /// so the first visible frame uses the current composer, including on sidebar
 /// resize and right-panel handoffs. Object-fit cropping is independent.
@@ -53,32 +208,17 @@ pub(crate) fn paint(
     source: Arc<RenderImage>,
     bounds: Bounds<Pixels>,
     composer: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
     cutout: bool,
     window: &mut Window,
 ) {
-    let width = f32::from(bounds.size.width);
-    let height = f32::from(bounds.size.height);
-    let source_size = source.size(0);
-    if width <= 0.0 || height <= 0.0 || source_size.width.0 <= 0 || source_size.height.0 <= 0 {
-        return;
-    }
-    let scale = (width / source_size.width.0 as f32).max(height / source_size.height.0 as f32);
-    let fitted_size = size(
-        px(source_size.width.0 as f32 * scale),
-        px(source_size.height.0 as f32 * scale),
-    );
-    let fitted = Bounds::new(
-        bounds.center() - point(fitted_size.width * 0.5, fitted_size.height * 0.5),
-        fitted_size,
-    );
-    let _ = window.paint_image_fitted_masked(
-        bounds,
-        fitted,
-        Default::default(),
+    paint_adjusted_with_mask(
         source,
-        0,
-        false,
+        bounds,
+        adjustment,
+        Default::default(),
         Some(mask(bounds, composer, cutout)),
+        window,
     );
 }
 
@@ -86,6 +226,221 @@ pub(crate) fn paint(
 mod tests {
     use super::*;
     use gpui::{Context, Render, canvas, div, prelude::*};
+
+    fn hero(width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(40.0), px(24.0)), size(px(width), px(height)))
+    }
+
+    fn fitted(
+        source: (f32, f32),
+        viewport: Bounds<Pixels>,
+        adjustment: NewThreadBackgroundAdjustment,
+    ) -> FittedGeometry {
+        fitted_geometry(source.0, source.1, viewport, adjustment).unwrap()
+    }
+
+    fn assert_near(actual: Pixels, expected: Pixels) {
+        assert!(
+            (f32::from(actual - expected)).abs() < 0.001,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    fn source(width: u32, height: u32) -> RenderImage {
+        RenderImage::new([image::Frame::new(image::RgbaImage::from_pixel(
+            width,
+            height,
+            image::Rgba([79, 151, 233, 180]),
+        ))])
+    }
+
+    #[test]
+    fn default_adjustment_is_the_existing_centered_cover_crop() {
+        let viewport = hero(1000.0, 500.0);
+        let crop = fitted(
+            (1600.0, 900.0),
+            viewport,
+            NewThreadBackgroundAdjustment::default(),
+        );
+        assert_eq!(crop.bounds.size.width, px(1000.0));
+        assert_eq!(crop.bounds.size.height, px(562.5));
+        assert_eq!(crop.bounds.left(), viewport.left());
+        assert_eq!(crop.bounds.top(), viewport.top() - px(31.25));
+        assert_eq!(crop.bounds.center(), viewport.center());
+    }
+
+    #[test]
+    fn focal_extremes_align_the_overflowing_image_edges() {
+        let viewport = hero(1000.0, 500.0);
+        let start = fitted(
+            (1600.0, 900.0),
+            viewport,
+            NewThreadBackgroundAdjustment {
+                focal_x: 0.0,
+                focal_y: 0.0,
+                zoom: 2.0,
+            },
+        );
+        assert_eq!(start.bounds.left(), viewport.left());
+        assert_eq!(start.bounds.top(), viewport.top());
+
+        let end = fitted(
+            (1600.0, 900.0),
+            viewport,
+            NewThreadBackgroundAdjustment {
+                focal_x: 1.0,
+                focal_y: 1.0,
+                zoom: 2.0,
+            },
+        );
+        assert_near(end.bounds.right(), viewport.right());
+        assert_near(end.bounds.bottom(), viewport.bottom());
+    }
+
+    #[test]
+    fn zoom_multiplies_cover_before_positioning() {
+        let viewport = hero(1000.0, 500.0);
+        let base = fitted(
+            (1600.0, 900.0),
+            viewport,
+            NewThreadBackgroundAdjustment::default(),
+        );
+        let zoomed = fitted(
+            (1600.0, 900.0),
+            viewport,
+            NewThreadBackgroundAdjustment {
+                zoom: 2.0,
+                ..Default::default()
+            },
+        );
+        assert_near(zoomed.bounds.size.width, base.bounds.size.width * 2.0);
+        assert_near(zoomed.bounds.size.height, base.bounds.size.height * 2.0);
+        assert_eq!(zoomed.bounds.center(), viewport.center());
+    }
+
+    #[test]
+    fn resizing_preserves_the_normalized_focal_alignment() {
+        let adjustment = NewThreadBackgroundAdjustment {
+            focal_x: 0.23,
+            focal_y: 0.71,
+            zoom: 2.2,
+        };
+        for viewport in [hero(420.0, 300.0), hero(960.0, 420.0), hero(1200.0, 760.0)] {
+            let crop = fitted((1600.0, 900.0), viewport, adjustment);
+            let x = f32::from(viewport.left() - crop.bounds.left()) / crop.overflow_x;
+            let y = f32::from(viewport.top() - crop.bounds.top()) / crop.overflow_y;
+            assert!((x - adjustment.focal_x).abs() < 0.0001);
+            assert!((y - adjustment.focal_y).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn every_supported_crop_covers_the_entire_viewport() {
+        for source in [(900.0, 1600.0), (1600.0, 900.0), (1000.0, 1000.0)] {
+            for viewport in [hero(360.0, 760.0), hero(1000.0, 500.0), hero(640.0, 640.0)] {
+                for focal_x in [0.0, 0.37, 1.0] {
+                    for focal_y in [0.0, 0.61, 1.0] {
+                        for zoom in [1.0, 1.8, NewThreadBackgroundAdjustment::MAX_ZOOM] {
+                            let crop = fitted(
+                                source,
+                                viewport,
+                                NewThreadBackgroundAdjustment {
+                                    focal_x,
+                                    focal_y,
+                                    zoom,
+                                },
+                            );
+                            assert!(crop.bounds.left() <= viewport.left());
+                            assert!(crop.bounds.top() <= viewport.top());
+                            assert!(crop.bounds.right() >= viewport.right());
+                            assert!(crop.bounds.bottom() >= viewport.bottom());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn masked_passes_share_identical_adjusted_geometry() {
+        let viewport = hero(1000.0, 500.0);
+        let composer = Bounds::new(point(px(180.0), px(320.0)), size(px(720.0), px(124.0)));
+        let adjustment = NewThreadBackgroundAdjustment {
+            focal_x: 0.17,
+            focal_y: 0.82,
+            zoom: 1.7,
+        };
+        let main = fitted((1600.0, 900.0), viewport, adjustment);
+        let reveal = fitted((1600.0, 900.0), viewport, adjustment);
+        assert_eq!(main.bounds, reveal.bounds);
+        let main_mask = mask(viewport, composer, true);
+        let reveal_mask = mask(viewport, composer, false);
+        assert_ne!(main_mask.bounds, reveal_mask.bounds);
+        assert_eq!(main_mask.bottom_fade, reveal_mask.bottom_fade);
+    }
+
+    #[test]
+    fn pan_adjustment_tracks_direct_pointer_movement() {
+        let source = source(16, 9);
+        let viewport = hero(100.0, 50.0);
+        let adjustment = NewThreadBackgroundAdjustment {
+            zoom: 2.0,
+            ..Default::default()
+        };
+        let before = source_geometry(&source, viewport, adjustment).unwrap();
+        let next = pan_adjustment(&source, viewport, adjustment, point(px(10.0), px(-5.0)));
+        let after = source_geometry(&source, viewport, next).unwrap();
+        assert_near(after.bounds.left(), before.bounds.left() + px(10.0));
+        assert_near(after.bounds.top(), before.bounds.top() - px(5.0));
+    }
+
+    #[test]
+    fn pointer_anchored_zoom_keeps_the_same_source_pixel_underneath() {
+        let source = source(16, 9);
+        let viewport = hero(100.0, 50.0);
+        let adjustment = NewThreadBackgroundAdjustment {
+            zoom: 1.5,
+            ..Default::default()
+        };
+        let anchor = point(viewport.left() + px(60.0), viewport.top() + px(30.0));
+        let before = source_geometry(&source, viewport, adjustment).unwrap();
+        let source_x = f32::from(anchor.x - before.bounds.left()) / before.width;
+        let source_y = f32::from(anchor.y - before.bounds.top()) / before.height;
+
+        let next = zoom_adjustment_around(&source, viewport, adjustment, 2.4, anchor);
+        let after = source_geometry(&source, viewport, next).unwrap();
+        let next_source_x = f32::from(anchor.x - after.bounds.left()) / after.width;
+        let next_source_y = f32::from(anchor.y - after.bounds.top()) / after.height;
+        assert!((next_source_x - source_x).abs() < 0.0001);
+        assert!((next_source_y - source_y).abs() < 0.0001);
+    }
+
+    #[test]
+    fn preview_paint_keeps_rounded_viewport_corners_when_panning_and_zooming() {
+        let source = source(16, 9);
+        let viewport = hero(100.0, 50.0);
+        let rounded = Corners::all(px(11.0));
+        let initial = NewThreadBackgroundAdjustment::default();
+        let zoomed = zoom_adjustment_around(&source, viewport, initial, 2.0, viewport.center());
+        let panned = pan_adjustment(&source, viewport, zoomed, point(px(10.0), px(-5.0)));
+
+        for adjustment in [initial, zoomed, panned] {
+            let (visible, fitted, corners) =
+                adjusted_image_paint(&source, viewport, adjustment, rounded).unwrap();
+            let (hero_visible, hero_fitted, hero_corners) =
+                adjusted_image_paint(&source, viewport, adjustment, Default::default()).unwrap();
+            assert_eq!(visible, viewport);
+            assert_eq!(corners, rounded);
+            assert_eq!(hero_corners, Corners::all(px(0.0)));
+            assert_eq!((visible, fitted), (hero_visible, hero_fitted));
+            assert_eq!(
+                fitted,
+                source_geometry(&source, viewport, adjustment)
+                    .unwrap()
+                    .bounds
+            );
+        }
+    }
 
     #[gpui::test]
     fn background_paint_sees_same_frame_composer_bounds_even_when_painted_first(
@@ -113,7 +468,14 @@ mod tests {
                             move |bounds, _, window, _| {
                                 painted.set(surface.get());
                                 if let Some(composer) = surface.get() {
-                                    paint(source, bounds, composer, true, window);
+                                    paint(
+                                        source,
+                                        bounds,
+                                        composer,
+                                        NewThreadBackgroundAdjustment::default(),
+                                        true,
+                                        window,
+                                    );
                                 }
                             },
                         )

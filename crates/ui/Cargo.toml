@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 project-palette-fixture = []
+compact-picker-fixture = ["gpui_platform/test-support"]
 
 browser-fixture = []
 windows-render-fixture = []
@@ -41,7 +42,12 @@ required-features = ["project-palette-fixture"]
 name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
+[[example]]
+name = "compact-picker-fixture"
+required-features = ["compact-picker-fixture"]
+
 [dependencies]
+zeron-voice = { path = "../voice" }
 url = "2"
 zeron-proto.workspace = true
 similar.workspace = true
@@ -89,7 +95,7 @@ wry = { version = "0.56", default-features = false, features = ["os-webview"] }
 raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSHapticFeedback", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = "0.3.2"
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDelegate", "WKNavigationAction", "WKSnapshotConfiguration"] }
 reqwest.workspace = true

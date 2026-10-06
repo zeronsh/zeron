@@ -57,7 +57,7 @@ fn choose(
         (recency, *rank)
     });
     for (_, path) in candidates {
-        if let Ok(staged) = crate::attachments::stage_file(&path)
+        if let Ok(staged) = crate::attachments::stage_file_verbatim(&path)
             && let Ok(image) = crate::new_thread_background_image::decode(staged.bytes())
         {
             return Ok((path, staged, image));
@@ -72,7 +72,9 @@ const LOOKAHEAD: usize = 3;
 struct QueueKey {
     folder: Option<PathBuf>,
     history: Vec<PathBuf>,
-    background: Option<super::NewThreadComposerBackground>,
+    /// Managed path only: adjusting the active image's framing must not
+    /// discard the decoded lookahead.
+    background: Option<String>,
     effect: super::NewThreadBackgroundEffect,
     light: bool,
     data_dir: PathBuf,
@@ -88,7 +90,9 @@ impl QueueKey {
         Self {
             folder: settings.wallpaper_folder,
             history,
-            background: settings.new_thread_composer_background,
+            background: settings
+                .new_thread_composer_background
+                .map(|background| background.path),
             effect: settings.new_thread_background_effect,
             light: cx
                 .try_global::<crate::theme::Theme>()
@@ -152,11 +156,10 @@ fn remove_orphaned_preloads(key: &QueueKey) {
     };
     // Compare names, not full paths, so a differently spelled data directory
     // can never make the active image look orphaned.
-    let active = key.background.as_ref().and_then(|background| {
-        Path::new(&background.path)
-            .file_name()
-            .map(|name| name.to_owned())
-    });
+    let active = key
+        .background
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name().map(|name| name.to_owned()));
     for entry in entries.flatten() {
         let name = entry.file_name();
         let managed = name
@@ -359,6 +362,59 @@ mod tests {
     }
 
     #[gpui::test]
+    fn warm_switch_resets_previous_background_adjustment(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = wallpaper_folder(dir.path());
+        let data = dir.path().join("data");
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            super::super::init(
+                super::super::UiSettings {
+                    wallpaper_folder: Some(folder.clone()),
+                    ..Default::default()
+                },
+                &data,
+                cx,
+            );
+            super::super::install_new_thread_composer_background(&folder.join("0.png"), cx)
+                .unwrap();
+            preload(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            // Framing belongs to the active image; it must not flush the
+            // decoded lookahead for the next shuffle.
+            let generation = cx.global::<PreloadQueue>().generation;
+            super::super::set_new_thread_background_adjustment(
+                super::super::NewThreadBackgroundAdjustment {
+                    focal_x: 0.2,
+                    focal_y: 0.8,
+                    zoom: 2.0,
+                },
+                cx,
+            );
+            preload(cx);
+            assert_eq!(cx.global::<PreloadQueue>().generation, generation);
+            assert_eq!(cx.global::<PreloadQueue>().ready.len(), LOOKAHEAD);
+            let expected = cx.global::<PreloadQueue>().ready[0].source.clone();
+            randomize(cx).detach();
+            assert_eq!(cx.global::<PreloadQueue>().ready.len(), LOOKAHEAD - 1);
+            let settings = super::super::current(cx);
+            assert_eq!(settings.wallpaper_source.as_ref(), Some(&expected));
+            assert_eq!(
+                settings
+                    .new_thread_composer_background
+                    .as_ref()
+                    .unwrap()
+                    .adjustment,
+                super::super::NewThreadBackgroundAdjustment::default(),
+            );
+            assert_eq!(super::super::UiSettings::load(&data), settings);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn first_preload_retires_copies_left_by_a_previous_session(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
@@ -377,6 +433,7 @@ mod tests {
                         super::super::NewThreadComposerBackground {
                             path: active.to_string_lossy().into_owned(),
                             name: "active.png".into(),
+                            adjustment: super::super::NewThreadBackgroundAdjustment::default(),
                         },
                     ),
                     ..Default::default()

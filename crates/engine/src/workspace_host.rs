@@ -807,6 +807,7 @@ impl WorkspaceHost {
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,
+            repository_id: None,
             created_at: Utc::now(),
         };
         self.mutate(|doc| doc.upsert_space(&space))?;
@@ -988,6 +989,7 @@ impl WorkspaceHost {
                 git_detected,
                 git_checked_at: None,
                 checkout_id: None,
+                repository_id: None,
                 created_at: Utc::now(),
             })
         })?;
@@ -1020,11 +1022,13 @@ impl WorkspaceHost {
         space_id: &str,
         detected: bool,
         checkout_id: Option<&str>,
+        repository_id: Option<&str>,
     ) -> Result<bool, EngineError> {
         match self.read(|doc| doc.space(space_id))? {
             Some(space) if space.device_id == self.inner.config.device_id => {
-                Ok(self
-                    .mutate(|doc| doc.set_space_git(space_id, detected, checkout_id, Utc::now()))?)
+                Ok(self.mutate(|doc| {
+                    doc.set_space_git(space_id, detected, checkout_id, repository_id, Utc::now())
+                })?)
             }
             Some(space) => {
                 tracing::warn!(

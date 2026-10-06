@@ -604,6 +604,10 @@ pub struct ProjectView {
     pub device_online: bool,
     pub git_detected: bool,
     pub created_at_ms: i64,
+    /// Shared by every checkout of one repository, on any device.
+    pub group_key: String,
+    /// The repository group's name, shared like `color_index`.
+    pub group_name: String,
     /// Most urgent indicator among its active sessions.
     pub indicator: ChatIndicator,
     pub unseen_count: u32,
@@ -623,6 +627,8 @@ impl From<&zc::ProjectView> for ProjectView {
             device_online: p.device_online,
             git_detected: p.git_detected,
             created_at_ms: p.created_at_ms,
+            group_key: p.group_key.clone(),
+            group_name: p.group_name.clone(),
             indicator: p.indicator.into(),
             unseen_count: p.unseen_count,
             sessions: rows(&p.sessions),

@@ -141,3 +141,9 @@ Zeron code.
 The Zui native overlay renderer adapts Apache-2.0 GPUI code from
 [`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
 Attribution is retained in the pinned Zui dependency’s `NOTICE`.
+
+## Optional desktop dictation
+
+Parakeet TDT 0.6B v3 model weights are by NVIDIA under CC BY 4.0. The optional download uses Ivan Stupakov's INT8 ONNX conversion, pinned to revision `8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce`, with per-file SHA-256 verification. Original: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3. Conversion: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx. License: https://creativecommons.org/licenses/by/4.0/.
+
+Native runtime dependencies: parakeet-rs 0.3.8 (MIT OR Apache-2.0), ort/ort-sys 2.0.0-rc.13 (MIT OR Apache-2.0), ONNX Runtime 1.28.0 (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). See `crates/voice/NOTICE.md` for exact conversion provenance, changes, runtime/platform limitations and supported languages. Models are not included in the application bundle.

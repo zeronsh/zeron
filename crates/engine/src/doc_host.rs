@@ -31,8 +31,8 @@ use tokio_util::task::TaskTracker;
 use zeron_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
-    join_continuation_entries,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
+    evaluate_command, join_continuation_entries,
 };
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
@@ -786,17 +786,33 @@ impl ChatDocHandle {
         })
     }
 
-    /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending
+    /// Recovery sweep: settle this device's running subagent chips (including
+    /// chips in completed parent turns), then stamp abandoned `streaming`
+    /// entries `aborted`, appending
     /// `note` as a visible error part so the transcript says WHY the turn
     /// ended (zeron folded "Run interrupted by backend restart" the same
     /// way). Returns the stamped entries' `(id, created_at)` — recovery uses
     /// them for the resume-freshness check.
     pub fn mark_abandoned_streams(&self, note: &str) -> Result<Vec<(String, i64)>, DocError> {
         let mut stamped = Vec::new();
+        let mut chips_changed = false;
         for entry in self.doc.read_entries()? {
-            if entry.role == MessageRole::Assistant
-                && entry.status == Some(MessageStatus::Streaming)
-                && entry.device_id == self.device_id
+            if entry.role != MessageRole::Assistant || entry.device_id != self.device_id {
+                continue;
+            }
+            for part in &entry.parts {
+                if let MessagePart::Tool {
+                    id,
+                    subagent_status: Some(SubagentStatus::Running),
+                    ..
+                } = part
+                {
+                    chips_changed |=
+                        self.doc
+                            .update_subagent_chip(id, None, Some("failed"), None)?;
+                }
+            }
+            if entry.status == Some(MessageStatus::Streaming)
                 && self
                     .doc
                     .set_message_status(&entry.id, MessageStatus::Aborted)?
@@ -808,7 +824,7 @@ impl ChatDocHandle {
                 stamped.push((entry.id.clone(), entry.created_at));
             }
         }
-        if !stamped.is_empty() {
+        if chips_changed || !stamped.is_empty() {
             self.publish_messages();
         }
         Ok(stamped)

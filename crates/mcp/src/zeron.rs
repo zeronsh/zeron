@@ -244,22 +244,66 @@ impl Zeron {
     }
 
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
-        let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
-        serde_json::from_value(value).context("ListHarnesses: unexpected shape")
+        self.harnesses_on(None).await
+    }
+
+    pub async fn harnesses_on(&self, device: Option<&str>) -> anyhow::Result<Vec<HarnessInfo>> {
+        let mut params = json!({});
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        let value = self
+            .call(methods::LIST_HARNESSES, params)
+            .await
+            .with_context(|| format!("harness catalog on device {}", device.unwrap_or("local")))?;
+        serde_json::from_value(value).with_context(|| {
+            format!(
+                "ListHarnesses: unexpected catalog on device {}",
+                device.unwrap_or("local")
+            )
+        })
     }
 
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
+        self.models_on(harness, None).await
+    }
+
+    pub async fn models_on(
+        &self,
+        harness: HarnessId,
+        device: Option<&str>,
+    ) -> anyhow::Result<Vec<Model>> {
+        let mut params = json!({ "harness": harness });
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
         let value = self
-            .call(methods::LIST_MODELS, json!({ "harness": harness }))
-            .await?;
-        serde_json::from_value(value).context("ListModels: unexpected shape")
+            .call(methods::LIST_MODELS, params)
+            .await
+            .with_context(|| format!("model catalog on device {}", device.unwrap_or("local")))?;
+        serde_json::from_value(value).with_context(|| {
+            format!(
+                "ListModels: unexpected catalog on device {}",
+                device.unwrap_or("local")
+            )
+        })
     }
 
     /// The full transcript: attach, take the opening `reset` frame, detach.
     pub async fn transcript(&self, chat_id: &str) -> anyhow::Result<Vec<SessionMessageEntry>> {
-        let mut rx = self
-            .subscribe(methods::WATCH_DOC_MESSAGES, json!({ "chatId": chat_id }))
-            .await?;
+        self.transcript_on(chat_id, None).await
+    }
+
+    pub async fn transcript_on(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+    ) -> anyhow::Result<Vec<SessionMessageEntry>> {
+        let mut params = json!({ "chatId": chat_id });
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        let mut rx = self.subscribe(methods::WATCH_DOC_MESSAGES, params).await?;
         let mut entries = Vec::new();
         let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
         loop {
@@ -346,6 +390,43 @@ impl Zeron {
     pub async fn resolve_space(&self, key: &str) -> anyhow::Result<Space> {
         let spaces = self.spaces().await?;
         resolve_space_in(&spaces, key.trim())
+    }
+
+    /// Resolve the host first when specified, so repeated project names/paths
+    /// on other machines cannot influence selection.
+    pub async fn resolve_target(
+        &self,
+        project: Option<&str>,
+        device: Option<&str>,
+    ) -> anyhow::Result<(Option<Space>, String)> {
+        let device = device.map(str::trim).filter(|d| !d.is_empty());
+        let host = match device {
+            Some(key) => Some(self.resolve_device_id(Some(key)).await?),
+            None => None,
+        };
+        if let Some(project) = project {
+            let mut spaces = self.spaces().await?;
+            if let Some(host) = &host {
+                if let Some(space) = spaces.iter().find(|s| s.id == project.trim()) {
+                    anyhow::ensure!(
+                        space.device_id == *host,
+                        "project {} belongs to device {}, not device {host}",
+                        space.id,
+                        space.device_id
+                    );
+                }
+                spaces.retain(|s| s.device_id == *host);
+            }
+            let space = resolve_space_in(&spaces, project.trim())?;
+            return Ok((Some(space.clone()), space.device_id));
+        }
+        Ok((
+            None,
+            match host {
+                Some(host) => host,
+                None => self.local_device_id().await?,
+            },
+        ))
     }
 
     /// Device id or exact name; `None` means this engine's own device.
@@ -531,17 +612,18 @@ pub fn resolve_space_in(spaces: &[Space], key: &str) -> anyhow::Result<Space> {
     if key.is_empty() {
         bail!("project is required");
     }
-    if let Some(space) = spaces.iter().find(|s| s.id == key || s.path == key) {
+    if let Some(space) = spaces.iter().find(|s| s.id == key) {
         return Ok(space.clone());
     }
     let normalized = key.trim_end_matches(['/', '\\']);
+    let by_path: Vec<&Space> = spaces
+        .iter()
+        .filter(|s| s.path.trim_end_matches(['/', '\\']) == normalized)
+        .collect();
     let by_name: Vec<&Space> = spaces
         .iter()
         .filter(|s| s.display_name().eq_ignore_ascii_case(normalized))
         .collect();
-    if let [one] = by_name.as_slice() {
-        return Ok((*one).clone());
-    }
     let by_suffix: Vec<&Space> = spaces
         .iter()
         .filter(|s| {
@@ -549,21 +631,23 @@ pub fn resolve_space_in(spaces: &[Space], key: &str) -> anyhow::Result<Space> {
             path.ends_with(normalized) || path.contains(normalized)
         })
         .collect();
-    if let [one] = by_suffix.as_slice() {
-        return Ok((*one).clone());
-    }
-    let candidates = if by_name.len() > 1 {
+    let candidates = if !by_path.is_empty() {
+        &by_path
+    } else if !by_name.is_empty() {
         &by_name
     } else {
         &by_suffix
     };
+    if let [one] = candidates.as_slice() {
+        return Ok((*one).clone());
+    }
     if candidates.len() > 1 {
         bail!(
             "{} projects match {key:?}; use an id: {}",
             candidates.len(),
             candidates
                 .iter()
-                .map(|s| format!("{} ({})", s.path, s.id))
+                .map(|s| format!("{} (id {}, device {})", s.path, s.id, s.device_id))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -688,8 +772,28 @@ mod tests {
             git_detected: true,
             git_checked_at: None,
             checkout_id: None,
+            repository_id: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn repeated_exact_paths_and_names_do_not_select_the_first_project() {
+        let mut remote = space("s2", "/repo/comet", Some("remote"));
+        remote.device_id = "other-device".into();
+        let spaces = [space("s1", "/repo/comet", None), remote];
+        let err = resolve_space_in(&spaces, "/repo/comet/")
+            .unwrap_err()
+            .to_string();
+        for candidate in ["s1", "s2", "dev", "other-device"] {
+            assert!(err.contains(candidate), "{err}");
+        }
+        // A unique path suffix must not override ambiguous display names.
+        let spaces = [
+            space("s1", "/repo/comet", None),
+            space("s2", "/repo/other", Some("comet")),
+        ];
+        assert!(resolve_space_in(&spaces, "comet").is_err());
     }
 
     #[test]
