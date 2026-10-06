@@ -23,7 +23,8 @@ const CARD_INNER_RADIUS: f32 = 11.0;
 /// outside the inner arc after the stream and sticky layers have painted.
 /// This canvas has no hitbox, so it cannot steal folding or scroll input.
 fn stream_corners(theme: &Theme) -> impl IntoElement {
-    let background = theme.bg;
+    // The PR route sits directly on the shell surface, not the code plane.
+    let background = theme.surface;
     gpui::canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -57,6 +58,19 @@ fn stream_corners(theme: &Theme) -> impl IntoElement {
     )
     .absolute()
     .inset_0()
+}
+
+fn stream_viewport(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("pr-code-viewport")
+        .debug_selector(|| "pr-code-viewport".into())
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(theme.border)
+        .overflow_hidden()
 }
 
 /// One entry of the virtualized review stream.
@@ -893,16 +907,7 @@ impl PullRequestDetailPage {
                     ));
                 }),
             );
-        let viewport = div()
-            .id("pr-code-viewport")
-            .debug_selector(|| "pr-code-viewport".into())
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .overflow_hidden()
+        let viewport = stream_viewport(theme)
             .map(|el| {
                 if loading {
                     el.child(crate::pull_request_skeleton::diff(
@@ -1140,5 +1145,85 @@ mod tests {
                 },
             ]
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "pull-request-fixture"))]
+mod corner_render_tests {
+    use super::*;
+
+    struct ViewportFixture;
+    impl Render for ViewportFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme {
+                bg: gpui::rgb(0x1e1e1e).into(),
+                surface: gpui::rgb(0x181818).into(),
+                surface_treatment: zeron_theme::SurfaceTreatment::Opaque,
+                ..Theme::default()
+            };
+            div()
+                .size_full()
+                .p(px(16.0))
+                .bg(theme.glass())
+                .flex()
+                .flex_col()
+                .child(
+                    stream_viewport(&theme)
+                        .child(div().size_full().bg(gpui::rgb(0xff0000)))
+                        .child(stream_corners(&theme)),
+                )
+        }
+    }
+
+    #[test]
+    fn pull_request_stream_content_stays_inside_rounded_outline() {
+        let mut cx = gpui::HeadlessAppContext::with_platform(
+            Arc::new(gpui::NoopTextSystem),
+            Arc::new(()),
+            gpui_platform::current_headless_renderer,
+        );
+        let window = cx
+            .open_window(gpui::size(px(160.0), px(120.0)), |_, cx| {
+                cx.new(|_| ViewportFixture)
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let image = cx.capture_screenshot(window.into()).unwrap();
+        if let Ok(path) = std::env::var("ZERON_PR_CORNER_CAPTURE") {
+            image.save(path).unwrap();
+        }
+        let scale = image.width() as f32 / 160.0;
+        let radius = 12.0 * scale;
+        let inset = 16.0 * scale;
+        for (corner_x, corner_y, dx, dy) in [
+            (inset, inset, 1.0, 1.0),
+            (image.width() as f32 - inset, inset, -1.0, 1.0),
+            (inset, image.height() as f32 - inset, 1.0, -1.0),
+            (
+                image.width() as f32 - inset,
+                image.height() as f32 - inset,
+                -1.0,
+                -1.0,
+            ),
+        ] {
+            for y in 0..radius as u32 {
+                for x in 0..radius as u32 {
+                    let distance = ((radius - x as f32 - 0.5).powi(2)
+                        + (radius - y as f32 - 0.5).powi(2))
+                    .sqrt();
+                    if distance < radius + 2.0 * scale {
+                        continue;
+                    }
+                    let x = (corner_x + dx * (x as f32 + 0.5)).floor() as u32;
+                    let y = (corner_y + dy * (y as f32 + 0.5)).floor() as u32;
+                    let pixel = image.get_pixel(x, y).0;
+                    assert!(
+                        pixel[..3].iter().all(|channel| channel.abs_diff(24) <= 1),
+                        "corner differs from shell surface at ({x}, {y}): {pixel:?}"
+                    );
+                }
+            }
+        }
     }
 }
