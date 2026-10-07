@@ -1090,14 +1090,17 @@ impl SessionsEngine {
     }
 
     /// Graceful shutdown: interrupt every live run so streaming entries settle.
+    /// Runs settle concurrently, so shutdown waits one bounded settle, not one
+    /// per live run.
     pub async fn shutdown(&self) {
         self.inner.voice.retire();
         let chats: Vec<String> = lock(&self.inner.runs).keys().cloned().collect();
-        for chat_id in chats {
-            if let Err(err) = self.interrupt(&chat_id).await {
+        futures::future::join_all(chats.iter().map(|chat_id| async move {
+            if let Err(err) = self.interrupt(chat_id).await {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
-        }
+        }))
+        .await;
     }
 
     fn is_live(&self, chat_id: &str, run_id: &str) -> bool {

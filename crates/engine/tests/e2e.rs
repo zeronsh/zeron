@@ -856,6 +856,63 @@ async fn interrupt_is_scoped_to_the_target_chat() {
     }));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_settles_live_runs_together() {
+    let chats = ["chat-quit-a", "chat-quit-b", "chat-quit-c"];
+    let dir = tempfile::tempdir().unwrap();
+    // The stream stays open and ignores its interrupt, like a harness child
+    // that is slow to exit, so each run settles only at the engine deadline.
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![AgentEvent::TextDelta {
+                text: "partial output".into(),
+            }],
+            step_delay: Duration::from_secs(60),
+            hang_until_interrupt: false,
+        }),
+    );
+    for chat_id in chats {
+        let handle = core.doc_host.open(chat_id).unwrap();
+        queue_as_viewer(
+            handle.doc(),
+            &format!("cmd-run-{chat_id}"),
+            SessionCommandPayload::Run {
+                request: run_request("hang"),
+                message_id: format!("m-{chat_id}"),
+            },
+        );
+    }
+    wait_for(
+        || {
+            chats.into_iter().all(|chat_id| {
+                entries_for(&core, chat_id)
+                    .iter()
+                    .any(|entry| entry.status == Some(MessageStatus::Streaming))
+            })
+        },
+        "every chat to be streaming",
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    core.shutdown().await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "shutdown took {elapsed:?} for {} live runs",
+        chats.len()
+    );
+    for chat_id in chats {
+        assert!(
+            entries_for(&core, chat_id)
+                .iter()
+                .any(|entry| entry.status == Some(MessageStatus::Aborted)),
+            "{chat_id} must settle aborted"
+        );
+    }
+}
+
 #[tokio::test]
 async fn steer_with_no_live_run_falls_back_to_new_turn() {
     let dir = tempfile::tempdir().unwrap();
