@@ -1031,6 +1031,7 @@ impl EngineRpc {
                 methods::WATCH_CHECKOUT_CHANGE_REQUEST
                     | methods::WATCH_WORKSPACE_GIT_STATUS
                     | methods::WATCH_HARNESS_UPDATES
+                    | methods::WATCH_SYSTEM_STATS
             ) {
                 let rx = match client.subscribe_checked(method, params).await {
                     Ok(rx) => rx,
@@ -1427,6 +1428,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_HARNESS_UPDATE
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
+            // Resource usage is a property of the device being asked.
+            | methods::WATCH_SYSTEM_STATS
     )
 }
 
@@ -1443,6 +1446,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
+            | methods::WATCH_SYSTEM_STATS
     )
 }
 
@@ -2401,6 +2405,16 @@ impl RpcService for EngineRpc {
                     }));
                 }
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::WATCH_SYSTEM_STATS => {
+                let request: zeron_proto::WatchSystemStatsRequest = if params.is_null() {
+                    Default::default()
+                } else {
+                    parse_params(params)?
+                };
+                Ok(RpcReply::Stream(crate::system_stats::watch(
+                    crate::system_stats::clamp_interval(request.interval_ms),
+                )))
             }
             methods::WATCH_CHECKOUT_DIFFS => {
                 Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
@@ -3840,6 +3854,8 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_WORKSPACE_GIT_STATUS));
         assert!(forwardable(methods::WATCH_HARNESS_UPDATES));
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
+        assert!(forwardable(methods::WATCH_SYSTEM_STATS));
+        assert!(is_stream_method(methods::WATCH_SYSTEM_STATS));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
     }

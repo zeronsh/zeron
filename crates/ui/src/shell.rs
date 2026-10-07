@@ -704,6 +704,8 @@ pub enum RightSurface {
     Browser(u64),
     Diff(u64),
     Terminal(u64),
+    /// Live resource usage of the device the session runs on.
+    Monitor(u64),
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
     /// keys [`Shell::subagent_tabs`].
     Subagent(u64),
@@ -1897,6 +1899,8 @@ pub struct Shell {
     browser_seq: u64,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
+    monitors: std::collections::HashMap<u64, Entity<crate::system_monitor::SystemMonitor>>,
+    monitor_seq: u64,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -2352,6 +2356,8 @@ impl Shell {
             browser_seq: 0,
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
+            monitors: std::collections::HashMap::new(),
+            monitor_seq: 0,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
@@ -3170,6 +3176,20 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
+                RightSurface::Monitor(id) => self.monitors.get(id).map(|monitor| {
+                    let title = match monitor.read(cx).target() {
+                        Some(device) => self
+                            .state
+                            .read(cx)
+                            .devices
+                            .iter()
+                            .find(|d| d.id == device)
+                            .map(|d| format!("Monitor · {}", d.name))
+                            .unwrap_or_else(|| "Monitor".into()),
+                        None => "Monitor".into(),
+                    };
+                    (*surface, SharedString::from(title), false, None)
+                }),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -3218,6 +3238,7 @@ impl Shell {
             RightSurface::Picker
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
+            | RightSurface::Monitor(_)
             | RightSurface::SideChat(_)
             | RightSurface::Subagent(_)
             | RightSurface::Browser(_) => {
@@ -3341,7 +3362,8 @@ impl Shell {
                     });
                 }
             }
-            RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Monitor(_) => {
+            }
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -3918,6 +3940,23 @@ impl Shell {
         }
     }
 
+    /// The picker's Monitor card / the `+` menu's Monitor row: a fresh
+    /// resource monitor for the device this session runs on.
+    fn add_monitor_surface(&mut self, cx: &mut Context<Self>) {
+        let key = self.panel_key(cx);
+        let target = self.state.read(cx).terminal_target_device(&key);
+        self.monitor_seq += 1;
+        let id = self.monitor_seq;
+        let state = self.state.clone();
+        let monitor = cx.new(|_| crate::system_monitor::SystemMonitor::new(state, target));
+        self.monitors.insert(id, monitor);
+        self.right_tabs
+            .entry(key)
+            .or_default()
+            .push(RightSurface::Monitor(id));
+        self.set_right_active(RightSurface::Monitor(id), cx);
+    }
+
     /// Spawn-chip events from the primary transcript AND from subagent-tab
     /// transcripts (nested spawns open their own tabs).
     fn on_transcript_event(
@@ -4144,6 +4183,10 @@ impl Shell {
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
                 panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
+            }
+            RightSurface::Monitor(id) => {
+                // Dropping the entity ends its stats subscription.
+                self.monitors.remove(&id);
             }
             RightSurface::SideChat(id) => {
                 // An unsent draft outlives the tab: the side chat stays
@@ -5541,6 +5584,9 @@ impl Shell {
         self.delete_confirm = None;
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
+                if let RightSurface::Monitor(id) = surface {
+                    self.monitors.remove(id);
+                }
                 if let RightSurface::Browser(id) = surface {
                     if let Some(browser) = self.browsers.remove(id) {
                         browser.update(cx, |browser, cx| browser.close(cx));
@@ -10875,6 +10921,14 @@ impl Shell {
                     });
                     panel.into_any_element()
                 }
+                RightSurface::Monitor(id) => match self.monitors.get(&id).cloned() {
+                    Some(monitor) => {
+                        // Sampling runs only while this arm renders.
+                        monitor.update(cx, |monitor, cx| monitor.ensure_watching(cx));
+                        monitor.into_any_element()
+                    }
+                    None => self.render_surface_picker(cx),
+                },
                 RightSurface::SideChat(id) => self.render_side_chat(id, cx),
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
                     let transcript = self
@@ -11030,6 +11084,13 @@ impl Shell {
                         row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.add_terminal_surface(cx);
+                            }),
+                        ),
+                    )
+                    .child(
+                        row("surface-card-monitor", icons::MONITOR, "Monitor").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.add_monitor_surface(cx);
                             }),
                         ),
                     )
@@ -11243,6 +11304,7 @@ impl Shell {
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
+                RightSurface::Monitor(_) => icons::MONITOR,
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Picker => icons::PLUS,
             };
@@ -11625,6 +11687,20 @@ impl Shell {
                                         .text_color(theme.text_muted),
                                 )
                                 .child(SharedString::from("Terminal")),
+                        )
+                        .child(
+                            popover::menu_row(&theme, false, "right-plus-monitor")
+                                .id("right-plus-monitor-row")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.add_monitor_surface(cx);
+                                    this.close_right_plus(cx);
+                                }))
+                                .child(
+                                    icon(icons::MONITOR)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Monitor")),
                         )
                         .when(self.space_git_detected(cx), |menu| {
                             menu.child(
@@ -13181,6 +13257,31 @@ impl Render for Shell {
             .children(Self::render_linux_resize_borders(window));
         self.render_time = None;
         root
+    }
+}
+
+/// Native visual QA for the Monitor surface on the production shell.
+#[cfg(feature = "monitor-fixture")]
+impl Shell {
+    /// Open the right pane on a fresh Monitor tab for the selected chat.
+    pub fn fixture_open_monitor(&mut self, cx: &mut Context<Self>) {
+        self.set_surfaces_open(true, cx);
+        self.add_monitor_surface(cx);
+    }
+
+    /// Set the newest Monitor tab's core list, process sort and scroll offset.
+    pub fn fixture_monitor_view(
+        &self,
+        cores_open: bool,
+        by_memory: bool,
+        scroll_y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(monitor) = self.monitors.get(&self.monitor_seq) {
+            monitor.update(cx, |monitor, cx| {
+                monitor.fixture_view(cores_open, by_memory, scroll_y, cx)
+            });
+        }
     }
 }
 
