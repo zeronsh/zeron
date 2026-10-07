@@ -55,7 +55,7 @@ pub(super) fn path_is_outside(path: &str) -> bool {
     path.starts_with('/')
 }
 
-pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .size(px(TOOLBAR_BUTTON_SIZE))
