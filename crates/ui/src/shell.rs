@@ -72,7 +72,7 @@ mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
-mod project_icon;
+pub(crate) mod project_icon;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -2021,8 +2021,7 @@ pub struct Shell {
     sidebar_view_trigger_focus: gpui::FocusHandle,
     /// Current pinned-row metrics shared by hit testing and displacement animations.
     sidebar_pinned_heights: Vec<f32>,
-    project_icons:
-        std::cell::RefCell<std::collections::HashMap<String, Entity<project_icon::ProjectIcon>>>,
+    project_icons: project_icon::ProjectIcons,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
     /// Set by an archive-pill click until the pointer next moves. gpui only

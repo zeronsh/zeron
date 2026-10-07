@@ -247,6 +247,9 @@ pub struct PullRequestsPage {
     repository_error: Option<String>,
     initial_scope_attempted: bool,
     initial_scope_task: Option<Task<()>>,
+    resolving_project: Option<ProjectRef>,
+    project_repositories: HashMap<ProjectRef, String>,
+    project_icons: crate::shell::project_icon::ProjectIcons,
     /// The project the board was last opened from. Opening it from another
     /// project follows that project; an explicit choice stands until then.
     seen_context: Option<ProjectRef>,
@@ -335,13 +338,24 @@ impl PullRequestsPage {
             ComposerInput::with_context("owner/repository", "PaletteSearch", cx)
                 .with_text_metrics(12.0, 16.0)
                 .with_single_line()
+                .with_tab_stop()
         });
-        let repository_events = cx.subscribe(&repository_input, |page: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                page.return_focus = Some(page.repository_focus.clone());
-                page.select_repository(cx);
-            }
-        });
+        let repository_events =
+            cx.subscribe(
+                &repository_input,
+                |page: &mut Self, _, event, cx| match event {
+                    ComposerInputEvent::Submitted => {
+                        page.return_focus = Some(page.repository_focus.clone());
+                        page.select_repository(cx);
+                    }
+                    ComposerInputEvent::Edited => {
+                        page.cancel_project_detection();
+                        page.repository_error = None;
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            );
         let observe = cx.observe(&state, |page, _, cx| {
             if page.visible {
                 page.reconcile_target_device(cx);
@@ -360,6 +374,9 @@ impl PullRequestsPage {
             repository_error: None,
             initial_scope_attempted: false,
             initial_scope_task: None,
+            resolving_project: None,
+            project_repositories: HashMap::new(),
+            project_icons: Default::default(),
             seen_context: None,
             _repository_events: repository_events,
             snapshots: Vec::new(),
@@ -473,7 +490,7 @@ impl PullRequestsPage {
             for project in candidates {
                 let target = (project.device != local).then(|| project.device.clone());
                 let mut params = params_for_target(target.as_deref());
-                params["cwd"] = project.path.into();
+                params["cwd"] = project.path.clone().into();
                 let request = engine.client().call(methods::GET_CHANGE_REQUEST_REPOSITORY, params);
                 let deadline = cx.background_executor().timer(std::time::Duration::from_secs(3));
                 futures::pin_mut!(request, deadline);
@@ -488,7 +505,7 @@ impl PullRequestsPage {
                     .flatten()
                     .filter(|repo| valid_repository_filter(repo))
                 {
-                    found = Some((repository, target));
+                    found = Some((repository, target, project));
                     break;
                 }
             }
@@ -499,6 +516,10 @@ impl PullRequestsPage {
                     return;
                 }
                 page.load_state = PullRequestsLoadState::Idle;
+                let found = found.map(|(repo, target, project)| {
+                    page.project_repositories.insert(project, repo.clone());
+                    (repo, target)
+                });
                 if let Some((repo, target)) = found.or(fallback) {
                     page.apply_initial_repository(repo, target, cx);
                 } else if discovery_failed && explicit_context {
@@ -524,6 +545,7 @@ impl PullRequestsPage {
         if self.seen_context.as_ref() == Some(&project) {
             return;
         }
+        self.cancel_project_detection();
         self.repository = None;
         self.automatic_filter = true;
         self.initial_scope_task = None;
@@ -545,6 +567,7 @@ impl PullRequestsPage {
     }
 
     pub(crate) fn on_project_scope_changed(&mut self, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
         if self.visible {
             self.follow_context(cx);
         }
@@ -570,6 +593,7 @@ impl PullRequestsPage {
 
     /// Keep the retained route entity dormant while another outlet is active.
     pub fn on_hidden(&mut self) {
+        self.cancel_project_detection();
         self.visible = false;
         self.sort_menu = popover::Popup::default();
         self.repository_menu = popover::Popup::default();
@@ -587,6 +611,7 @@ impl PullRequestsPage {
     }
 
     fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
         self.close_device_menu(cx);
         if self.target_device == target {
             return;
@@ -648,6 +673,7 @@ impl PullRequestsPage {
     }
 
     fn select_repository(&mut self, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
         let repository = self
             .repository_input
             .read(cx)
@@ -703,6 +729,7 @@ impl PullRequestsPage {
         if normalized == self.target_device {
             return false;
         }
+        self.cancel_project_detection();
         self.close_device_menu(cx);
         self.reset_for_target(normalized, cx);
         true
@@ -769,13 +796,24 @@ impl PullRequestsPage {
     }
 
     fn close_repository_menu(&mut self, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
         if self.repository_menu.begin_close() {
             popover::reap_popup(cx, |page: &mut Self| &mut page.repository_menu);
             cx.notify();
         }
     }
 
+    fn cancel_project_detection(&mut self) {
+        if self.resolving_project.take().is_some() {
+            self.initial_scope_task = None;
+            if self.repository.is_none() {
+                self.load_state = PullRequestsLoadState::Idle;
+            }
+        }
+    }
+
     fn select_project(&mut self, path: String, device: String, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
         let state = self.state.read(cx);
         let Some(engine) = state.engine().cloned() else {
             self.repository_error =
@@ -783,15 +821,24 @@ impl PullRequestsPage {
             cx.notify();
             return;
         };
+        if !state.device_online(&device, Utc::now()) {
+            self.repository_error =
+                Some("This device is offline. Reconnect it to open the project.".into());
+            cx.notify();
+            return;
+        }
         let local = state
             .local_device_id
             .as_deref()
             .unwrap_or(&engine.engine_info().device_id);
-        let target = (device != local).then_some(device);
+        let target = (device != local).then(|| device.clone());
+        let project = ProjectRef { path, device };
         let mut params = params_for_target(target.as_deref());
-        params["cwd"] = path.into();
+        params["cwd"] = project.path.clone().into();
         self.repository_error = None;
         self.initial_scope_attempted = true;
+        self.project_repositories.remove(&project);
+        self.resolving_project = Some(project.clone());
         self.initial_scope_task = Some(cx.spawn(async move |this, cx| {
             let request = engine
                 .client()
@@ -803,24 +850,29 @@ impl PullRequestsPage {
             let repository = match futures::future::select(request, deadline).await {
                 futures::future::Either::Left((Ok(value), _)) => {
                     serde_json::from_value::<Option<String>>(value)
-                        .ok()
-                        .flatten()
+                        .map_err(|_| "The device returned an unreadable repository. Try again.")
+                        .and_then(|repo| repo.filter(|repo| valid_repository_filter(repo))
+                            .ok_or("This project has no GitHub remote. Enter owner/repository to open it directly."))
                 }
-                _ => None,
+                futures::future::Either::Left((Err(_), _)) => Err("Couldn’t read this project’s repository. Check the device connection and try again."),
+                futures::future::Either::Right(_) => Err("Repository detection timed out. Try again or enter owner/repository."),
             };
             let _ = this.update(cx, |page, cx| {
+                if page.resolving_project.as_ref() != Some(&project) {
+                    return;
+                }
                 page.initial_scope_task = None;
-                if let Some(repository) = repository {
-                    if page.target_device != target {
-                        page.reset_for_target(target.clone(), cx);
+                page.resolving_project = None;
+                match repository {
+                    Ok(repository) => {
+                        page.project_repositories.insert(project, repository.clone());
+                        if page.target_device != target {
+                            page.reset_for_target(target.clone(), cx);
+                        }
+                        page.return_focus = Some(page.repository_focus.clone());
+                        page.apply_initial_repository(repository, target, cx);
                     }
-                    page.return_focus = Some(page.repository_focus.clone());
-                    page.apply_initial_repository(repository, target, cx);
-                } else {
-                    page.repository_error = Some(
-                        "Couldn’t find this project’s GitHub repository. Enter owner/name above."
-                            .into(),
-                    );
+                    Err(error) => page.repository_error = Some(error.into()),
                 }
                 cx.notify();
             });
@@ -828,7 +880,38 @@ impl PullRequestsPage {
         cx.notify();
     }
 
-    fn render_repository_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn project_is_selected(&self, project: &ProjectRef, local: Option<&str>) -> bool {
+        self.target_device.as_deref().or(local) == Some(project.device.as_str())
+            && self.project_repositories.get(project).is_some_and(|repo| {
+                self.repository
+                    .as_ref()
+                    .is_some_and(|current| current.eq_ignore_ascii_case(repo))
+            })
+    }
+
+    fn recent_repositories(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.repository
+            .iter()
+            .chain(
+                self.snapshots
+                    .iter()
+                    .rev()
+                    .filter(|((target, _, _), ..)| target == &self.target_device)
+                    .map(|((_, repo, _), ..)| repo),
+            )
+            .filter(|repo| seen.insert(repo.to_ascii_lowercase()))
+            .take(5)
+            .cloned()
+            .collect()
+    }
+
+    fn render_repository_menu(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let label = self.repository.clone().unwrap_or_else(|| {
             if self.initial_scope_task.is_some() {
                 "Detecting repository…".into()
@@ -836,7 +919,80 @@ impl PullRequestsPage {
                 "Choose repository".into()
             }
         });
-        let tooltip = label.clone();
+        let (projects, local, profile, selected_space) = {
+            let state = self.state.read(cx);
+            let local = state.local_device_id.clone().or_else(|| {
+                state
+                    .engine()
+                    .map(|engine| engine.engine_info().device_id.clone())
+            });
+            let projects: Vec<_> = if self.repository_menu.get().is_some() {
+                state.projects()
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .filter_map(|members| {
+                let name = state
+                    .representative_space(members[0])
+                    .display_name()
+                    .to_owned();
+                let checkouts: Vec<_> = members
+                    .into_iter()
+                    .filter(|space| space.git_detected)
+                    .map(|space| {
+                        (
+                            space.clone(),
+                            state
+                                .device_name(&space.device_id)
+                                .unwrap_or("This device")
+                                .to_owned(),
+                            state.device_online(&space.device_id, Utc::now()),
+                        )
+                    })
+                    .collect();
+                (!checkouts.is_empty()).then_some((name, checkouts))
+            })
+            .collect();
+            let profile = match &state.auth {
+                Some(zeron_proto::AuthState::SignedIn { user, org_id }) => {
+                    Some(format!("{}:{org_id:?}", user.id))
+                }
+                _ => None,
+            };
+            let selected_space = state
+                .spaces
+                .iter()
+                .find(|space| {
+                    space.git_detected
+                        && self.project_is_selected(
+                            &ProjectRef {
+                                path: space.path.clone(),
+                                device: space.device_id.clone(),
+                            },
+                            local.as_deref(),
+                        )
+                })
+                .cloned();
+            (projects, local, profile, selected_space)
+        };
+        let trigger_icon = match selected_space.as_ref() {
+            Some(space) => div()
+                .size(px(16.0))
+                .flex_none()
+                .child(self.project_icons.render(
+                    &self.state,
+                    Some(space),
+                    profile.clone(),
+                    false,
+                    cx,
+                ))
+                .into_any_element(),
+            None => icon(icons::FOLDER_WITH_FILES)
+                .size(px(14.0))
+                .text_color(theme.text_muted)
+                .into_any_element(),
+        };
         let mut trigger =
             crate::surface_chrome::tab("pr-repository", self.repository_menu.is_open(), theme)
                 .debug_selector(|| "pr-repository".into())
@@ -848,13 +1004,14 @@ impl PullRequestsPage {
                 .aria_label(format!("Repository: {label}"))
                 .aria_expanded(self.repository_menu.is_open())
                 .track_focus(&self.repository_focus)
-                .tooltip(widgets::text_tooltip(tooltip))
+                .tooltip(widgets::text_tooltip(label.clone()))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|page, _, _, _| page.repository_menu.note_trigger_press()),
                 )
                 .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" && page.repository_menu.is_open() {
+                        cx.stop_propagation();
                         page.return_focus = Some(page.repository_focus.clone());
                         page.close_repository_menu(cx);
                     }
@@ -869,16 +1026,13 @@ impl PullRequestsPage {
                     if open {
                         page.close_repository_menu(cx);
                     } else {
+                        page.repository_error = None;
                         page.repository_menu.open(());
                         window.focus(&page.repository_input.read(cx).focus_handle(cx), cx);
                     }
                     cx.notify();
                 }))
-                .child(
-                    icon(icons::FOLDER_WITH_FILES)
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
-                )
+                .child(trigger_icon)
                 .child(div().min_w_0().truncate().child(label))
                 .child(
                     icon(icons::ALT_ARROW_DOWN)
@@ -886,159 +1040,293 @@ impl PullRequestsPage {
                         .text_color(theme.text_muted),
                 );
         if self.repository_menu.get().is_some() {
-            let mut recent: Vec<String> = self
-                .snapshots
-                .iter()
-                .rev()
-                .filter(|((target, _, _), ..)| target == &self.target_device)
-                .map(|((_, repo, _), ..)| repo.clone())
-                .collect();
-            let mut seen = HashSet::new();
-            recent.retain(|repo| seen.insert(repo.clone()));
-            recent.truncate(5);
-            // Only Git projects can have a GitHub repository.
-            let state = self.state.read(cx);
-            let projects: Vec<_> = state
-                .projects()
+            let recent: Vec<_> = self
+                .recent_repositories()
                 .into_iter()
-                .map(|members| {
-                    let label = state
-                        .representative_space(members[0])
-                        .display_name()
-                        .to_owned();
-                    let checkouts = members
-                        .into_iter()
-                        .filter(|space| space.git_detected)
-                        .map(|space| {
-                            (
-                                space.clone(),
-                                state
-                                    .device_name(&space.device_id)
-                                    .unwrap_or("This device")
-                                    .to_owned(),
-                            )
+                .filter(|repo| {
+                    !projects
+                        .iter()
+                        .flat_map(|(_, members)| members)
+                        .any(|(space, _, _)| {
+                            let project = ProjectRef {
+                                path: space.path.clone(),
+                                device: space.device_id.clone(),
+                            };
+                            Some(space.device_id.as_str())
+                                == self.target_device.as_deref().or(local.as_deref())
+                                && self
+                                    .project_repositories
+                                    .get(&project)
+                                    .is_some_and(|known| known.eq_ignore_ascii_case(repo))
                         })
-                        .collect::<Vec<_>>();
-                    (label, checkouts)
                 })
-                .filter(|(_, members)| !members.is_empty())
                 .collect();
+            let mut options = Vec::new();
+            if !projects.is_empty() {
+                let mut group = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(repository_menu_label(theme, "Projects"));
+                for (name, members) in projects {
+                    let multiple = members.len() > 1;
+                    let artwork = self.project_icons.render(
+                        &self.state,
+                        Some(&members[0].0),
+                        profile.clone(),
+                        false,
+                        cx,
+                    );
+                    let mut project_group = div().flex().flex_col().gap(px(2.0));
+                    if multiple {
+                        project_group = project_group.child(
+                            div()
+                                .px(px(8.0))
+                                .pt(px(8.0))
+                                .pb(px(4.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(div().size(px(20.0)).flex_none().child(artwork))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .child(name.clone()),
+                                ),
+                        );
+                    }
+                    for (space, device, online) in members {
+                        let project = ProjectRef {
+                            path: space.path.clone(),
+                            device: space.device_id.clone(),
+                        };
+                        let selected = self.project_is_selected(&project, local.as_deref());
+                        let loading = self.resolving_project.as_ref() == Some(&project);
+                        let repository = self.project_repositories.get(&project);
+                        let primary = if multiple {
+                            device.clone()
+                        } else {
+                            name.clone()
+                        };
+                        let secondary = if loading {
+                            "Finding GitHub repository…".into()
+                        } else if !online {
+                            "Device offline".into()
+                        } else if multiple {
+                            space.path.clone()
+                        } else {
+                            format!(
+                                "{} · {}",
+                                device,
+                                repository.map(String::as_str).unwrap_or(&space.path)
+                            )
+                        };
+                        let glyph = if multiple {
+                            icon(icons::LAPTOP)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted)
+                                .into_any_element()
+                        } else {
+                            self.project_icons.render(
+                                &self.state,
+                                Some(&space),
+                                profile.clone(),
+                                selected,
+                                cx,
+                            )
+                        };
+                        let id = format!("pr-project-{}", space.id);
+                        let selector = id.clone();
+                        let row = popover::menu_row(theme, selected, id.clone())
+                            .id(SharedString::from(id))
+                            .debug_selector(move || selector.clone())
+                            .role(gpui::Role::Button)
+                            .aria_selected(selected)
+                            .tab_index(0)
+                            .aria_label(format!(
+                                "Open {name} repository on {device}: {}{}",
+                                space.path,
+                                if online { "" } else { ", offline" }
+                            ))
+                            .focus_visible(|style| style.border_2().border_color(theme.accent))
+                            .min_w_0()
+                            .min_h(px(48.0))
+                            .when(multiple, |row| row.ml(px(16.0)))
+                            .tooltip(widgets::text_tooltip(format!(
+                                "{name}\n{device}\n{}",
+                                space.path
+                            )))
+                            .child(
+                                div()
+                                    .size(px(20.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(glyph),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(div().min_w_0().truncate().child(primary))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(crate::typography::ui_rems(11.0))
+                                            .text_color(theme.text_muted)
+                                            .child(secondary),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .size(px(16.0))
+                                    .flex_none()
+                                    .when(loading, |el| {
+                                        el.child(crate::loaders::mini_glyph_spinner(
+                                            "pr-project-resolving",
+                                            1.5,
+                                            theme.glyph,
+                                            cx.entity_id(),
+                                            cx,
+                                        ))
+                                    })
+                                    .when(!loading && selected, |el| {
+                                        el.child(
+                                            icon(icons::CHECK)
+                                                .size(px(16.0))
+                                                .text_color(theme.text_muted),
+                                        )
+                                    }),
+                            )
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                cx.stop_propagation();
+                                page.select_project(
+                                    project.path.clone(),
+                                    project.device.clone(),
+                                    cx,
+                                );
+                            }));
+                        project_group = project_group.child(row);
+                    }
+                    group = group.child(project_group);
+                }
+                options.push(group.into_any_element());
+            }
+            if !recent.is_empty() {
+                let mut group = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(repository_menu_label(theme, "Recent repositories"));
+                for repo in recent {
+                    let selected = self
+                        .repository
+                        .as_ref()
+                        .is_some_and(|current| current.eq_ignore_ascii_case(&repo));
+                    group = group.child(
+                        popover::menu_row(theme, selected, format!("pr-recent-{repo}"))
+                            .id(SharedString::from(format!("pr-recent-{repo}")))
+                            .debug_selector(|| "pr-recent-option".into())
+                            .role(gpui::Role::Button)
+                            .aria_selected(selected)
+                            .tab_index(0)
+                            .aria_label(format!("Open {repo}"))
+                            .focus_visible(|style| style.border_2().border_color(theme.accent))
+                            .min_w_0()
+                            .min_h(px(36.0))
+                            .child(
+                                icon(icons::FOLDER_WITH_FILES)
+                                    .size(px(16.0))
+                                    .flex_none()
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(div().flex_1().min_w_0().truncate().child(repo.clone()))
+                            .child(div().size(px(16.0)).flex_none().when(selected, |el| {
+                                el.child(
+                                    icon(icons::CHECK)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                            }))
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                cx.stop_propagation();
+                                page.return_focus = Some(page.repository_focus.clone());
+                                page.repository_input
+                                    .update(cx, |input, cx| input.set_text(&repo, cx));
+                                page.select_repository(cx);
+                            })),
+                    );
+                }
+                options.push(group.into_any_element());
+            }
             let menu = popover::popover_card(theme)
-                .w(px(280.0))
+                .id("pr-repository-card")
+                .debug_selector(|| "pr-repository-card".into())
+                .w(px((f32::from(window.viewport_size().width) - 16.0)
+                    .min(344.0)
+                    .max(240.0)))
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                .gap(px(12.0))
                 .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_repository_menu(cx)))
-                .child(popover::menu_heading(theme, "Open a GitHub repository"))
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .flex_col()
                         .gap(px(6.0))
-                        .child(
-                            crate::surface_chrome::input()
-                                .h(px(30.0))
-                                .child(self.repository_input.clone()),
-                        )
-                        .child(
-                            crate::surface_chrome::tab("pr-repository-load", false, theme)
-                                .debug_selector(|| "pr-repository-load".into())
-                                .h(px(30.0))
-                                .px(px(8.0))
-                                .aria_label("Open repository")
-                                .child("Open")
-                                .on_click(cx.listener(|page, _, _, cx| {
-                                    cx.stop_propagation();
-                                    page.return_focus = Some(page.repository_focus.clone());
-                                    page.select_repository(cx);
-                                })),
-                        ),
-                )
-                .when(self.initial_scope_task.is_some(), |el| {
-                    el.child(
-                        div()
-                            .text_color(theme.text_muted)
-                            .child("Detecting repository…"),
-                    )
-                })
-                .when_some(self.repository_error.clone(), |el, error| {
-                    el.child(widgets::error_strip(theme, error))
-                })
-                .when(!projects.is_empty(), |el| {
-                    el.child(popover::menu_heading(theme, "From your projects"))
+                        .child(repository_menu_label(theme, "Open repository"))
                         .child(
                             div()
-                                .id("pr-project-options")
-                                .max_h(px(240.0))
-                                .overflow_y_scroll()
-                                .children(projects.into_iter().map(|(heading, members)| {
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .child(popover::menu_heading(theme, &heading))
-                                        .children(members.into_iter().map(|(project, device)| {
-                                            let label = device;
-                                            let path = project.path.clone();
-                                            popover::menu_row(
-                                                theme,
-                                                false,
-                                                format!("pr-project-{}", project.id),
-                                            )
-                                            .id(SharedString::from(format!(
-                                                "pr-project-{}",
-                                                project.id
-                                            )))
-                                            .role(gpui::Role::Button)
-                                            .tab_index(0)
-                                            .aria_label(format!("Open repository for {label}"))
-                                            .focus_visible(|style| {
-                                                style.border_2().border_color(theme.accent)
-                                            })
-                                            .child(div().flex_none().child(label))
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_color(theme.text_muted)
-                                                    .child(path),
-                                            )
-                                            .on_click(
-                                                cx.listener(move |page, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    page.select_project(
-                                                        project.path.clone(),
-                                                        project.device_id.clone(),
-                                                        cx,
-                                                    );
-                                                }),
-                                            )
-                                        }))
-                                })),
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    crate::surface_chrome::input()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .h(px(32.0))
+                                        .child(self.repository_input.clone()),
+                                )
+                                .child(
+                                    crate::surface_chrome::tab("pr-repository-load", false, theme)
+                                        .debug_selector(|| "pr-repository-load".into())
+                                        .h(px(32.0))
+                                        .px(px(10.0))
+                                        .flex_none()
+                                        .aria_label("Open repository")
+                                        .child("Open")
+                                        .on_click(cx.listener(|page, _, _, cx| {
+                                            cx.stop_propagation();
+                                            page.return_focus = Some(page.repository_focus.clone());
+                                            page.select_repository(cx);
+                                        })),
+                                ),
                         )
-                })
-                .when(!recent.is_empty(), |el| {
-                    el.child(popover::menu_heading(theme, "Recent repositories"))
-                })
-                .children(recent.into_iter().enumerate().map(|(index, repo)| {
-                    popover::menu_row(
-                        theme,
-                        self.repository.as_ref() == Some(&repo),
-                        format!("pr-recent-{index}"),
+                        .when_some(self.repository_error.clone(), |el, error| {
+                            el.child(widgets::error_strip(theme, error))
+                        }),
+                )
+                .when(!options.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .id("pr-repository-options")
+                            .min_w_0()
+                            .max_h(px((f32::from(window.viewport_size().height) - 240.0)
+                                .clamp(96.0, 360.0)))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .children(options),
                     )
-                    .id(("pr-recent", index))
-                    .role(gpui::Role::Button)
-                    .tab_index(0)
-                    .aria_label(format!("Open {repo}"))
-                    .focus_visible(|style| style.border_2().border_color(theme.accent))
-                    .child(div().truncate().child(repo.clone()))
-                    .on_click(cx.listener(move |page, _, _, cx| {
-                        cx.stop_propagation();
-                        page.return_focus = Some(page.repository_focus.clone());
-                        page.repository_input
-                            .update(cx, |input, cx| input.set_text(&repo, cx));
-                        page.select_repository(cx);
-                    }))
-                }));
+                });
             trigger = trigger.child(popover::anchored_menu_below_end(
                 "pr-repository-menu",
                 menu.into_any_element(),
@@ -1522,7 +1810,7 @@ impl PullRequestsPage {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(popover::menu_heading(theme, "Desktop devices"))
+                .child(repository_menu_label(theme, "Desktop devices"))
                 .children(devices.into_iter().enumerate().map(|(index, device)| {
                     let active = effective.as_deref() == Some(device.id.as_str());
                     let local = local_id.as_deref() == Some(device.id.as_str());
@@ -1860,7 +2148,7 @@ impl Render for PullRequestsPage {
                             .items_center()
                             .flex_wrap()
                             .gap(px(8.0))
-                            .child(self.render_repository_menu(&theme, cx))
+                            .child(self.render_repository_menu(&theme, window, cx))
                             .child(self.render_device_switcher(&theme, cx))
                             .child(
                                 widgets::ghost_action(&theme)
@@ -2767,7 +3055,7 @@ fn normalized_target_device(
 }
 
 /// A project folder on a device.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProjectRef {
     path: String,
     device: String,
@@ -2865,6 +3153,12 @@ fn recent_git_projects(state: &AppState, local: &str) -> Vec<ProjectRef> {
             device: space.device_id.clone(),
         })
         .collect()
+}
+
+fn repository_menu_label(theme: &Theme, label: &str) -> gpui::Div {
+    widgets::section_label(theme, label.to_owned())
+        .py(px(4.0))
+        .text_size(crate::typography::ui_rems(11.0))
 }
 
 fn valid_repository_filter(value: &str) -> bool {
@@ -3489,6 +3783,184 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[gpui::test]
+    fn pull_request_repository_picker_keeps_selection_and_cancels_detection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let rpc = ScriptedRpc::new({
+            let calls = calls.clone();
+            let release = release.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                let release = release.clone();
+                async move {
+                    match method.as_str() {
+                        methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                            let path = params["cwd"].as_str().unwrap().to_owned();
+                            calls.lock().unwrap().push(path.clone());
+                            if path == "/slow" {
+                                release.notified().await;
+                            }
+                            zeron_rpc::RpcReply::value(
+                                &(path != "/scratch").then(|| format!("owner{}", path)),
+                            )
+                        }
+                        methods::LIST_CHANGE_REQUEST_PAGE => {
+                            zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                                items: vec![pull_request(
+                                    params["repository"].as_str().unwrap(),
+                                    7,
+                                    1,
+                                    1,
+                                    1,
+                                )],
+                                next_cursor: None,
+                                total_count: Some(1),
+                            })
+                        }
+                        other => panic!("unexpected request {other}"),
+                    }
+                }
+            }
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, None);
+            let mut page = PullRequestsPage::new(state.clone(), cx);
+            page.repository = Some("owner/current".into());
+            page.load_state = PullRequestsLoadState::Ready;
+            state.update(cx, |state, _| {
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
+                state.local_device_id = Some("local".into());
+                state.spaces = vec![
+                    space("slow", "local", true, 1),
+                    space("next", "local", true, 1),
+                    space("scratch", "local", true, 1),
+                    space("next-worktree", "local", true, 1),
+                ];
+                state.spaces[1].repository_id = Some("next-repository".into());
+                state.spaces[3].repository_id = Some("next-repository".into());
+            });
+            page.snapshots.push((
+                (None, "OWNER/CURRENT".into(), ChangeRequestFilter::All),
+                Vec::new(),
+                Instant::now(),
+                Paging::default(),
+            ));
+            page.snapshots.push((
+                (
+                    Some("remote".into()),
+                    "remote/repo".into(),
+                    ChangeRequestFilter::All,
+                ),
+                Vec::new(),
+                Instant::now(),
+                Paging::default(),
+            ));
+            assert_eq!(page.recent_repositories(), ["owner/current"]);
+            page
+        });
+        let click = |selector: &'static str, cx: &mut gpui::VisualTestContext| {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            cx.simulate_mouse_down(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.run_until_parked();
+        };
+        cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        click("pr-repository", cx);
+        for width in [320.0, 900.0] {
+            cx.simulate_resize(gpui::size(px(width), px(700.0)));
+            cx.run_until_parked();
+            let menu = cx.debug_bounds("pr-repository-card").unwrap();
+            assert!(menu.left() >= px(0.0) && menu.right() <= px(width));
+            for selector in ["pr-project-slow", "pr-project-next", "pr-repository-load"] {
+                let row = cx.debug_bounds(selector).unwrap();
+                assert!(row.left() >= menu.left() && row.right() <= menu.right());
+                assert!(row.bottom() <= menu.bottom());
+            }
+        }
+        click("pr-project-slow", cx);
+        rpc.settle(cx, &runtime, |_| !calls.lock().unwrap().is_empty());
+        page.read_with(cx, |page, _| assert!(page.resolving_project.is_some()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert!(!page.repository_menu.is_open());
+            assert!(page.resolving_project.is_none());
+            assert!(page.initial_scope_task.is_none());
+            assert_eq!(page.repository.as_deref(), Some("owner/current"));
+        });
+        let focus = page.read_with(cx, |page, _| page.repository_focus.clone());
+        cx.update(|window, _| assert!(focus.is_focused(window)));
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| assert!(page.repository_menu.is_open()));
+        click("pr-project-next", cx);
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
+                page.repository.as_deref() == Some("owner/next")
+                    && page.load_state == PullRequestsLoadState::Ready
+            })
+        });
+        release.notify_one();
+        // The host may finish its bounded read after the UI task is cancelled;
+        // that old result must never replace the later selection.
+        rpc.settle(cx, &runtime, |_| rpc.completed() >= 3);
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("owner/next"))
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        click("pr-project-scratch", cx);
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| page.repository_error.is_some())
+        });
+        page.read_with(cx, |page, _| {
+            assert!(page.repository_menu.is_open());
+            assert!(
+                page.repository_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("no GitHub remote")
+            );
+            assert_eq!(page.repository.as_deref(), Some("owner/next"));
+        });
+        page.update(cx, |page, cx| {
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("owner/typed", cx))
+        });
+        page.read_with(cx, |page, _| assert!(page.repository_error.is_none()));
     }
 
     #[gpui::test]
