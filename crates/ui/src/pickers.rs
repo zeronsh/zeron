@@ -2420,7 +2420,9 @@ impl Pickers {
     fn project_rows(&self, cx: &App) -> Vec<ProjectRow> {
         let state = self.state.read(cx);
         let mut rows: Vec<ProjectRow> = Vec::new();
-        for space in &state.spaces {
+        // This device's checkouts are not offered while its local execution
+        // is disabled (a project only there drops out entirely).
+        for space in state.spaces.iter().filter(|s| state.may_execute_on(&s.device_id)) {
             let key = zeron_proto::view::project_key(space);
             if rows.iter().any(|row| row.key == key) {
                 continue;
@@ -2557,7 +2559,11 @@ impl Pickers {
                 .to_string()
         };
         if let Some(space) = state.selected_space_row() {
-            let members = state.project_members(space);
+            let members: Vec<_> = state
+                .project_members(space)
+                .into_iter()
+                .filter(|member| state.may_execute_on(&member.device_id))
+                .collect();
             return members
                 .iter()
                 .map(|member| {
@@ -2575,7 +2581,12 @@ impl Pickers {
                 })
                 .collect();
         }
-        let mut devices: Vec<&zeron_proto::Device> = state.devices.iter().collect();
+        // This device is not offered while its local execution is disabled.
+        let mut devices: Vec<&zeron_proto::Device> = state
+            .devices
+            .iter()
+            .filter(|d| state.may_execute_on(&d.id))
+            .collect();
         devices.sort_by_key(|d| {
             (
                 local.as_deref() != Some(d.id.as_str()),
@@ -2668,7 +2679,13 @@ impl Pickers {
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No devices match."))
+                .child(SharedString::from(
+                    if self.state.read(cx).local_execution_disabled {
+                        "No remote devices match. Local execution is disabled."
+                    } else {
+                        "No devices match."
+                    },
+                ))
                 .into_any_element()
         } else {
             popover::menu_scroll_host("device-list-host")

@@ -188,6 +188,38 @@ pub mod pi;
 pub mod process;
 mod scratch;
 pub mod shell_env;
+
+/// Process-wide hold on the local work this crate starts on its own (the
+/// login-shell snapshot, managed adapter and archive installs), set by the
+/// host from its "Disable local execution" policy. Starts hold the read side
+/// from their check through their first file or process, so once
+/// [`set_local_execution_suspended`]`(true)` returns none can begin.
+static LOCAL_EXECUTION_SUSPENDED: std::sync::RwLock<bool> = std::sync::RwLock::new(false);
+
+pub fn set_local_execution_suspended(suspended: bool) {
+    *LOCAL_EXECUTION_SUSPENDED
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = suspended;
+}
+
+/// The admission lease (see [`LOCAL_EXECUTION_SUSPENDED`]); `None` while
+/// suspended. Never call back into this crate's gated paths while holding it.
+pub(crate) fn local_execution_lease() -> Option<std::sync::RwLockReadGuard<'static, bool>> {
+    let lease = LOCAL_EXECUTION_SUSPENDED
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!*lease).then_some(lease)
+}
+
+// Only the unix login-shell snapshot asks this; the lease covers the rest.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn local_execution_suspended() -> bool {
+    local_execution_lease().is_none()
+}
+
+pub(crate) fn local_execution_refused() -> HarnessError {
+    HarnessError::Install("Local execution is disabled on this device".into())
+}
 pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;

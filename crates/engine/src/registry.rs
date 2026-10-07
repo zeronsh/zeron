@@ -138,6 +138,9 @@ pub struct HarnessRegistry {
     gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::RwLock<()>>>>,
     pending_updates: Mutex<std::collections::HashSet<HarnessId>>,
     update_generation: tokio::sync::watch::Sender<u64>,
+    /// Device policy (issue #730). [`Self::resolve`] is the funnel every agent
+    /// CLI process goes through: runs, titles, catalogs, update probes.
+    local_execution: Mutex<crate::local_execution::LocalExecution>,
 }
 
 impl Default for HarnessRegistry {
@@ -163,11 +166,15 @@ impl HarnessRegistry {
         lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     ) -> Result<Vec<zeron_proto::Model>, HarnessError> {
         let harness = self.resolve(id)?;
+        let policy = self.local_execution();
         tokio::spawn(async move {
             // An RPC cancellation must not drop the gate before the probe's
             // own deadline and child cleanup finish.
             let _lease = lease;
-            harness.models().await
+            policy
+                .until_disabled(harness.models())
+                .await
+                .map_err(|error| HarnessError::Protocol(error.to_string()))?
         })
         .await
         .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
@@ -181,9 +188,13 @@ impl HarnessRegistry {
         let cwd = cwd.to_owned();
         let lease = self.execution_lease(id).await;
         let harness = self.resolve(id)?;
+        let policy = self.local_execution();
         tokio::spawn(async move {
             let _lease = lease;
-            harness.commands_for(&cwd).await
+            policy
+                .until_disabled(harness.commands_for(&cwd))
+                .await
+                .map_err(|error| HarnessError::Protocol(error.to_string()))?
         })
         .await
         .map_err(|error| {
@@ -199,11 +210,15 @@ impl HarnessRegistry {
         let cwd = cwd.to_owned();
         let lease = self.execution_lease(id).await;
         let harness = self.resolve(id)?;
+        let policy = self.local_execution();
         tokio::spawn(async move {
             // Retain the read lease through the adapter's deadline and cleanup,
             // even when the requesting RPC is dropped.
             let _lease = lease;
-            harness.skills(&cwd).await
+            policy
+                .until_disabled(harness.skills(&cwd))
+                .await
+                .map_err(|error| HarnessError::Protocol(error.to_string()))?
         })
         .await
         .map_err(|error| HarnessError::Protocol(format!("skill discovery task failed: {error}")))?
@@ -220,7 +235,24 @@ impl HarnessRegistry {
             gates: Mutex::new(HashMap::new()),
             pending_updates: Mutex::new(std::collections::HashSet::new()),
             update_generation,
+            local_execution: Mutex::default(),
         }
+    }
+
+    /// Wire this device's local-execution policy (engine assembly; a
+    /// re-assembly re-points it, like the prefs path).
+    pub fn set_local_execution(&self, policy: crate::local_execution::LocalExecution) {
+        *self
+            .local_execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = policy;
+    }
+
+    pub(crate) fn local_execution(&self) -> crate::local_execution::LocalExecution {
+        self.local_execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn gate(&self, id: HarnessId) -> Arc<tokio::sync::RwLock<()>> {
@@ -482,6 +514,9 @@ impl HarnessRegistry {
     }
 
     pub fn resolve(&self, id: HarnessId) -> Result<Arc<dyn Harness>, HarnessError> {
+        self.local_execution()
+            .check()
+            .map_err(|error| HarnessError::Protocol(error.to_string()))?;
         let mut slots = self.slots();
         match slots.get(&id) {
             Some(Slot::Ready(harness)) => Ok(harness.clone()),
@@ -525,9 +560,8 @@ impl HarnessRegistry {
 /// `claude-code` slot resolved through `zeron_harness` on first use (subprocess
 /// discovery only happens when a run/model call actually needs it).
 pub fn default_registry() -> HarnessRegistry {
-    // Warm the login-shell PATH snapshot in the background so the first
-    // claude/codex resolve doesn't pay the shell-startup latency inline.
-    zeron_harness::shell_env::prewarm();
+    // The login-shell prewarm runs at engine assembly, once the device's
+    // local-execution policy is known (it spawns the user's shell).
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(MockHarness {
         script: vec![

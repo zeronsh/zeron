@@ -5155,6 +5155,11 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        // Reject before any host-side effect (worktree creation, setup
+        // Actions, row claims). Interrupt stays allowed: it only stops work.
+        if !matches!(entry.payload, SessionCommandPayload::Interrupt {}) {
+            sessions.check_local_execution()?;
+        }
         match &entry.payload {
             SessionCommandPayload::Run {
                 request,

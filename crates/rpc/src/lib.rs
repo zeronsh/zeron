@@ -124,6 +124,13 @@ pub mod methods {
     /// Headed IPC owners do not implement this method: closing another app's
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
+    /// This engine's "Disable local execution" policy (never relay-forwarded).
+    /// Stream: `disabled` (bool) now, then on every change.
+    pub const WATCH_LOCAL_EXECUTION: &str = "WatchLocalExecution";
+    /// `{disabled, interrupt?}` → `{disabled, activeChatIds, terminalsOpen}`.
+    /// Enabling with local work running and `interrupt` unset changes nothing
+    /// and reports that work; with `interrupt` it stops it. Relay peers are refused.
+    pub const SET_LOCAL_EXECUTION: &str = "SetLocalExecution";
     pub const AUTH_STATUS: &str = "AuthStatus";
     // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";

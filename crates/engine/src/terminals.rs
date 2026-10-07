@@ -93,6 +93,9 @@ impl LiveTerminal {
 
 struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
+    /// Device policy (issue #730): every PTY — shells, project Actions,
+    /// worktree setup Actions — opens through [`Terminals::open_session`].
+    local_execution: std::sync::OnceLock<crate::local_execution::LocalExecution>,
 }
 
 impl Drop for TerminalsInner {
@@ -157,10 +160,16 @@ impl Terminals {
         let terminals = Self {
             inner: Arc::new(TerminalsInner {
                 sessions: Mutex::new(HashMap::new()),
+                local_execution: std::sync::OnceLock::new(),
             }),
         };
         tokio::spawn(reaper_task(Arc::downgrade(&terminals.inner)));
         terminals
+    }
+
+    /// Wire the device's local-execution policy (once, at engine assembly).
+    pub fn set_local_execution(&self, policy: crate::local_execution::LocalExecution) {
+        let _ = self.inner.local_execution.set(policy);
     }
 
     /// Open a login shell in `cwd`. The PTY outlives every subscriber; it dies on
@@ -262,6 +271,15 @@ impl Terminals {
             (None, None)
         };
 
+        // Admission lease from the policy check through spawn and registration
+        // (see `LocalExecution::admit`): a disable waits for this start, and
+        // its drain then finds the registered session.
+        let lease = self
+            .inner
+            .local_execution
+            .get()
+            .map(|policy| policy.admit())
+            .transpose()?;
         #[cfg(windows)]
         let (master, mut child) =
             windows::open(&shell, cwd, clamp_size(cols, rows), environment)
@@ -321,6 +339,7 @@ impl Terminals {
             exited: false,
         }));
         lock(&self.inner.sessions).insert(id.clone(), session.clone());
+        drop(lease);
 
         // Raw PTY bytes: blocking reader thread → batcher task (12ms windows).
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();

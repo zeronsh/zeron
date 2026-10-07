@@ -171,6 +171,8 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Device policy (issue #730), wired at engine assembly before recovery.
+    local_execution: OnceLock<crate::local_execution::LocalExecution>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -208,6 +210,7 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                local_execution: OnceLock::new(),
             }),
         }
     }
@@ -256,6 +259,30 @@ impl SessionsEngine {
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    /// Wire the device's local-execution policy (called once at engine
+    /// assembly, before [`Self::recover_stale`]).
+    pub fn set_local_execution(&self, policy: crate::local_execution::LocalExecution) {
+        let _ = self.inner.local_execution.set(policy);
+    }
+
+    /// Every run start funnels through here: RPC, the durable command plane,
+    /// queue drains and crash auto-resume alike.
+    pub(crate) fn check_local_execution(&self) -> Result<(), EngineError> {
+        match self.inner.local_execution.get() {
+            Some(policy) => policy.check(),
+            None => Ok(()),
+        }
+    }
+
+    /// Chats with a turn in flight here — what enabling the policy would interrupt.
+    pub fn active_chat_ids(&self) -> Vec<String> {
+        lock(&self.inner.statuses)
+            .iter()
+            .filter(|(_, session)| is_active(session))
+            .map(|(chat_id, _)| chat_id.clone())
+            .collect()
     }
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
@@ -419,6 +446,7 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        self.check_local_execution()?;
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
@@ -603,6 +631,13 @@ impl SessionsEngine {
                 fork_history_sent: fork_history_sent.clone(),
             },
         );
+        // Re-check after registering: disabling publishes the policy and then
+        // drains `runs`, so a start racing it is either drained or stops here
+        // (before `drive_run` spawns anything).
+        if let Err(err) = self.check_local_execution() {
+            lock(&self.inner.runs).remove(chat_id);
+            return Err(err);
+        }
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -684,6 +719,7 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
+        self.check_local_execution()?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -879,7 +915,10 @@ impl SessionsEngine {
                         .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
                 })
                 .unwrap_or(false);
-            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            let will_resume = fresh
+                && prompt.is_some()
+                && attempts < MAX_AUTO_RESUME
+                && self.check_local_execution().is_ok();
 
             let note = if will_resume {
                 "Run interrupted by engine restart — resuming"
@@ -1873,7 +1912,16 @@ async fn drive_run(
                     wire_request.prompt =
                         zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
                 }
-                harness.run(wire_request, controls).await
+                // The agent process starts inside this await: a disable drops
+                // it here (see `LocalExecution::until_disabled`).
+                inner
+                    .registry
+                    .local_execution()
+                    .until_disabled(harness.run(wire_request, controls))
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(zeron_harness::HarnessError::Protocol(error.to_string()))
+                    })
             } else {
                 Ok(futures::stream::once(async {
                     Ok(AgentEvent::Done {

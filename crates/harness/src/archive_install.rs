@@ -176,8 +176,15 @@ where
         source.version,
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-    std::fs::create_dir_all(&tmp_dir)?;
+    {
+        // Admission (see `crate::local_execution_lease`): no new install dir
+        // once the host has disabled local execution.
+        let Some(_lease) = crate::local_execution_lease() else {
+            return Err(crate::local_execution_refused());
+        };
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir)?;
+    }
     tracing::info!(
         target: "zeron_harness::adapter_install",
         url = source.url,
@@ -192,6 +199,11 @@ where
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(error);
     }
+    // A disable that landed during the download keeps it from being committed.
+    let Some(_commit) = crate::local_execution_lease() else {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(crate::local_execution_refused());
+    };
     std::fs::write(tmp_dir.join(OK_MARKER), format!("{}\n", source.marker))?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;

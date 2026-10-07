@@ -115,7 +115,12 @@ pub struct ChangeRequestResolver {
 
 impl ChangeRequestResolver {
     pub fn new() -> Self {
-        let runner: Arc<dyn ProcessRunner> = Arc::new(SystemProcessRunner);
+        Self::with_local_execution(Default::default())
+    }
+
+    /// Its `git`/`gh` processes start under this device's admission lease.
+    pub fn with_local_execution(policy: crate::local_execution::LocalExecution) -> Self {
+        let runner: Arc<dyn ProcessRunner> = Arc::new(SystemProcessRunner(policy));
         Self {
             inspector: GitCheckoutInspector::new(runner.clone()),
             github: GitHubCli::with_runner(runner),
@@ -188,7 +193,7 @@ pub struct GitHubCli {
 
 impl GitHubCli {
     pub fn new() -> Self {
-        Self::with_runner(Arc::new(SystemProcessRunner))
+        Self::with_runner(Arc::new(SystemProcessRunner::default()))
     }
 
     fn with_runner(runner: Arc<dyn ProcessRunner>) -> Self {
@@ -780,7 +785,8 @@ trait ProcessRunner: Send + Sync {
     async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError>;
 }
 
-struct SystemProcessRunner;
+#[derive(Default)]
+struct SystemProcessRunner(crate::local_execution::LocalExecution);
 
 #[async_trait]
 impl ProcessRunner for SystemProcessRunner {
@@ -802,9 +808,14 @@ impl ProcessRunner for SystemProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command
-            .spawn()
-            .map_err(|error| ProcessRunError::Spawn(error.kind()))?;
+        let mut child = {
+            let _lease = self
+                .0
+                .admit()
+                .map_err(|_| ProcessRunError::Spawn(io::ErrorKind::PermissionDenied))?;
+            command.spawn()
+        }
+        .map_err(|error| ProcessRunError::Spawn(error.kind()))?;
         let stdout = child.stdout.take().ok_or(ProcessRunError::Io)?;
         let stderr = child.stderr.take().ok_or(ProcessRunError::Io)?;
         let completed = tokio::time::timeout(request.timeout, async {
@@ -925,7 +936,7 @@ mod tests {
                     request.program = "powershell.exe".into();
                 }
             }
-            SystemProcessRunner.run(request).await
+            SystemProcessRunner::default().run(request).await
         }
     }
 

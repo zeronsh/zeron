@@ -23,9 +23,11 @@
 //! Set `ZERON_NO_LOGIN_SHELL=1` to disable the snapshot entirely.
 
 use std::ffi::{OsStr, OsString};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 static CACHE: OnceLock<Option<OsString>> = OnceLock::new();
+/// Serializes captures (the cache is filled at most once).
+static CAPTURING: Mutex<()> = Mutex::new(());
 
 /// The PATH the user's login shell reports, captured once and cached for the
 /// life of the process. `None` when disabled, non-unix, no usable shell, or
@@ -33,7 +35,24 @@ static CACHE: OnceLock<Option<OsString>> = OnceLock::new();
 pub fn login_shell_path() -> Option<&'static OsStr> {
     #[cfg(unix)]
     {
-        CACHE.get_or_init(unix::capture).as_deref()
+        if let Some(cached) = CACHE.get() {
+            return cached.as_deref();
+        }
+        let _capturing = CAPTURING.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cached) = CACHE.get() {
+            return cached.as_deref();
+        }
+        // While the host has local execution disabled no shell is spawned
+        // (see `crate::set_local_execution_suspended`).
+        if crate::local_execution_suspended() {
+            return None;
+        }
+        let captured = unix::capture();
+        // A capture a suspension refused part-way is not a negative answer.
+        if captured.is_none() && crate::local_execution_suspended() {
+            return None;
+        }
+        CACHE.get_or_init(|| captured).as_deref()
     }
     #[cfg(not(unix))]
     {
@@ -164,7 +183,13 @@ mod unix {
             // VSCODE_RESOLVING_ENVIRONMENT; TERM=dumb quiets fancy prompts.
             .env("ZERON_RESOLVING_ENVIRONMENT", "1")
             .env("TERM", "dumb");
-        let Ok(mut child) = cmd.spawn() else {
+        let spawned = {
+            let Some(_lease) = crate::local_execution_lease() else {
+                return Vec::new();
+            };
+            cmd.spawn()
+        };
+        let Ok(mut child) = spawned else {
             return Vec::new();
         };
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));

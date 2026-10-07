@@ -25,6 +25,7 @@ pub mod doc_host;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
+pub mod local_execution;
 pub mod local_import;
 mod model_catalogs;
 pub mod profile;
@@ -141,6 +142,8 @@ pub struct EngineCore {
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
+    /// Device-scoped "Disable local execution" policy (issue #730).
+    pub local_execution: local_execution::LocalExecution,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -220,10 +223,15 @@ impl EngineCore {
         // This device's harness enablement (Settings → Providers) rides the
         // engine data dir — per-device, like the CLI installs it gates.
         registry.load_prefs(data_dir);
+        // Device-scoped like the prefs above: survives sign-out and profile switches.
+        let local_execution = local_execution::LocalExecution::load(data_dir);
+        registry.set_local_execution(local_execution.clone());
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        // Before `recover_stale`: crash auto-resume must not start local work.
+        sessions.set_local_execution(local_execution.clone());
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -253,11 +261,13 @@ impl EngineCore {
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
+        repos.set_local_execution(local_execution.clone());
         doc_host.set_repos(repos.clone());
         let change_requests = CheckoutChangeRequests::start(repos.clone(), &device_id);
         let workspace_files =
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
+        terminals.set_local_execution(local_execution.clone());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = zeron_preview::PreviewService::new(
@@ -303,6 +313,7 @@ impl EngineCore {
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
+        agent_accounts.set_local_execution(local_execution.clone());
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
@@ -334,6 +345,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             harness_updates,
+            local_execution,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -347,6 +359,19 @@ impl EngineCore {
 
     pub fn workspace_scope(&self) -> WorkspaceScope {
         self.workspace_scope
+    }
+
+    /// Start preview discovery. It stays paused while local execution is
+    /// disabled (`SetLocalExecution` pauses and resumes it); remote previews
+    /// and sign-in callbacks work either way.
+    pub async fn start_previews(
+        &self,
+        projects: zeron_preview::service::Projects,
+        signaling: Option<zeron_preview::signaling::Config>,
+    ) {
+        self.previews
+            .set_local_paused(self.local_execution.disabled());
+        self.previews.start(projects, signaling).await;
     }
 
     /// Attach the auth service (before building the RPC service / relays).
@@ -447,10 +472,21 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        zeron_rpc::HostRelay::spawn(config, self.relay_rpc_service(), on_nudge)
     }
 
+    /// The service relay peers reach. It is marked relay-origin so it can
+    /// never change this device's local-execution policy.
+    pub(crate) fn relay_rpc_service(&self) -> Arc<EngineRpc> {
+        Arc::new(self.engine_rpc().relay_origin())
+    }
+
+    /// The service for in-process and localhost IPC clients.
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
+        Arc::new(self.engine_rpc())
+    }
+
+    fn engine_rpc(&self) -> EngineRpc {
         let mut rpc = EngineRpc::new(
             self.sessions.clone(),
             self.doc_host.clone(),
@@ -464,6 +500,7 @@ impl EngineCore {
             self.diff_sync.clone(),
             self.uploads.clone(),
             self.agent_accounts.clone(),
+            self.local_execution.clone(),
             self.workspace_scope,
         )
         .with_auth(self.auth())
@@ -478,7 +515,7 @@ impl EngineCore {
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
-        Arc::new(rpc)
+        rpc
     }
 
     /// Revoke every account-scoped transport before any slower graceful
@@ -811,7 +848,7 @@ impl Engine {
             org_id: preview_org,
             tokens: Arc::new(auth.clone()),
         });
-        core.previews.start(projects, preview_signaling).await;
+        core.start_previews(projects, preview_signaling).await;
         // Release checker: polls {edge}/releases hourly (wall clock); headless
         // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
         // on quiescence so a restart never lands under a live run or open PTY.
@@ -838,7 +875,23 @@ impl Engine {
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat
         // never waits on — or dies inside — an npm run.
-        zeron_harness::acp::prewarm_managed_adapters();
+        // The prewarms spawn the user's login shell and run npm installs:
+        // wait until local execution is allowed.
+        let local_execution = core.local_execution.clone();
+        // Supervised by the policy: dropped on disable, retried on enable.
+        tokio::spawn(async move {
+            loop {
+                local_execution.wait_enabled().await;
+                zeron_harness::shell_env::prewarm();
+                if local_execution
+                    .until_disabled(zeron_harness::acp::prewarm_managed_adapters())
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        });
 
         let host_relay = edge.as_ref().map(|edge| {
             let mut link_config =

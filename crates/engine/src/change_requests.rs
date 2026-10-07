@@ -85,7 +85,8 @@ pub struct CheckoutChangeRequests {
 
 impl CheckoutChangeRequests {
     pub fn start(repos: Repos, device_id: &str) -> Self {
-        Self::new(repos, device_id, Arc::new(ChangeRequestResolver::new()))
+        let resolver = ChangeRequestResolver::with_local_execution(repos.local_execution());
+        Self::new(repos, device_id, Arc::new(resolver))
     }
 
     pub fn new(
@@ -163,7 +164,10 @@ impl CheckoutChangeRequests {
         };
         futures::stream::unfold(state, |mut state| async move {
             loop {
-                if state.service.inner.shutdown.is_cancelled() {
+                // Local execution disabled: end the stream before any git/gh.
+                if state.service.inner.shutdown.is_cancelled()
+                    || state.service.inner.repos.local_execution().disabled()
+                {
                     return None;
                 }
                 let mut source = match state

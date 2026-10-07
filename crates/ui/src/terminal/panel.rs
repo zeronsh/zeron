@@ -761,12 +761,32 @@ impl TerminalPanel {
 
             let mut attempt: u32 = 0;
             loop {
-                let Ok(after_seq) = this.update(cx, |panel, _| {
-                    panel.tab_mut(&chat, key).map(|t| t.last_seq)
+                // A local tab after this device disabled local execution has
+                // nothing to (re)subscribe to: the engine killed the PTY and
+                // refuses the subscribe. Close it out instead of retrying
+                // forever — checked before every attempt so a refused
+                // subscribe cannot skip it (issue #730).
+                let Ok(after_seq) = this.update(cx, |panel, cx| {
+                    let local_disabled = {
+                        let state = panel.state.read(cx);
+                        state.local_execution_disabled
+                            && target
+                                .as_deref()
+                                .is_none_or(|id| !state.may_execute_on(id))
+                    };
+                    let tab = panel.tab_mut(&chat, key)?;
+                    if tab.exited.is_none() && local_disabled {
+                        tab.exited = Some(-1);
+                        tab.emulator.feed(
+                            b"\r\n\x1b[90m[local execution disabled on this device]\x1b[0m\r\n",
+                        );
+                        cx.notify();
+                    }
+                    tab.exited.is_none().then_some(tab.last_seq)
                 }) else {
                     return; // entity released
                 };
-                let Some(after_seq) = after_seq else { return }; // tab closed
+                let Some(after_seq) = after_seq else { return }; // tab closed or closed out
 
                 let subscribed = engine
                     .client()
