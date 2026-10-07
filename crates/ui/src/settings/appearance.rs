@@ -271,6 +271,15 @@ impl Render for TranscriptWidthDrag {
     }
 }
 
+#[derive(Clone)]
+struct WallpaperOpacityDrag;
+
+impl Render for WallpaperOpacityDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 pub struct AppearancePage {
     width_focus: FocusHandle,
     width_hovered: bool,
@@ -279,6 +288,13 @@ pub struct AppearancePage {
     width_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     pending_width: Option<f32>,
     width_frame_pending: bool,
+    wallpaper_opacity_focus: FocusHandle,
+    wallpaper_opacity_reset_focus: FocusHandle,
+    wallpaper_opacity_hovered: bool,
+    wallpaper_opacity_pressed: bool,
+    wallpaper_opacity_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pending_wallpaper_opacity: Option<f32>,
+    wallpaper_opacity_frame_pending: bool,
     scroll: crate::settings::widgets::PageScroll,
     selected_font: UiFontFamily,
     selected_terminal_font: UiFontFamily,
@@ -320,6 +336,38 @@ pub struct AppearancePage {
 }
 
 impl AppearancePage {
+    fn reset_wallpaper_opacity(&mut self, cx: &mut Context<Self>) {
+        self.pending_wallpaper_opacity = None;
+        crate::settings::set_chat_wallpaper_opacity_override(None, cx);
+        cx.notify();
+    }
+
+    fn current_wallpaper_opacity(&self, cx: &gpui::App) -> f32 {
+        self.pending_wallpaper_opacity.unwrap_or_else(|| {
+            crate::settings::effective_chat_wallpaper_opacity(
+                crate::settings::chat_wallpaper_opacity_override(cx),
+            )
+        })
+    }
+
+    fn wallpaper_opacity_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let current = self.current_wallpaper_opacity(cx);
+        let next = match key {
+            "left" | "down" => current - 0.05,
+            "right" | "up" => current + 0.05,
+            "home" => 0.0,
+            "end" => 1.0,
+            _ => return false,
+        };
+        self.queue_wallpaper_opacity(next, window, cx);
+        true
+    }
+
     fn queue_width(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
         let width = crate::settings::normalize_transcript_width(width);
         if self
@@ -531,6 +579,252 @@ impl AppearancePage {
             .into_any_element()
     }
 
+    fn queue_wallpaper_opacity(
+        &mut self,
+        opacity: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !opacity.is_finite() {
+            return;
+        }
+        let opacity = opacity.clamp(0.0, 1.0);
+        let current_override = self
+            .pending_wallpaper_opacity
+            .or_else(|| crate::settings::chat_wallpaper_opacity_override(cx));
+        if current_override == Some(opacity) {
+            return;
+        }
+        self.pending_wallpaper_opacity = Some(opacity);
+        if !self.wallpaper_opacity_frame_pending {
+            self.wallpaper_opacity_frame_pending = true;
+            let page = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                let _ = page.update(cx, |this, cx| {
+                    this.wallpaper_opacity_frame_pending = false;
+                    this.apply_pending_wallpaper_opacity(cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    fn apply_pending_wallpaper_opacity(&mut self, cx: &mut Context<Self>) {
+        if let Some(opacity) = self.pending_wallpaper_opacity.take() {
+            crate::settings::set_chat_wallpaper_opacity_override(Some(opacity), cx);
+            cx.notify();
+        }
+    }
+
+    fn drag_wallpaper_opacity(
+        &mut self,
+        x: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.wallpaper_opacity_bounds.get() else {
+            return;
+        };
+        let fraction =
+            (f32::from(x - bounds.left()) - 7.0) / (f32::from(bounds.size.width) - 14.0).max(1.0);
+        self.queue_wallpaper_opacity(fraction.clamp(0.0, 1.0), window, cx);
+    }
+
+    fn render_wallpaper_opacity(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let current_override = crate::settings::chat_wallpaper_opacity_override(cx);
+        let has_override = current_override.is_some() || self.pending_wallpaper_opacity.is_some();
+        let effective = self.current_wallpaper_opacity(cx);
+        let fraction = effective.clamp(0.0, 1.0);
+        let bounds = self.wallpaper_opacity_bounds.clone();
+        let show_details = self.wallpaper_opacity_hovered
+            || self.wallpaper_opacity_pressed
+            || self.wallpaper_opacity_focus.is_focused(window)
+            || self.wallpaper_opacity_reset_focus.is_focused(window);
+        let reset_button = div()
+            .id("reset-wallpaper-opacity")
+            .track_focus(&self.wallpaper_opacity_reset_focus)
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label("Reset chat wallpaper opacity to 25%")
+            .cursor_pointer()
+            .text_color(if has_override {
+                theme.text_muted
+            } else {
+                theme.text_faint
+            })
+            .hover(|style| style.text_color(theme.text))
+            .focus_visible(|style| style.border_2().border_color(theme.accent).opacity(1.0))
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.reset_wallpaper_opacity(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    this.reset_wallpaper_opacity(cx);
+                }
+            }))
+            .on_a11y_action(gpui::AccessibleAction::Click, {
+                let page = cx.weak_entity();
+                move |_, _, cx| {
+                    let _ = page.update(cx, |page, cx| page.reset_wallpaper_opacity(cx));
+                }
+            })
+            .child("Reset");
+        let slider = div()
+            .id("wallpaper-opacity-slider")
+            .track_focus(&self.wallpaper_opacity_focus)
+            .relative()
+            .w(px(240.0))
+            .h(px(28.0))
+            .cursor_pointer()
+            .tab_index(0)
+            .role(gpui::Role::Slider)
+            .aria_label("Chat wallpaper opacity")
+            .aria_numeric_value(f64::from(fraction * 100.0))
+            .aria_min_numeric_value(0.0)
+            .aria_max_numeric_value(100.0)
+            .aria_numeric_value_step(5.0)
+            .aria_value(format!("{:.0}%", fraction * 100.0))
+            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    window.focus(&this.wallpaper_opacity_focus, cx);
+                    this.wallpaper_opacity_pressed = true;
+                    cx.notify();
+                    cx.stop_propagation();
+                    this.drag_wallpaper_opacity(event.position.x, window, cx);
+                }),
+            )
+            .on_drag(WallpaperOpacityDrag, |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            });
+        let slider = slider
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if this.wallpaper_opacity_key(event.keystroke.key.as_str(), window, cx) {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            }))
+            .on_a11y_action(gpui::AccessibleAction::Increment, {
+                let page = cx.weak_entity();
+                move |_, window, cx| {
+                    let _ = page.update(cx, |page, cx| {
+                        page.wallpaper_opacity_key("right", window, cx);
+                    });
+                }
+            })
+            .on_a11y_action(gpui::AccessibleAction::Decrement, {
+                let page = cx.weak_entity();
+                move |_, window, cx| {
+                    let _ = page.update(cx, |page, cx| {
+                        page.wallpaper_opacity_key("left", window, cx);
+                    });
+                }
+            })
+            .on_a11y_action(gpui::AccessibleAction::SetValue, {
+                let page = cx.weak_entity();
+                move |data, window, cx| {
+                    if let Some(gpui::accesskit::ActionData::NumericValue(value)) = data {
+                        let _ = page.update(cx, |page, cx| {
+                            page.queue_wallpaper_opacity((*value / 100.0) as f32, window, cx)
+                        });
+                    }
+                }
+            })
+            .child(
+                gpui::canvas(move |rect, _, _| bounds.set(Some(rect)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(7.0))
+                    .right(px(7.0))
+                    .top(px(12.0))
+                    .h(px(4.0))
+                    .rounded_full()
+                    .bg(theme.border)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(fraction))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(gpui::relative(fraction))
+                            .ml(px(-7.0))
+                            .top(px(-5.0))
+                            .size(px(14.0))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    ),
+            );
+        widgets::card_row(theme, false)
+            .gap(px(20.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(200.0))
+                    .child(widgets::row_title(theme, "Chat wallpaper opacity"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child("Adjust wallpaper visibility behind ongoing conversations.")
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                div()
+                    .id("wallpaper-opacity-control")
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.wallpaper_opacity_hovered = *hovered;
+                        cx.notify();
+                    }))
+                    .my(px(-12.0))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .when(!show_details, |el| el.opacity(0.0))
+                            .flex()
+                            .justify_between()
+                            .text_size(typography::ui_rems(12.0))
+                            .line_height(px(16.0))
+                            .child(format!("{:.0}%", fraction * 100.0))
+                            .child(reset_button),
+                    )
+                    .child(slider)
+                    .child(
+                        div()
+                            .when(!show_details, |el| el.opacity(0.0))
+                            .flex()
+                            .justify_between()
+                            .text_size(typography::ui_rems(11.0))
+                            .line_height(px(14.0))
+                            .text_color(theme.text_muted)
+                            .child("0%")
+                            .child("100%"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         // `PaletteSearch` binds text-editing keys only — arrows/Enter/Escape
         // stay unbound and bubble from the input to the menu card's own key
@@ -550,6 +844,13 @@ impl AppearancePage {
             width_bounds: Rc::default(),
             pending_width: None,
             width_frame_pending: false,
+            wallpaper_opacity_focus: cx.focus_handle().tab_stop(true),
+            wallpaper_opacity_reset_focus: cx.focus_handle().tab_stop(true),
+            wallpaper_opacity_hovered: false,
+            wallpaper_opacity_pressed: false,
+            wallpaper_opacity_bounds: Rc::default(),
+            pending_wallpaper_opacity: None,
+            wallpaper_opacity_frame_pending: false,
             scroll: crate::settings::widgets::PageScroll::default(),
             selected_font: typography::effective(cx),
             selected_terminal_font: typography::terminal_effective(cx),
@@ -3734,6 +4035,46 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
+        let show_in_chats = crate::settings::show_wallpaper_in_chats(cx);
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Show wallpaper in chats"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child("Keep the wallpaper visible behind ongoing conversations.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, show_in_chats, "show-wallpaper-in-chats")
+                        .id("show-wallpaper-in-chats-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Show wallpaper in chats")
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .aria_toggled(if show_in_chats {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_show_wallpaper_in_chats(!show_in_chats, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
+        if show_in_chats {
+            settings_rows.push(self.render_wallpaper_opacity(&theme, window, cx));
+        }
         if background_available {
             use crate::settings::NewThreadBackgroundEffect;
             let effect_control = widgets::select(
@@ -3982,6 +4323,11 @@ impl Render for AppearancePage {
                 },
             ))
             .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<WallpaperOpacityDrag>, window, cx| {
+                    this.drag_wallpaper_opacity(event.event.position.x, window, cx);
+                },
+            ))
+            .on_drag_move(cx.listener(
                 |this, event: &gpui::DragMoveEvent<BackgroundAdjustmentDrag>, _, cx| {
                     this.drag_background(event.event.position, cx);
                 },
@@ -3998,7 +4344,12 @@ impl Render for AppearancePage {
                         this.width_pressed = false;
                         cx.notify();
                     }
+                    if this.wallpaper_opacity_pressed {
+                        this.wallpaper_opacity_pressed = false;
+                        cx.notify();
+                    }
                     this.apply_pending_width(cx);
+                    this.apply_pending_wallpaper_opacity(cx);
                     this.finish_background_drag(cx);
                 }),
             )
@@ -4009,7 +4360,12 @@ impl Render for AppearancePage {
                         this.width_pressed = false;
                         cx.notify();
                     }
+                    if this.wallpaper_opacity_pressed {
+                        this.wallpaper_opacity_pressed = false;
+                        cx.notify();
+                    }
                     this.apply_pending_width(cx);
+                    this.apply_pending_wallpaper_opacity(cx);
                     this.finish_background_drag(cx);
                 }),
             )
@@ -4665,5 +5021,146 @@ mod tests {
             assert!(!typography::set_terminal_family(UiFontFamily::System, cx));
             assert_eq!(typography::terminal_effective(cx), UiFontFamily::GeistMono);
         });
+    }
+
+    #[gpui::test]
+    fn wallpaper_opacity_drag_coalesces_and_persists_the_last_value(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| AppearancePage::new(cx));
+        window
+            .update(cx, |page, window, cx| {
+                page.wallpaper_opacity_bounds.set(Some(gpui::Bounds::new(
+                    gpui::point(px(100.0), px(0.0)),
+                    gpui::size(px(240.0), px(28.0)),
+                )));
+                page.drag_wallpaper_opacity(px(0.0), window, cx);
+                assert_eq!(page.pending_wallpaper_opacity, Some(0.0));
+                page.drag_wallpaper_opacity(px(1000.0), window, cx);
+                assert_eq!(page.pending_wallpaper_opacity, Some(1.0));
+                page.drag_wallpaper_opacity(px(220.0), window, cx);
+                let pending = page.pending_wallpaper_opacity.unwrap();
+                assert!(pending > 0.45 && pending < 0.55);
+                assert_eq!(
+                    crate::settings::chat_wallpaper_opacity_override(cx),
+                    None,
+                    "pointer events must coalesce before publishing"
+                );
+                page.apply_pending_wallpaper_opacity(cx);
+                let applied = crate::settings::chat_wallpaper_opacity_override(cx);
+                assert_eq!(applied, Some(pending));
+                crate::settings::flush(cx);
+                let loaded =
+                    crate::settings::UiSettings::load(dir.path()).chat_wallpaper_opacity_override;
+                assert_eq!(loaded, applied);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn wallpaper_opacity_direct_selection_keyboard_and_reset(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| AppearancePage::new(cx));
+        window
+            .update(cx, |page, window, cx| {
+                assert_eq!(page.current_wallpaper_opacity(cx), 0.25);
+                for value in [1.0, 0.0, 0.25, 0.5] {
+                    page.queue_wallpaper_opacity(value, window, cx);
+                    page.apply_pending_wallpaper_opacity(cx);
+                    assert_eq!(
+                        crate::settings::chat_wallpaper_opacity_override(cx),
+                        Some(value)
+                    );
+                    crate::settings::flush(cx);
+                    assert_eq!(
+                        crate::settings::UiSettings::load(dir.path())
+                            .chat_wallpaper_opacity_override,
+                        Some(value)
+                    );
+                    page.reset_wallpaper_opacity(cx);
+                    assert_eq!(page.current_wallpaper_opacity(cx), 0.25);
+                    assert_eq!(crate::settings::chat_wallpaper_opacity_override(cx), None);
+                }
+                for (key, value) in [("end", 1.0), ("left", 0.95), ("home", 0.0), ("up", 0.05)] {
+                    assert!(page.wallpaper_opacity_key(key, window, cx));
+                    page.apply_pending_wallpaper_opacity(cx);
+                    assert_eq!(
+                        crate::settings::chat_wallpaper_opacity_override(cx),
+                        Some(value)
+                    );
+                }
+                page.queue_wallpaper_opacity(0.75, window, cx);
+                page.reset_wallpaper_opacity(cx);
+                page.apply_pending_wallpaper_opacity(cx);
+                crate::settings::flush(cx);
+                assert_eq!(
+                    crate::settings::UiSettings::load(dir.path()).chat_wallpaper_opacity_override,
+                    None
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn wallpaper_opacity_controls_are_in_the_tab_order_and_reset_handles_space(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+        });
+        struct OpacityControl(Entity<AppearancePage>);
+        impl Render for OpacityControl {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |page, cx| {
+                    page.render_wallpaper_opacity(&Theme::dark(), window, cx)
+                })
+            }
+        }
+        let window = cx.add_window(|_, cx| OpacityControl(cx.new(AppearancePage::new)));
+        let page = window.update(cx, |view, _, _| view.0.clone()).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear();
+            window.focus_next(cx);
+            assert!(
+                page.read(cx)
+                    .wallpaper_opacity_reset_focus
+                    .is_focused(window)
+            );
+            window.focus_next(cx);
+            assert!(page.read(cx).wallpaper_opacity_focus.is_focused(window));
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), "end");
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            page.update(cx, |page, cx| page.apply_pending_wallpaper_opacity(cx));
+            assert_eq!(
+                crate::settings::chat_wallpaper_opacity_override(cx),
+                Some(1.0)
+            );
+            window.draw(cx).clear();
+            window.focus_prev(cx);
+            assert!(
+                page.read(cx)
+                    .wallpaper_opacity_reset_focus
+                    .is_focused(window)
+            );
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), "space");
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(crate::settings::chat_wallpaper_opacity_override(cx), None));
     }
 }

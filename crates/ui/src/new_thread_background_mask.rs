@@ -126,7 +126,21 @@ pub(crate) fn zoom_adjustment_around(
     next.normalized()
 }
 
+pub(crate) fn ambient_mask(bounds: Bounds<Pixels>) -> ImageAlphaMask {
+    let height = f32::from(bounds.size.height);
+    ImageAlphaMask {
+        bounds: Bounds::new(point(bounds.left(), bounds.bottom() + px(1.0)), bounds.size),
+        radius: px(0.0),
+        feather: px(1.0),
+        clearance: px(0.0),
+        bottom_fade: Some((bounds.bottom(), px(height.max(1.0)))),
+    }
+}
+
 fn mask(bounds: Bounds<Pixels>, composer: Bounds<Pixels>, cutout: bool) -> ImageAlphaMask {
+    if !cutout {
+        return ambient_mask(bounds);
+    }
     let height = f32::from(bounds.size.height);
     // Keep the cleared area open through the hero's bottom. A taller image
     // must not fade back in beneath the composer's rounded lower edge.
@@ -138,24 +152,10 @@ fn mask(bounds: Bounds<Pixels>, composer: Bounds<Pixels>, cutout: bool) -> Image
         ),
     );
     ImageAlphaMask {
-        // The reveal pass has only the shared bottom fade. Its exclusion sits
-        // below the image, so it fills the cutout without changing its shape.
-        bounds: if cutout {
-            cleared
-        } else {
-            Bounds::new(point(bounds.left(), bounds.bottom() + px(1.0)), bounds.size)
-        },
-        radius: if cutout {
-            px(crate::composer::COMPOSER_RADIUS)
-        } else {
-            px(0.0)
-        },
-        feather: if cutout {
-            px((height * 0.52).clamp(120.0, 280.0))
-        } else {
-            px(1.0)
-        },
-        clearance: if cutout { px(8.0) } else { px(0.0) },
+        bounds: cleared,
+        radius: px(crate::composer::COMPOSER_RADIUS),
+        feather: px((height * 0.52).clamp(120.0, 280.0)),
+        clearance: px(8.0),
         // Start fading at the image's top, rather than holding full opacity
         // through its first 40% and compressing the transition near the bottom.
         // Both passes use the full height, independently of the softer cutout.
@@ -199,6 +199,25 @@ pub(crate) fn paint_adjusted(
     window: &mut Window,
 ) {
     paint_adjusted_with_mask(source, bounds, adjustment, corner_radii, None, window);
+}
+
+/// Paint the responsive crop with the soft bottom ambience fade, without any
+/// composer cutout mask. Ongoing chats use this to blend the wallpaper into
+/// the transcript canvas.
+pub(crate) fn paint_ambient(
+    source: Arc<RenderImage>,
+    bounds: Bounds<Pixels>,
+    adjustment: NewThreadBackgroundAdjustment,
+    window: &mut Window,
+) {
+    paint_adjusted_with_mask(
+        source,
+        bounds,
+        adjustment,
+        Default::default(),
+        Some(ambient_mask(bounds)),
+        window,
+    );
 }
 
 /// All elements have finished prepaint before this reads the measured surface,
@@ -377,6 +396,19 @@ mod tests {
         let reveal_mask = mask(viewport, composer, false);
         assert_ne!(main_mask.bounds, reveal_mask.bounds);
         assert_eq!(main_mask.bottom_fade, reveal_mask.bottom_fade);
+    }
+
+    #[test]
+    fn ambient_mask_fades_across_the_hero_without_a_cutout() {
+        let viewport = hero(1000.0, 500.0);
+        let ambient = ambient_mask(viewport);
+        assert_eq!(ambient.bounds.left(), viewport.left());
+        assert_eq!(ambient.bounds.top(), viewport.bottom() + px(1.0));
+        assert_eq!(ambient.bounds.size, viewport.size);
+        assert_eq!(ambient.radius, px(0.0));
+        assert_eq!(ambient.feather, px(1.0));
+        assert_eq!(ambient.clearance, px(0.0));
+        assert_eq!(ambient.bottom_fade, Some((viewport.bottom(), px(500.0))));
     }
 
     #[test]

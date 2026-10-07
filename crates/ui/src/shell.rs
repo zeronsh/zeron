@@ -1062,7 +1062,6 @@ const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
 /// New-thread controls float over the tail of a top-anchored image hero. The
 /// hero reaches below the composer, giving its lower mask room to dissolve
 /// gradually into the otherwise empty lower canvas.
-const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
 const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.72;
 const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
 
@@ -1313,17 +1312,89 @@ fn bottom_stack_measurement_matches(
     measured_has_composer == expected_has_composer
 }
 
-fn new_thread_background_opacity(is_frost: bool) -> f32 {
-    if is_frost {
-        NEW_THREAD_BACKGROUND_FROSTED_OPACITY
+fn wallpaper_handoff_opacity(
+    is_frost: bool,
+    show_in_chats: bool,
+    chat_override: Option<f32>,
+    dissolve: f32,
+) -> f32 {
+    let initial = settings::new_thread_background_opacity(is_frost);
+    let destination = if show_in_chats {
+        settings::effective_chat_wallpaper_opacity(chat_override)
     } else {
-        1.0
+        0.0
+    };
+    initial + (destination - initial) * dissolve.clamp(0.0, 1.0)
+}
+
+#[derive(Default)]
+struct WallpaperReveal {
+    started: Option<std::time::Instant>,
+    revealed: bool,
+}
+
+impl WallpaperReveal {
+    fn frame(
+        &mut self,
+        artwork: &crate::new_thread_background_effects::ArtworkFrame,
+        visible: bool,
+        reduced: bool,
+        now: std::time::Instant,
+    ) -> (f32, bool) {
+        // A removal frame still owns the departing image. Clear only once
+        // Readiness has finished its fade, otherwise its opacity is suppressed.
+        if artwork.current.is_none() && artwork.previous.is_none() {
+            *self = Self::default();
+            return (0.0, false);
+        }
+        if self.revealed {
+            return (1.0, false);
+        }
+        if !visible {
+            return (0.0, false);
+        }
+        if reduced {
+            self.revealed = true;
+            return (1.0, false);
+        }
+        let start = *self.started.get_or_insert(now);
+        let total = motion::FADE_IN.total().mul_f32(motion::speed_scale());
+        let elapsed = now.saturating_duration_since(start);
+        if elapsed >= total {
+            self.revealed = true;
+            (1.0, false)
+        } else {
+            (
+                motion::FADE_IN.progress(elapsed.as_secs_f32() / total.as_secs_f32()),
+                true,
+            )
+        }
     }
+}
+
+fn wallpaper_canvas(
+    content: impl IntoElement,
+    geometry: crate::terminal::dock::SharedGeometry,
+) -> impl IntoElement {
+    crate::terminal::dock::above_terminal(
+        div().absolute().inset_0().overflow_hidden().child(content),
+        geometry,
+    )
 }
 
 pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
     (viewport_height.max(0.0) * NEW_THREAD_BACKGROUND_VIEWPORT_RATIO)
         .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
+}
+
+pub(crate) fn should_render_wallpaper_background(
+    has_selection: bool,
+    dock_active: bool,
+    show_wallpaper_in_chats: bool,
+    has_background: bool,
+    artwork_active: bool,
+) -> bool {
+    !has_selection || dock_active || (show_wallpaper_in_chats && (has_background || artwork_active))
 }
 
 fn new_thread_background(
@@ -1338,53 +1409,72 @@ fn new_thread_background(
     let Some(artwork) = artwork else {
         return Empty.into_any_element();
     };
+    if opacity <= 0.0 {
+        return Empty.into_any_element();
+    }
     let hero_height = new_thread_background_height(viewport_height);
     let dissolve = dissolve.clamp(0.0, 1.0);
     // Image and treatment share a fixed crop and fade together in place.
     // The hero uses the full conversation canvas even while the destination
     // right pane clips it. Navigation must never rescale the artwork.
-    div()
+    let reveal_opacity = crate::new_thread_background_mask::CUTOUT_REVEAL_OPACITY
+        + (1.0 - crate::new_thread_background_mask::CUTOUT_REVEAL_OPACITY) * dissolve;
+    let cutout_opacity = 1.0 - dissolve;
+
+    let mut element = div()
         .absolute()
         .top_0()
         .left_0()
         .w(px(hero_width))
         .h(px(hero_height))
         .overflow_hidden()
-        .opacity((1.0 - dissolve) * opacity)
-        // Alpha resolves into the real canvas, including translucent themes;
-        // no theme-colored overlay bleaches or darkens the source pixels.
-        .children([false, true].into_iter().map(|cutout| {
+        .opacity(opacity)
+        .child({
+            let artwork = artwork.clone();
+            div().absolute().inset_0().opacity(reveal_opacity).child(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _cx| {
+                        crate::new_thread_background_mask::paint_ambient(
+                            artwork.clone(),
+                            bounds,
+                            adjustment,
+                            window,
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+        });
+
+    if cutout_opacity > 0.001 {
+        element = element.child({
             let artwork = artwork.clone();
             let composer_bounds = composer_bounds.clone();
-            div()
-                .absolute()
-                .inset_0()
-                .opacity(if cutout {
-                    1.0
-                } else {
-                    crate::new_thread_background_mask::CUTOUT_REVEAL_OPACITY
-                })
-                .child(
-                    gpui::canvas(
-                        |_, _, _| {},
-                        move |bounds, _, window, _cx| {
-                            if let Some(composer) = composer_bounds.get() {
-                                crate::new_thread_background_mask::paint(
-                                    artwork.clone(),
-                                    bounds,
-                                    composer,
-                                    adjustment,
-                                    cutout,
-                                    window,
-                                );
-                            }
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
+            div().absolute().inset_0().opacity(cutout_opacity).child(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _cx| {
+                        if let Some(composer) = composer_bounds.get() {
+                            crate::new_thread_background_mask::paint(
+                                artwork.clone(),
+                                bounds,
+                                composer,
+                                adjustment,
+                                true,
+                                window,
+                            );
+                        }
+                    },
                 )
-        }))
-        .into_any_element()
+                .absolute()
+                .inset_0(),
+            )
+        });
+    }
+
+    element.into_any_element()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1850,6 +1940,8 @@ pub struct Shell {
     /// Shared route clock and measured prepaint geometry for the persistent composer.
     composer_dock: crate::composer_dock::SharedDock,
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
+    /// Initial reveal, separate from Readiness replacement/removal fades.
+    wallpaper_reveal: WallpaperReveal,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     pub(super) sessions_open: bool,
@@ -2376,6 +2468,7 @@ impl Shell {
             bottom_stack_has_composer: std::rc::Rc::new(std::cell::Cell::new(false)),
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
+            wallpaper_reveal: WallpaperReveal::default(),
             archived_open: true,
             pinned_open: true,
             sessions_open: true,
@@ -10279,9 +10372,8 @@ impl Shell {
             self.bottom_stack_has_composer.get(),
             (has_spaces || no_project || has_appshots) && has_selection,
         );
-        let ui_settings = settings::current(cx);
-        let new_thread_background_setting = ui_settings.new_thread_composer_background;
-        let new_thread_background_effect = ui_settings.new_thread_background_effect;
+        let new_thread_background_setting = self.settings.new_thread_composer_background.clone();
+        let new_thread_background_effect = self.settings.new_thread_background_effect;
         let new_thread_background_adjustment = new_thread_background_setting
             .as_ref()
             .map(|background| background.adjustment)
@@ -10321,7 +10413,7 @@ impl Shell {
         let composer_width = self.composer_dock.borrow_mut().layout_width(
             composer_target_width(
                 main_content_width,
-                ui_settings.transcript_width,
+                self.settings.transcript_width,
                 has_selection,
             ),
             self.reduced_motion,
@@ -10340,14 +10432,46 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
-        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
+        let render_background = should_render_wallpaper_background(
+            has_selection,
+            dock_frame.active,
+            self.settings.show_wallpaper_in_chats,
+            new_thread_background_setting.is_some(),
+            artwork_frame.active,
+        );
+        let (reveal_multiplier, reveal_active) = self.wallpaper_reveal.frame(
+            &artwork_frame,
+            render_background,
+            self.reduced_motion,
+            frame_time,
+        );
+        if reveal_active {
+            window.request_animation_frame();
+            self.motion_active.set(true);
+        }
+
+        let new_thread_background_layer = render_background.then(|| {
             if artwork_frame.active {
                 window.request_animation_frame();
             }
             let width = (self.viewport_width - self.sidebar_now()).max(0.0);
             let bounds = self.composer.read(cx).surface_bounds();
-            let opacity = new_thread_background_opacity(theme.is_frost());
-            div()
+            let base_opacity = wallpaper_handoff_opacity(
+                theme.is_frost(),
+                self.settings.show_wallpaper_in_chats,
+                self.settings.chat_wallpaper_opacity_override,
+                dock_frame.dissolve(),
+            );
+            // The default-off handoff keeps the original mask treatment
+            // while dissolving the entire hero. Persistent chats dissolve
+            // the composer cutout instead.
+            let mask_dissolve = if self.settings.show_wallpaper_in_chats {
+                dock_frame.dissolve()
+            } else {
+                0.0
+            };
+            let opacity = base_opacity * reveal_multiplier;
+            let content = div()
                 .absolute()
                 .inset_0()
                 .child(new_thread_background(
@@ -10356,7 +10480,7 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds.clone(),
-                    dock_frame.dissolve(),
+                    mask_dissolve,
                     (1.0 - artwork_frame.mix) * opacity,
                 ))
                 .child(new_thread_background(
@@ -10365,9 +10489,13 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds,
-                    dock_frame.dissolve(),
+                    mask_dissolve,
                     artwork_frame.mix * opacity,
-                ))
+                ));
+            div()
+                .absolute()
+                .inset_0()
+                .child(wallpaper_canvas(content, terminal_geometry.clone()))
                 .into_any_element()
         });
 
@@ -13593,16 +13721,227 @@ mod tests {
         assert!(bottom_stack_measurement_matches(true, true));
         assert!(!bottom_stack_measurement_matches(false, true));
         assert!(!bottom_stack_measurement_matches(true, false));
-        assert_eq!(new_thread_background_opacity(false), 1.0);
-        assert_eq!(
-            new_thread_background_opacity(true),
-            NEW_THREAD_BACKGROUND_FROSTED_OPACITY
-        );
         assert_eq!(new_thread_background_height(400.0), 288.0);
         assert!((new_thread_background_height(600.0) - 432.0).abs() < 0.001);
         assert_eq!(new_thread_background_height(1_000.0), 720.0);
         assert_eq!(new_thread_background_height(1_200.0), 760.0);
         assert!(new_thread_background_height(848.0) > 848.0 / 2.0);
+    }
+
+    #[test]
+    fn wallpaper_rendering_in_chats_opt_in_matrix() {
+        // 1. New Thread: wallpaper renders regardless of show_wallpaper_in_chats
+        assert!(should_render_wallpaper_background(
+            false, false, false, true, false
+        ));
+        assert!(should_render_wallpaper_background(
+            false, false, true, true, false
+        ));
+        assert!(should_render_wallpaper_background(
+            false, false, false, false, false
+        ));
+        assert!(should_render_wallpaper_background(
+            false, false, true, false, false
+        ));
+
+        // 2. New Thread -> chat handoff (dock active): renders during transition
+        assert!(should_render_wallpaper_background(
+            true, true, false, true, false
+        ));
+        assert!(should_render_wallpaper_background(
+            true, true, true, true, false
+        ));
+        assert!(should_render_wallpaper_background(
+            true, true, false, false, false
+        ));
+
+        // 3. Established chat with show_wallpaper_in_chats = false:
+        // Must NOT render wallpaper behind transcript (upstream Zeron parity)
+        assert!(!should_render_wallpaper_background(
+            true, false, false, true, false
+        ));
+        assert!(!should_render_wallpaper_background(
+            true, false, false, true, true
+        ));
+        assert!(!should_render_wallpaper_background(
+            true, false, false, false, false
+        ));
+
+        // 4. Established chat with show_wallpaper_in_chats = true:
+        // Renders wallpaper if background is configured or artwork is active
+        assert!(should_render_wallpaper_background(
+            true, false, true, true, false
+        ));
+        assert!(should_render_wallpaper_background(
+            true, false, true, false, true
+        ));
+        assert!(!should_render_wallpaper_background(
+            true, false, true, false, false
+        ));
+    }
+
+    #[test]
+    fn wallpaper_handoff_preserves_new_thread_and_interpolates_continuously() {
+        for frosted in [false, true] {
+            let initial = settings::new_thread_background_opacity(frosted);
+            for enabled in [false, true] {
+                for custom in [None, Some(0.0), Some(0.5), Some(1.0)] {
+                    let destination = if enabled {
+                        settings::effective_chat_wallpaper_opacity(custom)
+                    } else {
+                        0.0
+                    };
+                    let steps = [0.0, 0.25, 0.5, 0.75, 0.99999, 1.0];
+                    let forward: Vec<_> = steps
+                        .iter()
+                        .map(|d| wallpaper_handoff_opacity(frosted, enabled, custom, *d))
+                        .collect();
+                    assert_eq!(
+                        forward[0], initial,
+                        "chat preference must never alter New Thread"
+                    );
+                    assert!((forward[5] - destination).abs() < 0.00001);
+                    assert!(
+                        (forward[4] - forward[5]).abs() < 0.00002,
+                        "no last-frame disappearance"
+                    );
+                    for (d, opacity) in steps.iter().zip(forward) {
+                        assert!(
+                            (opacity - (initial * (1.0 - d) + destination * d)).abs() < 0.00001
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wallpaper_shell_opacity_composes_reveal_replacement_and_removal() {
+        use crate::new_thread_background_effects::Readiness;
+        use std::{sync::Arc, time::Instant};
+        let image = || {
+            Arc::new(gpui::RenderImage::new([image::Frame::new(
+                image::RgbaImage::new(1, 1),
+            )]))
+        };
+        let first = image();
+        let second = image();
+        let adjustment = settings::NewThreadBackgroundAdjustment::default();
+        let mut readiness = Readiness::default();
+        let mut reveal = WallpaperReveal::default();
+        let now = Instant::now();
+        let initial = readiness.frame(Some(first.clone()), None, adjustment, true, false, now);
+        assert_eq!(reveal.frame(&initial, true, false, now), (0.0, true));
+        let halfway = now + motion::FADE_IN.total().mul_f32(motion::speed_scale() * 0.5);
+        let frame = readiness.frame(Some(first.clone()), None, adjustment, true, false, halfway);
+        let (alpha, active) = reveal.frame(&frame, true, false, halfway);
+        assert!(active && alpha > 0.0 && alpha < 1.0);
+        assert_eq!(
+            reveal.frame(&frame, true, false, halfway).0,
+            alpha,
+            "rerender cannot restart reveal"
+        );
+        let settled = now + Duration::from_secs(10);
+        let frame = readiness.frame(Some(first.clone()), None, adjustment, true, false, settled);
+        assert_eq!(reveal.frame(&frame, true, false, settled), (1.0, false));
+        let frame = readiness.frame(Some(second.clone()), None, adjustment, true, false, settled);
+        assert!(frame.previous.is_some() && frame.current.is_some());
+        assert_eq!(
+            reveal.frame(&frame, true, false, settled),
+            (1.0, false),
+            "replacement uses only Readiness crossfade"
+        );
+        let midpoint = settled
+            + motion::WALLPAPER_CROSSFADE
+                .total()
+                .mul_f32(motion::speed_scale() * 0.5);
+        let crossfade = readiness.frame(
+            Some(second.clone()),
+            None,
+            adjustment,
+            true,
+            false,
+            midpoint,
+        );
+        let (alpha, _) = reveal.frame(&crossfade, true, false, midpoint);
+        assert!(crossfade.mix > 0.0 && crossfade.mix < 1.0);
+        assert_eq!((1.0 - crossfade.mix) * alpha + crossfade.mix * alpha, 1.0);
+        let later = settled + Duration::from_secs(10);
+        readiness.frame(Some(second), None, adjustment, true, false, later);
+        let removal = readiness.frame(None, None, adjustment, false, false, later);
+        assert!(removal.previous.is_some() && removal.current.is_none());
+        let (alpha, _) = reveal.frame(&removal, true, false, later);
+        assert_eq!(
+            (1.0 - removal.mix) * alpha,
+            1.0,
+            "departing artwork remains visible at removal start"
+        );
+        let during = later
+            + motion::WALLPAPER_CROSSFADE
+                .total()
+                .mul_f32(motion::speed_scale() * 0.5);
+        let removal = readiness.frame(None, None, adjustment, false, false, during);
+        let (alpha, _) = reveal.frame(&removal, true, false, during);
+        assert!((1.0 - removal.mix) * alpha > 0.0 && (1.0 - removal.mix) * alpha < 1.0);
+        let done = readiness.frame(
+            None,
+            None,
+            adjustment,
+            false,
+            false,
+            later + Duration::from_secs(10),
+        );
+        assert_eq!(
+            reveal.frame(&done, true, false, later + Duration::from_secs(10)),
+            (0.0, false)
+        );
+        let frame = readiness.frame(Some(first), None, adjustment, true, true, later);
+        assert_eq!(reveal.frame(&frame, true, true, later), (1.0, false));
+        let frame = readiness.frame(None, None, adjustment, false, true, later);
+        assert_eq!(reveal.frame(&frame, true, true, later), (0.0, false));
+    }
+
+    #[gpui::test]
+    fn wallpaper_canvas_clips_tall_ambient_art_at_the_terminal(cx: &mut gpui::TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        for height in [0.0, 200.0, 440.0, 200.0, 0.0] {
+            let measured = Rc::new(Cell::new(None));
+            let paint_mask = measured.clone();
+            let geometry = Rc::new(Cell::new(crate::terminal::dock::Geometry::new(
+                height, height, 440.0,
+            )));
+            visual.draw(
+                gpui::Point::default(),
+                gpui::size(px(800.0), px(600.0)),
+                |_, _| {
+                    wallpaper_canvas(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w(px(800.0))
+                            .h(px(new_thread_background_height(1200.0)))
+                            .child(
+                                gpui::canvas(
+                                    |_, _, _| {},
+                                    move |_, _, window, _| {
+                                        paint_mask.set(Some(window.content_mask().bounds))
+                                    },
+                                )
+                                .absolute()
+                                .inset_0(),
+                            ),
+                        geometry,
+                    )
+                    .into_element()
+                },
+            );
+            let mask = measured.get().unwrap();
+            assert_eq!(mask.size.height, px(600.0 - height));
+            assert_eq!(mask.bottom(), px(600.0 - height));
+        }
     }
 
     #[test]
@@ -15076,6 +15415,8 @@ mod exit_regressions {
                     s.sidebar_show_branch = !before.sidebar_show_branch;
                     s.escape_stops_active_agent = !before.escape_stops_active_agent;
                 });
+                settings::set_chat_wallpaper_opacity_override(Some(0.5), cx);
+                settings::set_show_wallpaper_in_chats(true, cx);
                 // Navigating away saves the shell's own working copy.
                 shell.remember_settings_section(SettingsSection::Notifications, cx);
                 // The shell's own writes still land.
@@ -15099,6 +15440,21 @@ mod exit_regressions {
             SettingsSection::Notifications.canonical()
         );
         assert_eq!(after.sidebar_width, before.sidebar_width + 10.0);
+        assert_eq!(after.chat_wallpaper_opacity_override, Some(0.5));
+        assert!(after.show_wallpaper_in_chats);
+        window
+            .update(cx, |shell, _, cx| {
+                settings::set_chat_wallpaper_opacity_override(None, cx);
+                shell.settings.sidebar_width += 1.0;
+                shell.schedule_save(cx);
+                settings::flush(cx);
+                assert_eq!(
+                    settings::UiSettings::load(dir.path()).chat_wallpaper_opacity_override,
+                    None
+                );
+                assert_eq!(shell.settings.chat_wallpaper_opacity_override, None);
+            })
+            .unwrap();
     }
 
     #[gpui::test]

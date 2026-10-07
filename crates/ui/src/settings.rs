@@ -517,6 +517,55 @@ pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &
     }
 }
 
+pub const WALLPAPER_FROSTED_OPACITY: f32 = 0.84;
+pub const WALLPAPER_OPAQUE_OPACITY: f32 = 1.0;
+pub const CHAT_WALLPAPER_OPACITY: f32 = 0.25;
+
+pub fn new_thread_background_opacity(is_frost: bool) -> f32 {
+    if is_frost {
+        WALLPAPER_FROSTED_OPACITY
+    } else {
+        WALLPAPER_OPAQUE_OPACITY
+    }
+}
+
+pub fn effective_chat_wallpaper_opacity(override_val: Option<f32>) -> f32 {
+    override_val
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(CHAT_WALLPAPER_OPACITY)
+}
+
+pub fn chat_wallpaper_opacity_override(cx: &App) -> Option<f32> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.chat_wallpaper_opacity_override)
+}
+
+pub fn set_chat_wallpaper_opacity_override(override_val: Option<f32>, cx: &mut App) {
+    let override_val = override_val
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 1.0));
+    if update(SavePolicy::Debounced, cx, |settings| {
+        settings.chat_wallpaper_opacity_override = override_val;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn show_wallpaper_in_chats(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.show_wallpaper_in_chats)
+        .unwrap_or(false)
+}
+
+pub fn set_show_wallpaper_in_chats(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.show_wallpaper_in_chats = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_new_thread_background_adjustment(
     adjustment: NewThreadBackgroundAdjustment,
     cx: &mut App,
@@ -959,6 +1008,13 @@ pub struct UiSettings {
     pub wallpaper_history: Vec<PathBuf>,
     pub wallpaper_theme_colors: bool,
     pub wallpaper_color: Option<zeron_theme::Color>,
+    /// Device-local opacity behind ongoing conversations; None means 25%.
+    /// New Thread always retains the original surface opacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_wallpaper_opacity_override: Option<f32>,
+    /// Whether the wallpaper is kept visible behind ongoing primary chats.
+    #[serde(default)]
+    pub show_wallpaper_in_chats: bool,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
     /// Snap animations to rest. Defaults to following the OS.
@@ -1055,6 +1111,8 @@ impl Default for UiSettings {
             wallpaper_history: Vec::new(),
             wallpaper_theme_colors: false,
             wallpaper_color: None,
+            chat_wallpaper_opacity_override: None,
+            show_wallpaper_in_chats: false,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
@@ -1696,6 +1754,8 @@ impl UiSettings {
             wallpaper_history,
             wallpaper_theme_colors,
             wallpaper_color,
+            chat_wallpaper_opacity_override,
+            show_wallpaper_in_chats,
             new_thread_background_effect,
             reduce_motion,
             pause_animations_in_background,
@@ -1752,6 +1812,10 @@ impl UiSettings {
         if let Some(background) = self.new_thread_composer_background.as_mut() {
             background.adjustment = background.adjustment.normalized();
         }
+        self.chat_wallpaper_opacity_override = self
+            .chat_wallpaper_opacity_override
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0));
         self.keymap.heal_jump_slots();
         self.keymap.heal_reserved_composer_shortcuts();
         self
@@ -2497,6 +2561,149 @@ mod tests {
         });
     }
 
+    #[test]
+    fn wallpaper_opacity_defaults_clamping_and_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing keys in JSON fall back to defaults
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.chat_wallpaper_opacity_override, None);
+        assert_eq!(
+            effective_chat_wallpaper_opacity(legacy.chat_wallpaper_opacity_override),
+            0.25
+        );
+        assert_eq!(new_thread_background_opacity(true), 0.84);
+        assert_eq!(new_thread_background_opacity(false), 1.0);
+
+        // Unreleased opacity keys are ordinary unknown fields.
+        for key in [
+            "wallpaper_opacity_override",
+            "wallpaperOpacityOverride",
+            "wallpaperOpacity",
+            "wallpaper_opacity",
+        ] {
+            let settings: UiSettings =
+                serde_json::from_value(serde_json::json!({key: 0.5})).unwrap();
+            assert_eq!(settings.chat_wallpaper_opacity_override, None, "{key}");
+            assert_eq!(
+                effective_chat_wallpaper_opacity(settings.chat_wallpaper_opacity_override),
+                0.25
+            );
+            assert!(!settings.show_wallpaper_in_chats);
+            let settings: UiSettings = serde_json::from_value(serde_json::json!({
+                key: 0.5,
+                "chatWallpaperOpacityOverride": 0.75,
+            }))
+            .unwrap();
+            assert_eq!(settings.chat_wallpaper_opacity_override, Some(0.75));
+        }
+
+        // Clamping invalid values
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let clamped = UiSettings {
+                chat_wallpaper_opacity_override: Some(invalid),
+                ..Default::default()
+            }
+            .clamped();
+            assert_eq!(
+                clamped.chat_wallpaper_opacity_override, None,
+                "failed to drop non-finite {invalid}"
+            );
+        }
+        assert_eq!(
+            UiSettings {
+                chat_wallpaper_opacity_override: Some(-0.5),
+                ..Default::default()
+            }
+            .clamped()
+            .chat_wallpaper_opacity_override,
+            Some(0.0)
+        );
+        assert_eq!(
+            UiSettings {
+                chat_wallpaper_opacity_override: Some(1.5),
+                ..Default::default()
+            }
+            .clamped()
+            .chat_wallpaper_opacity_override,
+            Some(1.0)
+        );
+
+        // Persistence round-trip with override
+        let settings = UiSettings {
+            chat_wallpaper_opacity_override: Some(0.42),
+            show_wallpaper_in_chats: true,
+            ..UiSettings::default()
+        };
+        settings.save(dir.path()).unwrap();
+
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.chat_wallpaper_opacity_override, Some(0.42));
+        assert!(loaded.show_wallpaper_in_chats);
+
+        // Persistence round-trip with None override (field omitted in JSON)
+        let default_settings = UiSettings::default();
+        default_settings.save(dir.path()).unwrap();
+        let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        assert!(!json.contains("chatWallpaperOpacityOverride"));
+        let loaded_default = UiSettings::load(dir.path());
+        assert_eq!(loaded_default.chat_wallpaper_opacity_override, None);
+        assert!(!loaded_default.show_wallpaper_in_chats);
+    }
+
+    #[test]
+    fn wallpaper_three_way_merge_preserves_independent_updates_and_reset() {
+        let base = UiSettings {
+            chat_wallpaper_opacity_override: Some(0.6),
+            ..Default::default()
+        };
+        let edited = UiSettings {
+            chat_wallpaper_opacity_override: None,
+            ..base.clone()
+        };
+        let concurrent = UiSettings {
+            show_wallpaper_in_chats: true,
+            sidebar_width: 280.0,
+            ..base.clone()
+        };
+        let merged = UiSettings::merge_changes(&base, &edited, concurrent.clone());
+        assert_eq!(
+            merged,
+            UiSettings {
+                chat_wallpaper_opacity_override: None,
+                ..concurrent
+            }
+        );
+        let edited = UiSettings {
+            sidebar_width: 300.0,
+            ..base.clone()
+        };
+        let current = UiSettings {
+            chat_wallpaper_opacity_override: Some(0.25),
+            ..base.clone()
+        };
+        let merged = UiSettings::merge_changes(&base, &edited, current);
+        assert_eq!(merged.chat_wallpaper_opacity_override, Some(0.25));
+        assert_eq!(merged.sidebar_width, 300.0);
+
+        let edited = UiSettings {
+            show_wallpaper_in_chats: true,
+            ..base.clone()
+        };
+        let enabled = UiSettings::merge_changes(&base, &edited, base.clone());
+        assert!(enabled.show_wallpaper_in_chats);
+        let edited = UiSettings {
+            show_wallpaper_in_chats: false,
+            ..enabled.clone()
+        };
+        let concurrent = UiSettings {
+            sidebar_width: 280.0,
+            ..enabled.clone()
+        };
+        let merged = UiSettings::merge_changes(&enabled, &edited, concurrent);
+        assert!(!merged.show_wallpaper_in_chats);
+        assert_eq!(merged.sidebar_width, 280.0);
+    }
+
     #[gpui::test]
     fn invalid_background_replacement_preserves_previous_image_and_settings(
         cx: &mut gpui::TestAppContext,
@@ -2750,6 +2957,8 @@ mod tests {
             wallpaper_history: vec!["/tmp/wallpapers/background.png".into()],
             wallpaper_theme_colors: false,
             wallpaper_color: None,
+            chat_wallpaper_opacity_override: Some(0.72),
+            show_wallpaper_in_chats: true,
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
@@ -2758,6 +2967,7 @@ mod tests {
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""diffWrap": true"#));
+        assert!(json.contains(r#""showWallpaperInChats": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
         assert!(json.contains(r#""openWebLinksInZeron": false"#));
