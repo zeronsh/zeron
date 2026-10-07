@@ -14,6 +14,60 @@
 mod session;
 mod types;
 
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn mobile_scope_facade_uses_the_shared_projection_before_limit() {
+        let dir = std::env::temp_dir().join(format!("zeron-mobile-scope-{}", std::process::id()));
+        let mut config = zc::ClientConfig::new("https://edge.invalid", &dir);
+        config.device_id = "mobile-scope-test".into();
+        let client = zc::Client::new(
+            config,
+            zc::Credentials::Demo(zc::DemoOptions {
+                fixture: zc::DemoFixture::ProjectFilter,
+                ..Default::default()
+            }),
+            Arc::new(zc::events::NullListener),
+        )
+        .unwrap();
+        let core = CoreClient { client };
+        let scope = SessionScope::Project {
+            project_id: "space-zeron".into(),
+        };
+        let list = core.session_list(scope.clone());
+        assert_eq!(list.scope, scope);
+        assert_eq!(list.front.pinned.len(), 2);
+        assert_eq!(list.front.sections[0].sessions.len(), 1);
+        assert_eq!(list.archived.len(), 1);
+        assert!(list.groups.is_empty(), "default options stay flat");
+        let grouped = core.session_list_with_options(
+            scope.clone(),
+            SessionViewOptions {
+                organization: SessionOrganization::ByProject,
+                sort: SessionSort::Created,
+            },
+        );
+        assert_eq!(grouped.groups.len(), 1);
+        assert_eq!(grouped.groups[0].id, "project:space-zeron");
+        assert_eq!(grouped.groups[0].sessions.len(), grouped.front.recent.len());
+        let summary = core.project_deletion_summary("space-zeron".into()).unwrap();
+        assert_eq!(summary.session_count, 6);
+        assert_eq!(summary.archived_count, 1);
+        assert!(core.project_deletion_summary("missing".into()).is_none());
+        let hits = core.search_scoped("needle".into(), scope, false, 60);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.id, "chat-scoped-needle");
+        assert_eq!(
+            core.search_projects("studio archive/zeron".into())[0].id,
+            "space-duplicate"
+        );
+        core.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 use std::sync::Arc;
 
 use zeron_client as zc;
@@ -131,6 +185,56 @@ impl CoreClient {
     /// Threads page: pinned, sections, recent.
     pub fn front_page(&self) -> FrontPage {
         (&self.client.workspace().front).into()
+    }
+
+    pub fn session_list(&self, scope: SessionScope) -> SessionList {
+        self.session_list_with_options(scope, SessionViewOptions::default())
+    }
+
+    /// Scope-aware list with native grouping/sort options. `session_list`
+    /// keeps the default (flat, last-updated) projection.
+    pub fn session_list_with_options(
+        &self,
+        scope: SessionScope,
+        options: SessionViewOptions,
+    ) -> SessionList {
+        self.client
+            .workspace()
+            .session_list_with_options(&scope.into(), options.into())
+            .into()
+    }
+
+    /// Delete-confirmation facts for a project, computed over every chat
+    /// (archived and child rows included). `None` when the project is gone.
+    pub fn project_deletion_summary(&self, space_id: String) -> Option<ProjectDeletionSummary> {
+        self.client
+            .workspace()
+            .project_deletion_summary(&space_id)
+            .map(Into::into)
+    }
+
+    pub fn search_projects(&self, query: String) -> Vec<ProjectView> {
+        self.client
+            .workspace()
+            .search_projects(&query)
+            .iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    pub fn search_scoped(
+        &self,
+        query: String,
+        scope: SessionScope,
+        include_archived: bool,
+        limit: u32,
+    ) -> Vec<SearchHit> {
+        self.client
+            .workspace()
+            .search_scoped(&query, &scope.into(), include_archived, limit as usize)
+            .iter()
+            .map(Into::into)
+            .collect()
     }
 
     pub fn projects(&self) -> Vec<ProjectView> {
@@ -370,7 +474,11 @@ impl CoreClient {
                 .register_push_target(
                     &token,
                     &environment,
-                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                    zc::PushPrefs {
+                        done: prefs.done,
+                        input: prefs.input,
+                        failed: prefs.failed,
+                    },
                 )
                 .await
         })
@@ -404,7 +512,12 @@ impl CoreClient {
         query: String,
     ) -> CoreResult<Vec<FileMatch>> {
         let client = self.client.clone();
-        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        let files = on_runtime(async move {
+            client
+                .search_files(&device_id, chat_id, space_id, &query)
+                .await
+        })
+        .await?;
         Ok(files
             .into_iter()
             .map(|f| FileMatch {

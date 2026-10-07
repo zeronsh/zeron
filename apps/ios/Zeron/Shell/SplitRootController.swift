@@ -20,6 +20,7 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
     private let detail = UINavigationController()
     private lazy var tabs = MainTabController(app: app)
     private(set) var currentChatId: String?
+    private var workspaceObserver: AnyObject?
 
     init(app: AppModel) {
         self.app = app
@@ -48,6 +49,13 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         setViewController(detail, for: .secondary)
         setViewController(tabs, for: .compact)
         showDraft(prompt: nil, focus: false)
+        workspaceObserver = app.observe { [weak self] in
+            guard let self, self.app.workspaceSynced, let id = self.currentChatId,
+                  self.app.session(id) == nil else { return }
+            // Layout/scope changes keep the open session. Deleting its project
+            // removes the session itself, so the detail returns to the draft.
+            self.showDraft(prompt: nil, focus: false)
+        }
     }
 
     override var keyCommands: [UIKeyCommand]? {
@@ -228,7 +236,7 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         search.searchResultsUpdater = self
         search.obscuresBackgroundDuringPresentation = false
         search.hidesNavigationBarDuringPresentation = false
-        search.searchBar.placeholder = "Search"
+        search.searchBar.placeholder = "Search sessions"
         search.searchBar.searchTextField.accessibilityIdentifier = "sidebar-search"
         list.navigationItem.searchController = search
         list.navigationItem.hidesSearchBarWhenScrolling = false
@@ -240,6 +248,7 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         settings.accessibilityIdentifier = "sidebar-settings"
         let options = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: list.optionsMenu())
         options.accessibilityLabel = "Options"
+        options.accessibilityIdentifier = "sessions-options"
         let compose = UIBarButtonItem(image: UIImage(systemName: "plus"), primaryAction: UIAction { [weak self] _ in
             self?.router?.presentNewSession(prompt: nil)
         })
@@ -249,6 +258,7 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         compose.accessibilityIdentifier = "new-session"
         list.navigationItem.rightBarButtonItem = nil
         list.toolbarItems = [settings, options, .flexibleSpace(), compose]
+        list.updateOptionsMenu()
         nav.isToolbarHidden = false
 
         // A hairline between the sidebar and the main column.

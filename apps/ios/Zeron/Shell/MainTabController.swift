@@ -114,7 +114,8 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     }
 
     func presentNewSession(prompt: String? = nil) {
-        let vc = NewSessionViewController(app: app, prompt: prompt) { [weak self] chatId, handoff in
+        let list = (selectedTab?.viewController as? UINavigationController)?.topViewController as? SessionListController
+        let vc = NewSessionViewController(app: app, prompt: prompt, scope: list?.listScope) { [weak self] chatId, handoff in
             guard let self else { return }
             self.openSession(chatId, handoff: handoff)
         }

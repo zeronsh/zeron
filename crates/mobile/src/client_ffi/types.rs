@@ -121,6 +121,7 @@ impl From<AuthTokens> for zc::AuthTokens {
 pub enum DemoFixture {
     /// Devices, projects, pinned + sectioned sessions, PRs in every state.
     Standard,
+    ProjectFilter,
     /// No projects and no sessions (empty states).
     NoProjects,
     /// Only this phone — no execution hosts.
@@ -162,6 +163,7 @@ impl From<DemoOptions> for zc::DemoOptions {
         zc::DemoOptions {
             fixture: match o.fixture {
                 DemoFixture::Standard => zc::DemoFixture::Standard,
+                DemoFixture::ProjectFilter => zc::DemoFixture::ProjectFilter,
                 DemoFixture::NoProjects => zc::DemoFixture::NoProjects,
                 DemoFixture::IosOnly => zc::DemoFixture::IosOnly,
             },
@@ -589,6 +591,143 @@ impl From<&zc::FrontPage> for FrontPage {
                 })
                 .collect(),
             recent: rows(&f.recent),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum SessionScope {
+    All,
+    Project { project_id: String },
+    Projectless,
+}
+
+impl From<SessionScope> for zc::SessionScope {
+    fn from(s: SessionScope) -> Self {
+        match s {
+            SessionScope::All => Self::All,
+            SessionScope::Project { project_id } => Self::Project { project_id },
+            SessionScope::Projectless => Self::Projectless,
+        }
+    }
+}
+
+impl From<zc::SessionScope> for SessionScope {
+    fn from(s: zc::SessionScope) -> Self {
+        match s {
+            zc::SessionScope::All => Self::All,
+            zc::SessionScope::Project { project_id } => Self::Project { project_id },
+            zc::SessionScope::Projectless => Self::Projectless,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum SessionOrganization {
+    ByProject,
+    ByDevice,
+    #[default]
+    InOneList,
+}
+
+impl From<SessionOrganization> for zc::SessionOrganization {
+    fn from(value: SessionOrganization) -> Self {
+        match value {
+            SessionOrganization::ByProject => Self::ByProject,
+            SessionOrganization::ByDevice => Self::ByDevice,
+            SessionOrganization::InOneList => Self::InOneList,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum SessionSort {
+    #[default]
+    LastUpdated,
+    Created,
+}
+
+impl From<SessionSort> for zc::SessionSort {
+    fn from(value: SessionSort) -> Self {
+        match value {
+            SessionSort::LastUpdated => Self::LastUpdated,
+            SessionSort::Created => Self::Created,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Record)]
+pub struct SessionViewOptions {
+    pub organization: SessionOrganization,
+    pub sort: SessionSort,
+}
+
+impl From<SessionViewOptions> for zc::SessionViewOptions {
+    fn from(value: SessionViewOptions) -> Self {
+        Self {
+            organization: value.organization.into(),
+            sort: value.sort.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SessionGroup {
+    /// `project:<id>`, `home:<device>`, or `device:<device>`.
+    pub id: String,
+    pub name: String,
+    pub device_name: Option<String>,
+    pub path: Option<String>,
+    pub sessions: Vec<SessionRow>,
+}
+
+impl From<&zc::SessionGroup> for SessionGroup {
+    fn from(g: &zc::SessionGroup) -> Self {
+        Self {
+            id: g.id.clone(),
+            name: g.name.clone(),
+            device_name: g.device_name.clone(),
+            path: g.path.clone(),
+            sessions: rows(&g.sessions),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SessionList {
+    pub scope: SessionScope,
+    pub front: FrontPage,
+    pub archived: Vec<SessionRow>,
+    /// Grouped Recent buckets (empty for `InOneList`).
+    pub groups: Vec<SessionGroup>,
+}
+
+impl From<zc::SessionList> for SessionList {
+    fn from(s: zc::SessionList) -> Self {
+        Self {
+            scope: s.scope.into(),
+            front: (&s.front).into(),
+            archived: rows(&s.archived),
+            groups: s.groups.iter().map(SessionGroup::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProjectDeletionSummary {
+    pub project_id: String,
+    pub project_name: String,
+    pub session_count: u64,
+    pub archived_count: u64,
+}
+
+impl From<zc::ProjectDeletionSummary> for ProjectDeletionSummary {
+    fn from(s: zc::ProjectDeletionSummary) -> Self {
+        Self {
+            project_id: s.project_id,
+            project_name: s.project_name,
+            session_count: s.session_count,
+            archived_count: s.archived_count,
         }
     }
 }

@@ -17,9 +17,10 @@ use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
 
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
-    DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
-    SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
-    relative_time_label,
+    DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectDeletionSummary, ProjectRef, ProjectView,
+    PullRequestGroups, SearchField, SearchHit, SectionView, SessionGroup, SessionList,
+    SessionOrganization, SessionRow, SessionScope, SessionSort, SessionViewOptions,
+    WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 
 use crate::{lock, read, write};

@@ -379,7 +379,7 @@ pub(crate) fn seed(
             doc.reconcile_sidebar_pins(true)?;
             return Ok(Seeded { change_requests });
         }
-        DemoFixture::Standard => {}
+        DemoFixture::Standard | DemoFixture::ProjectFilter => {}
     }
     for device in &all_devices {
         doc.upsert_device(device)?;
@@ -493,6 +493,51 @@ pub(crate) fn seed(
                 },
             })?;
         }
+    }
+    if fixture == DemoFixture::ProjectFilter {
+        let mut duplicate = spaces
+            .iter()
+            .find(|s| s.id == "space-zeron")
+            .unwrap()
+            .clone();
+        duplicate.id = "space-duplicate".into();
+        duplicate.device_id = STUDIO.into();
+        duplicate.path = "/Users/studio/Archive/zeron".into();
+        duplicate.name = Some("zeron".into());
+        duplicate.repository_id = None;
+        duplicate.checkout_id = Some("co-space-duplicate".into());
+        doc.upsert_space(&duplicate)?;
+        let mut empty = duplicate.clone();
+        empty.id = "space-empty".into();
+        empty.path = "/Users/studio/Projects/empty-workspace".into();
+        empty.name = Some("Empty project with a very long name for accessible layouts".into());
+        empty.checkout_id = Some("co-space-empty".into());
+        doc.upsert_space(&empty)?;
+        let mut chat = doc.chat("chat-deploy")?.unwrap();
+        chat.id = "chat-duplicate".into();
+        chat.space_id = Some(duplicate.id);
+        chat.device_id = STUDIO.into();
+        chat.title = Some("Same name, different project".into());
+        chat.cwd = Some(duplicate.path);
+        doc.upsert_chat(&chat)?;
+        chat.device_id = VPS.into();
+        chat.space_id = Some("space-edge".into());
+        chat.title = Some("Needle search regression".into());
+        for index in 0..65 {
+            chat.id = format!("chat-global-needle-{index:02}");
+            chat.last_message_at = Some(ms(now - index * MIN));
+            doc.upsert_chat(&chat)?;
+        }
+        chat.id = "chat-scoped-needle".into();
+        chat.device_id = MAC.into();
+        chat.space_id = Some("space-zeron".into());
+        chat.last_message_at = Some(ms(now - 10 * DAY));
+        doc.upsert_chat(&chat)?;
+        let mut archived_home = doc.chat("chat-home")?.unwrap();
+        archived_home.id = "chat-home-archived".into();
+        archived_home.title = Some("Archived home session".into());
+        archived_home.archived = true;
+        doc.upsert_chat(&archived_home)?;
     }
     Ok(Seeded { change_requests })
 }

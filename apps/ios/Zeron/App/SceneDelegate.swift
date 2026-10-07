@@ -79,6 +79,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let root: UIViewController = !app.isSignedIn
             ? SignInViewController(app: app)
             : UIDevice.current.userInterfaceIdiom == .pad ? SplitRootController(app: app) : MainTabController(app: app)
+        #if DEBUG
+        // Exercise the split's native compact adaptation in the offline UI
+        // harness without relying on SpringBoard's multitasking gestures.
+        if ProcessInfo.processInfo.arguments.contains("-compact-width") { root.traitOverrides.horizontalSizeClass = .compact }
+        #endif
         // Sheets (new session, Settings) belong to the old root: they'd
         // stay on top of the new one.
         if let old = window.rootViewController, old.presentedViewController != nil {

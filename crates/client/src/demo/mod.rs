@@ -9,7 +9,7 @@
 //! id), streaming replies through `SegmentWriter`, flipping session status
 //! rows, draining the queue, and answering relay RPCs.
 
-mod fixtures;
+pub(crate) mod fixtures;
 mod png;
 mod transcripts;
 

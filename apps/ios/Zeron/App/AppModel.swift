@@ -10,6 +10,7 @@ final class AppModel {
         var folders: [FolderRowVM] = []
         var sessions: [SessionRowVM] = []
         var sectionSessions: [String: [SessionRowVM]] = [:]
+        var groups: [SessionGroupVM] = []
     }
 
     struct LiveCounts: Equatable {
@@ -25,6 +26,13 @@ final class AppModel {
     private(set) var live = LiveCounts()
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
+    private(set) var sessionScope: SessionScope = .all
+    private(set) var historyScope: SessionScope = .all
+    private(set) var viewPreferences = SessionViewPreferences()
+    private(set) var workspaceSynced = false
+    private(set) var sectionOptions: [FolderRowVM] = []
+    private var preferences: WorkspacePreferences?
+    private var scopePreferences: WorkspacePreferences?
     private var lastHosts: [HostOption] = []
     private var workspaceRevision: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
@@ -38,46 +46,37 @@ final class AppModel {
     var onSignOut: (() -> Void)?
     /// The new-session page's options (project, host, branch, model,
     /// effort), kept across launches.
-    var lastDraft: NewSessionDraft = {
-        var d = !AppModel.persistsNewSession ? NewSessionDraft() : UserDefaults.standard.data(forKey: "newSessionDraft").flatMap { try? JSONDecoder().decode(NewSessionDraft.self, from: $0) } ?? NewSessionDraft()
-        // `-harness mock`: live-stack tests must never start a real agent.
-        let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "-harness"), i + 1 < args.count { d.harness = args[i + 1] }
-        return d
-    }() {
+    var lastDraft = NewSessionDraft() {
         didSet {
-            guard Self.persistsNewSession else { return }
-            UserDefaults.standard.set(try? JSONEncoder().encode(lastDraft), forKey: "newSessionDraft")
+            preferences?.draft = lastDraft
         }
     }
 
     /// The demo (and the UI tests on it) keep the new-session page in memory
     /// only: one run's leftovers must not seed the next.
-    private static let persistsNewSession = !ProcessInfo.processInfo.arguments.contains("-demo")
     private var volatileNewSessionText = ""
 
     /// What was typed on the new-session page when it was closed unsent.
     var newSessionText: String {
-        get { Self.persistsNewSession ? Drafts.load(Self.newSessionDraftKey) : volatileNewSessionText }
+        get { preferences?.text ?? volatileNewSessionText }
         set {
-            if Self.persistsNewSession { Drafts.save(Self.newSessionDraftKey, newValue) } else { volatileNewSessionText = newValue }
+            if let preferences { preferences.text = newValue } else { volatileNewSessionText = newValue }
         }
     }
 
     /// Images staged there (this launch only).
     var newSessionImages: [StagedImage] = []
 
-    private static let newSessionDraftKey = "new-session"
-
     var isSignedIn: Bool { client != nil }
     var isDemo: Bool { client?.isDemo() ?? false }
 
-    init() {
+    init(credentials: Credentials? = nil) {
         // Online/offline + interface changes cut sync backoff short.
         path.pathUpdateHandler = { [weak self] p in
             DispatchQueue.main.async { self?.client?.setNetworkOnline(online: p.status == .satisfied) }
         }
         path.start(queue: DispatchQueue(label: "sh.zeron.path"))
+        if let credentials { start(credentials); return }
         let args = ProcessInfo.processInfo.arguments
         #if DEBUG
         // Test hooks (never in release builds): wipe the Keychain, or run
@@ -101,7 +100,7 @@ final class AppModel {
         let args = ProcessInfo.processInfo.arguments
         let scale: TranscriptScale = args.contains("-huge") ? .huge : args.contains("-big") ? .big : .normal
         return DemoOptions(
-            fixture: args.contains("-no-projects") ? .noProjects : args.contains("-ios-only") ? .iosOnly : .standard,
+            fixture: args.contains("-no-projects") ? .noProjects : args.contains("-ios-only") ? .iosOnly : args.contains("-project-filter-fixture") ? .projectFilter : .standard,
             transcriptScale: scale,
             streamSpeed: args.contains("-fast") ? .fast : .realistic,
             longReply: args.contains("-longreply")
@@ -134,7 +133,31 @@ final class AppModel {
     private func start(_ credentials: Credentials) -> Bool {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = credentials.isDemo ? support.appendingPathComponent("demo", isDirectory: true) : Self.coreDir
-        if !credentials.isDemo { Self.claimCoreDir(for: credentials) }
+        if !credentials.isDemo {
+            preferences = WorkspacePreferences(userId: credentials.userId, orgId: credentials.orgId)
+            if (try? String(contentsOf: Self.coreDir.appendingPathComponent(".owner"), encoding: .utf8)) == "\(credentials.userId)/\(credentials.orgId)" {
+                preferences?.migrateLegacyDraft()
+                preferences?.migrateLegacyViewPreferences()
+            }
+            Self.claimCoreDir(for: credentials)
+        }
+        scopePreferences = preferences
+        #if DEBUG
+        if credentials.isDemo, ProcessInfo.processInfo.arguments.contains("-persist-demo-scope") {
+            scopePreferences = WorkspacePreferences(userId: "demo-test", orgId: "demo-test")
+            if ProcessInfo.processInfo.arguments.contains("-reset-demo-scope") {
+                scopePreferences?.saveScope(.all, "sessionsScope")
+                scopePreferences?.saveScope(.all, "historyScope")
+                scopePreferences?.viewPreferences = SessionViewPreferences()
+            }
+        }
+        #endif
+        sessionScope = scopePreferences?.scope("sessionsScope") ?? .all
+        historyScope = scopePreferences?.scope("historyScope") ?? .all
+        viewPreferences = scopePreferences?.viewPreferences ?? SessionViewPreferences()
+        lastDraft = preferences?.draft ?? NewSessionDraft()
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-harness"), i + 1 < args.count { lastDraft.harness = args[i + 1] }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let config = CoreConfig(
             edgeUrl: Self.edgeURL,
@@ -219,10 +242,17 @@ final class AppModel {
         archived = []
         rows = [:]
         rawProjects = []
+        sectionOptions = []
         lastHosts = []
         connectivity = nil
         live = LiveCounts()
         workspaceRevision = 0
+        workspaceSynced = false
+        sessionScope = .all
+        historyScope = .all
+        viewPreferences = SessionViewPreferences()
+        preferences = nil
+        scopePreferences = nil
         lastDraft = NewSessionDraft()
         newSessionText = ""
         newSessionImages = []
@@ -312,6 +342,19 @@ final class AppModel {
     private func refreshWorkspace() {
         guard let client else { return }
         let ws = client.workspace()
+        let projectsChanged = rawProjects != ws.projects
+        let syncChanged = workspaceSynced != ws.synced
+        rawProjects = ws.projects
+        sectionOptions = ws.front.sections.map { FolderRowVM(id: $0.id, name: $0.name, count: $0.sessions.count, symbol: "folder") }
+        workspaceSynced = ws.synced
+        let projection = client.sessionListWithOptions(scope: sessionScope, options: viewPreferences.core)
+        let scopeChanged = sessionScope != projection.scope
+        sessionScope = projection.scope
+        if scopeChanged { scopePreferences?.saveScope(sessionScope, "sessionsScope") }
+        if case let .project(id) = historyScope, ws.synced, !ws.projects.contains(where: { $0.id == id }) {
+            historyScope = .all
+            scopePreferences?.saveScope(historyScope, "historyScope")
+        }
         workspaceRevision = ws.revision
         var all: [String: SessionRow] = [:]
         func vm(_ r: SessionRow) -> SessionRowVM {
@@ -319,23 +362,30 @@ final class AppModel {
             return Self.vm(r)
         }
         var page = FrontPage()
-        let pinned = ws.front.pinned.map(vm)
+        let pinned = projection.front.pinned.map(vm)
         if !pinned.isEmpty {
             page.folders.append(FolderRowVM(id: "pinned", name: "Pinned", count: pinned.count, symbol: "pin"))
         }
         page.sectionSessions["pinned"] = pinned
-        for s in ws.front.sections {
+        for s in projection.front.sections {
             let list = s.sessions.map(vm)
             page.folders.append(FolderRowVM(id: s.id, name: s.name, count: list.count, symbol: "folder"))
             page.sectionSessions[s.id] = list
         }
-        page.sessions = ws.front.recent.map(vm)
-        rawProjects = ws.projects
+        page.sessions = projection.front.recent.map(vm)
+        page.groups = projection.groups.map { group in
+            SessionGroupVM(id: group.id, title: group.name,
+                subtitle: [group.deviceName == group.name ? nil : group.deviceName, group.path].compactMap { $0 }.joined(separator: " · ").nonEmpty,
+                projectId: group.id.hasPrefix("project:") ? String(group.id.dropFirst(8)) : nil,
+                sessions: group.sessions.map(vm))
+        }
+        // Keep global rows available to deep links and the iPad detail column.
+        for r in ws.front.pinned + ws.front.sections.flatMap(\.sessions) + ws.front.recent + ws.archived { all[r.id] = r }
         // Sessions reachable only through their project still resolve by id.
         for p in ws.projects {
             for r in p.sessions where all[r.id] == nil { all[r.id] = r }
         }
-        let archivedVMs = ws.archived.map(vm)
+        let archivedVMs = projection.archived.map(vm)
         var counts = LiveCounts()
         var seen = Set<String>()
         for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
@@ -345,7 +395,7 @@ final class AppModel {
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
-        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
+        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts || projectsChanged || syncChanged || scopeChanged
         lastHosts = hosts
         live = counts
         frontPage = page
@@ -401,10 +451,66 @@ final class AppModel {
         id == "archived" ? archived : frontPage.sectionSessions[id] ?? []
     }
 
-    func search(_ query: String) -> [SessionRowVM] {
+    func search(_ query: String, scope: SessionScope? = nil, includeArchived: Bool = false) -> [SessionRowVM] {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard let client, !q.isEmpty else { return frontPage.sessions }
-        return client.search(query: q, limit: 60).map { Self.vm($0.session) }
+        return client.searchScoped(query: q, scope: scope ?? sessionScope, includeArchived: includeArchived, limit: 60).map { Self.vm($0.session) }
+    }
+
+    func setSessionScope(_ scope: SessionScope) {
+        guard scope != sessionScope else { return }
+        sessionScope = scope
+        scopePreferences?.saveScope(scope, "sessionsScope")
+        refreshWorkspace()
+        // Empty projects can yield the same projection; the label still changes.
+        observers.values.forEach { $0() }
+    }
+
+    func setHistoryScope(_ scope: SessionScope) {
+        historyScope = scope
+        scopePreferences?.saveScope(scope, "historyScope")
+        observers.values.forEach { $0() }
+    }
+
+    func setViewPreferences(_ value: SessionViewPreferences) {
+        guard value != viewPreferences else { return }
+        viewPreferences = value
+        scopePreferences?.viewPreferences = value
+        refreshWorkspace()
+        // Metadata changes must redraw even when the row projection is equal.
+        observers.values.forEach { $0() }
+    }
+
+    func scopeTitle(_ scope: SessionScope) -> String {
+        switch scope {
+        case .all: return "All projects"
+        case .projectless: return "No project"
+        case let .project(id): return rawProjects.first { $0.id == id }?.name ?? "Loading project…"
+        }
+    }
+
+    func scopeImage(_ scope: SessionScope) -> UIImage? {
+        if case let .project(id) = scope, let p = rawProjects.first(where: { $0.id == id }) {
+            return ProjectTile.image(name: p.name, colorIndex: Int(p.colorIndex))
+        }
+        return UIImage(systemName: scope == .projectless ? "tray" : "square.grid.2x2")
+    }
+
+    func projects(matching query: String) -> [ProjectOption] {
+        (client?.searchProjects(query: query) ?? []).map(projectOption)
+    }
+
+    /// A fresh draft follows the list. Saved content/attachments or an
+    /// explicit target choice keep the draft's actual execution target.
+    func newDraft(scope: SessionScope? = nil) -> NewSessionDraft {
+        var draft = lastDraft
+        if !newSessionText.isEmpty || !newSessionImages.isEmpty || draft.targetChosen { return draft }
+        switch scope ?? sessionScope {
+        case .all: break
+        case let .project(id): draft.projectId = id; draft.hostId = nil; draft.branch = nil; draft.worktree = false
+        case .projectless: draft.projectId = nil; draft.hostId = hostOptions.first(where: \.online)?.id ?? hostOptions.first?.id; draft.branch = nil; draft.worktree = false
+        }
+        return draft
     }
 
 
@@ -480,7 +586,38 @@ final class AppModel {
     }
 
     var projectOptions: [ProjectOption] {
-        rawProjects.map { ProjectOption(id: $0.id, name: $0.name, path: $0.path, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, groupKey: $0.groupKey, groupName: $0.groupName, colorIndex: Int($0.colorIndex)) }
+        rawProjects.map(projectOption)
+    }
+
+    func projectDeletionSummary(_ id: String) -> ProjectDeletionSummary? {
+        client?.projectDeletionSummary(spaceId: id)
+    }
+
+    func renameProject(_ id: String, name: String) throws {
+        guard let client else { throw ProjectActionError.unavailable }
+        try client.renameProject(spaceId: id, name: name)
+        refreshWorkspace()
+    }
+
+    func deleteProject(_ id: String) throws {
+        guard let client else { throw ProjectActionError.unavailable }
+        guard client.projectDeletionSummary(spaceId: id) != nil else { throw ProjectActionError.removed }
+        try client.deleteProject(spaceId: id)
+        refreshWorkspace()
+    }
+
+    enum ProjectActionError: LocalizedError {
+        case unavailable, removed
+        var errorDescription: String? {
+            switch self {
+            case .unavailable: "The workspace is unavailable. Try again after signing in."
+            case .removed: "This project has already been removed."
+            }
+        }
+    }
+
+    private func projectOption(_ p: ProjectView) -> ProjectOption {
+        ProjectOption(id: p.id, name: p.name, path: p.path, device: p.deviceId, deviceName: p.deviceName ?? deviceName(p.deviceId), online: p.deviceOnline, git: p.gitDetected, groupKey: p.groupKey, groupName: p.groupName, colorIndex: Int(p.colorIndex))
     }
 
     var hostOptions: [HostOption] {
@@ -550,6 +687,8 @@ final class AppModel {
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: worktree, busy: .queue))
             refreshWorkspace()
+            let actualScope: SessionScope = draft.projectId.map { .project(projectId: $0) } ?? .projectless
+            if sessionScope != .all, sessionScope != actualScope { setSessionScope(actualScope) }
             return chatId
         } catch {
             NSLog("create session failed: \(error)")
@@ -576,6 +715,20 @@ private final class ListenerBridge: ClientListener, @unchecked Sendable {
 // MARK: - Credential persistence (Keychain)
 
 extension Credentials {
+    var userId: String {
+        switch self {
+        case let .workOs(userId, _, _), let .dev(userId, _): return userId
+        case .demo: return "demo"
+        }
+    }
+
+    var orgId: String {
+        switch self {
+        case let .workOs(_, orgId, _), let .dev(_, orgId): return orgId
+        case .demo: return "demo"
+        }
+    }
+
     var isDemo: Bool {
         if case .demo = self { return true }
         return false

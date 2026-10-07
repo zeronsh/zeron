@@ -998,6 +998,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func project(spaceId: String)  -> ProjectView?
     
     /**
+     * Delete-confirmation facts for a project, computed over every chat
+     * (archived and child rows included). `None` when the project is gone.
+     */
+    func projectDeletionSummary(spaceId: String)  -> ProjectDeletionSummary?
+    
+    /**
      * Active sessions without a project.
      */
     func projectlessSessions()  -> [SessionRow]
@@ -1031,12 +1037,24 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func searchFiles(deviceId: String, chatId: String?, spaceId: String?, query: String) async throws  -> [FileMatch]
     
+    func searchProjects(query: String)  -> [ProjectView]
+    
+    func searchScoped(query: String, scope: SessionScope, includeArchived: Bool, limit: UInt32)  -> [SearchHit]
+    
     /**
      * An already-open session.
      */
     func session(chatId: String)  -> SessionHandle?
     
     func sessionConfig(chatId: String)  -> ChatConfig?
+    
+    func sessionList(scope: SessionScope)  -> SessionList
+    
+    /**
+     * Scope-aware list with native grouping/sort options. `session_list`
+     * keeps the default (flat, last-updated) projection.
+     */
+    func sessionListWithOptions(scope: SessionScope, options: SessionViewOptions)  -> SessionList
     
     /**
      * Any chat row (archived and child chats included).
@@ -1552,6 +1570,20 @@ open func project(spaceId: String) -> ProjectView?  {
 }
     
     /**
+     * Delete-confirmation facts for a project, computed over every chat
+     * (archived and child rows included). `None` when the project is gone.
+     */
+open func projectDeletionSummary(spaceId: String) -> ProjectDeletionSummary?  {
+    return try!  FfiConverterOptionTypeProjectDeletionSummary.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_project_deletion_summary(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Active sessions without a project.
      */
 open func projectlessSessions() -> [SessionRow]  {
@@ -1681,6 +1713,29 @@ open func searchFiles(deviceId: String, chatId: String?, spaceId: String?, query
         )
 }
     
+open func searchProjects(query: String) -> [ProjectView]  {
+    return try!  FfiConverterSequenceTypeProjectView.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_search_projects(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(query),uniffiCallStatus
+    )
+})
+}
+    
+open func searchScoped(query: String, scope: SessionScope, includeArchived: Bool, limit: UInt32) -> [SearchHit]  {
+    return try!  FfiConverterSequenceTypeSearchHit.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_search_scoped(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(query),
+        FfiConverterTypeSessionScope_lower(scope),
+        FfiConverterBool.lower(includeArchived),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * An already-open session.
      */
@@ -1700,6 +1755,31 @@ open func sessionConfig(chatId: String) -> ChatConfig?  {
     uniffi_zeron_mobile_fn_method_coreclient_session_config(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+})
+}
+    
+open func sessionList(scope: SessionScope) -> SessionList  {
+    return try!  FfiConverterTypeSessionList_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_session_list(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSessionScope_lower(scope),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Scope-aware list with native grouping/sort options. `session_list`
+     * keeps the default (flat, last-updated) projection.
+     */
+open func sessionListWithOptions(scope: SessionScope, options: SessionViewOptions) -> SessionList  {
+    return try!  FfiConverterTypeSessionList_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_session_list_with_options(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSessionScope_lower(scope),
+        FfiConverterTypeSessionViewOptions_lower(options),uniffiCallStatus
     )
 })
 }
@@ -6163,6 +6243,68 @@ public func FfiConverterTypePendingSend_lower(_ value: PendingSend) -> RustBuffe
 }
 
 
+public struct ProjectDeletionSummary: Equatable, Hashable {
+    public var projectId: String
+    public var projectName: String
+    public var sessionCount: UInt64
+    public var archivedCount: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(projectId: String, projectName: String, sessionCount: UInt64, archivedCount: UInt64) {
+        self.projectId = projectId
+        self.projectName = projectName
+        self.sessionCount = sessionCount
+        self.archivedCount = archivedCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProjectDeletionSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProjectDeletionSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProjectDeletionSummary {
+        return
+            try ProjectDeletionSummary(
+                projectId: FfiConverterString.read(from: &buf), 
+                projectName: FfiConverterString.read(from: &buf), 
+                sessionCount: FfiConverterUInt64.read(from: &buf), 
+                archivedCount: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProjectDeletionSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.projectId, into: &buf)
+        FfiConverterString.write(value.projectName, into: &buf)
+        FfiConverterUInt64.write(value.sessionCount, into: &buf)
+        FfiConverterUInt64.write(value.archivedCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectDeletionSummary_lift(_ buf: RustBuffer) throws -> ProjectDeletionSummary {
+    return try FfiConverterTypeProjectDeletionSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectDeletionSummary_lower(_ value: ProjectDeletionSummary) -> RustBuffer {
+    return FfiConverterTypeProjectDeletionSummary.lower(value)
+}
+
+
 public struct ProjectRef: Equatable, Hashable {
     public var id: String
     public var name: String
@@ -7313,6 +7455,146 @@ public func FfiConverterTypeSendRequest_lower(_ value: SendRequest) -> RustBuffe
 }
 
 
+public struct SessionGroup: Equatable, Hashable {
+    /**
+     * `project:<id>`, `home:<device>`, or `device:<device>`.
+     */
+    public var id: String
+    public var name: String
+    public var deviceName: String?
+    public var path: String?
+    public var sessions: [SessionRow]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `project:<id>`, `home:<device>`, or `device:<device>`.
+         */id: String, name: String, deviceName: String?, path: String?, sessions: [SessionRow]) {
+        self.id = id
+        self.name = name
+        self.deviceName = deviceName
+        self.path = path
+        self.sessions = sessions
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionGroup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionGroup {
+        return
+            try SessionGroup(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                deviceName: FfiConverterOptionString.read(from: &buf), 
+                path: FfiConverterOptionString.read(from: &buf), 
+                sessions: FfiConverterSequenceTypeSessionRow.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionGroup, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.deviceName, into: &buf)
+        FfiConverterOptionString.write(value.path, into: &buf)
+        FfiConverterSequenceTypeSessionRow.write(value.sessions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionGroup_lift(_ buf: RustBuffer) throws -> SessionGroup {
+    return try FfiConverterTypeSessionGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionGroup_lower(_ value: SessionGroup) -> RustBuffer {
+    return FfiConverterTypeSessionGroup.lower(value)
+}
+
+
+public struct SessionList: Equatable, Hashable {
+    public var scope: SessionScope
+    public var front: FrontPage
+    public var archived: [SessionRow]
+    /**
+     * Grouped Recent buckets (empty for `InOneList`).
+     */
+    public var groups: [SessionGroup]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(scope: SessionScope, front: FrontPage, archived: [SessionRow], 
+        /**
+         * Grouped Recent buckets (empty for `InOneList`).
+         */groups: [SessionGroup]) {
+        self.scope = scope
+        self.front = front
+        self.archived = archived
+        self.groups = groups
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionList: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionList: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionList {
+        return
+            try SessionList(
+                scope: FfiConverterTypeSessionScope.read(from: &buf), 
+                front: FfiConverterTypeFrontPage.read(from: &buf), 
+                archived: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
+                groups: FfiConverterSequenceTypeSessionGroup.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionList, into buf: inout [UInt8]) {
+        FfiConverterTypeSessionScope.write(value.scope, into: &buf)
+        FfiConverterTypeFrontPage.write(value.front, into: &buf)
+        FfiConverterSequenceTypeSessionRow.write(value.archived, into: &buf)
+        FfiConverterSequenceTypeSessionGroup.write(value.groups, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionList_lift(_ buf: RustBuffer) throws -> SessionList {
+    return try FfiConverterTypeSessionList.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionList_lower(_ value: SessionList) -> RustBuffer {
+    return FfiConverterTypeSessionList.lower(value)
+}
+
+
 /**
  * One session row, as every list renders it.
  */
@@ -7545,6 +7827,60 @@ public func FfiConverterTypeSessionRow_lift(_ buf: RustBuffer) throws -> Session
 #endif
 public func FfiConverterTypeSessionRow_lower(_ value: SessionRow) -> RustBuffer {
     return FfiConverterTypeSessionRow.lower(value)
+}
+
+
+public struct SessionViewOptions: Equatable, Hashable {
+    public var organization: SessionOrganization
+    public var sort: SessionSort
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(organization: SessionOrganization, sort: SessionSort) {
+        self.organization = organization
+        self.sort = sort
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SessionViewOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionViewOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionViewOptions {
+        return
+            try SessionViewOptions(
+                organization: FfiConverterTypeSessionOrganization.read(from: &buf), 
+                sort: FfiConverterTypeSessionSort.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SessionViewOptions, into buf: inout [UInt8]) {
+        FfiConverterTypeSessionOrganization.write(value.organization, into: &buf)
+        FfiConverterTypeSessionSort.write(value.sort, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionViewOptions_lift(_ buf: RustBuffer) throws -> SessionViewOptions {
+    return try FfiConverterTypeSessionViewOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionViewOptions_lower(_ value: SessionViewOptions) -> RustBuffer {
+    return FfiConverterTypeSessionViewOptions.lower(value)
 }
 
 
@@ -9568,6 +9904,7 @@ public enum DemoFixture: Equatable, Hashable {
      * Devices, projects, pinned + sectioned sessions, PRs in every state.
      */
     case standard
+    case projectFilter
     /**
      * No projects and no sessions (empty states).
      */
@@ -9599,9 +9936,11 @@ public struct FfiConverterTypeDemoFixture: FfiConverterRustBuffer {
         
         case 1: return .standard
         
-        case 2: return .noProjects
+        case 2: return .projectFilter
         
-        case 3: return .iosOnly
+        case 3: return .noProjects
+        
+        case 4: return .iosOnly
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -9615,12 +9954,16 @@ public struct FfiConverterTypeDemoFixture: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case .noProjects:
+        case .projectFilter:
             writeInt(&buf, Int32(2))
         
         
-        case .iosOnly:
+        case .noProjects:
             writeInt(&buf, Int32(3))
+        
+        
+        case .iosOnly:
+            writeInt(&buf, Int32(4))
         
         }
     }
@@ -10775,6 +11118,221 @@ public func FfiConverterTypeSendState_lower(_ value: SendState) -> RustBuffer {
 
 
 
+
+public enum SessionOrganization: Equatable, Hashable {
+    
+    case byProject
+    case byDevice
+    case inOneList
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SessionOrganization: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionOrganization: FfiConverterRustBuffer {
+    typealias SwiftType = SessionOrganization
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionOrganization {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .byProject
+        
+        case 2: return .byDevice
+        
+        case 3: return .inOneList
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SessionOrganization, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .byProject:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .byDevice:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .inOneList:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionOrganization_lift(_ buf: RustBuffer) throws -> SessionOrganization {
+    return try FfiConverterTypeSessionOrganization.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionOrganization_lower(_ value: SessionOrganization) -> RustBuffer {
+    return FfiConverterTypeSessionOrganization.lower(value)
+}
+
+
+
+
+public enum SessionScope: Equatable, Hashable {
+    
+    case all
+    case project(projectId: String
+    )
+    case projectless
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SessionScope: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionScope: FfiConverterRustBuffer {
+    typealias SwiftType = SessionScope
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionScope {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .all
+        
+        case 2: return .project(projectId: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .projectless
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SessionScope, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .all:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .project(projectId):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(projectId, into: &buf)
+            
+        
+        case .projectless:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionScope_lift(_ buf: RustBuffer) throws -> SessionScope {
+    return try FfiConverterTypeSessionScope.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionScope_lower(_ value: SessionScope) -> RustBuffer {
+    return FfiConverterTypeSessionScope.lower(value)
+}
+
+
+
+
+public enum SessionSort: Equatable, Hashable {
+    
+    case lastUpdated
+    case created
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SessionSort: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSessionSort: FfiConverterRustBuffer {
+    typealias SwiftType = SessionSort
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionSort {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .lastUpdated
+        
+        case 2: return .created
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SessionSort, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .lastUpdated:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .created:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionSort_lift(_ buf: RustBuffer) throws -> SessionSort {
+    return try FfiConverterTypeSessionSort.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSessionSort_lower(_ value: SessionSort) -> RustBuffer {
+    return FfiConverterTypeSessionSort.lower(value)
+}
+
+
+
 /**
  * Where a new session runs.
  */
@@ -11631,6 +12189,30 @@ fileprivate struct FfiConverterOptionTypeInputRequest: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeInputRequest.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeProjectDeletionSummary: FfiConverterRustBuffer {
+    typealias SwiftType = ProjectDeletionSummary?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeProjectDeletionSummary.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeProjectDeletionSummary.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -12504,6 +13086,31 @@ fileprivate struct FfiConverterSequenceTypeSectionView: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSessionGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [SessionGroup]
+
+    public static func write(_ value: [SessionGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSessionGroup.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SessionGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SessionGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSessionGroup.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSessionRow: FfiConverterRustBuffer {
     typealias SwiftType = [SessionRow]
 
@@ -13224,6 +13831,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_project() != 50153) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_project_deletion_summary() != 60388) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_projectless_sessions() != 26434) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13254,10 +13864,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_search_files() != 31096) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_search_projects() != 38813) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_search_scoped() != 54763) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_session() != 12772) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_session_config() != 4276) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_session_list() != 45025) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_session_list_with_options() != 47476) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_session_row() != 10938) {

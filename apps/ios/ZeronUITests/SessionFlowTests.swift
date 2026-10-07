@@ -9,7 +9,7 @@ final class SessionFlowTests: XCTestCase {
 
     private func launch(_ args: [String] = [], fast: Bool = true) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-demo"] + (fast ? ["-fast"] : []) + args
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-demo"] + (fast ? ["-fast"] : []) + args
         app.launch()
         return app
     }
@@ -38,6 +38,34 @@ final class SessionFlowTests: XCTestCase {
         app.buttons["Open"].tap()
         XCTAssertTrue(app.navigationBars["Pinned"].waitForExistence(timeout: 5))
         snapshot(app, "pinned-folder")
+    }
+
+    func testProjectScopeCarriesIntoPinnedAndArchivedFolders() {
+        let app = launch(["-harness", "mock"])
+        app.openProjectScopePicker()
+        let search = app.searchFields["project-search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap(); search.typeText("MacBook zeron")
+        app.cells["project-id:space-zeron"].tap()
+        app.returnToSessions()
+        let pinned = app.cells["section-pinned"]
+        XCTAssertTrue(pinned.waitForExistence(timeout: 5))
+        pinned.press(forDuration: 0.8)
+        app.buttons["Open"].tap()
+        XCTAssertTrue(app.navigationBars["Pinned"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars.staticTexts["zeron"].exists)
+        XCTAssertTrue(app.cells["session-chat-veil"].exists)
+        XCTAssertTrue(app.cells["session-chat-picker"].exists)
+        snapshot(app, "project-pinned-folder")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        // Menu entry stays in the native navigation bar on the phone.
+        app.buttons["sessions-options"].tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Archived'")).firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Archived"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars.staticTexts["zeron"].exists)
+        XCTAssertTrue(app.cells["session-chat-oklch"].exists)
+        XCTAssertFalse(app.cells["session-chat-presence"].exists)
+        snapshot(app, "project-archived-folder")
     }
 
     func testSendEchoesAndStreamsReply() {
@@ -296,7 +324,7 @@ final class SessionFlowTests: XCTestCase {
         let chip = app.buttons["composer-chip-project"]
         XCTAssertTrue(chip.waitForExistence(timeout: 10))
         chip.tap()
-        let add = app.buttons["New Project…"]
+        let add = app.buttons["new-project"]
         XCTAssertTrue(add.waitForExistence(timeout: 5))
         add.tap()
         let use = app.buttons["use-folder"]
@@ -318,10 +346,12 @@ final class SessionFlowTests: XCTestCase {
         let project = app.buttons["composer-chip-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         project.tap()
-        let zeron = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'zeron'"))
+        let zeron = app.tables["project-picker"].cells.matching(NSPredicate(format: "label BEGINSWITH 'zeron'"))
         XCTAssertTrue(zeron.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(zeron.count, 1, "one entry for both clones")
-        snapshot(app, "project-menu")
+        XCTAssertTrue(zeron.firstMatch.label.contains("MacBook Pro"))
+        XCTAssertTrue(zeron.firstMatch.label.contains("hetzner-01"))
+        snapshot(app, "project-picker")
         zeron.firstMatch.tap()
         let host = app.buttons["composer-chip-host"]
         XCTAssertTrue(host.waitForExistence(timeout: 5))

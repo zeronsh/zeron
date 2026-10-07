@@ -2,6 +2,7 @@ import UIKit
 
 /// What a new session will be created with.
 struct NewSessionDraft: Equatable, Codable {
+    init() {}
     var projectId: String?
     /// Projectless sessions run on an explicit host.
     var hostId: String?
@@ -10,6 +11,11 @@ struct NewSessionDraft: Equatable, Codable {
     var harness = "claude-code"
     var model: String?
     var effort: String?
+    private var explicitlyChosenTarget: Bool?
+    var targetChosen: Bool {
+        get { explicitlyChosenTarget ?? false }
+        set { explicitlyChosenTarget = newValue }
+    }
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -55,6 +61,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let mark = UIImageView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
+    private var workspaceObserver: AnyObject?
+    private var previousScope: SessionScope
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -67,12 +75,13 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     /// only when opened on purpose (not the launch page).
     var focusOnAppear: Bool
 
-    init(app: AppModel, prompt: String?, embedded: Bool = false, onCreated: @escaping (String, DraftHandoff?) -> Void) {
+    init(app: AppModel, prompt: String?, embedded: Bool = false, scope: SessionScope? = nil, onCreated: @escaping (String, DraftHandoff?) -> Void) {
         self.app = app
         self.embedded = embedded
         self.focusOnAppear = !embedded
         self.onCreated = onCreated
-        self.draft = app.lastDraft
+        self.draft = app.newDraft(scope: scope)
+        self.previousScope = app.sessionScope
         super.init(nibName: nil, bundle: nil)
         // Pick up where the page was left (closed without sending).
         composer.text = prompt ?? app.newSessionText
@@ -115,6 +124,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
                 self?.dismiss(animated: true)
             })
+            navigationItem.leftBarButtonItem?.accessibilityIdentifier = "new-session-close"
+            navigationItem.leftBarButtonItem?.accessibilityLabel = "Close"
         }
 
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
@@ -140,7 +151,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             guard let self else { return UIMenu() }
             return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
         }
-        composer.onChipTap = { _, _ in }
+        composer.onChipTap = { [weak self] id, source in
+            if id == "project" { self?.showProjectPicker(from: source) }
+        }
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
@@ -179,6 +192,17 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             // No projects yet: run on the first reachable host.
             draft.hostId = app.hostOptions.first(where: \.online)?.id ?? app.hostOptions.first?.id
         }
+        workspaceObserver = app.observe { [weak self] in
+            guard let self else { return }
+            let scopeChanged = self.previousScope != self.app.sessionScope
+            self.previousScope = self.app.sessionScope
+            if scopeChanged, !self.draft.targetChosen, self.composer.text.isEmpty, self.composer.images.isEmpty {
+                self.app.lastDraft = self.draft
+                self.draft = self.app.newDraft()
+                self.modelsDevice = nil
+            }
+            self.loadModels()
+        }
         loadModels()
     }
 
@@ -194,6 +218,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         guard device != modelsDevice else { return refreshChips() }
         modelsDevice = device
         models = Self.modelCache[device] ?? Self.catalogModels()
+        validateModel()
         refreshChips()
         Task { [weak self] in
             guard let self else { return }
@@ -202,6 +227,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             Self.modelCache[device] = fresh
             guard self.modelsDevice == device else { return }
             self.models = fresh
+            self.validateModel()
             self.refreshChips()
         }
     }
@@ -210,6 +236,17 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         fallbackHarnesses().filter(\.offered).flatMap { h in
             fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels) }
         }
+    }
+
+    private func validateModel() {
+        // The explicitly selected mock harness must survive host catalogs in
+        // the live/offline test harness; it can never turn into a real agent.
+        guard draft.harness != "mock", !models.isEmpty else { return }
+        let choice = models.first { $0.harness == draft.harness && $0.id == draft.model }
+            ?? models.first { $0.harness == draft.harness } ?? models[0]
+        draft.harness = choice.harness
+        draft.model = choice.id
+        if let effort = draft.effort, !choice.efforts.contains(effort) { draft.effort = nil }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -253,6 +290,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             if p.git {
                 chips.append(ComposerChip(id: "branch", title: draft.worktree ? "New worktree" : (draft.branch ?? "Current branch"), symbol: nil, icon: BranchIcon.sized()))
             }
+        } else if draft.projectId != nil {
+            chips.append(ComposerChip(id: "project", title: app.workspaceSynced ? "Unavailable project" : "Loading project…", symbol: "folder"))
         } else {
             let host = app.hostOptions.first { $0.id == draft.hostId }
             chips.append(ComposerChip(id: "project", title: "No project", symbol: "tray"))
@@ -268,7 +307,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         }
         composer.chips = chips
         composer.chipMenus = [
-            "project": { [weak self] in self?.projectMenu() },
             "host": { [weak self] in self?.hostMenu() },
             "branch": { [weak self] in self?.branchMenu() },
             "model": { [weak self] in self?.modelMenu() },
@@ -277,47 +315,24 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
     }
 
-    /// One entry per project — checkouts of one repository, on any device,
-    /// are one entry listing their hosts; the host chip then picks which.
-    private func projectMenu() -> UIMenu {
-        var groups: [[ProjectOption]] = []
-        for p in app.projectOptions {
-            if let i = groups.firstIndex(where: { $0[0].groupKey == p.groupKey }) {
-                groups[i].append(p)
-            } else {
-                groups.append([p])
-            }
-        }
-        groups.sort { $0[0].groupName.localizedCaseInsensitiveCompare($1[0].groupName) == .orderedAscending }
-        let picked = project?.groupKey
-        var sections: [UIMenuElement] = [UIMenu(options: .displayInline, children: groups.map { members in
-            let first = members[0]
-            var hosts: [String] = []
-            for m in members where !hosts.contains(m.deviceName) { hosts.append(m.deviceName) }
-            return UIAction(title: first.groupName, subtitle: hosts.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.joined(separator: ", "), image: ProjectTile.image(name: first.groupName, colorIndex: first.colorIndex, side: 18), state: first.groupKey == picked ? .on : .off) { [weak self] _ in
-                self?.pickProject(members)
-            }
-        })]
-        sections.append(UIMenu(options: .displayInline, children: [
-            UIAction(title: "No Project…", image: UIImage(systemName: "tray"), state: draft.projectId == nil ? .on : .off) { [weak self] _ in
-                guard let self else { return }
+    private func showProjectPicker(from source: UIView) {
+        let scope = draft.projectId.map { SessionScope.project(projectId: $0) } ?? .projectless
+        presentProjectPicker(app: app, selection: scope, mode: .newSession, source: source) { [weak self] selection in
+            guard let self else { return }
+            switch selection {
+            case let .project(id):
+                guard let project = self.app.projectOptions.first(where: { $0.id == id }) else { return }
+                self.pickProject(self.app.projectOptions.filter { $0.groupKey == project.groupKey })
+            case .projectless:
                 self.draft.projectId = nil
                 self.draft.hostId = self.draft.hostId ?? self.app.hostOptions.first(where: \.online)?.id ?? self.app.hostOptions.first?.id
+                self.draft.targetChosen = true
+                self.draft.branch = nil
+                self.draft.worktree = false
                 self.loadModels()
-            },
-            UIAction(title: "New Project…", image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
-                guard let self else { return }
-                let vc = NewProjectViewController(app: self.app)
-                vc.onCreated = { [weak self] id in
-                    self?.draft.projectId = id
-                    self?.draft.hostId = nil
-                    self?.draft.branch = nil
-                    self?.loadModels()
-                }
-                self.present(UINavigationController(rootViewController: vc), animated: true)
-            },
-        ]))
-        return UIMenu(title: "Project", children: sections)
+            case .all: return
+            }
+        }
     }
 
     /// Keep the host when it has a checkout of the project, else the first
@@ -331,9 +346,10 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     private func pickCheckout(_ p: ProjectOption) {
-        if p.id != draft.projectId { draft.branch = nil }
+        if p.id != draft.projectId { draft.branch = nil; draft.worktree = false }
         draft.projectId = p.id
         draft.hostId = nil
+        draft.targetChosen = true
         loadModels()
     }
 
@@ -353,6 +369,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         return UIMenu(title: "Run on", children: app.hostOptions.map { h in
             UIAction(title: h.name, subtitle: h.online ? "Online" : "Offline", image: UIImage(systemName: "desktopcomputer"), state: h.id == draft.hostId ? .on : .off) { [weak self] _ in
                 self?.draft.hostId = h.id
+                self?.draft.targetChosen = true
                 self?.loadModels()
             }
         })
@@ -413,6 +430,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             return false
         }
         created = true
+        app.lastDraft.targetChosen = false
         PushNotifications.shared.askAfterFirstSession()
         app.newSessionText = ""
         app.newSessionImages = []

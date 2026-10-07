@@ -162,6 +162,58 @@ fn sidebar_writes_reorder_the_front_page() {
 }
 
 #[test]
+fn reordering_scoped_pins_keeps_hidden_pins_in_order() {
+    let (client, _dir) = demo(fast());
+    for id in [
+        "chat-home",
+        "chat-ios-scroll",
+        "chat-tabs",
+        "chat-cjk",
+        "chat-blog",
+    ] {
+        client.pin_session(id).unwrap();
+    }
+    let scope = zeron_client::SessionScope::Project {
+        project_id: "space-zeron".into(),
+    };
+    assert_eq!(
+        ids(&client.workspace().session_list(&scope).front.pinned),
+        ["chat-veil", "chat-picker", "chat-tabs"]
+    );
+    client
+        .move_pin("chat-tabs", None, Some("chat-veil".into()))
+        .unwrap();
+    assert_eq!(
+        ids(&client.workspace().session_list(&scope).front.pinned),
+        ["chat-tabs", "chat-veil", "chat-picker"]
+    );
+    let hidden = client
+        .workspace()
+        .front
+        .pinned
+        .iter()
+        .filter(|r| !scope.contains(r))
+        .map(|r| r.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hidden,
+        ["chat-home", "chat-ios-scroll", "chat-cjk", "chat-blog"]
+    );
+    client
+        .move_pin("chat-veil", Some("chat-picker".into()), None)
+        .unwrap();
+    let hidden_after = client
+        .workspace()
+        .front
+        .pinned
+        .iter()
+        .filter(|r| !scope.contains(r))
+        .map(|r| r.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(hidden_after, hidden);
+}
+
+#[test]
 fn send_streams_a_reply_and_adopts_the_echo() {
     let (client, _dir) = demo(fast());
     let session = client.open_session("chat-home").unwrap();
@@ -257,8 +309,7 @@ fn questions_answer_through_respond_input() {
     });
     // The host publishes the question, then flips the chat's status.
     wait_for("awaiting input", Duration::from_secs(5), || {
-        client.workspace().session("chat-deploy").unwrap().indicator
-            == ChatIndicator::AwaitingInput
+        client.workspace().session("chat-deploy").unwrap().indicator == ChatIndicator::AwaitingInput
     });
     let input = session.composer().open_input.clone().unwrap();
     session

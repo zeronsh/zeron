@@ -39,6 +39,14 @@ struct FolderRowVM: Hashable {
     var symbol: String
 }
 
+struct SessionGroupVM: Equatable {
+    let id: String
+    let title: String
+    let subtitle: String?
+    let projectId: String?
+    let sessions: [SessionRowVM]
+}
+
 /// Two-line session row, laid out by hand: fixed height, no Auto Layout
 /// solving per cell, no text measurement beyond single-line labels. Status
 /// and PR badge follow the desktop sidebar.
@@ -55,6 +63,7 @@ final class SessionCell: UICollectionViewListCell {
     private let status = StatusGlyph()
     private let prBadge = PRBadgeView()
     private var vm: SessionRowVM?
+    private var preferences = SessionViewPreferences()
     /// The session open beside the sidebar (iPad): a quiet fill.
     var isCurrent = false { didSet { if isCurrent != oldValue { setNeedsUpdateConfiguration() } } }
 
@@ -70,7 +79,7 @@ final class SessionCell: UICollectionViewListCell {
         backgroundConfiguration = bg
         // The project tile is a rasterized attachment: redraw it in the new tone.
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (cell: SessionCell, _) in
-            if let vm = cell.vm { cell.configure(vm) }
+            if let vm = cell.vm { cell.configure(vm, preferences: cell.preferences) }
         }
     }
 
@@ -86,8 +95,15 @@ final class SessionCell: UICollectionViewListCell {
 
     /// Fixed height: skip Auto Layout self-sizing entirely.
     override func preferredLayoutAttributesFitting(_ attrs: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
-        attrs.size.height = Self.height
+        attrs.size.height = vm.map { Self.height(for: $0, preferences: preferences) } ?? Self.height
         return attrs
+    }
+
+    static func height(for vm: SessionRowVM, preferences: SessionViewPreferences) -> CGFloat {
+        let secondary = preferences.showProjectLabel || preferences.showProjectIcon
+            || (preferences.showBranch && vm.branch?.isEmpty == false)
+            || (preferences.showPullRequest && vm.pr != nil && vm.prNumber != nil)
+        return ((secondary ? 62 : 42) * TypeScale.factor).rounded()
     }
 
     /// Desktop precedence: a failed send beats everything; then the live
@@ -103,8 +119,10 @@ final class SessionCell: UICollectionViewListCell {
         }
     }
 
-    func configure(_ vm: SessionRowVM) {
+    func configure(_ vm: SessionRowVM, preferences: SessionViewPreferences = SessionViewPreferences()) {
         self.vm = vm
+        self.preferences = preferences
+        harness.isHidden = !preferences.showHarness
         harness.image = BrandMarks.image(for: vm.harness ?? "claude-code", side: Self.markSide)
         title.text = vm.title
         title.font = Fonts.ui(vm.unseen ? .sansSemibold : .sansMedium, TypeScale.size(16.5))
@@ -114,11 +132,17 @@ final class SessionCell: UICollectionViewListCell {
         // the title's leading edge (a separately framed tile drifted high).
         let metaFont = Fonts.ui(.sans, TypeScale.size(13.5))
         let tileSide = (14 * TypeScale.factor).rounded()
-        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
-        tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
-        let metaText = NSMutableAttributedString(attachment: tile)
-        metaText.append(NSAttributedString(string: "  " + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
-        if let b = vm.branch, !b.isEmpty, let icon = BranchIcon.image?.withTintColor(Palette.subline, renderingMode: .alwaysOriginal) {
+        let metaText = NSMutableAttributedString(string: "")
+        if preferences.showProjectIcon {
+            let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
+            tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
+            metaText.append(NSAttributedString(attachment: tile))
+        }
+        if preferences.showProjectLabel {
+            let gap = metaText.length > 0 ? "  " : ""
+            metaText.append(NSAttributedString(string: gap + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
+        }
+        if preferences.showBranch, let b = vm.branch, !b.isEmpty, let icon = BranchIcon.image?.withTintColor(Palette.subline, renderingMode: .alwaysOriginal) {
             // Desktop line 3: git-branch icon + branch in the subline tone.
             let font = Fonts.ui(.sans, TypeScale.size(12.5))
             let side = (12 * TypeScale.factor).rounded()
@@ -129,7 +153,8 @@ final class SessionCell: UICollectionViewListCell {
             metaText.append(NSAttributedString(string: " " + b, attributes: [.font: font, .foregroundColor: Palette.subline]))
         }
         meta.attributedText = metaText
-        if let pr = vm.pr, let n = vm.prNumber {
+        meta.isHidden = metaText.length == 0
+        if preferences.showPullRequest, let pr = vm.pr, let n = vm.prNumber {
             prBadge.isHidden = false
             prBadge.configure(number: n, state: pr, size: TypeScale.size(11))
         } else {
@@ -149,7 +174,9 @@ final class SessionCell: UICollectionViewListCell {
             status.kind = .none
             status.isHidden = true
         }
-        accessibilityLabel = [vm.title, vm.projectName, corner?.word, prBadge.isHidden ? nil : prBadge.accessibilityLabel].compactMap { $0 }.joined(separator: ", ")
+        accessibilityLabel = [vm.title, preferences.showProjectLabel ? vm.projectName : nil,
+            preferences.showBranch ? vm.branch : nil, preferences.showHarness ? vm.harness : nil,
+            corner?.word, prBadge.isHidden ? nil : prBadge.accessibilityLabel].compactMap { $0 }.joined(separator: ", ")
         accessibilityIdentifier = "session-\(vm.id)"
         setNeedsLayout()
     }
@@ -171,7 +198,7 @@ final class SessionCell: UICollectionViewListCell {
         let titleFont = title.font ?? Fonts.ui(.sansMedium, TypeScale.size(16.5))
         let baseline = titleY + (titleH - titleFont.lineHeight) / 2 + titleFont.ascender
         harness.frame = CGRect(x: left, y: (baseline - titleFont.xHeight / 2 - mark / 2).rounded(), width: mark, height: mark)
-        let textX = left + mark + 14
+        let textX = preferences.showHarness ? left + mark + 14 : left
         let tw = ceil(time.sizeThatFits(CGSize(width: 140, height: 40)).width)
         time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)
         var trailing = time.frame.minX - 10
@@ -235,6 +262,7 @@ final class SectionHeaderCell: UICollectionViewListCell {
     struct State: Equatable {
         let id: String
         var title: String
+        var subtitle: String? = nil
         var count: Int
         var collapsed: Bool
         var live: StatusGlyph.Kind?
@@ -242,6 +270,7 @@ final class SectionHeaderCell: UICollectionViewListCell {
 
     static var height: CGFloat { (40 * TypeScale.factor).rounded() }
     private let title = FadingLabel()
+    private let subtitle = FadingLabel()
     private let count = UILabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)))
     private let live = StatusGlyph()
@@ -253,14 +282,15 @@ final class SectionHeaderCell: UICollectionViewListCell {
         count.textColor = Palette.tertiary
         chevron.tintColor = Palette.tertiary
         chevron.contentMode = .center
-        for v in [title, count, chevron, live] as [UIView] { contentView.addSubview(v) }
+        subtitle.textColor = Palette.tertiary
+        for v in [title, subtitle, count, chevron, live] as [UIView] { contentView.addSubview(v) }
         accessibilityTraits = .button
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func preferredLayoutAttributesFitting(_ attrs: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
-        attrs.size.height = Self.height
+        attrs.size.height = subtitle.isHidden ? Self.height : (58 * TypeScale.factor).rounded()
         return attrs
     }
 
@@ -276,6 +306,9 @@ final class SectionHeaderCell: UICollectionViewListCell {
         title.font = Fonts.ui(.sansSemibold, TypeScale.size(13.5))
         count.font = Fonts.ui(.sansMedium, TypeScale.size(13.5))
         title.text = s.title
+        subtitle.font = Fonts.ui(.sans, TypeScale.size(11.5))
+        subtitle.text = s.subtitle
+        subtitle.isHidden = s.subtitle == nil
         count.text = "\(s.count)"
         live.isHidden = s.live == nil
         if let kind = s.live { live.kind = kind }
@@ -287,7 +320,7 @@ final class SectionHeaderCell: UICollectionViewListCell {
         }
         shownCollapsed = s.collapsed
         accessibilityIdentifier = "section-\(s.id)"
-        accessibilityLabel = "\(s.title), \(s.count)"
+        accessibilityLabel = [s.title, s.subtitle, "\(s.count)"].compactMap { $0 }.joined(separator: ", ")
         accessibilityValue = s.collapsed ? "Collapsed" : "Expanded"
         setNeedsLayout()
     }
@@ -295,10 +328,12 @@ final class SectionHeaderCell: UICollectionViewListCell {
     override func layoutSubviews() {
         super.layoutSubviews()
         let b = contentView.bounds
-        let h: CGFloat = 20
-        let y = b.height - h - 6
+        let h = (20 * TypeScale.factor).rounded()
+        let y = b.height - h - (subtitle.isHidden ? 6 : 22) * TypeScale.factor
         let tw = ceil(title.sizeThatFits(b.size).width)
         title.frame = CGRect(x: 20, y: y, width: min(tw, b.width - 120), height: h)
+        subtitle.frame = CGRect(x: 20, y: title.frame.maxY + 2 * TypeScale.factor,
+            width: max(0, b.width - 40), height: 16 * TypeScale.factor)
         let cw = ceil(count.sizeThatFits(b.size).width)
         count.frame = CGRect(x: title.frame.maxX + 7, y: y, width: cw, height: h)
         live.frame = CGRect(x: count.frame.maxX + 7, y: y + h / 2 - 6, width: 12, height: 12)

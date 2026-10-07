@@ -32,9 +32,9 @@ pub const PROJECT_COLOR_COUNT: u32 = 8;
 /// monogram tone: 32-bit FNV-1a of the project's path (`"home"` without a
 /// project), so a project has the same color on every device.
 pub fn project_color_index(space_path: &str) -> u32 {
-    let hash = space_path
-        .bytes()
-        .fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hash = space_path.bytes().fold(2_166_136_261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
     hash % PROJECT_COLOR_COUNT
 }
 
@@ -118,6 +118,90 @@ pub struct FrontPage {
     pub pinned: Vec<Arc<SessionRow>>,
     pub sections: Vec<SectionView>,
     pub recent: Vec<Arc<SessionRow>>,
+}
+
+/// A list's execution-project scope. Identity is always the stable project
+/// id; names and device labels are presentation only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SessionScope {
+    #[default]
+    All,
+    Project {
+        project_id: String,
+    },
+    Projectless,
+}
+
+impl SessionScope {
+    pub fn contains(&self, row: &SessionRow) -> bool {
+        match self {
+            Self::All => true,
+            Self::Project { project_id } => {
+                row.project.as_ref().is_some_and(|p| p.id == *project_id)
+            }
+            Self::Projectless => row.project.is_none(),
+        }
+    }
+}
+
+/// How the remaining (non-pinned, non-section) sessions are organized.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SessionOrganization {
+    ByProject,
+    ByDevice,
+    #[default]
+    InOneList,
+}
+
+/// Time key for the active lists. Pinned always keeps its manual order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SessionSort {
+    #[default]
+    LastUpdated,
+    Created,
+}
+
+/// Requested list grouping and ordering. Separate from [`SessionScope`] so a
+/// view preference never rewrites the selected project scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionViewOptions {
+    pub organization: SessionOrganization,
+    pub sort: SessionSort,
+}
+
+/// One project/device/home bucket of the grouped Recent list. `id` is stable
+/// (`project:<id>`, `home:<device>`, `device:<device>`); `name` and the
+/// optional metadata are display-only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionGroup {
+    pub id: String,
+    pub name: String,
+    pub device_name: Option<String>,
+    pub path: Option<String>,
+    pub sessions: Vec<Arc<SessionRow>>,
+}
+
+/// Delete-confirmation facts for one project. The registry delete cascades
+/// over every chat pointing at the project, so archived and child sessions
+/// are counted too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDeletionSummary {
+    pub project_id: String,
+    pub project_name: String,
+    pub session_count: u64,
+    pub archived_count: u64,
+}
+
+/// Pure projection of the sidebar and archive. Vectors retain their shared
+/// pin/section/recency order, so counts and live indicators use the same rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionList {
+    pub scope: SessionScope,
+    pub front: FrontPage,
+    pub archived: Vec<Arc<SessionRow>>,
+    /// Grouped Recent buckets (empty for `InOneList`); `front.recent` always
+    /// keeps the same complete, sorted set.
+    pub groups: Vec<SessionGroup>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -211,6 +295,189 @@ pub struct WorkspaceSnapshot {
 }
 
 impl WorkspaceSnapshot {
+    /// Keep a restored id while the initial sync is pending (including an
+    /// offline cold start). Only an authoritative snapshot can remove it.
+    pub fn resolve_scope(&self, scope: &SessionScope) -> SessionScope {
+        match scope {
+            SessionScope::Project { project_id }
+                if self.synced && self.project(project_id).is_none() =>
+            {
+                SessionScope::All
+            }
+            _ => scope.clone(),
+        }
+    }
+
+    pub fn session_list(&self, scope: &SessionScope) -> SessionList {
+        self.session_list_with_options(scope, SessionViewOptions::default())
+    }
+
+    /// Scope first, then the requested time sort over sections, Recent and
+    /// the flat archive; pinned keeps its shared manual order. Only Recent is
+    /// grouped, and `front.recent` stays the same complete sorted set.
+    pub fn session_list_with_options(
+        &self,
+        scope: &SessionScope,
+        options: SessionViewOptions,
+    ) -> SessionList {
+        let scope = self.resolve_scope(scope);
+        let filter = |rows: &[Arc<SessionRow>]| {
+            rows.iter()
+                .filter(|r| scope.contains(r))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let sections: Vec<SectionView> = self
+            .front
+            .sections
+            .iter()
+            .filter_map(|section| {
+                let mut sessions = filter(&section.sessions);
+                sort_session_rows(&mut sessions, options.sort);
+                (!sessions.is_empty()).then(|| SectionView {
+                    id: section.id.clone(),
+                    name: section.name.clone(),
+                    collapsed: section.collapsed,
+                    sessions,
+                })
+            })
+            .collect();
+        let mut recent = filter(&self.front.recent);
+        sort_session_rows(&mut recent, options.sort);
+        let mut archived = filter(&self.archived);
+        sort_session_rows(&mut archived, options.sort);
+        let groups = match options.organization {
+            SessionOrganization::InOneList => Vec::new(),
+            organization => self.group_recent(&recent, organization),
+        };
+        SessionList {
+            front: FrontPage {
+                pinned: filter(&self.front.pinned),
+                sections,
+                recent,
+            },
+            archived,
+            scope,
+            groups,
+        }
+    }
+
+    /// Project-picker candidates, including empty/offline projects. All
+    /// terms must occur in name, execution device or path, case-insensitively.
+    pub fn search_projects(&self, query: &str) -> Vec<ProjectView> {
+        let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
+        self.projects
+            .iter()
+            .filter(|p| {
+                let fields = [
+                    p.name.to_lowercase(),
+                    p.device_name.as_deref().unwrap_or("").to_lowercase(),
+                    p.path.to_lowercase(),
+                ];
+                terms
+                    .iter()
+                    .all(|term| fields.iter().any(|field| field.contains(term)))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Buckets an already scope-filtered, sorted Recent list. Group order is
+    /// the first appearance of a session's bucket; the local device group
+    /// leads `ByDevice` when it has sessions. Names come from the project or
+    /// device view, never from a raw id.
+    fn group_recent(
+        &self,
+        recent: &[Arc<SessionRow>],
+        organization: SessionOrganization,
+    ) -> Vec<SessionGroup> {
+        let mut groups: Vec<SessionGroup> = Vec::new();
+        for row in recent {
+            let (id, name, device_name, path) = match organization {
+                SessionOrganization::ByProject => match row.project.as_ref() {
+                    Some(project) => {
+                        let view = self.project(&project.id);
+                        (
+                            format!("project:{}", project.id),
+                            view.map_or_else(|| project.name.clone(), |p| p.name.clone()),
+                            view.and_then(|p| p.device_name.clone())
+                                .or_else(|| row.device_name.clone()),
+                            view.map(|p| p.path.clone()),
+                        )
+                    }
+                    None => (
+                        format!("home:{}", row.device_id),
+                        "~".to_owned(),
+                        row.device_name.clone(),
+                        row.cwd.clone(),
+                    ),
+                },
+                SessionOrganization::ByDevice => {
+                    let name = self
+                        .device(&row.device_id)
+                        .map(|d| d.name.clone())
+                        .or_else(|| row.device_name.clone())
+                        .unwrap_or_else(|| "Unknown device".to_owned());
+                    (
+                        format!("device:{}", row.device_id),
+                        name.clone(),
+                        Some(name),
+                        None,
+                    )
+                }
+                SessionOrganization::InOneList => continue,
+            };
+            match groups.iter_mut().find(|group| group.id == id) {
+                Some(group) => group.sessions.push(row.clone()),
+                None => groups.push(SessionGroup {
+                    id,
+                    name,
+                    device_name,
+                    path,
+                    sessions: vec![row.clone()],
+                }),
+            }
+        }
+        if organization == SessionOrganization::ByDevice {
+            if let Some(self_id) = self
+                .devices
+                .iter()
+                .find(|d| d.is_self)
+                .map(|d| d.id.clone())
+            {
+                let self_group = format!("device:{self_id}");
+                if let Some(at) = groups.iter().position(|group| group.id == self_group) {
+                    let local = groups.remove(at);
+                    groups.insert(0, local);
+                }
+            }
+        }
+        groups
+    }
+
+    /// Counts every chat pointing at the project (archived and child rows
+    /// included), mirroring `registry::delete_space`'s cascade. `None` when
+    /// the project is unknown.
+    pub fn project_deletion_summary(&self, project_id: &str) -> Option<ProjectDeletionSummary> {
+        let project = self.project(project_id)?;
+        let mut session_count = 0u64;
+        let mut archived_count = 0u64;
+        for row in self.sessions.values() {
+            if row.project.as_ref().is_some_and(|p| p.id == project_id) {
+                session_count += 1;
+                if row.archived {
+                    archived_count += 1;
+                }
+            }
+        }
+        Some(ProjectDeletionSummary {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            session_count,
+            archived_count,
+        })
+    }
+
     pub fn session(&self, chat_id: &str) -> Option<&Arc<SessionRow>> {
         self.sessions.get(chat_id)
     }
@@ -245,14 +512,31 @@ impl WorkspaceSnapshot {
     /// previews. Every whitespace-separated term must match some field.
     /// Active sessions rank above archived ones; ties break by recency.
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        self.search_scoped(query, &SessionScope::All, true, limit)
+    }
+
+    /// Apply scope and archive visibility BEFORE matching/ranking/limit.
+    /// Search the same valid top-level rows the lists display.
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        scope: &SessionScope,
+        include_archived: bool,
+        limit: usize,
+    ) -> Vec<SearchHit> {
+        let scope = self.resolve_scope(scope);
         let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
         if terms.is_empty() {
             return Vec::new();
         }
         let mut hits: Vec<SearchHit> = self
-            .sessions
-            .values()
-            .filter(|row| row.parent_chat_id.is_none())
+            .front
+            .pinned
+            .iter()
+            .chain(self.front.sections.iter().flat_map(|s| &s.sessions))
+            .chain(&self.front.recent)
+            .chain(self.archived.iter().filter(|_| include_archived))
+            .filter(|row| scope.contains(row))
             .filter_map(|row| score_row(row, &terms).map(|(score, field)| (row, score, field)))
             .map(|(row, score, field)| SearchHit {
                 session: row.clone(),
@@ -355,6 +639,22 @@ fn sort_key(chat: &Chat) -> DateTime<Utc> {
 
 fn sort_recency(rows: &mut [&Chat]) {
     rows.sort_by(|a, b| sort_key(b).cmp(&sort_key(a)).then_with(|| a.id.cmp(&b.id)));
+}
+
+fn view_sort_ms(row: &SessionRow, sort: SessionSort) -> i64 {
+    match sort {
+        SessionSort::LastUpdated => row.last_activity_ms,
+        SessionSort::Created => row.created_at_ms,
+    }
+}
+
+/// Desktop tie-break: newer first, then stable chat id ascending.
+fn sort_session_rows(rows: &mut [Arc<SessionRow>], sort: SessionSort) {
+    rows.sort_by(|a, b| {
+        view_sort_ms(b, sort)
+            .cmp(&view_sort_ms(a, sort))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 /// desktop `change_request_for_chat`: the latest resolution for the chat's
@@ -675,6 +975,11 @@ pub(crate) fn derive(
         .chats
         .iter()
         .filter(|c| c.archived && c.parent_chat_id.is_none())
+        .filter(|c| {
+            c.space_id
+                .as_deref()
+                .is_none_or(|id| rc.spaces.contains_key(id))
+        })
         .collect();
     sort_recency(&mut archived_chats);
     let archived: Vec<Arc<SessionRow>> = archived_chats.iter().map(|c| row(c)).collect();
@@ -799,6 +1104,313 @@ impl Hash for DeviceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> WorkspaceSnapshot {
+        let mut doc = zeron_doc::RegistryDoc::new("test-phone");
+        crate::demo::fixtures::seed(
+            &mut doc,
+            crate::DemoFixture::ProjectFilter,
+            "test-phone",
+            "Phone",
+        )
+        .unwrap();
+        derive(
+            &doc.read_all().unwrap(),
+            doc.sidebar_preferences().as_ref(),
+            &DeriveContext {
+                self_device_id: "test-phone",
+                now: Utc::now(),
+                presence: &HashMap::new(),
+                change_requests: &[],
+                send_states: &HashMap::new(),
+                synced: true,
+                previous: None,
+            },
+        )
+    }
+
+    fn project(id: &str) -> SessionScope {
+        SessionScope::Project {
+            project_id: id.into(),
+        }
+    }
+
+    #[test]
+    fn project_scope_uses_ids_and_preserves_sidebar_membership() {
+        let ws = fixture();
+        assert_eq!(
+            ws.project("space-zeron").unwrap().name,
+            ws.project("space-duplicate").unwrap().name
+        );
+        assert_ne!(
+            ws.project("space-zeron").unwrap().group_key,
+            ws.project("space-duplicate").unwrap().group_key
+        );
+        let list = ws.session_list(&project("space-zeron"));
+        assert_eq!(
+            list.front
+                .pinned
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["chat-veil", "chat-picker"]
+        );
+        assert_eq!(list.front.sections.len(), 1);
+        assert_eq!(list.front.sections[0].id, "section-p0");
+        assert_eq!(list.front.sections[0].sessions.len(), 1);
+        assert_eq!(list.front.sections[0].sessions[0].id, "chat-tabs");
+        assert_eq!(
+            list.front
+                .recent
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["chat-scoped-needle"]
+        );
+        assert_eq!(
+            ws.session_list(&project("space-zeron-vps")).front.recent[0].id,
+            "chat-cjk"
+        );
+        assert_eq!(
+            list.archived
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["chat-oklch"]
+        );
+        let duplicate = ws.session_list(&project("space-duplicate"));
+        assert!(
+            duplicate.front.pinned.is_empty()
+                && duplicate.front.sections.is_empty()
+                && duplicate.archived.is_empty()
+        );
+        assert_eq!(duplicate.front.recent[0].id, "chat-duplicate");
+        let home = ws.session_list(&SessionScope::Projectless);
+        assert_eq!(home.front.recent[0].id, "chat-home");
+        assert_eq!(home.archived[0].id, "chat-home-archived");
+        assert!(home.front.pinned.is_empty() && home.front.sections.is_empty());
+    }
+
+    #[test]
+    fn scope_and_archive_filter_before_search_limit() {
+        let mut ws = fixture();
+        assert!(
+            !ws.search("needle", 60)
+                .iter()
+                .any(|h| h.session.id == "chat-scoped-needle")
+        );
+        let hits = ws.search_scoped("needle", &project("space-zeron"), false, 60);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.id, "chat-scoped-needle");
+        assert_eq!(
+            ws.search_scoped("needle", &project("space-edge"), false, 60)
+                .len(),
+            60
+        );
+        // Archived title matches outrank an active preview match. Excluding
+        // archives must happen before truncation, even inside one project.
+        let mut active = (**ws.session("chat-scoped-needle").unwrap()).clone();
+        active.title = "Older active session".into();
+        active.preview = Some("needle".into());
+        ws.front.recent = vec![Arc::new(active.clone())];
+        ws.front.pinned.clear();
+        ws.front.sections.clear();
+        ws.archived = (0..70)
+            .map(|i| {
+                let mut archived = active.clone();
+                archived.id = format!("archived-{i}");
+                archived.archived = true;
+                archived.title = "Needle".into();
+                Arc::new(archived)
+            })
+            .collect();
+        assert!(
+            ws.search_scoped("needle", &project("space-zeron"), true, 60)
+                .iter()
+                .all(|h| h.session.archived)
+        );
+        let active_hits = ws.search_scoped("needle", &project("space-zeron"), false, 60);
+        assert_eq!(active_hits.len(), 1);
+        assert_eq!(active_hits[0].session.id, "chat-scoped-needle");
+        assert!(
+            ws.search_scoped(" \n", &SessionScope::All, true, 60)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn restored_scope_waits_for_first_sync_and_empty_projects_are_searchable() {
+        let pending = WorkspaceSnapshot::default();
+        let scope = project("space-zeron");
+        assert_eq!(pending.session_list(&scope).scope, scope);
+        let ready = WorkspaceSnapshot {
+            synced: true,
+            ..Default::default()
+        };
+        assert_eq!(ready.session_list(&scope).scope, SessionScope::All);
+        let ws = fixture();
+        let empty = ws.session_list(&project("space-empty"));
+        assert_eq!(empty.scope, project("space-empty"));
+        assert!(
+            empty.front.recent.is_empty()
+                && empty.front.pinned.is_empty()
+                && empty.front.sections.is_empty()
+                && empty.archived.is_empty()
+        );
+        assert_eq!(
+            ws.search_projects("STUDIO archive/zeron")[0].id,
+            "space-duplicate"
+        );
+        assert_eq!(
+            ws.search_projects("accessible layouts")[0].id,
+            "space-empty"
+        );
+        assert_eq!(ws.search_projects("zeron").len(), 4);
+        assert!(ws.search_projects("not-a-project").is_empty());
+    }
+
+    fn options(organization: SessionOrganization, sort: SessionSort) -> SessionViewOptions {
+        SessionViewOptions { organization, sort }
+    }
+
+    fn recent_ids(list: &SessionList) -> Vec<&str> {
+        list.front.recent.iter().map(|r| r.id.as_str()).collect()
+    }
+
+    fn archived_ids(list: &SessionList) -> Vec<&str> {
+        list.archived.iter().map(|r| r.id.as_str()).collect()
+    }
+
+    #[test]
+    fn default_list_is_flat_and_preserves_phase_one_order() {
+        let ws = fixture();
+        let list = ws.session_list(&project("space-zeron"));
+        assert!(list.groups.is_empty());
+        assert_eq!(recent_ids(&list), ["chat-scoped-needle"]);
+        assert_eq!(archived_ids(&list), ["chat-oklch"]);
+    }
+
+    #[test]
+    fn created_sort_reorders_recent_and_archive() {
+        let mut ws = fixture();
+        let base = (**ws.front.recent.first().unwrap()).clone();
+        let mut fresh_update = base.clone();
+        fresh_update.id = "row-fresh-update".into();
+        fresh_update.last_activity_ms = 1_000;
+        fresh_update.created_at_ms = 10;
+        let mut fresh_create = base;
+        fresh_create.id = "row-fresh-create".into();
+        fresh_create.last_activity_ms = 10;
+        fresh_create.created_at_ms = 1_000;
+        ws.front.recent = vec![
+            Arc::new(fresh_update.clone()),
+            Arc::new(fresh_create.clone()),
+        ];
+        ws.archived = vec![Arc::new(fresh_update), Arc::new(fresh_create)];
+
+        let updated = ws.session_list_with_options(
+            &SessionScope::All,
+            options(SessionOrganization::InOneList, SessionSort::LastUpdated),
+        );
+        assert_eq!(
+            recent_ids(&updated),
+            ["row-fresh-update", "row-fresh-create"]
+        );
+        assert_eq!(
+            archived_ids(&updated),
+            ["row-fresh-update", "row-fresh-create"]
+        );
+
+        let created = ws.session_list_with_options(
+            &SessionScope::All,
+            options(SessionOrganization::InOneList, SessionSort::Created),
+        );
+        assert_eq!(
+            recent_ids(&created),
+            ["row-fresh-create", "row-fresh-update"]
+        );
+        assert_eq!(
+            archived_ids(&created),
+            ["row-fresh-create", "row-fresh-update"]
+        );
+    }
+
+    #[test]
+    fn by_project_groups_recent_and_projectless_by_home_device() {
+        let ws = fixture();
+        let scoped = ws.session_list_with_options(
+            &project("space-zeron"),
+            options(SessionOrganization::ByProject, SessionSort::LastUpdated),
+        );
+        assert_eq!(scoped.groups.len(), 1);
+        assert_eq!(scoped.groups[0].id, "project:space-zeron");
+        assert_eq!(scoped.groups[0].name, "zeron");
+        assert_eq!(
+            scoped.groups[0].path.as_deref(),
+            Some(ws.project("space-zeron").unwrap().path.as_str())
+        );
+        let flat: Vec<&str> = scoped
+            .groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(|r| r.id.as_str()))
+            .collect();
+        assert_eq!(flat, recent_ids(&scoped));
+
+        let home = ws.session_list_with_options(
+            &SessionScope::Projectless,
+            options(SessionOrganization::ByProject, SessionSort::LastUpdated),
+        );
+        assert_eq!(home.groups.len(), 1);
+        assert_eq!(home.groups[0].id, "home:dev-mac");
+        assert_eq!(home.groups[0].name, "~");
+        assert_eq!(home.groups[0].device_name.as_deref(), Some("MacBook Pro"));
+        assert_eq!(home.groups[0].sessions[0].id, "chat-home");
+    }
+
+    #[test]
+    fn by_device_groups_and_promotes_the_local_device() {
+        let mut ws = fixture();
+        let mut local = (**ws.front.recent.first().unwrap()).clone();
+        local.id = "row-local".into();
+        local.device_id = "test-phone".into();
+        local.device_name = Some("Phone".into());
+        local.last_activity_ms = -1;
+        ws.front.recent.push(Arc::new(local));
+
+        let list = ws.session_list_with_options(
+            &SessionScope::All,
+            options(SessionOrganization::ByDevice, SessionSort::LastUpdated),
+        );
+        assert_eq!(list.groups[0].id, "device:test-phone");
+        assert_eq!(list.groups[0].name, "Phone");
+        assert!(
+            list.groups[0]
+                .sessions
+                .iter()
+                .all(|r| r.device_id == "test-phone")
+        );
+        for group in &list.groups {
+            let device_id = group.id.strip_prefix("device:").unwrap();
+            assert_eq!(group.name, ws.device(device_id).unwrap().name);
+        }
+        let total: usize = list.groups.iter().map(|g| g.sessions.len()).sum();
+        assert_eq!(total, list.front.recent.len());
+    }
+
+    #[test]
+    fn deletion_summary_counts_archived_and_child_sessions() {
+        let ws = fixture();
+        let summary = ws.project_deletion_summary("space-zeron").unwrap();
+        assert_eq!(summary.project_name, "zeron");
+        // Top-level active (veil, picker, tabs, scoped-needle) + child
+        // (side) + archived (oklch).
+        assert_eq!(summary.session_count, 6);
+        assert_eq!(summary.archived_count, 1);
+        let edge = ws.project_deletion_summary("space-edge").unwrap();
+        assert_eq!(edge.session_count, 68);
+        assert_eq!(edge.archived_count, 1);
+        assert!(ws.project_deletion_summary("missing").is_none());
+    }
 
     #[test]
     fn time_labels() {

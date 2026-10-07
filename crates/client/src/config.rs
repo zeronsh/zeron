@@ -113,6 +113,9 @@ impl Default for DemoOptions {
 pub enum DemoFixture {
     /// Devices, projects, pinned + sectioned sessions, PRs in every state.
     Standard,
+    /// Project-filter regressions: duplicate names, empty/long-name projects
+    /// and a scoped search hit beyond the global first sixty matches.
+    ProjectFilter,
     /// No projects and no sessions (`-no-projects`): empty-state screens.
     NoProjects,
     /// Only this phone — no execution hosts (`-ios-only`).

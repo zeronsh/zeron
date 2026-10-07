@@ -259,7 +259,10 @@ per `docs/research/durable-objects-language.md`.
   CLIs, not CRDT-synced).
 - **Changed**: Postgres entity sync/server → workspace registry + edge; Electron/React/mugen → gpui with
   ported techniques; Node harness SDKs → subprocess protocols; WebRTC → device-room relay (zeron
-  had already made this move); mobile app → out of scope for this repo.
+  had already made this move). The native iOS app lives in `apps/ios`: UIKit
+  presents the engine-free peer client in `crates/client` through the shared
+  `crates/mobile` UniFFI facade. Remote engines execute its sessions; the same
+  Rust workspace/query/layout logic is available to future mobile frontends.
 - **Kept verbatim**: session-doc schema shape + constants, command ledger rules, edge DO design,
   render-parts privacy policy, UX behaviors and animation timings.
 
