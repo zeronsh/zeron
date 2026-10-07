@@ -12,6 +12,8 @@
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
 mod session;
+#[cfg(test)]
+mod tests;
 mod types;
 
 use std::sync::Arc;
