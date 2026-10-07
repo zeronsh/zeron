@@ -252,6 +252,40 @@ case "$turnline" in
   cat "$(dirname "$0")/codex/v2-lifecycle.jsonl"
   ;;
 
+*scenario:child-stop*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"parent-turn\"}}}"
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"spawn-alpha","type":"subAgentActivity","kind":"started","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}'
+  tracked=false
+  idle=false
+  case "$turnline" in
+    *tracked*) tracked=true; emit '{"method":"turn/started","params":{"threadId":"child-alpha","turn":{"id":"child-turn","status":"inProgress"}}}' ;;
+    *idle*|*missing-turn*) idle=true ;;
+  esac
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"child-alpha","itemId":"m1","delta":"working"}}'
+  read -r line || exit 1
+  if [ "$tracked" = false ]; then
+    has "$line" '"method":"thread/read"' && has "$line" '"threadId":"child-alpha"' || exit 1
+    if [ "$idle" = true ]; then
+      status=idle
+      case "$turnline" in *missing-turn*) status=active ;; esac
+      emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"child-alpha\",\"status\":{\"type\":\"$status\"},\"turns\":[]}}}"
+    else
+      emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"child-alpha\",\"turns\":[{\"id\":\"child-turn\",\"status\":\"inProgress\"}]}}}"
+      read -r line || exit 1
+    fi
+  fi
+  if [ "$idle" = false ]; then
+    has "$line" '"method":"turn/interrupt"' && has "$line" '"threadId":"child-alpha"' && has "$line" '"turnId":"child-turn"' || exit 1
+    case "$turnline" in
+      *reject*) emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"cannot stop task\"}}" ;;
+      *) emit "{\"id\":$(rid "$line"),\"result\":{}}" ;;
+    esac
+  fi
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"parent-message","delta":"parent continues"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"parent-turn","status":"completed"}}}'
+  exec sleep 30
+  ;;
+
 *scenario:subagent*)
   # Multi-agent v2 child-thread routing: registration via subAgentActivity,
   # tagged child items, consumed child turn bookkeeping (must never settle

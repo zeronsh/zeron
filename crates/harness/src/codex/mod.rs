@@ -569,6 +569,9 @@ impl Harness for CodexHarness {
         // the catalog entry doesn't change after the first resolve.
         "Codex"
     }
+    fn supports_subagent_stop(&self) -> bool {
+        true
+    }
     fn supports_steering(&self) -> bool {
         true
     }
@@ -958,6 +961,7 @@ async fn run_session(session: Session) {
         stderr_tail,
     } = session;
     let RunControls {
+        mut subagent_control,
         execution_lease: _execution_lease,
         request_input,
         mut steering,
@@ -1498,6 +1502,43 @@ async fn run_session(session: Session) {
                 Some(Incoming::Eof) | None => break 'main,
             },
 
+            Some(command) = async {
+                match subagent_control.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if !interrupted => {
+                if command.reply.is_closed() { continue; }
+                let result = if let Some(child) = children.child_for_spawn(&command.tool_use_id) {
+                    let result = async {
+                        let turn = if let Some(turn) = children.active_turn(child) {
+                            Some(turn.to_owned())
+                        } else {
+                            let state = client.request("thread/read", json!({"threadId": child, "includeTurns": true})).await
+                                .map_err(|e| e.to_string())?;
+                            let turn = state.pointer("/thread/turns").and_then(Value::as_array)
+                                .and_then(|turns| turns.iter().rev().find(|t| t["status"] == "inProgress"))
+                                .and_then(|turn| turn["id"].as_str()).map(str::to_owned);
+                            if turn.is_none() && state.pointer("/thread/status/type").and_then(Value::as_str) == Some("active") {
+                                return Err("Codex child is active but has not supplied a turn id".into());
+                            }
+                            turn
+                        };
+                        if let Some(turn) = turn {
+                            client.request("turn/interrupt", json!({"threadId": child, "turnId": turn})).await
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    };
+                    match tokio::time::timeout(Duration::from_secs(8), result).await {
+                        Ok(result) => result,
+                        Err(_) => Err("Codex subagent stop timed out".into()),
+                    }
+                } else {
+                    Err("Codex has not registered this subagent thread".into())
+                };
+                let _ = command.reply.send(result);
+            }
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     let text = msg.prompt;

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use zeron_proto::AgentEvent;
 
-use super::normalize::{ChildStream, Phase, collab_spawn_child, item_type, map_item};
+use super::normalize::{ChildStream, Phase, collab_spawn_child, item_type, map_item, remember};
 
 const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
@@ -25,6 +25,7 @@ pub(super) struct Subagents {
     streams: HashMap<String, ChildStream>,
     emitted_spawns: HashSet<String>,
     resolved_spawns: HashSet<String>,
+    terminal_activities: std::collections::VecDeque<String>,
 }
 
 impl Subagents {
@@ -38,7 +39,18 @@ impl Subagents {
             streams: HashMap::new(),
             emitted_spawns: HashSet::new(),
             resolved_spawns: HashSet::new(),
+            terminal_activities: Default::default(),
         }
+    }
+
+    pub(super) fn child_for_spawn(&self, spawn: &str) -> Option<&str> {
+        self.spawns
+            .iter()
+            .find_map(|(child, owner)| (owner == spawn).then_some(child.as_str()))
+    }
+
+    pub(super) fn active_turn(&self, child: &str) -> Option<&str> {
+        self.streams.get(child).and_then(ChildStream::active_turn)
     }
 
     /// thread/resume returns the stored parent items. Rebuild ownership without
@@ -79,6 +91,35 @@ impl Subagents {
     }
 
     pub(super) fn parent_item(&mut self, phase: Phase, item: &Value) -> Vec<AgentEvent> {
+        // Newer app servers can report the child's terminal lifecycle on
+        // the parent's activity item even when no child turn end arrives.
+        if phase == Phase::Completed
+            && matches!(item_type(item), "subAgentActivity" | "sub_agent_activity")
+            && let Some(child) = item.get("agentThreadId").and_then(Value::as_str)
+            && child != self.root
+        {
+            let status = match item.get("kind").and_then(Value::as_str) {
+                Some("completed") => Some("completed"),
+                Some("interrupted") => Some("interrupted"),
+                _ => None,
+            };
+            if let Some(status) = status {
+                if !remember(
+                    &mut self.terminal_activities,
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                ) {
+                    return Vec::new();
+                }
+                return self.notification(
+                    child,
+                    "turn/completed",
+                    &serde_json::json!({"turn": {"status": status}}),
+                );
+            }
+        }
         let activity = matches!(item_type(item), "subAgentActivity" | "sub_agent_activity");
         let child = if activity {
             let path = item.get("agentPath").and_then(Value::as_str).unwrap_or("");
@@ -242,5 +283,40 @@ mod tests {
             children.route("alpha", vec![text("ok")]),
             vec![tag("spawn", text("ok"))]
         );
+    }
+    #[test]
+    fn parent_terminal_activity_settles_original_spawn_without_child_turn_end() {
+        for (kind, expected) in [
+            ("completed", zeron_proto::DoneStatus::Completed),
+            ("interrupted", zeron_proto::DoneStatus::Interrupted),
+        ] {
+            let mut children = Subagents::new("root".into());
+            children.bind("alpha", "spawn-alpha");
+            let item = serde_json::json!({"type":"subAgentActivity", "id":"later-activity", "kind":kind, "agentThreadId":"alpha"});
+            assert!(children.parent_item(Phase::Started, &item).is_empty());
+            let events = children.parent_item(Phase::Completed, &item);
+            assert!(
+                matches!(&events[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
+                if parent_tool_use_id == "spawn-alpha" && matches!(event.as_ref(), AgentEvent::Done { status, .. } if *status == expected))
+            );
+            assert!(children.parent_item(Phase::Completed, &item).is_empty());
+            children.notification(
+                "alpha",
+                "turn/started",
+                &serde_json::json!({"turn":{"id":"next"}}),
+            );
+            assert!(
+                children.parent_item(Phase::Completed, &item).is_empty(),
+                "replayed activity closed a later assignment"
+            );
+            assert_eq!(
+                children.notification(
+                    "alpha",
+                    "item/agentMessage/delta",
+                    &serde_json::json!({"delta":"still working"})
+                ),
+                vec![tag("spawn-alpha", text("still working"))]
+            );
+        }
     }
 }

@@ -28,7 +28,7 @@ use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage, SubagentCommand};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
     UserInputQuestion,
@@ -109,6 +109,8 @@ struct RunHandle {
     steerable: bool,
     runtime_config: RuntimeConfig,
     steer_tx: mpsc::Sender<SteerMessage>,
+    subagent_tx: mpsc::Sender<SubagentCommand>,
+    supports_subagent_stop: bool,
     /// Harness-level cancellation (protocol interrupt + child teardown).
     interrupt_token: CancellationToken,
     /// Engine-level cancel: arms the run task's grace deadline so a harness that
@@ -581,7 +583,9 @@ impl SessionsEngine {
         };
         let interrupt_token = CancellationToken::new();
         let fork_history_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (subagent_tx, subagent_rx) = mpsc::channel(8);
         let controls = RunControls {
+            subagent_control: Some(subagent_rx),
             execution_lease: None,
             request_input,
             steering: steer_rx,
@@ -595,6 +599,8 @@ impl SessionsEngine {
                 steerable: harness.supports_steering(),
                 runtime_config: RuntimeConfig::from_request(harness_id, &request),
                 steer_tx,
+                subagent_tx,
+                supports_subagent_stop: harness.supports_subagent_stop(),
                 interrupt_token,
                 cancel: cancel_tx,
                 engine_tx,
@@ -763,6 +769,78 @@ impl SessionsEngine {
         }
         self.inner.note_message(chat_id, prompt);
         Ok(SteerOutcome::Accepted)
+    }
+
+    /// Stop a single child, acknowledging its native protocol independently
+    /// of the parent run. Never fall back to parent cancellation on failure.
+    pub async fn stop_subagent(&self, chat_id: &str, tool_use_id: &str) -> Result<(), EngineError> {
+        let host = self
+            .inner
+            .doc_host()
+            .ok_or_else(|| EngineError::Other("Document host unavailable".into()))?;
+        let handle = host.open(chat_id)?;
+        let known = handle.writer().read_entries()?.iter().any(|entry| {
+            entry.device_id == self.inner.device_id && entry.parts.iter().any(|part| {
+                matches!(part, MessagePart::Tool { id, call, .. } if id == tool_use_id && call.is_subagent_spawn())
+            })
+        });
+        if !known {
+            return Err(EngineError::Other(
+                "Unknown subagent spawn on this device".into(),
+            ));
+        }
+        let target = lock(&self.inner.runs).get(chat_id).map(|h| {
+            (
+                h.run_id.clone(),
+                h.subagent_tx.clone(),
+                h.engine_tx.clone(),
+                h.supports_subagent_stop,
+            )
+        });
+        let Some((run_id, tx, events, supported)) = target else {
+            // The runtime is already gone: repair its orphaned chip without
+            // starting a parent turn merely to deliver a stop request.
+            if handle.writer().read_entries()?.iter().flat_map(|e| &e.parts).any(|part| {
+                matches!(part, MessagePart::Tool { id, subagent_status: Some(zeron_doc::SubagentStatus::Running), .. } if id == tool_use_id)
+            }) {
+                handle.writer().update_subagent_chip(tool_use_id, None, Some("failed"), None)?;
+            }
+            return Ok(());
+        };
+        if !supported {
+            return Err(EngineError::Other(
+                "This harness does not support stopping individual subagents".into(),
+            ));
+        }
+        let (reply, answer) = oneshot::channel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tx.send(SubagentCommand {
+                tool_use_id: tool_use_id.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| "Subagent control channel closed".to_owned())?;
+            answer
+                .await
+                .map_err(|_| "Harness ended before acknowledging subagent stop".to_owned())?
+        })
+        .await
+        .map_err(|_| EngineError::Other("Subagent stop acknowledgement timed out".into()))?;
+        result.map_err(EngineError::Other)?;
+        if self.is_live(chat_id, &run_id) {
+            // Some provider versions acknowledge stop without a terminal
+            // notification. Feed the same child-only finalization path.
+            let _ = events.send(AgentEvent::Subagent {
+                parent_tool_use_id: tool_use_id.to_owned(),
+                event: Box::new(AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            });
+        }
+        Ok(())
     }
 
     /// Interrupt the live run, if any. The run settles with a synthetic
@@ -2864,6 +2942,27 @@ async fn drive_run(
                     diff: None,
                 },
             );
+        }
+    }
+
+    // A chip can be live without a sink: resumed history, no child content,
+    // or a failed doc open. Runtime death is authoritative for every locally
+    // owned Running chip, including chips in already-completed parent turns.
+    for entry in doc_ref.read_entries().unwrap_or_default() {
+        if entry.device_id != device_id || entry.role != MessageRole::Assistant {
+            continue;
+        }
+        for part in entry.parts {
+            if let MessagePart::Tool {
+                id,
+                call,
+                subagent_status: Some(zeron_doc::SubagentStatus::Running),
+                ..
+            } = part
+                && call.is_subagent_spawn()
+            {
+                let _ = doc_ref.update_subagent_chip(&id, None, Some("failed"), None);
+            }
         }
     }
 

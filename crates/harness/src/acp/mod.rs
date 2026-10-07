@@ -3505,6 +3505,7 @@ async fn run_session(session: Session) {
         sign_in_prompted,
     } = session;
     let RunControls {
+        subagent_control: _,
         execution_lease: _execution_lease,
         request_input,
         mut steering,

@@ -5525,3 +5525,10 @@ impl AppState {
         self.change_requests.store(key, snapshot);
     }
 }
+
+#[cfg(feature = "subagent-fixture")]
+impl AppState {
+    pub fn fixture_subagent_engine(&mut self, engine: EngineHandle) {
+        self.engine = Some(engine);
+    }
+}

@@ -46,8 +46,17 @@ pub struct SteerMessage {
     pub message_id: Option<String>,
 }
 
+/// A child-specific stop request. The driver acknowledges protocol success;
+/// callers must never cancel the parent token as a fallback.
+pub struct SubagentCommand {
+    pub tool_use_id: String,
+    pub reply: oneshot::Sender<Result<(), String>>,
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
+    /// Child-specific controls, independent of parent steering/cancellation.
+    pub subagent_control: Option<mpsc::Receiver<SubagentCommand>>,
     /// Shared execution gate held until the harness has shut down and reaped
     /// its subprocess, including when the host drops the event stream. Each
     /// detached session task must retain this lease through its cleanup.
@@ -84,6 +93,9 @@ pub trait Harness: Send + Sync {
     fn id(&self) -> HarnessId;
     fn display_name(&self) -> &str;
     fn supports_steering(&self) -> bool;
+    fn supports_subagent_stop(&self) -> bool {
+        false
+    }
     fn steering_mode(&self) -> SteeringMode;
     fn reasoning_levels(&self) -> &[ReasoningLevel];
     /// Whether the agent's own CLI is present on this device — the settings

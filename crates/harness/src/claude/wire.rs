@@ -17,7 +17,11 @@ pub(crate) enum Frame {
     RateLimit(RateLimitFrame),
     Result(ResultFrame),
     ControlRequest(ControlRequestFrame),
-    /// control_response / control_cancel_request / anything unknown.
+    ControlResponse {
+        request_id: String,
+        error: Option<String>,
+    },
+    /// control_cancel_request / anything unknown.
     Other,
 }
 
@@ -85,6 +89,10 @@ pub(crate) struct MessageFrame {
     pub parent_tool_use_id: Option<String>,
     #[serde(default)]
     pub message: MessageBody,
+    /// Structured Agent result: native task identity and explicit async or
+    /// terminal status. Content remains private to the CLI's own transcript.
+    #[serde(default, alias = "toolUseResult")]
+    pub tool_use_result: Option<Value>,
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,
@@ -198,6 +206,21 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
         "user" => Frame::User(serde_json::from_value(value)?),
         "rate_limit_event" => Frame::RateLimit(serde_json::from_value(value)?),
         "result" => Frame::Result(serde_json::from_value(value)?),
+        "control_response" => {
+            let response = &value["response"];
+            Frame::ControlResponse {
+                request_id: response["request_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                error: (response["subtype"] != "success").then(|| {
+                    response["error"]
+                        .as_str()
+                        .unwrap_or("Claude rejected the stop request")
+                        .to_owned()
+                }),
+            }
+        }
         "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
         _ => Frame::Other,
     };

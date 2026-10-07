@@ -509,9 +509,10 @@ pub(super) struct ChildStream {
     completed_items: std::collections::VecDeque<String>,
     completed_turns: std::collections::VecDeque<String>,
     settled: bool,
+    active_turn: Option<String>,
 }
 
-fn remember(ids: &mut std::collections::VecDeque<String>, id: String) -> bool {
+pub(super) fn remember(ids: &mut std::collections::VecDeque<String>, id: String) -> bool {
     if id.is_empty() {
         return true;
     }
@@ -526,11 +527,38 @@ fn remember(ids: &mut std::collections::VecDeque<String>, id: String) -> bool {
 }
 
 impl ChildStream {
+    pub(super) fn active_turn(&self) -> Option<&str> {
+        self.active_turn.as_deref()
+    }
     pub(super) fn map(&mut self, child: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
+        if method == "thread/status/changed" {
+            let status = match params.pointer("/status/type").and_then(Value::as_str) {
+                Some("idle" | "notLoaded") => DoneStatus::Completed,
+                Some("systemError") => DoneStatus::Errored,
+                // An active status can precede the confirmed new turn. Only
+                // turn/started (or userMessage) reopens a settled transcript.
+                _ => return Vec::new(),
+            };
+            if self.settled && status == DoneStatus::Completed {
+                return Vec::new();
+            }
+            self.settled = true;
+            self.active_turn = None;
+            self.streamed_text.clear();
+            return vec![AgentEvent::Done {
+                status,
+                result: None,
+                error: None,
+                session_id: Some(child.to_owned()),
+            }];
+        }
         if method == "turn/started" {
             let id = turn_id(params);
             if !id.is_empty() && self.completed_turns.contains(&id) {
                 return Vec::new();
+            }
+            if !id.is_empty() {
+                self.active_turn = Some(id);
             }
             if self.settled {
                 self.settled = false;
@@ -590,6 +618,14 @@ impl ChildStream {
             }
             return map_item(phase, item);
         }
+        // A fallback status/activity may settle before the turn-end frame.
+        // Remember that frame even while settled, so a replay cannot close a
+        // later assignment after turn/started reopens this child.
+        if matches!(method, "turn/completed" | "turn/failed" | "turn/aborted")
+            && !remember(&mut self.completed_turns, turn_id(params))
+        {
+            return Vec::new();
+        }
         if self.settled {
             return Vec::new();
         }
@@ -609,12 +645,8 @@ impl ChildStream {
             | "item/reasoning/summaryTextDelta"
             | "item/reasoning/summaryPartAdded" => self.reasoning.map(method, params),
             "turn/completed" | "turn/failed" | "turn/aborted" | "thread/closed" => {
-                if method != "thread/closed"
-                    && !remember(&mut self.completed_turns, turn_id(params))
-                {
-                    return Vec::new();
-                }
                 self.settled = true;
+                self.active_turn = None;
                 self.streamed_text.clear();
                 let error = turn_error_message(params);
                 let status = if method == "turn/failed"
@@ -708,12 +740,12 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
         | "turn/failed"
         | "turn/aborted"
         | "error"
-        | "thread/closed" => ChildRoute::Subagent,
+        | "thread/closed"
+        | "thread/status/changed" => ChildRoute::Subagent,
         // Child status bookkeeping with no subagent meaning: consumed
         // so it can never settle the PARENT turn (the exact bug class the
         // explicit table exists for).
-        "thread/status/changed"
-        | "thread/tokenUsage/updated"
+        "thread/tokenUsage/updated"
         // Child chatter with no consumer on this wire.
         | "item/commandExecution/outputDelta"
         | "item/fileChange/outputDelta"
@@ -1198,5 +1230,62 @@ mod generated_image_tests {
                 }
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod child_status_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn authoritative_child_status_settles_without_turn_end_and_can_restart() {
+        for (status, expected) in [
+            ("idle", DoneStatus::Completed),
+            ("notLoaded", DoneStatus::Completed),
+            ("systemError", DoneStatus::Errored),
+        ] {
+            let mut stream = ChildStream::default();
+            let events = stream.map(
+                "child",
+                "thread/status/changed",
+                &json!({"status":{"type":status}}),
+            );
+            assert!(
+                matches!(&events[..], [AgentEvent::Done { status, .. }] if *status == expected)
+            );
+            assert!(
+                stream
+                    .map("child", "item/agentMessage/delta", &json!({"delta":"late"}))
+                    .is_empty()
+            );
+            assert!(matches!(
+                &stream.map("child", "turn/started", &json!({"turn":{"id":"new-turn"}}))[..],
+                [AgentEvent::Steered { .. }]
+            ));
+            assert!(matches!(
+                &stream.map(
+                    "child",
+                    "item/agentMessage/delta",
+                    &json!({"delta":"new work"})
+                )[..],
+                [AgentEvent::TextDelta { .. }]
+            ));
+        }
+        for status in ["active", "futureStatus"] {
+            assert!(
+                ChildStream::default()
+                    .map(
+                        "child",
+                        "thread/status/changed",
+                        &json!({"status":{"type":status}})
+                    )
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            route_child_notification("thread/status/changed"),
+            ChildRoute::Subagent
+        );
     }
 }

@@ -13,6 +13,23 @@ emit() { printf '%s\n' "$1"; }
 
 case "$first" in
 
+*scenario:child-stop*)
+  emit '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"spawn-alpha","name":"Agent","input":{"description":"alpha"}}]}}'
+  emit '{"type":"system","subtype":"task_started","task_id":"task-alpha","tool_use_id":"spawn-alpha","subagent_type":"general-purpose"}'
+  emit '{"type":"stream_event","parent_tool_use_id":"spawn-alpha","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"working"}}}'
+  read -r stop || exit 1
+  case "$stop" in *'"subtype":"stop_task"'*'"task_id":"task-alpha"'*) ;; *) exit 1 ;; esac
+  id=$(printf '%s' "$stop" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  case "$first" in
+    *reject*) emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$id\",\"error\":\"cannot stop task\"}}" ;;
+    *) emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id\"}}" ;;
+  esac
+  # No child notification: engine must finalize from the acknowledgement.
+  emit '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"parent continues"}}}'
+  emit '{"type":"result","subtype":"success","session_id":"parent"}'
+  exec sleep 30
+  ;;
+
 *scenario:command-echo*)
   content=$(printf '%s\n' "$first" | sed 's/.*"content":"\([^"]*\)".*/\1/')
   emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$content\"}}}"
