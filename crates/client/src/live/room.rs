@@ -708,3 +708,48 @@ impl Drop for Room {
         self.persister.flush();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn persister(dir: &std::path::Path) -> (Arc<SessionDoc>, Arc<DocsStore>, Arc<Persister>) {
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let store = Arc::new(DocsStore::open(dir).unwrap());
+        let persister = Persister::new(&doc, store.clone(), "chat-1", 0);
+        (doc, store, persister)
+    }
+
+    /// Backgrounding flushes every warm room, so a room with nothing new must
+    /// cost nothing: no snapshot export, no SQLite write.
+    #[test]
+    fn flush_skips_a_clean_room_and_writes_a_dirty_one_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_doc, store, persister) = persister(dir.path());
+
+        persister.flush();
+        assert!(store.load_snapshot("chat-1").unwrap().is_none());
+
+        persister.applied(7, false);
+        persister.flush();
+        assert!(store.load_snapshot("chat-1").unwrap().is_some());
+        assert_eq!(store.snapshot_cursor("chat-1").unwrap(), 7);
+
+        // A sentinel stands in for "the row was rewritten": a second flush
+        // with no new changes must leave it alone.
+        store.save_snapshot("chat-1", b"sentinel").unwrap();
+        persister.flush();
+        assert_eq!(
+            store.load_snapshot("chat-1").unwrap().as_deref(),
+            Some(&b"sentinel"[..])
+        );
+
+        persister.applied(8, false);
+        persister.flush();
+        assert_ne!(
+            store.load_snapshot("chat-1").unwrap().as_deref(),
+            Some(&b"sentinel"[..])
+        );
+        assert_eq!(store.snapshot_cursor("chat-1").unwrap(), 8);
+    }
+}
