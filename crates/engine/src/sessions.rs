@@ -614,7 +614,13 @@ impl SessionsEngine {
         // the Done-time call below stays as the retry for a failed
         // generation).
         if let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+            titles.maybe_generate(
+                chat_id,
+                harness_id,
+                &request.prompt,
+                &request.cwd,
+                request.model.clone(),
+            );
         }
 
         tokio::spawn(drive_run(
@@ -1800,6 +1806,7 @@ async fn drive_run(
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
+    let run_model = request.model.clone();
     if request.resume.is_none() {
         let _ = doc.clear_context_usage();
     }
@@ -2793,7 +2800,13 @@ async fn drive_run(
             if *status == DoneStatus::Completed
                 && let Some(titles) = inner.titles.get()
             {
-                titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
+                titles.maybe_generate(
+                    &chat_id,
+                    harness_id,
+                    &user_prompt,
+                    &run_cwd,
+                    run_model.clone(),
+                );
             }
             // An accepted steer awaiting its boundary owns the continuation:
             // the previous Done is an internal handoff, not a completion ping.

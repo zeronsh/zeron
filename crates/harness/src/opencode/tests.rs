@@ -68,6 +68,23 @@ impl TurnWire {
             overrides,
             command_failure,
             None,
+            false,
+        )
+        .await
+    }
+
+    /// Title-only run: the session rejects every tool permission.
+    async fn start_title(v2: bool) -> Self {
+        Self::start_fixture(
+            false,
+            v2,
+            false,
+            Some(true),
+            if v2 { "2.0.11" } else { "1.18.31" },
+            json!({}),
+            false,
+            None,
+            true,
         )
         .await
     }
@@ -82,6 +99,7 @@ impl TurnWire {
             json!({}),
             false,
             Some(reply),
+            false,
         )
         .await
     }
@@ -95,6 +113,7 @@ impl TurnWire {
         overrides: Value,
         command_failure: bool,
         native_command_reply: Option<NativeCommandReply>,
+        title_only: bool,
     ) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -287,6 +306,7 @@ impl TurnWire {
                 input_hint: None,
             }]),
             initial_native_command_selected: native_command_reply.is_some(),
+            title_only,
         }));
         Self {
             bus,
@@ -1743,6 +1763,36 @@ async fn permissions_always_approve_without_user_input() {
                 assert_eq!(body, json!({key: "once"}));
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn title_runs_reject_tool_permissions() {
+    for v2 in [false, true] {
+        let mut wire = TurnWire::start_title(v2).await;
+        if v2 {
+            wire.request("/api/model").await;
+        }
+        wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+            .await;
+        // Reply key: v1 and pre-2.0.4 use "reply", newer 2.x uses "decision".
+        let key = if v2 { "decision" } else { "reply" };
+        let mut data =
+            json!({"id":"own", "action":"external_directory", "resources":["/private/*"]});
+        data["sessionID"] = json!("fixture");
+        wire.bus
+            .send(if v2 {
+                json!({"type":"permission.asked", "data":data})
+            } else {
+                json!({"type":"permission.asked", "properties":data})
+            })
+            .unwrap();
+        let body = wire.posted("/permission/own/reply").await;
+        assert_eq!(
+            body,
+            json!({key: "reject"}),
+            "title runs must never approve tools (v2={v2})"
+        );
     }
 }
 
