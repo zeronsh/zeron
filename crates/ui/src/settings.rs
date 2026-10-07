@@ -945,6 +945,9 @@ pub struct UiSettings {
     pub files_word_wrap: bool,
     /// Include hidden and ignored entries in workspace file trees.
     pub files_show_all: bool,
+    /// Fold the explorer's file tree under its Files header, leaving the
+    /// Subagents / Chats sections the column.
+    pub files_tree_collapsed: bool,
     /// Interactive identity overlay; imported themes default to their own accent.
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
@@ -1047,6 +1050,7 @@ impl Default for UiSettings {
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
             files_show_all: false,
+            files_tree_collapsed: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
@@ -1688,6 +1692,7 @@ impl UiSettings {
             files_autosave_delay_ms,
             files_word_wrap,
             files_show_all,
+            files_tree_collapsed,
             accent,
             surface,
             new_thread_composer_background,
@@ -2734,6 +2739,7 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
+            files_tree_collapsed: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {
@@ -2924,6 +2930,7 @@ mod tests {
             crate::typography::TERMINAL_FONT_SIZE_DEFAULT
         );
         assert!(!loaded.files_show_all);
+        assert!(!loaded.files_tree_collapsed);
         assert!(
             loaded.notifications_enabled,
             "pre-banner files default banners on"

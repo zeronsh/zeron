@@ -201,6 +201,8 @@ pub enum FilesEvent {
     },
     WordWrapChanged(bool),
     ShowAllFilesChanged(bool),
+    /// The Files header folded (`true`) or unfolded the tree.
+    TreeCollapsedChanged(bool),
     CloseReady,
     CloseCancelled,
     /// A footer row: open this subagent's transcript in the right pane.
@@ -296,7 +298,7 @@ pub struct FilesSurface {
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
     started: bool,
-    /// The Subagents / Chats footer under the tree.
+    /// The tree's Files fold and the Subagents / Chats footer under it.
     sections: sections::ExplorerSections,
     _observe: Subscription,
     _search_events: Subscription,
@@ -320,15 +322,33 @@ impl Render for FilesSurface {
         } else {
             Some(self.render_explorer_header(&theme, cx))
         };
+        let mutation_error = self
+            .mutation_error
+            .as_ref()
+            .map(|message| crate::popover::error_row(&theme, message).into_any_element());
+        // The explorer folds its tree under a Files header and docks its
+        // Subagents / Chats sections beneath; an editor surface has neither.
         let body = if is_editor {
-            self.render_preview(window, cx)
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(self.render_preview(window, cx)),
+                )
+                .children(mutation_error)
+                .into_any_element()
         } else {
-            self.render_explorer(&theme, cx).into_any_element()
+            let tree = self.render_explorer(&theme, cx).into_any_element();
+            self.render_explorer_body(tree, mutation_error, &theme, cx)
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
-        // The explorer docks its Subagents / Chats sections under the tree;
-        // an editor surface has no footer.
-        let sections = (!is_editor).then(|| self.render_sections(&theme, cx));
         div()
             .id(SharedString::from(format!(
                 "files-surface-{}",
@@ -342,13 +362,7 @@ impl Render for FilesSurface {
             .bg(crate::theme::ink(0.0))
             .flex_col()
             .children(header)
-            .child(div().flex_1().min_h_0().w_full().child(body))
-            .children(
-                self.mutation_error
-                    .as_ref()
-                    .map(|message| crate::popover::error_row(&theme, message).into_any_element()),
-            )
-            .children(sections)
+            .child(body)
             .children(editor_context_menu)
             .children(self.render_tree_context_menu(&theme, cx))
             .children(self.render_tree_delete(&theme, window, cx))

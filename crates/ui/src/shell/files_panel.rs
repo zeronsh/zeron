@@ -124,6 +124,15 @@ impl Shell {
             && source.read(cx).is_current_target(cx)
     }
 
+    /// One explorer's Files fold becomes every explorer's, and is saved.
+    fn set_files_tree_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.settings.files_tree_collapsed = collapsed;
+        for files in self.files.values().cloned().collect::<Vec<_>>() {
+            files.update(cx, |files, cx| files.set_tree_collapsed(collapsed, cx));
+        }
+        self.schedule_save(cx);
+    }
+
     pub(super) fn prune_file_explorers(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         if !state.chats_synced {
@@ -160,12 +169,14 @@ impl Shell {
         let key = self.panel_key(cx);
         if !self.files.contains_key(&key) {
             let files = cx.new(|cx| {
-                FilesSurface::new_explorer(
+                let mut files = FilesSurface::new_explorer(
                     self.state.clone(),
                     self.active_chat.clone(),
                     self.settings.files_show_all,
                     cx,
-                )
+                );
+                files.set_tree_collapsed(self.settings.files_tree_collapsed, cx);
+                files
             });
             let owner = key.clone();
             let sub = cx.subscribe_in(
@@ -217,6 +228,9 @@ impl Shell {
                     }
                     FilesEvent::ShowAllFilesChanged(show_all) => {
                         this.set_files_show_all(*show_all, cx)
+                    }
+                    FilesEvent::TreeCollapsedChanged(collapsed) => {
+                        this.set_files_tree_collapsed(*collapsed, cx)
                     }
                     // Footer rows land in the surface host beside the explorer,
                     // through the same paths a spawn chip and a side-chat tab use.

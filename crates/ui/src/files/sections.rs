@@ -1,5 +1,5 @@
-//! The explorer's footer: two collapsible sections docked under the file
-//! tree — **Subagents** (the spawn chips of the active chat's transcript,
+//! The explorer's sections: the file tree folds under a **Files** header,
+//! and two collapsible sections dock under it — **Subagents** (the spawn chips of the active chat's transcript,
 //! with their live status) and **Chats** (the side chats hanging off the
 //! active chat: forks, and chats an agent spawned through the Zeron MCP
 //! server). Rows borrow the left sidebar's compact session row — 29px, status
@@ -11,10 +11,13 @@
 //!
 //! The footer has a fixed height budget that the open sections share and
 //! scroll inside, and like the sidebar's Archived shelf each shows ten rows
-//! before a "Show N more" row pages by ten.
+//! before a "Show N more" row pages by ten. A folded tree hands its room to
+//! the footer.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -60,9 +63,11 @@ const FOOTER_PAD_BOTTOM: f32 = 6.0;
 const FOOTER_HEIGHT: f32 = 510.0;
 const TWEEN_GRACE: std::time::Duration = std::time::Duration::from_millis(120);
 
-/// Which footer section a motion or toggle addresses.
+/// Which section a motion or toggle addresses: the tree's fold or a footer
+/// section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Section {
+    Files,
     Subagents,
     Chats,
 }
@@ -70,6 +75,7 @@ pub(super) enum Section {
 impl Section {
     fn key(self) -> &'static str {
         match self {
+            Section::Files => "files",
             Section::Subagents => "subagents",
             Section::Chats => "chats",
         }
@@ -77,6 +83,7 @@ impl Section {
 
     fn label(self) -> &'static str {
         match self {
+            Section::Files => "Files",
             Section::Subagents => "Subagents",
             Section::Chats => "Chats",
         }
@@ -130,14 +137,24 @@ pub(super) struct ExplorerSections {
     /// A section opened to reveal a renamed row: its motion starts on the
     /// render that knows the body height.
     reveal: Option<Section>,
+    /// Painted height of the column under the Files header (tree, error
+    /// row, footer), so a folded tree can hand its room to the footer.
+    column: Rc<Cell<f32>>,
+    /// The tree's height while open beside the footer: what its fold
+    /// tweens from and its unfold back to.
+    tree_full: f32,
 }
 
 impl Default for ExplorerSections {
     fn default() -> Self {
         Self {
-            open: [(Section::Subagents, true), (Section::Chats, true)]
-                .into_iter()
-                .collect(),
+            open: [
+                (Section::Files, true),
+                (Section::Subagents, true),
+                (Section::Chats, true),
+            ]
+            .into_iter()
+            .collect(),
             motion: HashMap::new(),
             shown: HashMap::new(),
             scroll: [
@@ -149,6 +166,8 @@ impl Default for ExplorerSections {
             fingerprint: 0,
             chat_rename: None,
             reveal: None,
+            column: Rc::new(Cell::new(0.0)),
+            tree_full: 0.0,
         }
     }
 }
@@ -389,7 +408,7 @@ fn content_height_unfloored(section: Section, count: usize, shown: usize) -> f32
             + EMPTY_COPY_HEIGHT
             + match section {
                 Section::Chats => EMPTY_ACTIONS_HEIGHT,
-                Section::Subagents => 0.0,
+                Section::Files | Section::Subagents => 0.0,
             };
     }
     let visible = count.min(shown);
@@ -470,7 +489,36 @@ impl FilesSurface {
         }
     }
 
-    pub(super) fn render_sections(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// Fold or unfold the tree without motion: the shell mirrors one
+    /// explorer's toggle to the others, and a new explorer opens on the saved
+    /// choice.
+    pub(crate) fn set_tree_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if self.sections.is_open(Section::Files) == collapsed {
+            self.sections.open.insert(Section::Files, !collapsed);
+            cx.notify();
+        }
+    }
+
+    /// The Files header's toggle: tween the tree between its open height and
+    /// nothing, and tell the shell so the choice sticks.
+    pub(super) fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        let was_open = self.sections.is_open(Section::Files);
+        let full = self.sections.tree_full;
+        let (resting, target) = if was_open { (full, 0.0) } else { (0.0, full) };
+        self.sections.toggle(Section::Files, resting, target);
+        cx.emit(FilesEvent::TreeCollapsedChanged(was_open));
+        cx.notify();
+    }
+
+    /// Everything under the explorer's toolbar: the Files header, the tree
+    /// under its fold, any mutation error, and the Subagents / Chats footer.
+    pub(super) fn render_explorer_body(
+        &mut self,
+        tree: AnyElement,
+        error: Option<AnyElement>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let now = Utc::now();
         let (subagents, chats) = {
             let state = self.state.read(cx);
@@ -496,14 +544,51 @@ impl FilesSurface {
             self.sections.is_open(Section::Subagents),
             self.sections.is_open(Section::Chats),
         ];
-        let budget = FOOTER_HEIGHT - chrome_height();
+        // Beside an open tree the footer keeps its fixed budget and the tree
+        // takes the rest of the column; folding hands the tree's room to the
+        // footer, frame by frame while the fold tweens.
+        let column = self.sections.column.get();
+        let footer_beside_tree = chrome_height()
+            + body_budget(FOOTER_HEIGHT - chrome_height(), wants, open)
+                .iter()
+                .sum::<f32>();
+        self.sections.tree_full = (column - footer_beside_tree).max(0.0);
+        let tree_open = self.sections.is_open(Section::Files);
+        let tree_motion = self.sections.live_motion(Section::Files);
+        let tree_height = match tree_motion {
+            Some(tween) => tween.current(),
+            None if tree_open => self.sections.tree_full,
+            None => 0.0,
+        };
+        let budget = (column - tree_height).max(FOOTER_HEIGHT) - chrome_height();
         let heights = body_budget(budget, wants, open);
         let view = cx.entity_id();
+        let tree = if tree_motion.is_some() {
+            Some(self.render_disclosure_body(
+                Section::Files,
+                tree_open,
+                self.sections.tree_full,
+                tree,
+            ))
+        } else {
+            tree_open.then(|| {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(tree)
+                    .into_any_element()
+            })
+        };
+        let header = self
+            .render_section_header(Section::Files, Section::Files.label().into(), None, theme)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx)));
         let subagent_body = self.render_subagent_rows(&subagents, view, theme, cx);
         let chat_body = self.render_chat_rows(&chats, theme, cx);
         let chats_actions = self.render_chats_header_actions(theme, cx);
-        div()
+        let footer = div()
             .id("files-sections")
+            .debug_selector(|| "files-sections".into())
             .relative()
             .flex_none()
             .w_full()
@@ -517,6 +602,7 @@ impl FilesSurface {
                 subagents.len(),
                 wants[0],
                 heights[0],
+                budget,
                 None,
                 subagent_body,
                 theme,
@@ -527,11 +613,51 @@ impl FilesSurface {
                 chats.len(),
                 wants[1],
                 heights[1],
+                budget,
                 Some(chats_actions),
                 chat_body,
                 theme,
                 cx,
-            ))
+            ));
+        let measured = self.sections.column.clone();
+        let measure = gpui::canvas(
+            move |bounds, window, _| {
+                let height = f32::from(bounds.size.height);
+                if measured.replace(height) != height {
+                    window.on_next_frame(move |_, cx| cx.notify(view));
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(6.0))
+                    .pt(px(FOOTER_PAD_TOP))
+                    .child(header),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .children(tree)
+                    .children(error)
+                    .child(footer)
+                    .child(measure),
+            )
             .into_any_element()
     }
 
@@ -582,6 +708,7 @@ impl FilesSurface {
         count: usize,
         wanted: f32,
         height: f32,
+        budget: f32,
         actions: Option<AnyElement>,
         body: AnyElement,
         theme: &Theme,
@@ -601,13 +728,41 @@ impl FilesSurface {
         let full = if open {
             height
         } else {
-            wanted.min(FOOTER_HEIGHT - chrome_height()).max(0.0)
+            wanted.min(budget).max(0.0)
         };
-        let header = div()
-            .id(SharedString::from(format!(
-                "files-section-{}",
-                section.key()
-            )))
+        let header = self
+            .render_section_header(section, label, actions, theme)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // Open → close runs from the painted body height to 0, and
+                // back up to what the budget allows.
+                let was_open = this.sections.is_open(section);
+                let (resting, target) = if was_open { (full, 0.0) } else { (0.0, full) };
+                this.sections.toggle(section, resting, target);
+                cx.notify();
+            }));
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(self.render_disclosure_body(section, open, height, body))
+            .into_any_element()
+    }
+
+    /// A section's caret row: its label, any hover actions, and the chevron.
+    /// The caller wires the click.
+    fn render_section_header(
+        &self,
+        section: Section,
+        label: SharedString,
+        actions: Option<AnyElement>,
+        theme: &Theme,
+    ) -> gpui::Stateful<gpui::Div> {
+        let open = self.sections.is_open(section);
+        let key = section.key();
+        div()
+            .id(SharedString::from(format!("files-section-{key}")))
+            .debug_selector(move || format!("files-section-{key}"))
             .group(HEADER_GROUP)
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!(
@@ -625,14 +780,6 @@ impl FilesSurface {
             .pr(px(4.0))
             .rounded(px(6.0))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                // Open → close runs from the painted body height to 0, and
-                // back up to what the budget allows.
-                let was_open = this.sections.is_open(section);
-                let (resting, target) = if was_open { (full, 0.0) } else { (0.0, full) };
-                this.sections.toggle(section, resting, target);
-                cx.notify();
-            }))
             .child(
                 div()
                     .flex_1()
@@ -644,14 +791,7 @@ impl FilesSurface {
                     .child(label),
             )
             .children(actions)
-            .child(self.render_chevron(section, open, theme));
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(self.render_disclosure_body(section, open, height, body))
-            .into_any_element()
+            .child(self.render_chevron(section, open, theme))
     }
 
     fn render_chevron(&self, section: Section, open: bool, theme: &Theme) -> AnyElement {
@@ -1458,6 +1598,87 @@ mod tests {
             assert_eq!(files.sections.motion[&Section::Chats].from, 0.0);
         });
         assert!(cx.debug_bounds("files-chat-title-editor-side-11").is_some());
+    }
+
+    #[gpui::test]
+    fn files_header_folds_the_tree_and_hands_its_room_to_the_footer(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let (files, cx) = super::super::test_support::setup(cx);
+        // More side chats than the footer's fixed budget fits beside the tree.
+        files.update(cx, |files, cx| {
+            files.state.update(cx, |state, _| {
+                for ix in 0..12 {
+                    state
+                        .chats
+                        .push(chat(&format!("side-{ix:02}"), Some("chat"), ix));
+                }
+            });
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("files-tree").is_some());
+        let beside_tree = cx.debug_bounds("files-sections").unwrap().size.height;
+        assert_eq!(beside_tree, px(FOOTER_HEIGHT));
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+        let header = cx.debug_bounds("files-section-files").unwrap().center();
+        cx.simulate_click(header, Modifiers::default());
+        assert!(matches!(
+            &events.borrow()[..],
+            [FilesEvent::TreeCollapsedChanged(true)]
+        ));
+        // The shell mirrors the choice back to the explorer it came from.
+        files.update(cx, |files, cx| {
+            assert!(!files.sections.is_open(Section::Files));
+            files.set_tree_collapsed(true, cx);
+            // Settle the fold.
+            files.sections.motion.clear();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("files-tree").is_none());
+        let folded = cx.debug_bounds("files-sections").unwrap().size.height;
+        assert!(folded > beside_tree, "{folded:?} <= {beside_tree:?}");
+
+        // Searching unfolds the tree: results live where it does.
+        events.borrow_mut().clear();
+        let search = cx.debug_bounds("files-search").unwrap();
+        cx.simulate_click(
+            gpui::point(search.left() + px(2.0), search.center().y),
+            Modifiers::default(),
+        );
+        cx.simulate_input("a.txt");
+        files.read_with(cx, |files, _| {
+            assert!(files.sections.is_open(Section::Files))
+        });
+        assert!(matches!(
+            &events.borrow()[..],
+            [FilesEvent::TreeCollapsedChanged(false)]
+        ));
+    }
+
+    #[gpui::test]
+    fn a_new_explorer_opens_on_the_saved_fold(cx: &mut gpui::TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update(cx, |files, cx| files.set_tree_collapsed(true, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        // No motion: the tree is simply folded, its header still there.
+        assert!(cx.debug_bounds("files-tree").is_none());
+        assert!(cx.debug_bounds("files-section-files").is_some());
+        files.update(cx, |files, cx| files.set_tree_collapsed(false, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-tree").is_some());
     }
 
     #[test]

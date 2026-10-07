@@ -3783,9 +3783,10 @@ impl Shell {
                     FilesEvent::CloseReady => {
                         this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
                     }
-                    // Footer rows exist on the explorer only; an editor
-                    // surface never emits them.
-                    FilesEvent::OpenSubagent { .. }
+                    // The Files fold and footer rows exist on the explorer
+                    // only; an editor surface never emits them.
+                    FilesEvent::TreeCollapsedChanged(_)
+                    | FilesEvent::OpenSubagent { .. }
                     | FilesEvent::OpenChildChat(_)
                     | FilesEvent::RenameChildChat(_)
                     | FilesEvent::ChildChatContextMenu { .. }
