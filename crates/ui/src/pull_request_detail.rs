@@ -2310,6 +2310,11 @@ mod tests {
                 viewport.left(),
                 "toolbar and stream share an edge"
             );
+            let scroll = cx.debug_bounds("pr-code-scroll").unwrap();
+            assert!(scroll.left() >= viewport.left() + px(4.0));
+            assert!(scroll.top() >= viewport.top() + px(4.0));
+            assert!(scroll.right() <= viewport.right() - px(4.0));
+            assert!(scroll.bottom() <= viewport.bottom() - px(4.0));
             let header = cx.debug_bounds("pr-file-header-0").unwrap();
             assert_eq!(header.size.height, px(crate::changes::FILE_HEADER_HEIGHT));
             if width >= 900.0 {
@@ -2470,7 +2475,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pull_request_file_jump_hides_the_header_divider_under_the_card_border(
+    fn pull_request_file_jump_hides_the_header_divider_above_the_scroll_viewport(
         cx: &mut gpui::TestAppContext,
     ) {
         fixture::init(cx);
@@ -2489,12 +2494,12 @@ mod tests {
         cx.run_until_parked();
         page.update(cx, |page, cx| page.select_code_file(1, cx));
         cx.run_until_parked();
-        let viewport = cx.debug_bounds("pr-code-viewport").unwrap();
+        let viewport = cx.debug_bounds("pr-code-scroll").unwrap();
         let header = cx.debug_bounds("pr-file-header-1").unwrap();
         assert_eq!(
-            header.top(),
+            header.top() + px(1.0),
             viewport.top(),
-            "the jumped-to header's divider hides under the card border"
+            "the jumped-to header's divider hides above the scroll viewport"
         );
         assert!(
             cx.debug_bounds("pr-sticky-file-1").is_none(),

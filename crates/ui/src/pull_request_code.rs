@@ -16,60 +16,34 @@ const PICKER_HEIGHT: f32 = 360.0;
 /// scrolling under it, light enough to keep the header rows' tone.
 const STICKY_BLUR: f32 = 32.0;
 const STICKY_VEIL: f32 = 0.18;
-/// The stream card's 12px radius inside its 1px border.
-const CARD_INNER_RADIUS: f32 = 11.0;
+const CARD_RADIUS: f32 = 12.0;
+// GPUI clips descendants to rectangles. Keep their rectangle inside the
+// rounded border: 1px border + 4px inset clears the 12px arc at every corner.
+// Never paint shell-colored corner covers: frost has no solid backdrop color.
+const CARD_CONTENT_INSET: f32 = 4.0;
 
-/// GPUI's overflow mask is rectangular. Cover the four small regions
-/// outside the inner arc after the stream and sticky layers have painted.
-/// This canvas has no hitbox, so it cannot steal folding or scroll input.
-fn stream_corners(theme: &Theme) -> impl IntoElement {
-    // The PR route sits directly on the shell surface, not the code plane.
-    let background = theme.surface;
-    gpui::canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let radius = CARD_INNER_RADIUS
-                .min(f32::from(bounds.size.width) / 2.0)
-                .min(f32::from(bounds.size.height) / 2.0);
-            let control = radius * (1.0 - 0.552_284_8);
-            window.paint_layer(bounds, |window| {
-                for (corner, dx, dy) in [
-                    (bounds.origin, 1.0, 1.0),
-                    (gpui::point(bounds.right(), bounds.top()), -1.0, 1.0),
-                    (gpui::point(bounds.left(), bounds.bottom()), 1.0, -1.0),
-                    (gpui::point(bounds.right(), bounds.bottom()), -1.0, -1.0),
-                ] {
-                    let point = |x, y| gpui::point(corner.x + px(x * dx), corner.y + px(y * dy));
-                    let mut path = gpui::PathBuilder::fill();
-                    path.move_to(point(0.0, 0.0));
-                    path.line_to(point(radius, 0.0));
-                    path.cubic_bezier_to(
-                        point(0.0, radius),
-                        point(control, 0.0),
-                        point(0.0, control),
-                    );
-                    path.close();
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, background);
-                    }
-                }
-            });
-        },
-    )
-    .absolute()
-    .inset_0()
-}
-
-fn stream_viewport(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+fn stream_frame(theme: &Theme, content: impl IntoElement) -> impl IntoElement {
     div()
         .id("pr-code-viewport")
         .debug_selector(|| "pr-code-viewport".into())
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(theme.border)
+        .p(px(CARD_CONTENT_INSET))
+        .child(content)
+}
+
+fn stream_viewport() -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("pr-code-scroll")
+        .debug_selector(|| "pr-code-scroll".into())
         .relative()
         .flex_1()
         .min_h_0()
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(theme.border)
         .overflow_hidden()
 }
 
@@ -511,10 +485,6 @@ impl PullRequestDetailPage {
                     .border_color(paint.border.opacity(if sticky { 1.0 } else { 0.0 }))
             })
             .when(sticky, |el| el.block_mouse_except_scroll())
-            // Follow the stream card's inner corner radius at the top edge.
-            .when(!sticky && file == 0, |el| {
-                el.rounded_t(px(CARD_INNER_RADIUS))
-            })
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .focus_visible(|style| style.border_2().border_color(theme.accent))
@@ -907,28 +877,26 @@ impl PullRequestDetailPage {
                     ));
                 }),
             );
-        let viewport = stream_viewport(theme)
-            .map(|el| {
-                if loading {
-                    el.child(crate::pull_request_skeleton::diff(
-                        self.review.split,
-                        cx.entity_id(),
-                        theme,
-                        cx,
-                    ))
-                } else {
-                    el.child(
-                        gpui::list(
-                            self.review.list.clone(),
-                            cx.processor(Self::render_code_row),
-                        )
-                        .size_full()
-                        .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+        let viewport = stream_viewport().map(|el| {
+            if loading {
+                el.child(crate::pull_request_skeleton::diff(
+                    self.review.split,
+                    cx.entity_id(),
+                    theme,
+                    cx,
+                ))
+            } else {
+                el.child(
+                    gpui::list(
+                        self.review.list.clone(),
+                        cx.processor(Self::render_code_row),
                     )
-                    .children(self.sticky_header(theme, cx))
-                }
-            })
-            .child(stream_corners(theme));
+                    .size_full()
+                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                )
+                .children(self.sticky_header(theme, cx))
+            }
+        });
         let editor = div()
             .relative()
             .flex_1()
@@ -939,7 +907,7 @@ impl PullRequestDetailPage {
             .gap(px(8.0))
             .pb(px(NAV_CLEARANCE))
             .child(toolbar)
-            .child(viewport)
+            .child(stream_frame(theme, viewport))
             .when(!wide && self.files_expanded, |el| {
                 el.child(
                     // Dismiss layer, then the picker anchored under the toolbar.
@@ -1151,79 +1119,158 @@ mod tests {
 #[cfg(all(test, target_os = "macos", feature = "pull-request-fixture"))]
 mod corner_render_tests {
     use super::*;
+    use crate::theme::Appearance;
 
-    struct ViewportFixture;
+    struct ViewportFixture {
+        theme: Theme,
+    }
+
     impl Render for ViewportFixture {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let theme = Theme {
-                bg: gpui::rgb(0x1e1e1e).into(),
-                surface: gpui::rgb(0x181818).into(),
-                surface_treatment: zeron_theme::SurfaceTreatment::Opaque,
-                ..Theme::default()
-            };
+            let theme = &self.theme;
             div()
                 .size_full()
-                .p(px(16.0))
-                .bg(theme.glass())
-                .flex()
-                .flex_col()
+                .relative()
+                // Two different backdrop colors expose any painted corner
+                // cover, including one that happens to match the theme.
                 .child(
-                    stream_viewport(&theme)
-                        .child(div().size_full().bg(gpui::rgb(0xff0000)))
-                        .child(stream_corners(&theme)),
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().bg(gpui::rgb(0x305070)))
+                        .child(div().flex_1().bg(gpui::rgb(0x705030))),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .p(px(16.0))
+                        .bg(theme.glass())
+                        .flex()
+                        .flex_col()
+                        .child(stream_frame(
+                            theme,
+                            stream_viewport()
+                                .child(div().size_full().bg(gpui::rgb(0xff0000)))
+                                // Model the full-width pinned header over the
+                                // stream. Both layers must stay inside the frame.
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .w_full()
+                                        .h(px(30.0))
+                                        .bg(gpui::rgb(0x0000ff)),
+                                ),
+                        )),
                 )
         }
     }
 
     #[test]
-    fn pull_request_stream_content_stays_inside_rounded_outline() {
+    fn pull_request_stream_corners_preserve_the_actual_backdrop() {
         let mut cx = gpui::HeadlessAppContext::with_platform(
             Arc::new(gpui::NoopTextSystem),
             Arc::new(()),
             gpui_platform::current_headless_renderer,
         );
-        let window = cx
-            .open_window(gpui::size(px(160.0), px(120.0)), |_, cx| {
-                cx.new(|_| ViewportFixture)
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-        let image = cx.capture_screenshot(window.into()).unwrap();
-        if let Ok(path) = std::env::var("ZERON_PR_CORNER_CAPTURE") {
-            image.save(path).unwrap();
-        }
-        let scale = image.width() as f32 / 160.0;
-        let radius = 12.0 * scale;
-        let inset = 16.0 * scale;
-        for (corner_x, corner_y, dx, dy) in [
-            (inset, inset, 1.0, 1.0),
-            (image.width() as f32 - inset, inset, -1.0, 1.0),
-            (inset, image.height() as f32 - inset, 1.0, -1.0),
+        for (name, appearance, surface, treatment) in [
             (
-                image.width() as f32 - inset,
-                image.height() as f32 - inset,
-                -1.0,
-                -1.0,
+                "dark-frost",
+                Appearance::Dark,
+                0x181818,
+                zeron_theme::SurfaceTreatment::Frosted,
+            ),
+            (
+                "light-frost",
+                Appearance::Light,
+                0xeeeeee,
+                zeron_theme::SurfaceTreatment::Frosted,
+            ),
+            (
+                "dark-opaque",
+                Appearance::Dark,
+                0x181818,
+                zeron_theme::SurfaceTreatment::Opaque,
+            ),
+            (
+                "light-opaque",
+                Appearance::Light,
+                0xeeeeee,
+                zeron_theme::SurfaceTreatment::Opaque,
             ),
         ] {
-            for y in 0..radius as u32 {
-                for x in 0..radius as u32 {
-                    let distance = ((radius - x as f32 - 0.5).powi(2)
-                        + (radius - y as f32 - 0.5).powi(2))
-                    .sqrt();
-                    if distance < radius + 2.0 * scale {
-                        continue;
+            let theme = Theme {
+                appearance,
+                surface: gpui::rgb(surface).into(),
+                surface_treatment: treatment,
+                ..match appearance {
+                    Appearance::Dark => Theme::dark(),
+                    Appearance::Light => Theme::light(),
+                }
+            };
+            let window = cx
+                .open_window(gpui::size(px(160.0), px(120.0)), |_, cx| {
+                    cx.new(|_| ViewportFixture { theme })
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            if let Ok(directory) = std::env::var("ZERON_PR_CORNER_CAPTURE_DIR") {
+                image
+                    .save(std::path::Path::new(&directory).join(format!("{name}.png")))
+                    .unwrap();
+            }
+            let scale = image.width() as f32 / 160.0;
+            let radius = CARD_RADIUS * scale;
+            let inset = 16.0 * scale;
+            for (corner_x, corner_y, dx, dy) in [
+                (inset, inset, 1.0, 1.0),
+                (image.width() as f32 - inset, inset, -1.0, 1.0),
+                (inset, image.height() as f32 - inset, 1.0, -1.0),
+                (
+                    image.width() as f32 - inset,
+                    image.height() as f32 - inset,
+                    -1.0,
+                    -1.0,
+                ),
+            ] {
+                for y in 0..radius as u32 {
+                    for x in 0..radius as u32 {
+                        let distance = ((radius - x as f32 - 0.5).powi(2)
+                            + (radius - y as f32 - 0.5).powi(2))
+                        .sqrt();
+                        if distance < radius + 2.0 * scale {
+                            continue;
+                        }
+                        let x = (corner_x + dx * (x as f32 + 0.5)).floor() as u32;
+                        let y = (corner_y + dy * (y as f32 + 0.5)).floor() as u32;
+                        let pixel = image.get_pixel(x, y).0;
+                        let backdrop = image.get_pixel((8.0 * scale) as u32, y).0;
+                        assert!(
+                            pixel.iter().zip(backdrop).all(|(a, b)| a.abs_diff(b) <= 1),
+                            "{name}: corner ({x}, {y}) is {pixel:?}, backdrop is {backdrop:?}"
+                        );
                     }
-                    let x = (corner_x + dx * (x as f32 + 0.5)).floor() as u32;
-                    let y = (corner_y + dy * (y as f32 + 0.5)).floor() as u32;
-                    let pixel = image.get_pixel(x, y).0;
-                    assert!(
-                        pixel[..3].iter().all(|channel| channel.abs_diff(24) <= 1),
-                        "corner differs from shell surface at ({x}, {y}): {pixel:?}"
-                    );
                 }
             }
+            // Ensure this is testing visible content, not an empty frame.
+            assert_eq!(
+                image
+                    .get_pixel((80.0 * scale) as u32, (30.0 * scale) as u32)
+                    .0[..3],
+                [0, 0, 255]
+            );
+            assert_eq!(
+                image
+                    .get_pixel((80.0 * scale) as u32, (80.0 * scale) as u32)
+                    .0[..3],
+                [255, 0, 0]
+            );
         }
     }
 }
