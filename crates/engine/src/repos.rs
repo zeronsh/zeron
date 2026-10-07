@@ -1417,7 +1417,17 @@ impl Repos {
     /// (dead mount, permission-gated folder) fails this listing without blocking
     /// anything else; the abandoned task unwinds on its own thread.
     pub async fn list_folders(&self, path: Option<String>) -> Result<FolderListing, EngineError> {
-        self.list_folders_with(path, FOLDER_LIST_TIMEOUT, false)
+        self.list_folders_with_hidden(path, false).await
+    }
+
+    /// One directory level with optional dotfiles; ordering, cap, and timeout
+    /// are the same as [`Self::list_folders`].
+    pub async fn list_folders_with_hidden(
+        &self,
+        path: Option<String>,
+        show_hidden: bool,
+    ) -> Result<FolderListing, EngineError> {
+        self.list_folders_with(path, show_hidden, FOLDER_LIST_TIMEOUT, false)
             .await
     }
 
@@ -1484,6 +1494,7 @@ impl Repos {
     pub async fn list_folders_with(
         &self,
         path: Option<String>,
+        show_hidden: bool,
         timeout: Duration,
         hang_for_test: bool,
     ) -> Result<FolderListing, EngineError> {
@@ -1500,7 +1511,7 @@ impl Repos {
                     // exit reclaims it) — the caller must hit its timeout.
                     std::thread::sleep(Duration::from_secs(3600));
                 }
-                let _ = tx.send(list_folders_blocking(&target));
+                let _ = tx.send(list_folders_blocking(&target, show_hidden));
             });
         if let Err(err) = spawned {
             return Err(EngineError::Other(format!("folder listing failed: {err}")));
@@ -1556,7 +1567,7 @@ async fn disposable_worker<T: Send + 'static>(
 
 /// The blocking walk: ONE readdir of the target; `is_repo` is a cheap `.git`
 /// existence probe per directory entry.
-fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
+fn list_folders_blocking(target: &Path, show_hidden: bool) -> Result<FolderListing, EngineError> {
     let read = std::fs::read_dir(target).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
             EngineError::Other("Zeron doesn't have access to this folder on the device.".into())
@@ -1566,7 +1577,7 @@ fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let mut entries: Vec<FolderEntry> = Vec::new();
     for entry in read.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
+        if !show_hidden && name.starts_with('.') {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);

@@ -613,6 +613,16 @@ async fn folder_lister_flags_and_ordering() {
         .find(|e| e.name == "aaa.txt")
         .expect("file entry");
     assert!(!file.is_dir);
+
+    let listing = repos
+        .list_folders_with_hidden(Some(tmp.path().to_string_lossy().to_string()), true)
+        .await
+        .expect("listing with hidden entries");
+    assert!(!listing.truncated);
+    let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec![".hidden", "alpha", "beta", "aaa.txt"]);
+    assert!(listing.entries[0].is_dir);
+    assert!(!listing.entries[0].is_repo);
 }
 
 #[tokio::test]
@@ -638,6 +648,7 @@ async fn folder_lister_timeout_path() {
     let err = repos
         .list_folders_with(
             Some(tmp.path().to_string_lossy().to_string()),
+            false,
             Duration::from_millis(50),
             true, // worker never responds
         )

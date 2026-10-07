@@ -134,7 +134,7 @@ display EXCLUDED. File paths refer to the reference repo.
 - Run(RunRequest)->RunAck{runId}; Subscribe{sessionId,afterSeq?}->stream SessionStreamEvent;
   Interrupt{runId?|sessionId?}; Steer{sessionId,prompt}->{accepted}; RespondInput{sessionId,
   requestId,answers}
-- ListRepos/AddRepo{path}/CloneRepo{url}/CreateRepo{name}; ListFolders{path?}; ListBranches{repo};
+- ListRepos/AddRepo{path}/CloneRepo{url}/CreateRepo{name}; ListFolders{path?, showHidden?}; ListBranches{repo};
   CreateWorktree{repo,branch}; DeleteWorktree
 - UploadChunk/UploadCommit; ReadAttachment(stream)/ReadAttachmentChunk
 - OpenTerminal{chatId,cols,rows}->TerminalSession; SubscribeTerminal{id,afterSeq?}->stream

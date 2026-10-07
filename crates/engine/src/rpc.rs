@@ -20,7 +20,7 @@
 //!   `SelectOrg {organizationId}`
 //! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
 //!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
-//!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
+//!   `ListFolders {path?, showHidden?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
 //!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
 //! - Workspace files: lazy directory listing, recursive path search, bounded text
 //!   reads, hash-guarded writes, and a checkout-scoped filesystem change stream.
@@ -318,6 +318,8 @@ struct RunProjectActionParams {
 struct ListFoldersParams {
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    show_hidden: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2928,7 +2930,7 @@ impl RpcService for EngineRpc {
                 let p: ListFoldersParams = parse_params(params)?;
                 let listing = self
                     .repos
-                    .list_folders(p.path)
+                    .list_folders_with_hidden(p.path, p.show_hidden)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
@@ -3402,6 +3404,17 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_folders_show_hidden_defaults_to_false() {
+        let params: ListFoldersParams = parse_params(serde_json::json!({})).unwrap();
+        assert!(!params.show_hidden);
+        for show_hidden in [false, true] {
+            let params: ListFoldersParams =
+                parse_params(serde_json::json!({"showHidden": show_hidden})).unwrap();
+            assert_eq!(params.show_hidden, show_hidden);
+        }
+    }
 
     // Each subprocess has private HOME/PATH/overrides, avoiding process-global test races.
     #[cfg(unix)]
