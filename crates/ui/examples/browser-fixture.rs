@@ -29,6 +29,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
         let window = app
             .keyWindow()
             .or_else(|| app.mainWindow())
+            .or_else(|| app.windows().firstObject())
             .ok_or_else(|| anyhow::anyhow!("fixture window is not available"))?;
         std::process::Command::new("/usr/sbin/screencapture")
             .args(["-x", "-o", "-l", &window.windowNumber().to_string()])

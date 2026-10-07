@@ -194,6 +194,73 @@ impl LinkUi {
     }
 }
 
+/// Verbatim tool text with the same hit targets and menus as Markdown links.
+pub(crate) fn tool_text(
+    text: SharedString,
+    id: SharedString,
+    ui: Option<LinkUi>,
+    theme: &Theme,
+    mono: bool,
+) -> AnyElement {
+    if !text.contains("http://") && !text.contains("https://") {
+        return div()
+            .when(mono, |row| row.w_full())
+            .min_w_0()
+            .truncate()
+            .child(text)
+            .into_any_element();
+    }
+    let mut offset = 0;
+    let mut links = Vec::new();
+    let mut runs = Vec::new();
+    for run in super::parser::plain_text_links(&text) {
+        let end = offset + run.text.len();
+        if let Some(url) = &run.style.link {
+            links.push((offset..end, LinkTarget::new(url, url)));
+        }
+        runs.push(TextRun {
+            len: run.text.len(),
+            font: font(if mono {
+                theme.font_mono.clone()
+            } else {
+                theme.font_sans_fixed.clone()
+            }),
+            color: if mono {
+                theme.text_faint
+            } else {
+                theme.text_muted
+            },
+            background_color: None,
+            underline: run.style.link.is_some().then_some(UnderlineStyle {
+                color: Some(theme.text_muted),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+            strikethrough: None,
+        });
+        offset = end;
+    }
+    let styled = StyledText::new(text).with_runs(runs);
+    let layout = styled.layout().clone();
+    let child = div()
+        .when(mono, |row| row.w_full())
+        .min_w_0()
+        .truncate()
+        .child(styled)
+        .into_any_element();
+    if links.is_empty() {
+        return child;
+    }
+    super::link_interaction::LinkRanges {
+        id,
+        child,
+        layout,
+        links,
+        ui,
+    }
+    .into_any_element()
+}
+
 pub fn activate_link(
     target: LinkTarget,
     action: LinkAction,

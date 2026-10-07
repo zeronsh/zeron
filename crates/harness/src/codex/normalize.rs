@@ -25,6 +25,44 @@ fn str_field(v: &Value, keys: &[&str]) -> String {
         .to_owned()
 }
 
+/// Page actions carry their destination in `action`, not the search query.
+fn web_call(item: &Value) -> ToolCall {
+    let action = item.get("action").unwrap_or(&Value::Null);
+    if let Some(url) = action
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.is_empty())
+    {
+        return ToolCall::WebFetch {
+            url: url.to_owned(),
+            prompt: action
+                .get("pattern")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+    }
+    let query = item
+        .get("query")
+        .and_then(Value::as_str)
+        .filter(|q| !q.is_empty())
+        .or_else(|| action.get("query").and_then(Value::as_str))
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            action
+                .get("queries")
+                .and_then(Value::as_array)
+                .map(|queries| {
+                    queries
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default()
+        });
+    ToolCall::WebSearch { query }
+}
+
 /// Delta text under either spelling the app server has used
 /// (`delta` on agentMessage, `textDelta` on some reasoning builds).
 pub(crate) fn delta_text(params: &Value) -> Option<String> {
@@ -387,14 +425,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 diff: None,
             }],
         },
-        "webSearch" | "web_search" => tool_lifecycle(
-            phase,
-            id,
-            ToolCall::WebSearch {
-                query: str_field(item, &["query"]),
-            },
-            false,
-        ),
+        "webSearch" | "web_search" => tool_lifecycle(phase, id, web_call(item), false),
         "todoList" | "todo_list" => {
             let items = item
                 .get("items")
@@ -739,6 +770,33 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn web_actions_preserve_destinations_and_search_queries() {
+        for kind in ["openPage", "findInPage"] {
+            assert_eq!(
+                web_call(&json!({"query": "", "action": {
+                    "type": kind, "url": "https://example.com/docs", "pattern": "setup"
+                }})),
+                ToolCall::WebFetch {
+                    url: "https://example.com/docs".into(),
+                    prompt: Some("setup".into()),
+                }
+            );
+        }
+        assert_eq!(
+            web_call(&json!({"query": "rust"})),
+            ToolCall::WebSearch {
+                query: "rust".into()
+            }
+        );
+        assert_eq!(
+            web_call(&json!({"action": {"type": "search", "queries": ["rust", "gpui"]}})),
+            ToolCall::WebSearch {
+                query: "rust; gpui".into()
+            }
+        );
+    }
 
     #[test]
     fn reasoning_parts_preserve_chunking_and_existing_paragraph_breaks() {

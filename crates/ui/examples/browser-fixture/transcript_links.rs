@@ -11,7 +11,7 @@ fn dispatch(
     return super::linux::dispatch(window, event, cx);
     #[cfg(not(target_os = "linux"))]
     {
-        window.update(cx, |_, w, cx| {
+        gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| {
             w.dispatch_event(event, cx);
         })?;
         Ok(())
@@ -56,7 +56,11 @@ async fn screenshot(
 ) -> anyhow::Result<()> {
     // Synthetic key/focus dispatch updates hit testing synchronously. Request
     // a presented frame too, especially when Wayland's frame loop is idle.
-    window.update(cx, |_, w, _| w.on_next_frame(|window, _| window.refresh()))?;
+    gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| {
+        cx.activate(true);
+        w.activate_window();
+        w.on_next_frame(|window, _| window.refresh());
+    })?;
     pause(cx, 250).await;
     capture(output, name)
 }
@@ -68,6 +72,9 @@ pub(super) async fn exercise(
     output: &std::path::Path,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
+    if std::env::var_os("ZERON_WEB_TOOL_LINK_FIXTURE").is_some() {
+        return web_tools(window, state, origin, output, cx).await;
+    }
     let long = format!(
         "{origin}/{}?complete=yes#destination",
         "long-segment/".repeat(35)
@@ -154,7 +161,7 @@ pub(super) async fn exercise(
     // Focus discloses the original destination even when its label is truncated.
     let (_, focus) = markdown::render::fixture_link(&long)
         .ok_or_else(|| anyhow::anyhow!("long link was not painted"))?;
-    window.update(cx, |_, w, cx| w.focus(&focus, cx))?;
+    gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| w.focus(&focus, cx))?;
     pause(cx, 300).await;
     screenshot(window, output, "transcript-link-focus", cx).await?;
     key(window, "shift-f10", cx).await?;
@@ -173,7 +180,7 @@ pub(super) async fn exercise(
     let details = format!("{origin}/two");
     let (_, focus) = markdown::render::fixture_link(&details)
         .ok_or_else(|| anyhow::anyhow!("labeled link not painted"))?;
-    window.update(cx, |_, w, cx| w.focus(&focus, cx))?;
+    gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| w.focus(&focus, cx))?;
     pause(cx, 100).await;
     key(window, "enter", cx).await?;
     let (second, _) = window
@@ -203,6 +210,102 @@ pub(super) async fn exercise(
         serde_json::to_vec_pretty(
             &serde_json::json!({"fixture":"transcript-links", "passed":true, "missing_runtime":missing_runtime, "platform":std::env::consts::OS}),
         )?,
+    )?;
+    Ok(())
+}
+
+/// Exercise the actual tool header through the shared link interaction layer.
+async fn web_tools(
+    window: WindowHandle<shell::Shell>,
+    state: Entity<state::AppState>,
+    origin: &str,
+    output: &std::path::Path,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    let destination = format!("{origin}/two");
+    state.update(cx, |s, cx| {
+        let entries = serde_json::from_value(serde_json::json!([
+            {"id":"web-tools","role":"assistant","parts":[
+                {"id":"intro","kind":"text","text":"I’m checking the workspace documentation."},
+                {"id":"fetch","kind":"tool","call":{"kind":"webFetch","url":destination},"resolved":true,
+                 "output":format!("Documentation: {origin}/two")}
+            ],"createdAt":1788900001000_i64,"deviceId":"local","status":"streaming"}
+        ])).unwrap();
+        s.receive_transcript_frame(zeron_doc::TranscriptFrame::Reset { reset: entries }, cx).unwrap();
+    });
+    pause(cx, 1000).await;
+    for (mode, name) in [
+        (appearance::AppearanceMode::Dark, "dark"),
+        (appearance::AppearanceMode::Light, "light"),
+    ] {
+        for (surface, label) in [
+            (zeron_theme::SurfacePreference::Frosted, "frosted"),
+            (zeron_theme::SurfacePreference::Opaque, "opaque"),
+        ] {
+            cx.update(|cx| {
+                appearance::set_mode(mode, cx);
+                appearance::set_surface(surface, cx);
+            });
+            screenshot(window, output, &format!("web-tool-{name}-{label}"), cx).await?;
+        }
+    }
+    if std::env::var_os("ZERON_WEB_TOOL_BEFORE").is_some() {
+        return Ok(());
+    }
+    cx.update(|cx| {
+        appearance::set_mode(appearance::AppearanceMode::Dark, cx);
+        appearance::set_surface(zeron_theme::SurfacePreference::Frosted, cx);
+    });
+    pause(cx, 300).await;
+    let (_, focus) = markdown::render::fixture_link(&destination)
+        .ok_or_else(|| anyhow::anyhow!("tool header URL was not painted as a link"))?;
+    gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| w.focus(&focus, cx))?;
+    key(window, "shift-f10", cx).await?;
+    screenshot(window, output, "web-tool-link-menu", cx).await?;
+    key(window, "escape", cx).await?;
+    let (position, _) = markdown::render::fixture_link(&destination)
+        .ok_or_else(|| anyhow::anyhow!("tool link disappeared after closing its menu"))?;
+    dispatch(
+        window,
+        PlatformInput::MouseMove(gpui::MouseMoveEvent {
+            position,
+            ..Default::default()
+        }),
+        cx,
+    )?;
+    pause(cx, 100).await;
+    for down in [true, false] {
+        let event = if down {
+            PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            })
+        } else {
+            PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            })
+        };
+        dispatch(window, event, cx)?;
+        pause(cx, 80).await;
+    }
+    pause(cx, 700).await;
+    let (_, page) = window
+        .update(cx, |s, _, cx| s.fixture_active_browser(cx))?
+        .ok_or_else(|| anyhow::anyhow!("tool URL click did not open Browser"))?;
+    anyhow::ensure!(
+        page.read_with(cx, |p, _| p.page.url.as_deref()
+            == Some(destination.as_str())),
+        "tool URL opened wrong destination"
+    );
+    screenshot(window, output, "web-tool-opened-browser", cx).await?;
+    std::fs::write(
+        output.join("web-tool-result.txt"),
+        "PASS: tool header link menu and pointer navigation; four appearance screenshots captured.\n",
     )?;
     Ok(())
 }
