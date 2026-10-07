@@ -414,6 +414,7 @@ impl Render for AccountUsage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let context = self.state.read(cx).context_usage;
+        let tokens = self.state.read(cx).token_usage;
         let account = self.fraction(cx).map(|fraction| {
             let level = usage_level(fraction);
             let chip = crate::context_usage::ring_chip(
@@ -444,7 +445,9 @@ impl Render for AccountUsage {
             self.trigger(
                 chip,
                 FooterCard::Context,
-                move |_, cx| crate::context_usage::card(context, &Theme::of(cx).for_popup()),
+                move |_, cx| {
+                    crate::context_usage::card(context, tokens, &Theme::of(cx).for_popup())
+                },
                 cx,
             )
         });

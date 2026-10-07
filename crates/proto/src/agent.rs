@@ -860,6 +860,33 @@ impl ContextUsage {
     }
 }
 
+/// Tokens every provider session of one chat used, summed by the host from
+/// the agents' own transcripts and replicated with the chat document. Unlike
+/// [`ContextUsage`] it only grows: it is the chat's bill, not its occupancy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTokenUsage {
+    #[serde(default)]
+    pub input: u64,
+    #[serde(default)]
+    pub output: u64,
+    /// Prompt tokens served from the provider's cache.
+    #[serde(default)]
+    pub cache_read: u64,
+    /// Prompt tokens written into the provider's cache.
+    #[serde(default)]
+    pub cache_write: u64,
+}
+
+impl ChatTokenUsage {
+    pub fn add(&mut self, other: Self) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+    }
+}
+
 #[cfg(test)]
 mod generated_image_tests {
     use super::*;

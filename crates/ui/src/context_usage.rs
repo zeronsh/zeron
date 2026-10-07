@@ -1,7 +1,7 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
 use crate::theme::Theme;
 use gpui::{IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*, px};
-use zeron_proto::ContextUsage;
+use zeron_proto::{ChatTokenUsage, ContextUsage};
 
 /// The context ring's trigger chip; the footer ([`crate::account_usage`])
 /// opens [`card`] from it on click.
@@ -147,27 +147,79 @@ fn details(usage: Option<ContextUsage>) -> String {
     }
 }
 
-/// The context ring's popover content.
-pub fn card(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Div {
+/// The chat's running bill, in the providers' own terms: every provider
+/// session it used, cache included.
+fn chat_rows(usage: ChatTokenUsage) -> [(&'static str, String); 4] {
+    [
+        ("Output", with_separators(usage.output)),
+        ("Input", with_separators(usage.input)),
+        ("Cache read", with_separators(usage.cache_read)),
+        ("Cache write", with_separators(usage.cache_write)),
+    ]
+}
+
+fn section(theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pb(px(6.0))
+        .text_size(px(12.0))
+        .line_height(px(19.0))
+        .whitespace_nowrap()
+        .text_color(theme.text_muted)
+}
+
+/// The context ring's popover content: the window now, then what the chat
+/// has used so far when its host has counted it.
+pub fn card(
+    usage: Option<ContextUsage>,
+    tokens: Option<ChatTokenUsage>,
+    theme: &Theme,
+) -> gpui::Div {
     crate::popover::popover_card(theme)
         .flex()
         .flex_col()
         .child(crate::popover::menu_heading(theme, "Context window"))
-        .child(
-            div()
-                .px(px(8.0))
-                .pb(px(6.0))
-                .text_size(px(12.0))
-                .line_height(px(19.0))
-                .whitespace_nowrap()
-                .text_color(theme.text_muted)
-                .child(SharedString::from(details(usage))),
+        .child(section(theme).child(SharedString::from(details(usage))))
+        .when_some(
+            tokens.filter(|tokens| *tokens != ChatTokenUsage::default()),
+            |card, tokens| {
+                let rows = chat_rows(tokens).map(|(label, value)| {
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap(px(24.0))
+                        .child(label)
+                        .child(value)
+                });
+                card.child(crate::popover::menu_heading(theme, "This chat"))
+                    .child(section(theme).flex().flex_col().children(rows))
+            },
         )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_usage_rows_match_the_context_lines() {
+        let usage = ChatTokenUsage {
+            input: 1_200,
+            output: 34_000,
+            cache_read: 5_000_000,
+            cache_write: 80_000,
+        };
+        assert_eq!(
+            chat_rows(usage).map(|(label, value)| format!("{label} {value}")),
+            [
+                "Output 34,000",
+                "Input 1,200",
+                "Cache read 5,000,000",
+                "Cache write 80,000"
+            ]
+        );
+    }
+
     #[test]
     fn indicator_needs_a_reported_window() {
         assert!(!has_window(None));

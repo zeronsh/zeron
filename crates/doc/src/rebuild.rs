@@ -56,6 +56,9 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
     if let Some(usage) = source.context_usage() {
         thin.update_context_usage(usage.tokens, usage.window)?;
     }
+    if let Some(usage) = source.token_usage() {
+        thin.set_token_usage(usage)?;
+    }
     let mut sidecar = Vec::new();
     let entries = source.read_entries()?;
     let entry_count = entries.len();

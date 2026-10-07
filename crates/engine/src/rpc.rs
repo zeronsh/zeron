@@ -1542,7 +1542,7 @@ fn doc_messages_stream(
             rx,
             None::<crate::doc_host::TranscriptSnapshot>,
             doc,
-            None,
+            (None, None),
             zeron_doc::TranscriptBaseline::default(),
         ),
         |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
@@ -1588,14 +1588,15 @@ fn doc_messages_stream(
                 prev = Some(current);
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
-                let usage = doc.context_usage();
+                let usage = (doc.context_usage(), doc.token_usage());
                 if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
                     continue;
                 }
                 previous_usage = usage;
                 let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
-                    context_usage: usage,
+                    context_usage: usage.0,
+                    token_usage: usage.1,
                     replay_baseline,
                 })
                 .ok()?;
@@ -1618,6 +1619,7 @@ async fn opening_doc_messages_stream(
         let mut preview = serde_json::to_value(zeron_doc::TranscriptUpdate {
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: handle.doc().context_usage(),
+            token_usage: handle.doc().token_usage(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
@@ -2069,6 +2071,8 @@ impl RpcService for EngineRpc {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let p: ChatParams = parse_params(params)?;
+                // A chat from before token counting gets its totals on first view.
+                self.sessions.spawn_token_count(p.chat_id.clone(), true);
                 if opening_tail {
                     return Ok(RpcReply::Stream(
                         opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?,

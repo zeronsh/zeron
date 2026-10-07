@@ -369,6 +369,27 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// The chat's token totals; see [`zeron_proto::ChatTokenUsage`].
+    pub fn token_usage(&self) -> Option<zeron_proto::ChatTokenUsage> {
+        let loro::ValueOrContainer::Value(LoroValue::String(value)) =
+            self.doc.get_map("meta").get("tokenUsage")?
+        else {
+            return None;
+        };
+        serde_json::from_str(&value).ok()
+    }
+
+    /// Replace the totals; a recount that changed nothing writes nothing.
+    pub fn set_token_usage(&self, usage: zeron_proto::ChatTokenUsage) -> Result<(), DocError> {
+        if self.token_usage() != Some(usage) {
+            self.doc
+                .get_map("meta")
+                .insert("tokenUsage", serde_json::to_string(&usage)?)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
         self.doc.commit();

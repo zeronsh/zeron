@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let preview = zeron_doc::TranscriptUpdate {
             frame: zeron_doc::TranscriptFrame::reset(&tail),
             context_usage: doc.context_usage(),
+            token_usage: None,
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&tail)),
         };
         let tail_wire = serde_json::to_vec(&serde_json::to_value(preview)?)?;
@@ -53,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let update = zeron_doc::TranscriptUpdate {
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: doc.context_usage(),
+            token_usage: None,
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
         };
         let value = serde_json::to_value(update)?;

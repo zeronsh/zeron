@@ -300,6 +300,14 @@ impl SessionsEngine {
         }
     }
 
+    /// Count `chat_id`'s tokens off the runtime: after a run, and the first
+    /// time a chat with no totals is opened, which backfills chats that ran
+    /// before counting existed.
+    pub fn spawn_token_count(&self, chat_id: String, only_if_missing: bool) {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.count_token_usage(&chat_id, only_if_missing));
+    }
+
     fn doc_handle(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         let host = self
             .inner
@@ -1410,19 +1418,80 @@ impl Inner {
         cwd_ok(&session_cwd).then_some(session_id)
     }
 
-    /// The last harness session id named anywhere in the chat's journal, with
-    /// the cwd of the `SessionStarted` that governs it. `Done.session_id`
+    /// Sum every provider session this chat used, from the CLIs' own
+    /// transcripts (see [`zeron_harness::usage`]), into the chat doc. Only
+    /// the host device has those files. Blocking.
+    fn count_token_usage(&self, chat_id: &str, only_if_missing: bool) {
+        let Some(chat) = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+        else {
+            return;
+        };
+        let Some(harness) = chat.config.as_ref().map(|config| config.harness) else {
+            return;
+        };
+        // The harnesses whose transcripts `session_usage` reads.
+        if !matches!(
+            harness,
+            HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Pi
+        ) {
+            return;
+        }
+        let Some(host) = self.doc_host() else {
+            return;
+        };
+        if chat.device_id != self.device_id {
+            return;
+        }
+        let Ok(handle) = host.open(chat_id) else {
+            return;
+        };
+        if only_if_missing && handle.doc().token_usage().is_some() {
+            return;
+        }
+        let mut sessions = self.journal_harness_sessions(chat_id);
+        if let Some(id) = chat.harness_session_id.filter(|id| !id.is_empty()) {
+            let cwd = chat.harness_session_cwd.or(chat.cwd).unwrap_or_default();
+            sessions.push((id, cwd));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut total = zeron_proto::ChatTokenUsage::default();
+        let mut counted = false;
+        for (id, cwd) in &sessions {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(usage) =
+                zeron_harness::usage::session_usage(harness, id, std::path::Path::new(cwd))
+            {
+                total.add(usage);
+                counted = true;
+            }
+        }
+        // A first count whose CLI logs are gone still records zeros, so later
+        // views don't repeat it; a recount never overwrites totals with them.
+        let first_count = only_if_missing && !sessions.is_empty();
+        if (counted || first_count)
+            && let Err(err) = handle.doc().set_token_usage(total)
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "token usage write failed");
+        }
+    }
+
+    /// Every harness session id the chat's journal names, oldest first, each
+    /// with the cwd of the `SessionStarted` that governs it. `Done.session_id`
     /// inherits the cwd of the most recent `SessionStarted` (same run).
-    fn journal_harness_session(&self, chat_id: &str) -> Option<(String, String)> {
+    fn journal_harness_sessions(&self, chat_id: &str) -> Vec<(String, String)> {
         let events = match self.journal.replay(chat_id, 0) {
             Ok(events) => events,
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "journal scan for harness session failed");
-                return None;
+                return Vec::new();
             }
         };
         let mut current_cwd = String::new();
-        let mut found: Option<(String, String)> = None;
+        let mut sessions = Vec::new();
         for (_, event) in events {
             match event {
                 AgentEvent::SessionStarted {
@@ -1430,19 +1499,24 @@ impl Inner {
                 } => {
                     current_cwd = cwd;
                     if !session_id.is_empty() {
-                        found = Some((session_id, current_cwd.clone()));
+                        sessions.push((session_id, current_cwd.clone()));
                     }
                 }
                 AgentEvent::Done {
                     session_id: Some(session_id),
                     ..
                 } if !session_id.is_empty() => {
-                    found = Some((session_id, current_cwd.clone()));
+                    sessions.push((session_id, current_cwd.clone()));
                 }
                 _ => {}
             }
         }
-        found
+        sessions
+    }
+
+    /// The last of [`Self::journal_harness_sessions`].
+    fn journal_harness_session(&self, chat_id: &str) -> Option<(String, String)> {
+        self.journal_harness_sessions(chat_id).pop()
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
@@ -3038,6 +3112,17 @@ async fn drive_run(
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
+    {
+        // Claude Code queues transcript writes and drains them on a 100 ms
+        // timer, so a run's last response can reach disk after its result
+        // event; count once that has comfortably passed.
+        let inner = inner.clone();
+        let chat_id = chat_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::task::spawn_blocking(move || inner.count_token_usage(&chat_id, false));
+        });
+    }
     if !interrupted && !orphans.is_empty() {
         // The dying run accepted these into its mailbox but never confirmed a
         // Steered boundary (idle-reaper race, a mid-turn error discarding

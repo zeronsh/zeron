@@ -25,6 +25,11 @@ use tokio::{
 };
 use zeron_proto::{AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode};
 
+/// The native transcript of Pi session `id`, for read-only usage counting.
+pub(crate) fn session_file(id: &str, cwd: &Path) -> Option<PathBuf> {
+    sessions::Store::new(None, None).resolve(id, cwd).ok()
+}
+
 pub struct PiHarness {
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,

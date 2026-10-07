@@ -24,6 +24,9 @@ pub struct TranscriptUpdate {
     pub frame: TranscriptFrame,
     #[serde(default)]
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    /// The chat's token totals. Older readers ignore it; older hosts send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<zeron_proto::ChatTokenUsage>,
     /// Historical content included in this update, independent of reset/delta
     /// encoding. Omitted on ordinary live updates and by older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -517,6 +520,7 @@ mod context_update_tests {
                 tokens: Some(0),
                 window: Some(200000),
             }),
+            token_usage: None,
         })
         .unwrap();
         assert_eq!(value["contextUsage"]["tokens"], 0);
