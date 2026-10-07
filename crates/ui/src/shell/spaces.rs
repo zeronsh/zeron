@@ -4930,6 +4930,7 @@ impl Shell {
                     jump_label,
                     self.settings.sidebar_show_project_icon && !project_group,
                     None,
+                    None,
                     theme,
                     cx,
                 );
@@ -5445,6 +5446,7 @@ impl Shell {
                         None,
                         None,
                         self.settings.sidebar_show_project_icon,
+                        None,
                         None,
                         theme,
                         cx,
