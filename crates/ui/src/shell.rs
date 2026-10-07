@@ -1296,6 +1296,22 @@ impl WidthTween {
     }
 }
 
+/// How far "↓ Scroll to bottom" has folded into a bare round ↓ button.
+#[derive(Clone, Copy)]
+pub(crate) struct ChipFold {
+    /// 0 = the labeled chip, 1 = just the arrow.
+    pub amount: f32,
+    /// The label's natural width in px (only read while folding).
+    pub label_width: f32,
+}
+
+impl ChipFold {
+    pub(crate) const OPEN: Self = Self {
+        amount: 0.0,
+        label_width: 0.0,
+    };
+}
+
 fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
     // Match the padded flex row's center, not the raw titlebar center.
     // Keep the native 24px controls untouched and give them 4px of air.
@@ -2155,6 +2171,9 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_jump_transcript(transcript.clone(), cx)
+        });
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
@@ -10461,8 +10480,10 @@ impl Shell {
                         gpui::canvas(
                             move |bounds, window, cx| {
                                 // Reserve the destination footprint, never the animated height.
+                                let composer = composer.read(cx);
                                 let next_height = f32::from(bounds.size.height)
-                                    + composer.read(cx).dock_clearance_correction();
+                                    + composer.dock_clearance_correction()
+                                    + composer.live_diff_clearance(cx);
                                 let changed = (measured.get() - next_height).abs() > 0.5
                                     || measured_has_composer.get() != contains_composer;
                                 measured.set(next_height);
@@ -10487,12 +10508,7 @@ impl Shell {
                                     .w(px(composer_width))
                                     .opacity(composer_opacity)
                                     .mx_auto()
-                                    .child(self.composer.clone())
-                                    .children(if has_selection {
-                                        self.render_jump_to_bottom(cx)
-                                    } else {
-                                        None
-                                    }),
+                                    .child(self.composer.clone()),
                                 self.composer_dock.clone(),
                                 self.viewport_height,
                                 self.reduced_motion,
@@ -10509,57 +10525,36 @@ impl Shell {
 
     /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
     /// chip — down-arrow glyph + 13px label on a near-opaque raised surface
-    /// with a hairline — horizontally centered over the transcript column and
-    /// floating six pixels above the composer. It shares the composer's
-    /// measured dock transform and paints after it, outside the transcript fade.
-    fn render_jump_to_bottom(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.transcript.read(cx).jump_button_shown() {
-            return None;
-        }
-        Some(
-            div()
-                .absolute()
-                // Share the composer's measured translation, not its final
-                // bottom-stack target. Paint after the composer so it cannot
-                // pass over this control during docking.
-                .top(px(-36.0))
-                .left_0()
-                .right(px(10.0))
-                .flex()
-                .justify_center()
-                .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), cx))
-                .into_any_element(),
-        )
-    }
-
-    /// The jump pill itself — shared between the conversation overlay and
-    /// the subagent pane so both read as one control. `anim_key`/`hover_key`
+    /// with a hairline. Shared between the composer's top row
+    /// ([`crate::live_diff`], the main conversation's), the subagent pane and
+    /// side chats so they all read as one control. `anim_key`/`hover_key`
     /// must be distinct per instance (they key global animation state).
     ///
     /// Use the shared popover tint and blur, with a separate hover wash so
     /// the floating control retains the same glass surface in either theme.
-    fn jump_pill(
-        &self,
+    ///
+    /// `fold` folds the label away into a round ↓ button (with a tooltip) for
+    /// when the chip shares a row with another; [`ChipFold::OPEN`] is the
+    /// plain labeled chip.
+    pub(crate) fn jump_pill(
         anim_key: &'static str,
         hover_key: &'static str,
         transcript: Entity<Transcript>,
-        cx: &mut Context<Self>,
+        fold: ChipFold,
+        cx: &App,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let glass = theme.is_frost();
-        let base = if glass {
-            popover::surface_bg(&theme)
-        } else {
-            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
-        };
-        let wash = if glass {
-            motion::hover_blend(hover_key, gpui::transparent_black(), theme.glass_hover())
-        } else {
-            gpui::transparent_black()
-        };
+        let (base, wash) = popover::pill_fills(hover_key, &theme);
+        let open = 1.0 - fold.amount;
+        let label = div()
+            .text_size(crate::typography::ui_rems(13.0))
+            .text_color(theme.text.opacity(open))
+            .child(SharedString::from("Scroll to bottom"));
         let pill = div()
             .id(anim_key)
             .h(px(30.0))
+            .min_w(px(30.0))
             .rounded_full()
             .border_1()
             .border_color(theme.border)
@@ -10567,9 +10562,14 @@ impl Shell {
             .cursor_pointer()
             .bg(base)
             .on_hover(motion::hover_listener(hover_key))
-            .on_click(cx.listener(move |_, _, _, cx| {
+            .role(gpui::Role::Button)
+            .aria_label("Scroll to bottom")
+            .when(fold.amount > 0.0, |el| {
+                el.tooltip(crate::settings::widgets::text_tooltip("Scroll to bottom"))
+            })
+            .on_click(move |_, _, cx| {
                 transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
-            }))
+            })
             .child(
                 // The hover wash rides an inner full-height layer so it
                 // composites over the tint (a div has one bg).
@@ -10578,9 +10578,9 @@ impl Shell {
                     .rounded_full()
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
-                    .pl(px(11.0))
-                    .pr(px(13.0))
+                    .justify_center()
+                    .pl(px(motion::lerp(11.0, 10.0, fold.amount)))
+                    .pr(px(motion::lerp(13.0, 10.0, fold.amount)))
                     .bg(wash)
                     .child(
                         div()
@@ -10590,9 +10590,16 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from("Scroll to bottom")),
+                            .flex_none()
+                            .ml(px(6.0 * open))
+                            // Folding: the label's box narrows (clipping the
+                            // text) while it fades, taking its gap with it.
+                            .when(fold.amount > 0.0, |el| {
+                                el.overflow_hidden()
+                                    .w(px(fold.label_width * open))
+                                    .whitespace_nowrap()
+                            })
+                            .child(label),
                     ),
             );
         // Frost OUTSIDE the entry animation (the composer pill's exact
@@ -10894,10 +10901,11 @@ impl Shell {
                             .right_0()
                             .flex()
                             .justify_center()
-                            .child(self.jump_pill(
+                            .child(Self::jump_pill(
                                 "subagent-jump-to-bottom",
                                 "subagent-jump-pill",
                                 transcript.clone(),
+                                ChipFold::OPEN,
                                 cx,
                             ))
                     });

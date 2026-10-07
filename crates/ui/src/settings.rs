@@ -572,6 +572,14 @@ pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     }
 }
 
+/// Whether the composer shows the live-diff pill while the agent works. Read
+/// at render and by the pill's own follow logic, so it is a bool field read.
+pub fn live_diff_pill(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.live_diff_pill)
+        .unwrap_or(true)
+}
+
 pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSettings)) -> bool {
     if !cx.has_global::<SettingsStore>() {
         return false;
@@ -937,6 +945,9 @@ pub struct UiSettings {
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
+    /// Show the "N files changed" pill above the composer while the agent
+    /// works. The scroll-to-bottom chip that shares its row is unaffected.
+    pub live_diff_pill: bool,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -1037,6 +1048,7 @@ impl Default for UiSettings {
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
             transcript_compact_mode: false,
+            live_diff_pill: true,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -1676,6 +1688,7 @@ impl UiSettings {
             transcript_width,
             open_web_links_in_zeron,
             transcript_compact_mode,
+            live_diff_pill,
             files_autosave_enabled,
             files_autosave_delay_ms,
             files_word_wrap,
@@ -1952,6 +1965,23 @@ mod tests {
         settings.skills_in_slash_menu = true;
         settings.save(dir.path()).unwrap();
         assert!(UiSettings::load(dir.path()).skills_in_slash_menu);
+    }
+
+    #[test]
+    fn live_diff_pill_is_on_by_default_and_opt_out_persists() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            legacy.live_diff_pill,
+            "an old file without the key keeps it on"
+        );
+        let settings = UiSettings {
+            live_diff_pill: false,
+            ..legacy
+        };
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(saved.contains(r#""liveDiffPill":false"#));
+        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
+        assert!(!loaded.live_diff_pill);
     }
 
     #[test]
@@ -2714,6 +2744,7 @@ mod tests {
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
             transcript_compact_mode: true,
+            live_diff_pill: false,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,

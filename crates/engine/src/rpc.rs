@@ -2495,16 +2495,21 @@ impl RpcService for EngineRpc {
                                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
                             crate::diff_sync::capture_commit_diff(&self.repos, root, sha).await
                         }
-                        "turn" => {
+                        // `turn`: since the last prompt (a steer starts a new
+                        // one). `run`: since the agent started working, across
+                        // steers — the live-diff pill's base.
+                        mode @ ("turn" | "run") => {
                             let chat_id = p
                                 .chat_id
                                 .as_deref()
                                 .ok_or_else(|| RpcError::Failed("chatId required".into()))?;
-                            let snapshot = self
-                                .diff_sync
-                                .turn_snapshot(chat_id)
-                                .filter(|s| s.root == identity.root)
-                                .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
+                            let snapshot = if mode == "run" {
+                                self.diff_sync.run_snapshot(chat_id).await
+                            } else {
+                                self.diff_sync.turn_snapshot(chat_id)
+                            }
+                            .filter(|s| s.root == identity.root)
+                            .ok_or_else(|| RpcError::Failed(format!("no {mode} recorded")))?;
                             crate::diff_sync::capture_turn_diff(&self.repos, root, &snapshot.tree)
                                 .await
                         }

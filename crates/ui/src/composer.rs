@@ -80,7 +80,7 @@ pub const COMPACT_TOTAL_HEIGHT: f32 = 49.0;
 /// width is supplied. Established threads follow the conversation column.
 pub const COMPOSER_MAX_WIDTH: f32 = 768.0;
 /// The queue reads as a narrower tray emerging from behind the composer.
-const QUEUE_SIDE_INSET: f32 = 16.0;
+pub(crate) const QUEUE_SIDE_INSET: f32 = 16.0;
 /// The composer covers the tray's lower padding so the queue reads as emerging
 /// from behind it instead of as a separate rounded pill.
 pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
@@ -6106,6 +6106,9 @@ pub struct Composer {
     /// The footer's rings: plan usage of the session harness's live
     /// account, and context occupancy — each opening a popover.
     account_usage: Entity<crate::account_usage::AccountUsage>,
+    /// The row above the box: the "N files changed" pill while the agent
+    /// works, and the "Scroll to bottom" chip.
+    live_diff: Entity<crate::live_diff::LiveDiff>,
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     _picker_focus: Subscription,
@@ -6192,6 +6195,7 @@ impl Composer {
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         let account_usage = cx.new(|cx| crate::account_usage::AccountUsage::new(state.clone(), cx));
+        let live_diff = cx.new(|cx| crate::live_diff::LiveDiff::new(state.clone(), cx));
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -6362,6 +6366,7 @@ impl Composer {
             _observe: observe,
             _pickers_observe: pickers_observe,
             account_usage,
+            live_diff,
             side_chat: false,
             _picker_focus: picker_focus,
             _input_events: input_events,
@@ -8567,6 +8572,23 @@ impl Composer {
         cx.notify();
     }
 
+    /// The transcript the top row's scroll-to-bottom chip jumps. Only the main
+    /// conversation's composer gets one; a side chat's row stays inert.
+    pub(crate) fn set_jump_transcript(
+        &mut self,
+        transcript: Entity<crate::transcript::Transcript>,
+        cx: &mut Context<Self>,
+    ) {
+        self.live_diff
+            .update(cx, |live_diff, cx| live_diff.set_transcript(transcript, cx));
+    }
+
+    /// Height the transcript leaves above the composer for the live-diff pill,
+    /// which floats there without moving the composer.
+    pub(crate) fn live_diff_clearance(&self, cx: &App) -> f32 {
+        self.live_diff.read(cx).clearance()
+    }
+
     pub(crate) fn run_live(&self, cx: &App) -> bool {
         let s = self.state.read(cx);
         let Some(chat_id) = s.selected_chat.as_deref() else {
@@ -10763,6 +10785,10 @@ impl Render for Composer {
             .gap(px(Theme::SPACE_SM))
             .px(px(Theme::SPACE_LG))
             .pb(px(Theme::SPACE_LG))
+            // The top row floats the scroll-to-bottom chip above everything
+            // else here and grows into a line of its own for the live-diff
+            // pill. It has no height at rest (a side chat's stays inert).
+            .when(!self.side_chat, |el| el.child(self.live_diff.clone()))
             .when_some(failure, |el, message| {
                 // Amber with "Warning" for the offline-ish case (engine not
                 // connected), red with "Error" for send/run failures. Click

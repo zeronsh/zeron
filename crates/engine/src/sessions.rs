@@ -167,14 +167,16 @@ struct Inner {
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
-    /// Fired with `(chat_id, cwd)` when a user prompt starts a turn (fresh
-    /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
-    /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
+    /// Fired with `(chat_id, cwd, starts_run)` when a user prompt starts a turn
+    /// (fresh dispatch or accepted steer) — the diff sync snapshots the
+    /// checkout tree for the Changes pane's "Latest turn" scope (and, when the
+    /// prompt starts a run, for the live-diff pill). Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
 }
 
-/// Turn-start hook: called with `(chat_id, cwd)`.
-pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// Turn-start hook: called with `(chat_id, cwd, starts_run)`. `starts_run` is
+/// false for a prompt steered into a run that is already working.
+pub type TurnListener = Arc<dyn Fn(&str, &str, bool) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -258,9 +260,18 @@ impl SessionsEngine {
         let _ = self.inner.turn_listener.set(listener);
     }
 
+    /// A user prompt is starting a turn (dispatch or steer). It starts a *run*
+    /// unless the agent is already working: a mid-run steer continues the same
+    /// stretch of work.
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
+        let mid_run = self.session_status(chat_id).is_some_and(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Working | SessionStatus::AwaitingInput
+            )
+        });
         if let Some(listener) = self.inner.turn_listener.get() {
-            listener(chat_id, cwd);
+            listener(chat_id, cwd, !mid_run);
         }
     }
 
@@ -427,6 +438,10 @@ impl SessionsEngine {
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
             .map_err(EngineError::Other)?;
+        // The turn's diff bases are replaced the moment its prompt arrives —
+        // before the lease, routing or `Working` below — so nothing that sees
+        // the new turn can be answered from the previous one's base.
+        self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -482,7 +497,6 @@ impl SessionsEngine {
             if accepted {
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
-                self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
                         history_sent.store(true, std::sync::atomic::Ordering::Release);
@@ -1865,9 +1879,6 @@ async fn drive_run(
             if let Some(lease) = lease {
                 _execution_lease = Some(lease.clone());
                 controls.execution_lease = Some(lease);
-                if let Some(listener) = inner.turn_listener.get() {
-                    listener(&chat_id, &request.cwd);
-                }
                 let mut wire_request = request;
                 if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
                     wire_request.prompt =

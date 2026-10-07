@@ -314,8 +314,8 @@ impl EngineCore {
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();
-        sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
-            turn_diff.note_turn_start(chat_id, cwd);
+        sessions.set_turn_listener(Arc::new(move |chat_id, cwd, starts_run| {
+            turn_diff.note_turn_start(chat_id, cwd, starts_run);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         Ok(Self {
