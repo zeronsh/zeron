@@ -41,6 +41,31 @@ case "$first" in
   ;;
 
 
+*scenario:thinking-display*)
+  # The undocumented --thinking-display flag must reach the CLI whenever the
+  # resolved binary accepts it: its absence silently drops the thinking
+  # summary newer models need. Reported back as a run error when it is missing.
+  found=false
+  expect_flag=false
+  for arg in "$@"; do
+    if [ "$expect_flag" = true ]; then
+      [ "$arg" = "summarized" ] || exit 1
+      expect_flag=false
+      found=true
+      continue
+    fi
+    [ "$arg" = "--thinking-display" ] && expect_flag=true
+  done
+  if [ "$found" != true ]; then
+    emit '{"type":"result","subtype":"error_during_execution","errors":["--thinking-display summarized was not passed"],"usage":{"input_tokens":0,"output_tokens":0},"session_id":"sess-td"}'
+    exit 0
+  fi
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-td"}'
+  emit '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"summarized"}}}'
+  emit '{"type":"result","subtype":"success","result":"flag present","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-td"}'
+  ;;
+
+
 *scenario:happy*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","Read"],"cwd":"/tmp","session_id":"sess-1"}'
   # Re-emitted init mid-run (background-task wakeup): must be deduped.
