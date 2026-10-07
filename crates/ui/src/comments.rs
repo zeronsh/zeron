@@ -185,6 +185,7 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
             icon: crate::icons::CHAT_ROUND_LINE,
             label: chip_label(details.len()).into(),
             details,
+            full: Default::default(),
         },
     ))
 }

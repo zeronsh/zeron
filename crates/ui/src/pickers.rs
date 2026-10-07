@@ -778,6 +778,7 @@ impl Pickers {
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::OpenAttachment(_)
+            | ComposerInputEvent::PastedLongText(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)

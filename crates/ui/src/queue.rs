@@ -1548,7 +1548,10 @@ impl Composer {
             .insert(self.current_key.clone(), attachments);
         self.appshots.insert(self.current_key.clone(), appshots);
         self.focus_pending = true;
-        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.input.update(cx, |input, cx| {
+            input.chips_long_pastes = false;
+            input.set_text(text, cx);
+        });
     }
 
     /// The text a queue edit saves: a chip whose attachment was removed is
@@ -1611,6 +1614,7 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.cancel_dictation();
             input.read_only = false;
+            input.chips_long_pastes = true;
             cx.notify();
         });
         self.queue_edit_task = None;

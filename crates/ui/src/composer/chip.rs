@@ -30,6 +30,8 @@ pub enum ChipKind {
     Command,
     File,
     Directory,
+    /// Long pastes staged or sent beside the prompt (see [`crate::pasted`]).
+    Paste,
 }
 
 /// What a chip's icon is painted from: a monochrome glyph tinted like the
@@ -170,6 +172,7 @@ pub(crate) fn chip_icon(
         ChipKind::Image => ChipIcon::Glyph(crate::icons::GALLERY),
         ChipKind::Skill => ChipIcon::Glyph(crate::icons::MAGIC_STICK_3),
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
+        ChipKind::Paste => ChipIcon::Glyph(crate::icons::DOCUMENT),
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),
@@ -290,4 +293,18 @@ pub(crate) fn chip_text(
         .child(underlay)
         .child(styled)
         .into_any_element()
+}
+
+/// A chip standing on its own rather than inside text.
+pub(crate) fn chip_pill(kind: ChipKind, label: &str, theme: &Theme) -> gpui::AnyElement {
+    let label = label.replace(' ', "\u{00A0}");
+    let text = format!("{MENTION_SIDE_PAD}{CHIP_ICON_SLOT}{label}{CHIP_TRAILING_PAD}");
+    let span = SentMentionSpan {
+        range: 0..text.len(),
+        path: SharedString::default(),
+        kind,
+        attachment: None,
+        upload: None,
+    };
+    chip_text(text.into(), vec![span], theme)
 }

@@ -20,6 +20,9 @@ pub struct MessageBadge {
     pub label: SharedString,
     /// Empty means the label says everything and the pill carries no card.
     pub details: Vec<BadgeDetail>,
+    /// Text a click shows in the message, on a chip instead of a pill; empty
+    /// means the pill isn't expandable.
+    pub full: SharedString,
 }
 
 /// One row of a hover card. Three generic slots, so a new badge kind fills them
@@ -37,7 +40,7 @@ pub struct BadgeDetail {
 /// it. `None` when the message carries nothing of that kind.
 pub type Extractor = fn(&str) -> Option<(String, MessageBadge)>;
 
-const EXTRACTORS: &[Extractor] = &[crate::comments::extract_badge];
+const EXTRACTORS: &[Extractor] = &[crate::comments::extract_badge, crate::pasted::extract_badge];
 
 /// Each extractor sees what the previous ones left behind, so two features can
 /// ride the same prompt.

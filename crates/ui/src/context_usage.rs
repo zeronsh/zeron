@@ -95,7 +95,7 @@ pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl Into
     .size(px(16.0))
 }
 
-fn with_separators(count: u64) -> String {
+pub(crate) fn with_separators(count: u64) -> String {
     let digits = count.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
