@@ -310,19 +310,25 @@ impl PullRequestDetailPage {
                                 let selected = self.verification_platform == platform;
                                 let id = format!("pr-verification-{}", platform.label());
                                 let selector = id.clone();
-                                crate::surface_chrome::tab_frame(
-                                    SharedString::from(id),
-                                    selected,
-                                    theme,
-                                )
-                                .debug_selector(move || selector.clone())
-                                .role(gpui::Role::Button)
-                                .aria_label(platform.label())
-                                .aria_selected(selected)
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .child(platform.label())
-                                .on_click(cx.listener(
-                                    move |page, _, _, cx| {
+                                crate::surface_chrome::tab(SharedString::from(id), selected, theme)
+                                    .debug_selector(move || selector.clone())
+                                    .role(gpui::Role::Button)
+                                    .aria_label(platform.label())
+                                    .aria_selected(selected)
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .line_height(crate::typography::ui_rems(16.0))
+                                    .px(px(10.0))
+                                    .child(
+                                        div()
+                                            .debug_selector(move || {
+                                                format!(
+                                                    "pr-verification-label-{}",
+                                                    platform.label()
+                                                )
+                                            })
+                                            .child(platform.label()),
+                                    )
+                                    .on_click(cx.listener(move |page, _, _, cx| {
                                         page.verification_platform = platform;
                                         cx.notify();
                                     },

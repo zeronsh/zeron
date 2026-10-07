@@ -1938,6 +1938,7 @@ impl PullRequestsPage {
         };
         div()
             .mt(px(72.0))
+            .flex_none()
             .flex()
             .flex_col()
             .items_center()
@@ -1951,7 +1952,8 @@ impl PullRequestsPage {
                 div()
                     .w_full()
                     .max_w(px(420.0))
-                    .text_size(px(15.0))
+                    .text_size(crate::typography::ui_rems(15.0))
+                    .line_height(crate::typography::ui_rems(22.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child(SharedString::from(title)),
@@ -1961,7 +1963,9 @@ impl PullRequestsPage {
                     .mt(px(6.0))
                     .w_full()
                     .max_w(px(420.0))
-                    .text_size(px(13.0))
+                    .debug_selector(|| "pr-empty-description".into())
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .line_height(crate::typography::ui_rems(20.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(body)),
             )
@@ -2023,8 +2027,10 @@ fn empty_action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::S
         .debug_selector(move || id.into())
         .role(gpui::Role::Button)
         .tab_index(0)
-        .mt(px(Theme::SPACE_LG))
-        .h(px(32.0))
+        .mt(px(20.0))
+        .flex_none()
+        .min_h(px(32.0))
+        .line_height(crate::typography::ui_rems(18.0))
         .px(px(14.0))
         .border_1()
         .border_color(theme.border)
@@ -2156,20 +2162,19 @@ impl Render for PullRequestsPage {
                     .items_center()
                     .flex_wrap()
                     .gap(px(12.0))
-                    .child(
-                        widgets::page_header(&theme, "Pull requests", count)
-                            .items_center()
-                            .when(self.paging.next_cursor.is_some(), |el| {
-                                el.child(
-                                    div()
-                                        .id("pull-requests-loaded-count")
-                                        .debug_selector(|| "pull-requests-loaded-count".into())
-                                        .text_size(crate::typography::ui_rems(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child(format!("{} loaded", self.items.len())),
-                                )
-                            }),
-                    )
+                    .child(widgets::page_header(&theme, "Pull requests", count).when(
+                        self.paging.next_cursor.is_some(),
+                        |el| {
+                            el.child(
+                                div()
+                                    .id("pull-requests-loaded-count")
+                                    .debug_selector(|| "pull-requests-loaded-count".into())
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(format!("{} loaded", self.items.len())),
+                            )
+                        },
+                    ))
                     .child(div().flex_1())
                     .child(
                         div()
@@ -2361,6 +2366,7 @@ impl Render for PullRequestsPage {
                                 .aria_selected(selected)
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .px(px(10.0))
+                                .line_height(crate::typography::ui_rems(16.0))
                                 .child(label)
                                 .on_click(cx.listener(move |page, _, _, cx| {
                                     page.personal_view = if selected {
@@ -2378,7 +2384,9 @@ impl Render for PullRequestsPage {
                     )
                     .child(
                         div()
-                            .text_size(crate::typography::ui_rems(11.0))
+                            .debug_selector(|| "pull-requests-list-status".into())
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .line_height(crate::typography::ui_rems(16.0))
                             .text_color(theme.text_muted)
                             .child(if initial_loading {
                                 "Loading pull requests…".to_owned()
@@ -3700,6 +3708,23 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), ["authored"]);
         cx.run_until_parked();
         assert!(cx.debug_bounds("pr-empty-show-all").is_some());
+        for scale in [16.0, 20.0] {
+            cx.update(|window, _| window.set_rem_size(px(scale)));
+            for width in [320.0, 900.0] {
+                cx.simulate_resize(gpui::size(px(width), px(800.0)));
+                cx.run_until_parked();
+                let description = cx.debug_bounds("pr-empty-description").unwrap();
+                let action = cx.debug_bounds("pr-empty-show-all").unwrap();
+                assert!(action.top() - description.bottom() >= px(20.0));
+                assert!(action.size.height >= px(32.0));
+                assert!(action.left() >= px(0.0) && action.right() <= px(width));
+                if width == 900.0 {
+                    let status = cx.debug_bounds("pull-requests-list-status").unwrap();
+                    let filter = cx.debug_bounds("pr-view-starred").unwrap();
+                    assert!((status.center().y - filter.center().y).abs() < px(1.0));
+                }
+            }
+        }
     }
 
     #[gpui::test]

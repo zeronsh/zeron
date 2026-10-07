@@ -843,15 +843,23 @@ impl PullRequestDetailPage {
                             .flex_none()
                             .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis)),
                     )
-                    .child(div().min_w_0().truncate().child(label))
-                    .children(count.map(|count| {
+                    .child(
                         div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(theme.text_muted)
-                            .child(count.to_string())
-                    }))
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(6.0))
+                            .line_height(crate::typography::ui_rems(16.0))
+                            .child(div().min_w_0().truncate().child(label))
+                            .children(count.map(|count| {
+                                div()
+                                    .flex_none()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .font_weight(gpui::FontWeight::NORMAL)
+                                    .text_color(theme.text_muted)
+                                    .child(count.to_string())
+                            })),
+                    )
                     .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
                     .on_key_down(cx.listener(
                         move |page, event: &gpui::KeyDownEvent, window, cx| {
@@ -2868,6 +2876,25 @@ mod tests {
         assert_eq!(check_name.left() - check.left(), px(16.0));
         assert!(check.size.height <= px(40.0));
         assert!(check_name.top() > check.top() && check_name.bottom() < check.bottom());
+        for scale in [16.0, 20.0] {
+            cx.update(|window, _| window.set_rem_size(px(scale)));
+            cx.run_until_parked();
+            for (control, label) in [
+                (
+                    "pr-verification-Relevant platforms",
+                    "pr-verification-label-Relevant platforms",
+                ),
+                ("pr-verification-Windows", "pr-verification-label-Windows"),
+            ] {
+                let control = cx.debug_bounds(control).unwrap();
+                let label = cx.debug_bounds(label).unwrap();
+                assert!(label.left() - control.left() >= px(10.0));
+                assert!(control.right() - label.right() >= px(10.0));
+                assert!(label.top() >= control.top() && label.bottom() <= control.bottom());
+            }
+        }
+        cx.update(|window, _| window.set_rem_size(px(16.0)));
+        cx.run_until_parked();
         let platform = cx.debug_bounds("pr-verification-Windows").unwrap();
         cx.simulate_mouse_down(
             platform.center(),
