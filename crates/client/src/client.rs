@@ -18,6 +18,7 @@ use crate::connectivity::{
     Connectivity, ConnectivityState, ConnectivityTracker, RawConnectivity, SendState,
 };
 use crate::demo::DemoHost;
+use crate::direct::host::DirectHost;
 use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
@@ -30,10 +31,27 @@ use crate::{lock, now_ms, read, write};
 const ATTACHMENT_CACHE_BYTES: usize = 48 * 1024 * 1024;
 /// Time-driven re-derivation cadence (staleness, presence, send grace).
 const TICK: Duration = Duration::from_secs(1);
+/// After ListHarnesses fails to reach a computer, plain model reads use the
+/// saved lists for this long (see `Client::model_catalog`).
+const CATALOG_OUTAGE: Duration = Duration::from_secs(60);
+/// A live catalog read (the prefetch right after a direct link comes up, the
+/// background refresh every [`CATALOG_REFRESH`], or any later read) answers
+/// plain reads for this long without asking the computer again, so opening
+/// New Session never waits behind a busy link. A forced read (retry, or the
+/// model list's refresh action) always asks.
+const CATALOG_FRESH: Duration = Duration::from_secs(30 * 60 + 60);
+/// While a direct link is up, the CLI/model lists are re-read in the
+/// background this often (and once right after connecting). A failed read
+/// keeps the saved lists.
+pub(crate) const CATALOG_REFRESH: Duration = Duration::from_secs(30 * 60);
 /// Detached sessions kept warm (doc + room) before the least recently used
 /// is evicted. On-screen sessions, streaming ones and ones with unadopted
 /// sends are never evicted.
 pub const WARM_SESSION_CAP: usize = 6;
+/// Over a direct link: transcripts kept in memory after leaving them (the
+/// most recently viewed, not streaming). Coming back shows the kept one at
+/// once while it resubscribes; older ones are dropped and load again.
+pub const DIRECT_KEPT_TRANSCRIPTS: usize = 3;
 /// Sessions `preload_sessions` warms (front page order).
 pub const PRELOAD_CAP: usize = 4;
 
@@ -61,6 +79,8 @@ pub struct NewSession {
 pub(crate) enum Backend {
     Demo(Arc<DemoHost>),
     Live(Box<LiveBackend>),
+    /// SSH straight to the user's own machine (no edge).
+    Direct(Arc<DirectHost>),
 }
 
 pub(crate) struct ClientInner {
@@ -70,6 +90,10 @@ pub(crate) struct ClientInner {
     pub(crate) workspace: WorkspaceStore,
     pub(crate) tokens: TokenProvider,
     pub(crate) attachment_cache: AttachmentCache,
+    /// Staged attachment bytes waiting to reach the host — durable under the
+    /// data dir and retried across restarts on every real backend (the Live
+    /// escorts and the direct link carry the same chunk protocol).
+    pub(crate) escorts: crate::live::escort::Escorts,
     backend: OnceLock<Backend>,
     sessions: Mutex<HashMap<String, Arc<SessionCore>>>,
     pub(crate) cancel: CancellationToken,
@@ -79,6 +103,13 @@ pub(crate) struct ClientInner {
     foreground: AtomicBool,
     synced: AtomicBool,
     harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
+    /// Device → when ListHarnesses last failed to reach it, and why. Plain
+    /// model reads skip the computer for a while after (see
+    /// [`CATALOG_OUTAGE`]) instead of each waiting out its own timeout.
+    catalog_outage: Mutex<HashMap<String, (std::time::Instant, String)>>,
+    /// (device, harness — "" for the harness list) → when it was last read
+    /// live. Plain reads within [`CATALOG_FRESH`] use the saved copy.
+    catalog_fresh: Mutex<HashMap<(String, String), std::time::Instant>>,
 }
 
 impl Drop for ClientInner {
@@ -96,8 +127,42 @@ impl ClientInner {
     pub(crate) fn demo(&self) -> Option<&Arc<DemoHost>> {
         match self.backend() {
             Backend::Demo(demo) => Some(demo),
-            Backend::Live(_) => None,
+            _ => None,
         }
+    }
+
+    pub(crate) fn direct(&self) -> Option<&Arc<DirectHost>> {
+        match self.backend.get()? {
+            Backend::Direct(direct) => Some(direct),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_direct(&self) -> bool {
+        self.direct().is_some()
+    }
+
+    /// Direct: forward a registry mutation to the engine (the optimistic
+    /// local write already landed; the mirror confirms it).
+    pub(crate) fn direct_mutate(&self, op: serde_json::Value) {
+        if let Some(direct) = self.direct() {
+            direct.mutate(op);
+        }
+    }
+
+    /// Direct: first mirror pass landed — the replica is authoritative.
+    pub(crate) fn mark_direct_synced(self: &Arc<Self>) {
+        if self.synced.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // Phone-only sidebar prefs (pins/sections) initialize locally.
+        let _ = self
+            .workspace
+            .mutate(|doc| doc.reconcile_sidebar_pins(true));
+        if let Some(direct) = self.direct() {
+            direct.settle_registry(self);
+        }
+        self.recompute_workspace();
     }
 
     pub(crate) fn is_demo(&self) -> bool {
@@ -107,7 +172,7 @@ impl ClientInner {
     pub(crate) fn live(&self) -> Option<&LiveBackend> {
         match self.backend.get()? {
             Backend::Live(live) => Some(live),
-            Backend::Demo(_) => None,
+            _ => None,
         }
     }
 
@@ -151,6 +216,7 @@ impl ClientInner {
         match self.backend() {
             Backend::Demo(demo) => demo.settle_registry(&self.workspace),
             Backend::Live(live) => live.registry_written(),
+            Backend::Direct(direct) => direct.settle_registry(self),
         }
         self.recompute_workspace();
     }
@@ -241,6 +307,14 @@ impl ClientInner {
     /// chat's CreateChat row — to reach the edge first, so the host never
     /// wakes for a chat it can't see yet.
     pub(crate) fn nudge_host(self: &Arc<Self>, host: &str, chat_id: &str) {
+        // Direct has no edge to POST to: "wake the chat" is a local command
+        // drain — e.g. an attachment escort just landed the bytes a held
+        // command was waiting on.
+        if let Some(direct) = self.direct() {
+            let _ = host; // one machine per link
+            direct.on_command(chat_id);
+            return;
+        }
         let Some(live) = self.live() else { return };
         let url = crate::live::urls::nudge(&live.edge, host);
         let inner = Arc::downgrade(self);
@@ -288,11 +362,25 @@ impl ClientInner {
     }
 
     pub(crate) fn mark_seen(self: &Arc<Self>, chat_id: &str) {
-        let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
+        let now = Utc::now();
+        let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, now));
+        self.direct_mutate(serde_json::json!({
+            "op": "markChatSeen", "chatId": chat_id, "at": now.timestamp_millis(),
+        }));
     }
 
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
         let raw = match self.live() {
+            None if self.is_direct() => {
+                let status = self.direct().map(|d| d.status()).unwrap_or_default();
+                RawConnectivity {
+                    path_offline: !self.network_online(),
+                    registry_connected: status.phase.is_up(),
+                    registry_retry_at_ms: status.retry_at_ms,
+                    last_failure: status.last_error,
+                    chat_rooms: Vec::new(),
+                }
+            }
             None => RawConnectivity {
                 path_offline: !self.network_online(),
                 registry_connected: true,
@@ -394,7 +482,10 @@ impl ClientInner {
         let Some(device) = workspace.device(device_id) else {
             return HostCapabilities::default();
         };
-        let has = |cap: &str| device.capabilities.iter().any(|c| c == cap);
+        // Direct: the shared queue lives in the engine's doc, which the phone
+        // only mirrors — busy sends steer instead of queueing.
+        let direct = self.is_direct();
+        let has = |cap: &str| !direct && device.capabilities.iter().any(|c| c == cap);
         let mid_turn_steering = harness.and_then(|harness| {
             lock(&self.harness_catalogs)
                 .get(device_id)
@@ -439,7 +530,7 @@ impl ClientInner {
                 let upload_id = crate::new_id();
                 let name = attachments::upload_file_name(&attachment.name);
                 let reference = attachments::pending_ref(&upload_id, &name);
-                if let Some(live) = self.live() {
+                if !self.is_demo() {
                     let meta = crate::live::escort::StashMeta {
                         upload_id: upload_id.clone(),
                         chat_id: chat_id.to_owned(),
@@ -447,7 +538,7 @@ impl ClientInner {
                         name: name.clone(),
                         created_at_ms: now_ms(),
                     };
-                    live.escorts
+                    self.escorts
                         .stash(&meta, &attachment.data)
                         .map_err(|e| ClientError::Storage(e.to_string()))?;
                 }
@@ -463,9 +554,17 @@ impl ClientInner {
     pub(crate) fn after_command(self: &Arc<Self>, core: &Arc<SessionCore>, has_attachments: bool) {
         match self.backend() {
             Backend::Demo(demo) => demo.on_command(&core.chat_id),
-            Backend::Live(live) => {
+            Backend::Direct(direct) => {
+                // A send streams its transcript until adopted, on screen or not.
+                direct.session_opened(core);
+                direct.on_command(&core.chat_id);
                 if has_attachments {
-                    live.escorts.respawn_chat(self, &core.chat_id);
+                    self.escorts.respawn_chat(self, &core.chat_id);
+                }
+            }
+            Backend::Live(_) => {
+                if has_attachments {
+                    self.escorts.respawn_chat(self, &core.chat_id);
                 }
                 if let Some(host) = self.workspace.chat(&core.chat_id).map(|c| c.device_id) {
                     self.nudge_host(&host, &core.chat_id);
@@ -483,6 +582,19 @@ impl ClientInner {
         match self.backend() {
             Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
             Backend::Live(live) => live.relay.call(device_id, method, params).await,
+            Backend::Direct(direct) => {
+                let _ = device_id; // one machine per link
+                direct.call(method, params).await
+            }
+        }
+    }
+
+    /// A host catalog read failed: warn, and on a direct link also put it in
+    /// the connection log the user can open (连接详情 › 日志 / Connection Details › Log).
+    pub(crate) fn catalog_warning(&self, message: String) {
+        match self.direct() {
+            Some(direct) => direct.warn(message),
+            None => tracing::warn!("{message}"),
         }
     }
 
@@ -494,23 +606,37 @@ impl ClientInner {
         if let Some(live) = self.live() {
             live.kick();
         }
+        if let Some(direct) = self.direct() {
+            direct.kick();
+        }
     }
 
     /// Drop the least recently used detached, quiet sessions past the cap.
+    /// Over a direct link a detached transcript no longer streams (its
+    /// "streaming" flag is just where it stood when it left), so only the
+    /// [`DIRECT_KEPT_TRANSCRIPTS`] most recently viewed stay.
     pub(crate) fn evict_sessions(&self) {
+        let direct = self.direct().is_some();
+        let cap = if direct {
+            DIRECT_KEPT_TRANSCRIPTS
+        } else {
+            WARM_SESSION_CAP
+        };
         let mut sessions = lock(&self.sessions);
         let mut idle: Vec<(i64, String)> = sessions
             .values()
             .filter(|core| {
-                !core.view_attached() && !core.has_pending_sends() && !core.snapshot().streaming
+                !core.view_attached()
+                    && !core.has_pending_sends()
+                    && (direct || !core.snapshot().streaming)
             })
             .map(|core| (core.touched_ms(), core.chat_id.clone()))
             .collect();
-        if idle.len() <= WARM_SESSION_CAP {
+        if idle.len() <= cap {
             return;
         }
         idle.sort();
-        let excess = idle.len() - WARM_SESSION_CAP;
+        let excess = idle.len() - cap;
         for (_, chat_id) in idle.into_iter().take(excess) {
             tracing::debug!(chat = %chat_id, "evicting warm session");
             sessions.remove(&chat_id);
@@ -533,7 +659,9 @@ impl ClientInner {
         self.recompute_connectivity();
         self.recompute_workspace();
         for core in self.cores() {
-            if core.has_pending_sends() {
+            // Time-driven: delivery grace, and a just-adopted send's wait
+            // for its turn to be reported.
+            if core.has_pending_sends() || core.awaiting_turn() {
                 core.refresh();
             }
         }
@@ -587,6 +715,11 @@ impl Client {
         // the very first snapshot renders the cached workspace (instant).
         let (registry, store) = if credentials.is_demo() {
             (RegistryDoc::new(config.device_id.clone()), None)
+        } else if credentials.is_direct() {
+            (
+                DirectHost::load_registry(&config.data_dir, &config.device_id),
+                None,
+            )
         } else {
             let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
             (registry, Some(store))
@@ -596,6 +729,7 @@ impl Client {
             events: events.clone(),
             tokens,
             attachment_cache: AttachmentCache::new(ATTACHMENT_CACHE_BYTES),
+            escorts: crate::live::escort::Escorts::new(&config.data_dir),
             backend: OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
             cancel: CancellationToken::new(),
@@ -612,6 +746,8 @@ impl Client {
             foreground: AtomicBool::new(true),
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
+            catalog_outage: Mutex::new(HashMap::new()),
+            catalog_fresh: Mutex::new(HashMap::new()),
             credentials: credentials.clone(),
             config,
         });
@@ -622,6 +758,7 @@ impl Client {
                 inner.synced.store(true, Ordering::Release);
                 Backend::Demo(demo)
             }
+            Credentials::Direct(target) => Backend::Direct(DirectHost::new(&inner, target.clone())),
             _ => Backend::Live(Box::new({
                 catalog::DiskCatalog::new(&inner.config.data_dir).warm_labels();
                 LiveBackend::new(
@@ -637,6 +774,11 @@ impl Client {
             Backend::Demo(demo) => demo.start(&inner, inner.cancel.clone()),
             Backend::Live(live) => {
                 live.start(&inner);
+                inner.recompute_connectivity();
+            }
+            Backend::Direct(direct) => {
+                direct.start(inner.cancel.clone());
+                inner.escorts.respawn(&inner);
                 inner.recompute_connectivity();
             }
         }
@@ -669,6 +811,32 @@ impl Client {
         self.inner.is_demo()
     }
 
+    pub fn is_direct(&self) -> bool {
+        self.inner.is_direct()
+    }
+
+    /// The direct link's phase, errors and stream counters (`None` outside
+    /// direct mode).
+    pub fn direct_status(&self) -> Option<crate::direct::DirectStatus> {
+        self.inner.direct().map(|d| d.status())
+    }
+
+    /// Direct mode: drop the current link, even a stalled one, and redial.
+    pub fn reconnect_direct(&self) {
+        if let Some(direct) = self.inner.direct() {
+            direct.reconnect();
+        }
+    }
+
+    /// Direct mode: the machine's addresses in their new dial order (the
+    /// network changed). The link in use stays up; pair with
+    /// [`Self::reconnect_direct`] to move to the new first choice now.
+    pub fn set_direct_endpoints(&self, endpoints: Vec<crate::direct::SshEndpoint>) {
+        if let Some(direct) = self.inner.direct() {
+            direct.set_endpoints(endpoints);
+        }
+    }
+
     pub fn device_id(&self) -> &str {
         &self.inner.config.device_id
     }
@@ -689,6 +857,7 @@ impl Client {
                 live.flush_registry(&self.inner);
                 live.stop();
             }
+            Backend::Direct(direct) => direct.stop(),
         }
         self.inner.cancel.cancel();
         // Dropping the cores stops their rooms (each flushes its snapshot).
@@ -777,6 +946,25 @@ impl Client {
         };
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        if let Some(direct) = self.inner.direct() {
+            direct.note_local_row(&id);
+            let mut op = serde_json::json!({
+                "op": "createChat",
+                "chatId": id,
+                "spaceId": chat.space_id,
+                "deviceId": chat.device_id,
+                "config": chat.config,
+                "branch": chat.branch,
+            });
+            if chat.space_id.is_none() || new.cwd.is_some() {
+                op["cwd"] = serde_json::json!(chat.cwd);
+            }
+            direct.mutate(op);
+            if let Some(title) = &chat.title {
+                direct
+                    .mutate(serde_json::json!({"op": "renameChat", "chatId": id, "title": title}));
+            }
+        }
         Ok(id)
     }
 
@@ -793,15 +981,27 @@ impl Client {
     }
 
     pub fn archive_session(&self, chat_id: &str) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, true))
+        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, true))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatArchived", "chatId": chat_id, "archived": true}),
+        );
+        Ok(())
     }
 
     pub fn unarchive_session(&self, chat_id: &str) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
+        self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatArchived", "chatId": chat_id, "archived": false}),
+        );
+        Ok(())
     }
 
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.rename_chat(chat_id, title.trim()))
+        self.chat_write(chat_id, |doc| doc.rename_chat(chat_id, title.trim()))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "renameChat", "chatId": chat_id, "title": title.trim()}),
+        );
+        Ok(())
     }
 
     pub fn mark_seen(&self, chat_id: &str) {
@@ -809,12 +1009,18 @@ impl Client {
     }
 
     pub fn set_session_config(&self, chat_id: &str, config: &ChatConfig) -> Result<()> {
-        self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))
+        self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatConfig", "chatId": chat_id, "config": config}),
+        );
+        Ok(())
     }
 
     /// Remove the chat row (the doc itself stays on the edge).
     pub fn delete_session(&self, chat_id: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.delete_chat(chat_id))?;
+        self.inner
+            .direct_mutate(serde_json::json!({"op": "deleteChat", "chatId": chat_id}));
         let core = lock(&self.inner.sessions).remove(chat_id);
         // A view may still hold the session: close its room now (it flushes
         // once), so nothing re-saves the snapshot deleted below.
@@ -848,6 +1054,10 @@ impl Client {
                     doc.set_chat_cwd(chat_id, &worktree)?;
                     doc.set_chat_branch(chat_id, &reference.name)
                 })?;
+                self.inner.direct_mutate(
+                    serde_json::json!({"op": "setChatCwd", "chatId": chat_id, "cwd": worktree}),
+                );
+                self.inner.direct_mutate(serde_json::json!({"op": "setChatBranch", "chatId": chat_id, "branch": reference.name}));
             }
             return Ok(());
         }
@@ -855,6 +1065,9 @@ impl Client {
             .await?;
         self.inner
             .registry_write(|doc| doc.set_chat_branch(chat_id, &reference.name))?;
+        self.inner.direct_mutate(
+            serde_json::json!({"op": "setChatBranch", "chatId": chat_id, "branch": reference.name}),
+        );
         Ok(())
     }
 
@@ -956,7 +1169,7 @@ impl Client {
         if let Some(existing) = state
             .spaces
             .iter()
-            .find(|s| s.device_id == device_id && s.path == path)
+            .find(|s| s.device_id == device_id && same_folder(&s.path, path))
         {
             return Ok(existing.id.clone());
         }
@@ -975,10 +1188,10 @@ impl Client {
         // The owning host writes the row itself (it knows git state and runs
         // the project's setup); an unreachable host gets a local row write
         // it will adopt later.
-        if let Some(live) = self.inner.live() {
-            let asked = live
-                .relay
-                .call(
+        if self.inner.live().is_some() || self.inner.is_direct() {
+            let asked = self
+                .inner
+                .host_rpc(
                     device_id,
                     zeron_rpc::methods::MUTATE,
                     serde_json::json!({
@@ -1025,6 +1238,9 @@ impl Client {
             .inner
             .registry_write(|doc| doc.rename_space(space_id, name))?
         {
+            self.inner.direct_mutate(
+                serde_json::json!({"op": "renameSpace", "spaceId": space_id, "name": name}),
+            );
             Ok(())
         } else {
             Err(ClientError::NotFound(space_id.to_owned()))
@@ -1036,6 +1252,8 @@ impl Client {
         let deleted = self
             .inner
             .registry_write(|doc| doc.delete_space(space_id))?;
+        self.inner
+            .direct_mutate(serde_json::json!({"op": "deleteSpace", "spaceId": space_id}));
         let mut sessions = lock(&self.inner.sessions);
         for chat_id in deleted.chat_ids {
             sessions.remove(&chat_id);
@@ -1056,6 +1274,10 @@ impl Client {
         }
         let (doc, cursor, hydrated) = match self.inner.backend() {
             Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
+            Backend::Direct(direct) => {
+                let (doc, hydrated) = direct.session_doc(chat_id)?;
+                (doc, 0, hydrated)
+            }
             Backend::Live(live) => {
                 let local = crate::live::room::load_local(&live.store, chat_id);
                 (local.doc, local.cursor, local.had_content)
@@ -1077,6 +1299,9 @@ impl Client {
         core.refresh();
         if let Some(demo) = self.inner.demo() {
             demo.session_opened(&core);
+        }
+        if let Some(direct) = self.inner.direct() {
+            direct.session_opened(&core);
         }
         self.inner.evict_sessions();
         Ok(SessionHandle { core })
@@ -1104,13 +1329,93 @@ impl Client {
     /// the last cached list, else the static fallback. Cached in memory for
     /// capability gating (mid-turn steering).
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
+        self.harness_list(device_id, true).await
+    }
+
+    /// Read the harness list and every offered CLI's models now and save
+    /// them, so New Session has the computer's live lists before anything
+    /// else is asked for (direct: right after the link comes up, before
+    /// transcripts start streaming).
+    pub(crate) async fn prefetch_catalog(inner: Arc<ClientInner>, device_id: String) {
+        let client = Client { inner };
+        let harnesses = client.harness_list(&device_id, false).await;
+        let reads = harnesses
+            .iter()
+            .filter(|h| h.offered())
+            .map(|h| client.read_models(&device_id, &h.id, false, false));
+        futures::future::join_all(reads).await;
+    }
+
+    /// What New Session shows the moment it opens, without asking the
+    /// computer: every offered CLI from the lists saved on disk for
+    /// `device_id` (the last good live read, kept until another succeeds),
+    /// each `Saved`; a CLI never read from this computer gets the built-in
+    /// list, `Static`. Background reads (on connect, every
+    /// [`CATALOG_REFRESH`]) update what this returns.
+    pub fn saved_catalog(&self, device_id: &str) -> Vec<(HarnessInfo, catalog::ModelCatalog)> {
+        let demo = matches!(self.inner.backend(), Backend::Demo(_));
+        let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
+        let harnesses = lock(&self.inner.harness_catalogs)
+            .get(device_id)
+            .cloned()
+            .or_else(|| (!demo).then(|| cache.harnesses(device_id)).flatten())
+            .unwrap_or_else(catalog::fallback_harnesses);
+        harnesses
+            .into_iter()
+            .filter(HarnessInfo::offered)
+            .map(|h| {
+                let saved = (!demo).then(|| cache.models(device_id, &h.id)).flatten();
+                let catalog = match saved {
+                    Some(models) if !models.is_empty() => catalog::ModelCatalog {
+                        models,
+                        source: catalog::CatalogSource::Saved,
+                        error: None,
+                    },
+                    _ => catalog::ModelCatalog {
+                        models: if demo {
+                            crate::demo::demo_models(&h.id)
+                        } else {
+                            catalog::fallback_models(&h.id)
+                        },
+                        source: if demo {
+                            catalog::CatalogSource::Live
+                        } else {
+                            catalog::CatalogSource::Static
+                        },
+                        error: None,
+                    },
+                };
+                (h, catalog)
+            })
+            .collect()
+    }
+
+    fn catalog_is_fresh(&self, device_id: &str, key: &str) -> bool {
+        lock(&self.inner.catalog_fresh)
+            .get(&(device_id.to_owned(), key.to_owned()))
+            .is_some_and(|at| at.elapsed() < CATALOG_FRESH)
+    }
+
+    fn mark_catalog_fresh(&self, device_id: &str, key: &str) {
+        lock(&self.inner.catalog_fresh).insert(
+            (device_id.to_owned(), key.to_owned()),
+            std::time::Instant::now(),
+        );
+    }
+
+    async fn harness_list(&self, device_id: &str, use_fresh: bool) -> Vec<HarnessInfo> {
+        if use_fresh && self.catalog_is_fresh(device_id, "") {
+            if let Some(list) = lock(&self.inner.harness_catalogs).get(device_id) {
+                return list.clone();
+            }
+        }
         let list = match self.inner.backend() {
             Backend::Demo(demo) => demo.list_harnesses(device_id).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
-                let reply = live
-                    .relay
-                    .call(
+                let reply = self
+                    .inner
+                    .host_rpc(
                         device_id,
                         zeron_rpc::methods::LIST_HARNESSES,
                         serde_json::json!({}),
@@ -1121,17 +1426,39 @@ impl Client {
                             .map_err(|e| ClientError::HostError(e.to_string()))
                     });
                 match reply {
-                    Ok(list) => {
+                    Ok(list)
+                        if list.iter().any(|h| h.id != "mock")
+                            || cache.harnesses(device_id).is_none() =>
+                    {
+                        lock(&self.inner.catalog_outage).remove(device_id);
+                        self.mark_catalog_fresh(device_id, "");
                         let list: Vec<HarnessInfo> =
                             list.into_iter().filter(|h| h.id != "mock").collect();
                         cache.put_harnesses(device_id, &list);
                         list
                     }
-                    Err(err) => {
-                        tracing::debug!(device = %device_id, error = %err, "ListHarnesses failed; using cache");
+                    // An empty answer never replaces the list saved before.
+                    Ok(_) => {
+                        self.inner.catalog_warning(
+                            "ListHarnesses listed no CLIs; showing the saved list".to_owned(),
+                        );
                         cache
                             .harnesses(device_id)
                             .unwrap_or_else(catalog::fallback_harnesses)
+                    }
+                    Err(err) => {
+                        if let ClientError::HostUnavailable(why) = &err {
+                            lock(&self.inner.catalog_outage).insert(
+                                device_id.to_owned(),
+                                (std::time::Instant::now(), why.clone()),
+                            );
+                        }
+                        let saved = cache.harnesses(device_id);
+                        let shown = if saved.is_some() { "saved" } else { "built-in" };
+                        self.inner.catalog_warning(format!(
+                            "ListHarnesses failed: {err}; showing the {shown} list"
+                        ));
+                        saved.unwrap_or_else(catalog::fallback_harnesses)
                     }
                 }
             }
@@ -1147,39 +1474,117 @@ impl Client {
     /// Model catalog for `harness` on `device_id` (normalized live reply,
     /// else the cached one, else the curated static list).
     pub async fn list_models(&self, device_id: &str, harness: &str) -> Vec<ModelInfo> {
-        match self.inner.backend() {
-            Backend::Demo(demo) => demo.list_models(harness).await,
-            Backend::Live(live) => {
-                let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
-                let reply = live
-                    .relay
-                    .call(
-                        device_id,
-                        zeron_rpc::methods::LIST_MODELS,
-                        serde_json::json!({ "harness": harness }),
-                    )
-                    .await
-                    .and_then(|v| {
-                        serde_json::from_value::<Vec<ModelInfo>>(v)
-                            .map_err(|e| ClientError::HostError(e.to_string()))
-                    });
-                match reply {
-                    Ok(list) if !list.is_empty() => {
-                        let list = catalog::normalize_models(harness, list);
-                        cache.put_models(device_id, harness, &list);
-                        // Rows and chips pick up newly learned model labels.
-                        self.inner.recompute_workspace();
-                        list
-                    }
-                    _ => match cache.models(device_id, harness) {
-                        Some(list) => {
-                            catalog::learn_labels(harness, &list);
-                            list
-                        }
-                        None => catalog::fallback_models(harness),
-                    },
-                }
+        self.model_catalog(device_id, harness, false).await.models
+    }
+
+    /// [`Self::list_models`] plus where the list came from. `force` asks the
+    /// engine to re-probe the CLI instead of answering from its cache (the
+    /// user tapped retry, or refresh on a saved list): it skips
+    /// [`CATALOG_FRESH`] and the [`CATALOG_OUTAGE`] shortcut, and a good
+    /// answer replaces the list saved for this computer. A failed read never
+    /// touches the saved list: it answers with it (`Saved`) and the reason in
+    /// `error`, is logged at warn and noted in the direct connection log.
+    pub async fn model_catalog(
+        &self,
+        device_id: &str,
+        harness: &str,
+        force: bool,
+    ) -> catalog::ModelCatalog {
+        self.read_models(device_id, harness, force, true).await
+    }
+
+    async fn read_models(
+        &self,
+        device_id: &str,
+        harness: &str,
+        force: bool,
+        use_fresh: bool,
+    ) -> catalog::ModelCatalog {
+        if let Backend::Demo(demo) = self.inner.backend() {
+            return catalog::ModelCatalog {
+                models: demo.list_models(harness).await,
+                source: catalog::CatalogSource::Live,
+                error: None,
+            };
+        }
+        let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
+        if use_fresh && !force && self.catalog_is_fresh(device_id, harness) {
+            if let Some(list) = cache.models(device_id, harness) {
+                return catalog::ModelCatalog {
+                    models: list,
+                    source: catalog::CatalogSource::Live,
+                    error: None,
+                };
             }
+        }
+        let mut params = serde_json::json!({ "harness": harness });
+        if force {
+            params["force"] = serde_json::Value::Bool(true);
+        }
+        // ListHarnesses just failed to reach the computer: don't send one
+        // ListModels per CLI to wait out the same timeout (up to 100 s
+        // each); say why and show the saved list. Retry (force) still asks.
+        let outage = lock(&self.inner.catalog_outage)
+            .get(device_id)
+            .filter(|(at, _)| !force && at.elapsed() < CATALOG_OUTAGE)
+            .map(|(_, why)| why.clone());
+        let reply = match outage {
+            Some(why) => Err(ClientError::HostUnavailable(format!(
+                "ListHarnesses failed ({why})"
+            ))),
+            None => self
+                .inner
+                .host_rpc(device_id, zeron_rpc::methods::LIST_MODELS, params)
+                .await
+                .and_then(|v| catalog::decode_models(v).map_err(ClientError::HostError)),
+        };
+        let error = match reply {
+            Ok((list, notes)) if !list.is_empty() => {
+                if let Some(first) = notes.first() {
+                    self.inner.catalog_warning(format!(
+                        "ListModels {harness}: {} unreadable model row(s) ignored ({first})",
+                        notes.len()
+                    ));
+                }
+                let list = catalog::normalize_models(harness, list);
+                cache.put_models(device_id, harness, &list);
+                self.mark_catalog_fresh(device_id, harness);
+                catalog::learn_labels(harness, &list);
+                // Rows and chips pick up newly learned model labels.
+                self.inner.recompute_workspace();
+                return catalog::ModelCatalog {
+                    models: list,
+                    source: catalog::CatalogSource::Live,
+                    error: None,
+                };
+            }
+            Ok((_, notes)) => match notes.first() {
+                Some(first) => format!("no readable models ({first})"),
+                None => "the computer listed no models".to_owned(),
+            },
+            Err(err) => err.to_string(),
+        };
+        let (models, source) = match cache.models(device_id, harness) {
+            Some(list) => {
+                catalog::learn_labels(harness, &list);
+                (list, catalog::CatalogSource::Saved)
+            }
+            None => (
+                catalog::fallback_models(harness),
+                catalog::CatalogSource::Static,
+            ),
+        };
+        let shown = match source {
+            catalog::CatalogSource::Saved => "saved",
+            _ => "built-in",
+        };
+        self.inner.catalog_warning(format!(
+            "ListModels {harness} failed: {error}; showing the {shown} list"
+        ));
+        catalog::ModelCatalog {
+            models,
+            source,
+            error: Some(error),
         }
     }
 
@@ -1240,13 +1645,64 @@ impl Client {
         Ok(())
     }
 
+    /// Read the text file a message link points at (`zeron-file:` mention,
+    /// absolute path under the chat's checkout, `file://` URL…) from the
+    /// chat's computer. Paths outside the chat's workspace are refused.
+    pub async fn read_file_link(
+        &self,
+        chat_id: &str,
+        url: &str,
+    ) -> Result<crate::file_links::WorkspaceFile> {
+        let chat = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let (state, _) = self.inner.workspace.state();
+        let space_path = chat
+            .space_id
+            .as_deref()
+            .and_then(|id| state.spaces.iter().find(|s| s.id == id))
+            .map(|s| s.path.clone());
+        let roots: Vec<&str> = [
+            chat.cwd.as_deref(),
+            chat.harness_session_cwd.as_deref(),
+            space_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let path = crate::file_links::workspace_link_path(url, &roots).ok_or_else(|| {
+            ClientError::InvalidArgument(format!("{url} is outside this session's project folder"))
+        })?;
+        if let Backend::Demo(_) = self.inner.backend() {
+            return Ok(crate::demo::demo_file(&path));
+        }
+        let value = self
+            .inner
+            .host_rpc(
+                &chat.device_id,
+                zeron_rpc::methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": chat_id, "path": path }),
+            )
+            .await?;
+        let read: zeron_proto::WorkspaceFileText =
+            serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))?;
+        Ok(crate::file_links::WorkspaceFile {
+            path: read.path,
+            text: read.text,
+            size: read.size,
+            truncated: read.truncated,
+        })
+    }
+
     pub async fn list_refs(&self, device_id: &str, repo_path: &str) -> Result<Vec<RepoRef>> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_refs(repo_path).await,
-            Backend::Live(live) => {
-                let value = live
-                    .relay
-                    .call(
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
                         device_id,
                         zeron_rpc::methods::LIST_REFS,
                         serde_json::json!({ "repoPath": repo_path }),
@@ -1290,10 +1746,10 @@ impl Client {
                     })
                     .collect())
             }
-            Backend::Live(live) => {
-                let value = live
-                    .relay
-                    .call(
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
                         device_id,
                         zeron_rpc::methods::SEARCH_FILES,
                         serde_json::json!({ "query": query, "chatId": chat_id, "spaceId": space_id }),
@@ -1312,16 +1768,61 @@ impl Client {
     ) -> Result<FolderListing> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_folders(device_id, path).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let params = match path.filter(|p| !p.is_empty()) {
                     Some(path) => serde_json::json!({ "path": path }),
                     None => serde_json::json!({}),
                 };
-                let value = live
-                    .relay
-                    .call(device_id, zeron_rpc::methods::LIST_FOLDERS, params)
+                let value = self
+                    .inner
+                    .host_rpc(device_id, zeron_rpc::methods::LIST_FOLDERS, params)
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// Browse roots beyond home on a device: drive letters on Windows,
+    /// mounted volumes elsewhere (host `ListDrives`). Engines that predate
+    /// it answer `Unsupported`; callers then offer home only.
+    pub async fn list_drives(&self, device_id: &str) -> Result<Vec<crate::rpc::DriveEntry>> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(vec![crate::rpc::DriveEntry {
+                name: "System".into(),
+                path: "/".into(),
+            }]),
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
+                        device_id,
+                        zeron_rpc::methods::LIST_DRIVES,
+                        serde_json::json!({}),
+                    )
+                    .await?;
+                serde_json::from_value::<crate::rpc::DriveListing>(value)
+                    .map(|l| l.drives)
+                    .map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// Plan / rate-limit usage of every agent login on a device (host
+    /// `ListAgentAccounts`). `force` re-probes the providers (the engine
+    /// throttles it); otherwise the engine serves its last good probe.
+    pub async fn list_agent_usage(&self, device_id: &str, force: bool) -> Result<Vec<crate::rpc::AgentUsage>> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(Vec::new()),
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
+                        device_id,
+                        zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
+                        serde_json::json!({ "forceUsage": force }),
+                    )
+                    .await?;
+                Ok(crate::rpc::parse_agent_usage(&value))
             }
         }
     }
@@ -1330,9 +1831,9 @@ impl Client {
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.switch_ref(repo_path, ref_name).await,
-            Backend::Live(live) => live
-                .relay
-                .call(
+            Backend::Live(_) | Backend::Direct(_) => self
+                .inner
+                .host_rpc(
                     device_id,
                     zeron_rpc::methods::SWITCH_REF,
                     serde_json::json!({ "repoPath": repo_path, "refName": ref_name }),
@@ -1352,14 +1853,14 @@ impl Client {
     ) -> Result<String> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.create_worktree(repo_path, branch).await,
-            Backend::Live(live) => {
+            Backend::Live(_) | Backend::Direct(_) => {
                 let mut params = serde_json::json!({ "repoPath": repo_path, "branch": branch });
                 if !space_id.is_empty() {
                     params["spaceId"] = serde_json::Value::String(space_id.to_owned());
                 }
-                let value = live
-                    .relay
-                    .call(device_id, zeron_rpc::methods::CREATE_WORKTREE, params)
+                let value = self
+                    .inner
+                    .host_rpc(device_id, zeron_rpc::methods::CREATE_WORKTREE, params)
                     .await?;
                 value
                     .get("path")
@@ -1400,6 +1901,22 @@ impl Client {
                     .put(device_id, &path, Arc::new(data));
                 Ok(path)
             }
+            Backend::Direct(direct) => {
+                let upload_id = crate::new_id();
+                let file_name = attachments::upload_file_name(name);
+                let path = attachments::upload_chunks(
+                    direct.rpc_call(),
+                    &upload_id,
+                    &file_name,
+                    &data,
+                    progress,
+                )
+                .await?;
+                self.inner
+                    .attachment_cache
+                    .put(device_id, &path, Arc::new(data));
+                Ok(path)
+            }
         }
     }
 
@@ -1412,6 +1929,9 @@ impl Client {
         let bytes = match self.inner.backend() {
             Backend::Demo(demo) => demo.read_attachment(path)?,
             Backend::Live(live) => Arc::new(live.relay.read_attachment(device_id, path).await?),
+            Backend::Direct(direct) => {
+                Arc::new(attachments::read_chunks(direct.rpc_call(), path).await?)
+            }
         };
         self.inner
             .attachment_cache
@@ -1435,6 +1955,9 @@ impl Client {
                 live.kick();
                 self.kick_rooms();
             }
+            if online && let Some(direct) = self.inner.direct() {
+                direct.kick();
+            }
         }
     }
 
@@ -1450,6 +1973,9 @@ impl Client {
             live.relay.clear_unsupported();
             self.inner.reconcile_change_request_watches();
         }
+        if let Some(direct) = self.inner.direct() {
+            direct.kick();
+        }
         self.inner.tick();
     }
 
@@ -1463,6 +1989,9 @@ impl Client {
             for core in self.inner.cores() {
                 core.flush();
             }
+        }
+        if let Some(direct) = self.inner.direct() {
+            direct.save_registry();
         }
     }
 
@@ -1478,6 +2007,11 @@ impl Client {
     /// recent), up to [`PRELOAD_CAP`]. Opening is instant (local snapshot);
     /// live rooms dial behind the client's dial cap.
     pub fn preload_sessions(&self) {
+        // Over a direct link a warm session streams nothing until it is on
+        // screen (see `DirectHost::wants_mirror`), so preloading only costs.
+        if self.inner.direct().is_some() {
+            return;
+        }
         let workspace = self.workspace();
         let front = &workspace.front;
         let candidates = front
@@ -1517,4 +2051,50 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+/// Whether two project paths name the same folder. Windows hosts accept
+/// either separator (real spaces carry paths like `D:\\/Work/app`) and are
+/// case-insensitive, so compare those normalized; POSIX paths only ignore a
+/// trailing slash.
+pub(crate) fn same_folder(a: &str, b: &str) -> bool {
+    fn windowsy(p: &str) -> bool {
+        let bytes = p.as_bytes();
+        (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()) || p.starts_with("\\\\")
+    }
+    fn norm(p: &str) -> String {
+        if windowsy(p) {
+            let mut out = String::with_capacity(p.len());
+            for c in p.chars() {
+                let c = if c == '/' { '\\' } else { c };
+                if c == '\\' && out.ends_with('\\') && out.len() > 1 {
+                    continue;
+                }
+                out.push(c);
+            }
+            out.trim_end_matches('\\').to_lowercase()
+        } else {
+            let t = p.trim_end_matches('/');
+            if t.is_empty() { "/".into() } else { t.to_owned() }
+        }
+    }
+    a == b || norm(a) == norm(b)
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::same_folder;
+
+    #[test]
+    fn windows_paths_match_across_separators_and_case() {
+        assert!(same_folder("D:\\/MyWords/VibeCoding/Rewinder", "D:\\MyWords\\VibeCoding\\Rewinder"));
+        assert!(same_folder("c:\\Users\\villa\\", "C:\\Users\\villa"));
+        assert!(!same_folder("C:\\Users\\villa", "C:\\Users\\villa2"));
+    }
+
+    #[test]
+    fn posix_paths_ignore_only_a_trailing_slash() {
+        assert!(same_folder("/home/dev/app/", "/home/dev/app"));
+        assert!(!same_folder("/home/dev/App", "/home/dev/app"));
+    }
 }

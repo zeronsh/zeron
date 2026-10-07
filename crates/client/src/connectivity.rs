@@ -127,9 +127,18 @@ impl ConnectivityTracker {
     }
 }
 
-/// Oldest-pending-send truth (legacy `AppModel.sendState`).
-pub(crate) fn send_state(started_ms: i64, degraded: bool, dead: bool, now: i64) -> SendState {
-    if dead || now - started_ms > UNDELIVERED_GRACE_MS {
+/// Oldest-pending-send truth (legacy `AppModel.sendState`). `uploading`
+/// holds the grace clock while a staged attachment upload is still alive
+/// (mid-transfer OR retrying between attempts) — a slow big image must not
+/// flip to Failed while its bytes are demonstrably still moving.
+pub(crate) fn send_state(
+    started_ms: i64,
+    degraded: bool,
+    dead: bool,
+    uploading: bool,
+    now: i64,
+) -> SendState {
+    if dead || (now - started_ms > UNDELIVERED_GRACE_MS && !uploading) {
         SendState::Failed
     } else if degraded {
         SendState::Queued
@@ -172,12 +181,19 @@ mod tests {
 
     #[test]
     fn send_state_prefers_failed() {
-        assert_eq!(send_state(0, false, false, 10), SendState::Sending);
-        assert_eq!(send_state(0, true, false, 10), SendState::Queued);
+        assert_eq!(send_state(0, false, false, false, 10), SendState::Sending);
+        assert_eq!(send_state(0, true, false, false, 10), SendState::Queued);
         assert_eq!(
-            send_state(0, true, false, UNDELIVERED_GRACE_MS + 1),
+            send_state(0, true, false, false, UNDELIVERED_GRACE_MS + 1),
             SendState::Failed
         );
-        assert_eq!(send_state(0, false, true, 10), SendState::Failed);
+        // A live upload holds the grace clock — no Failed while bytes move.
+        assert_eq!(
+            send_state(0, false, false, true, UNDELIVERED_GRACE_MS + 1),
+            SendState::Sending
+        );
+        // ...but a host-rejected send is Failed upload or not.
+        assert_eq!(send_state(0, false, true, true, 10), SendState::Failed);
+        assert_eq!(send_state(0, false, true, false, 10), SendState::Failed);
     }
 }

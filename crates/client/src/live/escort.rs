@@ -121,10 +121,8 @@ impl Escorts {
         let cancel = inner.cancel.clone();
         crate::runtime::shared().spawn(async move {
             run(weak.clone(), &upload_id, cancel).await;
-            if let Some(inner) = weak.upgrade()
-                && let Some(live) = inner.live()
-            {
-                lock(&live.escorts.active).remove(&upload_id);
+            if let Some(inner) = weak.upgrade() {
+                lock(&inner.escorts.active).remove(&upload_id);
             }
         });
     }
@@ -138,13 +136,15 @@ async fn run(
     let mut backoff = BACKOFF_BASE;
     loop {
         let Some(inner) = weak.upgrade() else { return };
-        let Some(live) = inner.live() else { return };
-        let Some((meta, bytes)) = live.escorts.load(upload_id) else {
+        let Some((meta, bytes)) = inner.escorts.load(upload_id) else {
             return;
         };
         if now_ms() - meta.created_at_ms > ESCORT_MAX_MS {
             tracing::warn!(upload = %upload_id, chat = %meta.chat_id, "attachment escort expired");
-            live.escorts.remove(upload_id);
+            inner.escorts.remove(upload_id);
+            // Release commands held on these bytes so the host can reject
+            // them — a terminal state beats sitting Pending forever.
+            inner.nudge_host(&meta.host_device_id, &meta.chat_id);
             return;
         }
         let core = inner.session_core(&meta.chat_id);
@@ -156,23 +156,37 @@ async fn run(
                 }
             }) as crate::rpc::ProgressFn
         });
-        let relay_result = live
-            .relay
-            .upload(
-                &meta.host_device_id,
-                upload_id,
-                &meta.name,
-                &bytes,
-                progress,
-            )
-            .await;
+        // Same chunk protocol over whichever transport this client speaks.
+        let result = match inner.backend() {
+            crate::client::Backend::Live(live) => live
+                .relay
+                .upload(
+                    &meta.host_device_id,
+                    upload_id,
+                    &meta.name,
+                    &bytes,
+                    progress,
+                )
+                .await,
+            crate::client::Backend::Direct(direct) => {
+                crate::attachments::upload_chunks(
+                    direct.rpc_call(),
+                    upload_id,
+                    &meta.name,
+                    &bytes,
+                    progress,
+                )
+                .await
+            }
+            crate::client::Backend::Demo(_) => return,
+        };
         if let Some(core) = &core {
             core.set_transfer_progress(None);
         }
-        match relay_result {
+        match result {
             Ok(path) => {
                 tracing::info!(upload = %upload_id, %path, "attachment escorted");
-                live.escorts.remove(upload_id);
+                inner.escorts.remove(upload_id);
                 inner.nudge_host(&meta.host_device_id, &meta.chat_id);
                 return;
             }

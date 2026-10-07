@@ -125,6 +125,29 @@ fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
 }
 
+/// First paint on a cold open isn't gated on the whole transcript: the
+/// first pass shows only the newest entries headed by the "loading
+/// earlier" row, the followup pass adds the rest. An empty attach pass
+/// (the watch fires before the mirror delivers) must not spend the
+/// segment on nothing.
+#[test]
+fn cold_open_paints_the_newest_first() {
+    let mut w = worker(390.0);
+    w.pass(); // empty attach pass
+    w.input = transcript(30);
+    let first = w.pass();
+    assert!(w.followup, "a big cold input defers its prefix");
+    let head = first.display(0).and_then(|d| d.widgets.first().map(|w| w.kind.clone()));
+    assert!(matches!(head, Some(display::WidgetKind::HistoryPending { .. })));
+    let second = w.pass();
+    assert!(!w.followup);
+    assert!(second.row_count() > first.row_count());
+    // Steady state after that: every pass renders the whole input.
+    let third = w.pass();
+    assert_eq!(third.row_count(), second.row_count());
+    assert!(!w.followup);
+}
+
 #[test]
 fn stable_prefix_rows_are_reused_while_streaming() {
     let mut w = worker(390.0);
@@ -446,7 +469,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true };
+        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, outcome: None, history_pending: None };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();
@@ -605,4 +628,89 @@ fn links_get_hit_regions() {
         let links: Vec<_> = (0..frame.row_count()).flat_map(|i| frame.display(i).unwrap().links).collect();
         assert!(!links.is_empty(), "no link hits for {md:?}");
     }
+}
+
+/// The transcript's tail status row: while a turn runs, the working row is
+/// the only status (the composer pill no longer repeats it); once it ends,
+/// a done check / failed dot with the end time stays at the end.
+#[test]
+fn the_tail_row_shows_the_running_turn_then_how_it_ended() {
+    let tail = |input: TranscriptInput| {
+        let mut w = worker(390.0);
+        w.input = input;
+        let frame = w.pass();
+        let last = frame.display(frame.row_count() - 1).unwrap();
+        last.widgets.last().map(|w| w.kind.clone())
+    };
+    let done = zeron_client::TurnOutcome { failed: false, at_ms: 1_790_900_000_000 };
+    let failed = zeron_client::TurnOutcome { failed: true, at_ms: 1_790_900_000_000 };
+
+    // Running: the working row, never an outcome (even a stale one).
+    let mut running = transcript(2);
+    running.working = true;
+    running.outcome = Some(done);
+    assert!(matches!(tail(running), Some(display::WidgetKind::Working { .. })));
+
+    // Finished: the outcome and its time.
+    let mut finished = transcript(2);
+    finished.working = false;
+    finished.streaming = false;
+    finished.outcome = Some(done);
+    assert_eq!(
+        tail(finished.clone()),
+        Some(display::WidgetKind::TurnEnd { failed: false, at_ms: 1_790_900_000_000 })
+    );
+    finished.outcome = Some(failed);
+    assert_eq!(
+        tail(finished.clone()),
+        Some(display::WidgetKind::TurnEnd { failed: true, at_ms: 1_790_900_000_000 })
+    );
+
+    // No outcome (never ran, stopped, or the platform didn't opt in): no row.
+    finished.outcome = None;
+    assert!(!matches!(
+        tail(finished.clone()),
+        Some(display::WidgetKind::TurnEnd { .. } | display::WidgetKind::Working { .. })
+    ));
+
+    // A send of mine on its way: the next turn is coming, no stale outcome.
+    finished.outcome = Some(done);
+    finished.pending = vec![PendingUser { id: "p1".into(), text: "next".into() }];
+    assert!(!matches!(tail(finished), Some(display::WidgetKind::TurnEnd { .. })));
+}
+
+/// While only a transcript's newest rows are here (a Direct link's opening
+/// tail), its head says the older ones are loading, and how much of them has
+/// come in; scrolled to the top, that's what shows instead of nothing. The
+/// row goes once the complete history is in, and never shows for an empty
+/// transcript.
+#[test]
+fn the_head_row_says_older_rows_are_still_loading() {
+    let head = |input: TranscriptInput| {
+        let mut w = worker(390.0);
+        w.input = input;
+        let frame = w.pass();
+        (frame.row_count(), frame.display(0).and_then(|d| d.widgets.first().map(|w| w.kind.clone())))
+    };
+    let (plain_rows, plain_head) = head(transcript(2));
+    assert!(!matches!(plain_head, Some(display::WidgetKind::HistoryPending { .. })));
+
+    let mut loading = transcript(2);
+    loading.history_pending = Some(1_234_567);
+    let (rows, first) = head(loading.clone());
+    assert_eq!(rows, plain_rows + 1, "one extra row, at the head");
+    assert_eq!(first, Some(display::WidgetKind::HistoryPending { received_bytes: 1_234_567 }));
+
+    // The tail is unchanged: a running turn still ends with the working row.
+    loading.working = true;
+    let mut w = worker(390.0);
+    w.input = loading;
+    let frame = w.pass();
+    let last = frame.display(frame.row_count() - 1).unwrap();
+    assert!(matches!(last.widgets.last().map(|w| &w.kind), Some(display::WidgetKind::Working { .. })));
+
+    // Nothing shown yet: no head row on its own.
+    let mut empty = transcript(0);
+    empty.history_pending = Some(0);
+    assert_eq!(head(empty).0, 0);
 }

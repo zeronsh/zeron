@@ -196,8 +196,7 @@ pub(crate) struct LiveBackend {
     registry_save: Arc<Notify>,
     registry_dirty: Arc<AtomicBool>,
     last_liveness_probe: AtomicI64,
-    pub(crate) relay: relay::Relay,
-    pub(crate) escorts: escort::Escorts,
+    pub(crate) relay: Arc<relay::Relay>,
     cancel: CancellationToken,
 }
 
@@ -224,8 +223,7 @@ impl LiveBackend {
         let edge = inner.config.edge_base().to_owned();
         let store = Arc::new(store);
         Self {
-            relay: relay::Relay::new(inner, &edge, bearer),
-            escorts: escort::Escorts::new(&inner.config.data_dir),
+            relay: Arc::new(relay::Relay::new(inner, &edge, bearer)),
             edge,
             store,
             registry: Mutex::new(None),
@@ -247,7 +245,7 @@ impl LiveBackend {
     pub(crate) fn start(&self, inner: &Arc<ClientInner>) {
         self.spawn_registry(inner);
         self.spawn_registry_saver(inner);
-        self.escorts.respawn(inner);
+        inner.escorts.respawn(inner);
     }
 
     pub(crate) fn stop(&self) {

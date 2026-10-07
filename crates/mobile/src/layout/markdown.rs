@@ -43,8 +43,6 @@ pub(crate) struct PText {
 pub(crate) struct PCode {
     pub label: Option<PText>,
     pub body: PText,
-    pub lines: usize,
-    pub content_width: f32,
     pub source: String,
 }
 
@@ -92,7 +90,8 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
     let base_weight = if heading { Weight::Semibold } else { Weight::Regular };
     let body = ctx.typo.style(Family::Sans, base_weight, false, size);
     let code = ctx.typo.style(Family::Mono, Weight::Regular, false, size * TYPE.inline_code / TYPE.body.0);
-    let pad = ctx.typo.px(4.0);
+    // Tight chip: a couple of points, not a gap between the word and its neighbors.
+    let pad = ctx.typo.px(2.0);
     let chip_h = code.ascent + code.descent + ctx.typo.px(4.0);
     let lh = ctx.typo.px(lh);
 
@@ -370,13 +369,13 @@ fn prepare_code(ctx: &mut Ctx, language: Option<&str>, code: &str) -> PCode {
         source,
         &spans,
         &PrepareOptions {
-            white_space: WhiteSpace::Pre,
-            overflow_wrap: OverflowWrap::Normal,
+            // Narrow screens can't afford a horizontal scroller inside a chat
+            // row: wrap long lines like the desktop's Fit mode instead.
+            white_space: WhiteSpace::PreWrap,
+            overflow_wrap: OverflowWrap::Anywhere,
             tab_size: 4,
         },
     );
-    let lines = p.line_count(f32::INFINITY).max(1);
-    let content_width = p.max_content_width();
     let body = PText {
         p,
         lh,
@@ -403,8 +402,6 @@ fn prepare_code(ctx: &mut Ctx, language: Option<&str>, code: &str) -> PCode {
     PCode {
         label,
         body,
-        lines,
-        content_width,
         source: source.to_owned(),
     }
 }
@@ -596,21 +593,22 @@ pub(crate) fn place(block: &PBlock, px: Px, x: f32, y: f32, width: f32, out: Opt
 fn place_code(c: &PCode, px: Px, x: f32, y: f32, width: f32, out: Option<&mut DisplayBuilder>) -> f32 {
     use geom::*;
     let header = px.v(CODE_HEADER);
-    let body_h = c.lines as f32 * c.body.lh + px.v(CODE_PAD_BOTTOM);
+    let pad = px.v(CODE_PAD_X);
+    // Lines wrap to the block's width, so the height is measured here where
+    // the real width is known, not at prepare time.
+    let avail = (width - pad * 2.0).max(1.0);
+    let body_h = c.body.p.line_count(avail).max(1) as f32 * c.body.lh + px.v(CODE_PAD_BOTTOM);
     let h = header + body_h;
     let Some(out) = out else { return h };
     out.fill(x, y, width, h, px.v(CODE_RADIUS), ColorRole::CodeBackground);
     out.hairline(x, y, width, h, px.v(CODE_RADIUS), ColorRole::CodeBorder);
     if let Some(label) = &c.label {
-        let lw = width - px.v(CODE_PAD_X) - px.v(44.0);
-        place_text(label, x + px.v(CODE_PAD_X), y + (header - label.lh) / 2.0, lw.max(1.0), Some(out));
+        let lw = width - pad - px.v(44.0);
+        place_text(label, x + pad, y + (header - label.lh) / 2.0, lw.max(1.0), Some(out));
     }
     let bw = px.v(44.0);
     out.widget(WidgetKind::CopyCode, (x + width - bw, y, bw, header), Some(c.source.clone()));
-    let pad = px.v(CODE_PAD_X);
-    out.begin_scroller(x, y + header, width, body_h, c.content_width + pad * 2.0);
-    place_text(&c.body, pad, 0.0, f32::INFINITY, Some(out));
-    out.end_scroller();
+    place_text(&c.body, x + pad, y + header, avail, Some(out));
     h
 }
 

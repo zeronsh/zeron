@@ -33,6 +33,8 @@ struct StateCache {
 pub(crate) struct WorkspaceStore {
     doc: Arc<Mutex<RegistryDoc>>,
     presence: Mutex<HashMap<String, i64>>,
+    /// Engine device id → when a live direct link last heard from it (ms).
+    heard: Mutex<HashMap<String, i64>>,
     change_requests: Mutex<Vec<CheckoutChangeRequestStatus>>,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
@@ -45,6 +47,7 @@ impl WorkspaceStore {
         Self {
             doc: Arc::new(Mutex::new(doc)),
             presence: Mutex::new(HashMap::new()),
+            heard: Mutex::new(HashMap::new()),
             change_requests: Mutex::new(Vec::new()),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
@@ -106,6 +109,20 @@ impl WorkspaceStore {
     }
 
     #[allow(dead_code)] // live registry client
+    /// A live direct link heard from `device_id`'s engine at `at_ms`;
+    /// `None` when the link is gone (its rows age in real time again).
+    pub(crate) fn set_heard(&self, device_id: &str, at_ms: Option<i64>) {
+        let mut heard = lock(&self.heard);
+        match at_ms {
+            Some(at) => {
+                heard.insert(device_id.to_owned(), at);
+            }
+            None => {
+                heard.remove(device_id);
+            }
+        }
+    }
+
     pub(crate) fn replace_presence(&self, presence: HashMap<String, i64>) {
         *lock(&self.presence) = presence;
     }
@@ -140,6 +157,7 @@ impl WorkspaceStore {
         let _serial = lock(&self.recompute);
         let (state, prefs) = self.state();
         let presence = self.presence();
+        let heard = lock(&self.heard).clone();
         let change_requests = lock(&self.change_requests).clone();
         let previous = self.snapshot();
         let mut next = view::derive(
@@ -149,6 +167,7 @@ impl WorkspaceStore {
                 self_device_id,
                 now: chrono::Utc::now(),
                 presence: &presence,
+                heard: &heard,
                 change_requests: &change_requests,
                 send_states,
                 synced,

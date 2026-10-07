@@ -18,7 +18,7 @@ use zeron_doc::WorkspaceState;
 use zeron_proto::view::{attention_rank, display_status, project_key, representative_space};
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus,
-    Device, Session, SidebarPreferences, Space,
+    Device, Session, SessionStatus, SidebarPreferences, Space,
 };
 
 use crate::catalog;
@@ -32,9 +32,9 @@ pub const PROJECT_COLOR_COUNT: u32 = 8;
 /// monogram tone: 32-bit FNV-1a of the project's path (`"home"` without a
 /// project), so a project has the same color on every device.
 pub fn project_color_index(space_path: &str) -> u32 {
-    let hash = space_path
-        .bytes()
-        .fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hash = space_path.bytes().fold(2_166_136_261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
     hash % PROJECT_COLOR_COUNT
 }
 
@@ -84,6 +84,14 @@ pub struct SessionRow {
     /// minus the "a send of mine is in flight" override. What stop/busy
     /// logic keys off (a send parked for an offline host is not a turn).
     pub host_indicator: ChatIndicator,
+    /// How the chat's last run ended, NOT gated on the seen marker: live
+    /// states as `host_indicator`; `Errored` while the host's session row
+    /// still reports an errored turn; `Completed` for any other chat that has
+    /// activity; `Idle` for a chat that never ran. `indicator` clears
+    /// Completed/Errored as soon as the chat is seen on any device (the tab
+    /// dot's "news" semantics); lists that want a persistent outcome glyph
+    /// read this instead.
+    pub last_outcome: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
     /// `last_message_at`, falling back to `created_at` (the sort key).
@@ -319,6 +327,9 @@ pub(crate) struct DeriveContext<'a> {
     pub now: DateTime<Utc>,
     /// Newest presence heartbeat per device (epoch ms).
     pub presence: &'a HashMap<String, i64>,
+    /// Engine device id → when this phone last heard from that engine over
+    /// a live direct link (epoch ms). See [`status_now`].
+    pub heard: &'a HashMap<String, i64>,
     pub change_requests: &'a [CheckoutChangeRequestStatus],
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
@@ -397,6 +408,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.cwd.hash(&mut h);
     attention_rank(row.indicator).hash(&mut h);
     attention_rank(row.host_indicator).hash(&mut h);
+    attention_rank(row.last_outcome).hash(&mut h);
     row.working_since_ms.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
     row.time_label.hash(&mut h);
@@ -426,11 +438,58 @@ struct RowContext<'a> {
     section_of: HashMap<&'a str, &'a str>,
 }
 
+/// How long after the phone last heard from a direct engine its session
+/// rows keep ageing. The link probes a silent engine well inside this.
+pub(crate) const STATUS_HOLD_MS: i64 = 20_000;
+
+/// The time a session row's freshness (the 45 s staleness gate) is judged
+/// at. Normally now. For an engine reached over a live direct link it is
+/// capped at `heard + STATUS_HOLD_MS`, where `heard` is how far the feed has
+/// caught up: when it delivers nothing (the app was frozen in the
+/// background, the tunnel stalled, or the heartbeat is queued behind
+/// megabytes of transcript on a slow relay) the rows' heartbeats can't
+/// arrive either, and that delay must not read as "the run ended" (the
+/// home list showed a running session as done). While
+/// the link is delivering, a row whose own heartbeat stops still goes stale
+/// on time; when the link is down the entry is gone and real time applies.
+pub(crate) fn status_now(
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+    heard: &HashMap<String, i64>,
+) -> DateTime<Utc> {
+    session
+        .and_then(|s| heard.get(&s.device_id))
+        .and_then(|at| DateTime::from_timestamp_millis(at.saturating_add(STATUS_HOLD_MS)))
+        .map_or(now, |held| held.min(now))
+}
+
+/// [`SessionRow::last_outcome`]: the run outcome without the seen gate.
+fn last_outcome(chat: &Chat, session: Option<&Session>, host: ChatIndicator) -> ChatIndicator {
+    match host {
+        ChatIndicator::Working | ChatIndicator::AwaitingInput => host,
+        // The host's row still says running but its heartbeat went stale:
+        // nobody saw this run end, so claim no outcome (no green check).
+        _ if session.is_some_and(|s| {
+            matches!(
+                s.status,
+                SessionStatus::Working | SessionStatus::AwaitingInput
+            )
+        }) =>
+        {
+            ChatIndicator::Idle
+        }
+        _ if session.is_some_and(|s| s.status == SessionStatus::Errored) => ChatIndicator::Errored,
+        _ if chat.last_message_at.is_some() => ChatIndicator::Completed,
+        _ => ChatIndicator::Idle,
+    }
+}
+
 fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<SessionRow> {
     let now_ms = cx.now.timestamp_millis();
     let session = rc.sessions.get(chat.id.as_str()).copied();
     let send_state = cx.send_states.get(&chat.id).copied();
-    let host_indicator = display_status(chat, session, cx.now);
+    let host_indicator = display_status(chat, session, status_now(session, cx.now, cx.heard));
+    let last_outcome = last_outcome(chat, session, host_indicator);
     let mut indicator = host_indicator;
     let mut working_since_ms = match indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
@@ -505,6 +564,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         cwd: chat.cwd.clone(),
         indicator,
         host_indicator,
+        last_outcome,
         working_since_ms,
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
@@ -808,5 +868,173 @@ mod tests {
         assert_eq!(relative_time_label(now - 34 * 60_000, now), "34m");
         assert_eq!(relative_time_label(now - 4 * 3_600_000 - 1, now), "4h");
         assert_eq!(relative_time_label(now - 2 * 86_400_000, now), "2d");
+    }
+
+    fn chat(last_message: bool, seen: bool) -> Chat {
+        let mut v = serde_json::json!({
+            "id": "c", "deviceId": "d", "archived": false,
+            "createdAt": "2026-09-30T00:00:00Z",
+        });
+        if last_message {
+            v["lastMessageAt"] = "2026-09-30T01:00:00Z".into();
+        }
+        if seen {
+            v["lastSeenAt"] = "2026-09-30T02:00:00Z".into();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn session(status: SessionStatus) -> Session {
+        serde_json::from_value(serde_json::json!({
+            "chatId": "c", "deviceId": "d", "status": status,
+            "updatedAt": "2026-09-30T01:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn last_outcome_survives_the_seen_marker() {
+        let now: DateTime<Utc> = "2026-09-30T03:00:00Z".parse().unwrap();
+        // Seen on some device: the tab-dot indicator reads Idle, the outcome
+        // still says how the last run ended.
+        let seen = chat(true, true);
+        let errored = session(SessionStatus::Errored);
+        assert_eq!(
+            display_status(&seen, Some(&errored), now),
+            ChatIndicator::Idle
+        );
+        assert_eq!(
+            last_outcome(&seen, Some(&errored), ChatIndicator::Idle),
+            ChatIndicator::Errored
+        );
+        let idle = session(SessionStatus::Idle);
+        assert_eq!(display_status(&seen, Some(&idle), now), ChatIndicator::Idle);
+        assert_eq!(
+            last_outcome(&seen, Some(&idle), ChatIndicator::Idle),
+            ChatIndicator::Completed
+        );
+        assert_eq!(
+            last_outcome(&seen, None, ChatIndicator::Idle),
+            ChatIndicator::Completed
+        );
+        // Unseen agrees with the indicator.
+        let unseen = chat(true, false);
+        assert_eq!(
+            last_outcome(&unseen, Some(&errored), ChatIndicator::Errored),
+            ChatIndicator::Errored
+        );
+        // Live states pass through; a chat that never ran has no outcome.
+        assert_eq!(
+            last_outcome(&seen, Some(&errored), ChatIndicator::Working),
+            ChatIndicator::Working
+        );
+        assert_eq!(
+            last_outcome(&seen, None, ChatIndicator::AwaitingInput),
+            ChatIndicator::AwaitingInput
+        );
+        assert_eq!(
+            last_outcome(&chat(false, false), None, ChatIndicator::Idle),
+            ChatIndicator::Idle
+        );
+    }
+
+    /// The home row of a session that is still running, as the phone sees
+    /// it: the user has read it (seen), the engine's last heartbeat for it
+    /// reached the phone 50 s ago and nothing at all has arrived since (app
+    /// frozen in the background, tunnel stalled). round5-11 turned that
+    /// into a green "done" check and dropped it from the running count.
+    fn home_row(
+        heard: &HashMap<String, i64>,
+        now: DateTime<Utc>,
+        beat_age_s: i64,
+    ) -> Arc<SessionRow> {
+        let mut chat = chat(true, true);
+        chat.last_seen_at = Some(now - chrono::TimeDelta::seconds(5));
+        chat.last_message_at = Some(now - chrono::TimeDelta::seconds(60));
+        let mut running = session(SessionStatus::Working);
+        running.started_at = Some(now - chrono::TimeDelta::minutes(10));
+        running.updated_at = now - chrono::TimeDelta::seconds(beat_age_s);
+        let state = WorkspaceState {
+            devices: vec![],
+            spaces: vec![],
+            chats: vec![chat],
+            sessions: vec![running],
+        };
+        let presence = HashMap::new();
+        let send_states = HashMap::new();
+        let snapshot = derive(
+            &state,
+            None,
+            &DeriveContext {
+                self_device_id: "phone",
+                now,
+                presence: &presence,
+                heard,
+                change_requests: &[],
+                send_states: &send_states,
+                synced: true,
+                previous: None,
+            },
+        );
+        snapshot.session("c").unwrap().clone()
+    }
+
+    #[test]
+    fn a_silent_link_does_not_turn_a_running_session_into_done() {
+        let now: DateTime<Utc> = "2026-10-01T10:15:00Z".parse().unwrap();
+        let ms = |s: i64| (now - chrono::TimeDelta::seconds(s)).timestamp_millis();
+        // Direct link up, last heard from the engine with that heartbeat.
+        let heard = HashMap::from([("d".to_owned(), ms(50))]);
+        let row = home_row(&heard, now, 50);
+        assert_eq!(
+            row.indicator,
+            ChatIndicator::Working,
+            "still running on the home list"
+        );
+        assert_eq!(row.last_outcome, ChatIndicator::Working);
+        // The link keeps delivering (heard 1 s ago) but this run's own
+        // heartbeat stopped 50 s ago: a hung run still goes stale, and as
+        // nobody saw it end it shows no outcome, not a green check.
+        let heard = HashMap::from([("d".to_owned(), ms(1))]);
+        let row = home_row(&heard, now, 50);
+        assert_eq!(row.indicator, ChatIndicator::Idle);
+        assert_eq!(
+            row.last_outcome,
+            ChatIndicator::Idle,
+            "no done check for an unseen end"
+        );
+        // Link down (no entry): real time, same as before.
+        let row = home_row(&HashMap::new(), now, 50);
+        assert_eq!(row.indicator, ChatIndicator::Idle);
+        assert_eq!(row.last_outcome, ChatIndicator::Idle);
+        // A fresh heartbeat is Working either way.
+        assert_eq!(
+            home_row(&HashMap::new(), now, 10).indicator,
+            ChatIndicator::Working
+        );
+    }
+
+    #[test]
+    fn status_now_holds_only_for_the_heard_engine() {
+        let now: DateTime<Utc> = "2026-10-01T10:15:00Z".parse().unwrap();
+        let heard = HashMap::from([(
+            "d".to_owned(),
+            (now - chrono::TimeDelta::seconds(60)).timestamp_millis(),
+        )]);
+        let mine = session(SessionStatus::Working);
+        let mut other = session(SessionStatus::Working);
+        other.device_id = "elsewhere".into();
+        assert_eq!(
+            status_now(Some(&mine), now, &heard),
+            now - chrono::TimeDelta::seconds(40)
+        );
+        assert_eq!(status_now(Some(&other), now, &heard), now);
+        assert_eq!(status_now(None, now, &heard), now);
+        let recent = HashMap::from([("d".to_owned(), now.timestamp_millis())]);
+        assert_eq!(
+            status_now(Some(&mine), now, &recent),
+            now,
+            "never in the future"
+        );
     }
 }

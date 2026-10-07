@@ -29,7 +29,7 @@ use zeron_proto::{
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
-    SnapshotDelta,
+    SnapshotDelta, TurnOutcome,
 };
 use transcript::{Dirty, Tracker};
 
@@ -174,6 +174,13 @@ struct CoreState {
     last_submitted: Option<String>,
     transfer_progress: Option<f64>,
     hydrated: bool,
+    /// Only the opening tail is shown; the complete history is on its way
+    /// (Direct `openingTail`). See [`SessionSnapshot::history_pending`].
+    history_pending: bool,
+    /// Bytes of that complete history received so far (0 = unknown).
+    history_received: u64,
+    /// A send of ours the host adopted but hasn't reported a turn for yet.
+    awaiting_turn: Option<AwaitingTurn>,
     transcript_revision: u64,
     composer_revision: u64,
 }
@@ -200,6 +207,8 @@ pub(crate) struct SessionCore {
     view_attached: AtomicBool,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
+    /// When the view last left the screen (0 = never on screen).
+    detached_ms: std::sync::atomic::AtomicI64,
 }
 
 impl SessionCore {
@@ -246,6 +255,9 @@ impl SessionCore {
                 last_submitted: None,
                 transfer_progress: None,
                 hydrated: false,
+                history_pending: false,
+                history_received: 0,
+                awaiting_turn: None,
                 transcript_revision: 0,
                 composer_revision: 0,
             }),
@@ -254,6 +266,7 @@ impl SessionCore {
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+            detached_ms: std::sync::atomic::AtomicI64::new(0),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
         // ~one refresh per frame, not N).
@@ -374,6 +387,42 @@ impl SessionCore {
         lock(&self.state).hydrated = true;
     }
 
+    /// Whether only the opening tail is shown and the complete history is
+    /// still on its way (set by the Direct mirror).
+    pub(crate) fn history_pending(&self) -> bool {
+        lock(&self.state).history_pending
+    }
+
+    pub(crate) fn set_history_pending(&self, pending: bool) {
+        let changed = {
+            let mut st = lock(&self.state);
+            if !pending {
+                st.history_received = 0;
+            }
+            std::mem::replace(&mut st.history_pending, pending) != pending
+        };
+        if changed {
+            self.schedule_refresh();
+        }
+    }
+
+    /// Bytes of the complete history received so far (while pending).
+    pub(crate) fn set_history_received(&self, bytes: u64) {
+        let changed = {
+            let mut st = lock(&self.state);
+            st.history_pending && std::mem::replace(&mut st.history_received, bytes) != bytes
+        };
+        if changed {
+            self.schedule_refresh();
+        }
+    }
+
+    /// A send of ours is adopted but its turn not yet reported (the tick
+    /// refreshes such a session so the wait can time out).
+    pub(crate) fn awaiting_turn(&self) -> bool {
+        lock(&self.state).awaiting_turn.is_some()
+    }
+
     /// Serialized doc write, then an incremental refresh.
     pub(crate) fn write<R>(
         &self,
@@ -415,16 +464,15 @@ impl SessionCore {
         let dirty = std::mem::take(&mut *lock(&self.dirty));
         let now = now_ms();
         let degraded = client.chat_delivery_degraded(&self.chat_id);
-        let (indicator_working, working_since_ms) = client
-            .workspace
-            .snapshot()
-            .session(&self.chat_id)
-            .map_or((false, None), |row| {
-                (
-                    row.host_indicator == ChatIndicator::Working,
-                    row.working_since_ms,
-                )
-            });
+        // A staged attachment whose bytes are still moving (transfer or
+        // escort retry window) holds the undelivered-grace clock.
+        let uploading = !client.escorts.pending_for(&self.chat_id).is_empty();
+        let row = client.workspace.snapshot().session(&self.chat_id).cloned();
+        let host_indicator = row
+            .as_ref()
+            .map_or(ChatIndicator::Idle, |row| row.host_indicator);
+        let indicator_working = host_indicator == ChatIndicator::Working;
+        let working_since_ms = row.as_ref().and_then(|row| row.working_since_ms);
         let mut transcript_event = None;
         let send_before;
         let send_after;
@@ -441,7 +489,13 @@ impl SessionCore {
             if dirty.meta {
                 st.context_usage = self.doc.context_usage();
             }
-            let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
+            let unadopted: Vec<(String, PendingKind)> = st
+                .pending
+                .iter()
+                .map(|p| (p.message_id.clone(), p.kind))
+                .collect();
+            let echoes_changed =
+                derive_pending(&mut st, &client.config.device_id, degraded, uploading, now);
             send_after = oldest_state(&st.pending);
             let previous = self.snapshot();
             let streaming = st
@@ -450,12 +504,53 @@ impl SessionCore {
                 .last()
                 .is_some_and(|e| e.is_streaming());
             let sending = st.pending.iter().any(|p| p.state == SendState::Sending);
+            // A send the host just adopted: its turn starts any moment, but
+            // the host's status (another feed) may say so seconds later.
+            // Until then the transcript says working, not how the previous
+            // turn ended (the "✓ 完成" (Done) row flashed in that gap).
+            for (id, _) in unadopted
+                .iter()
+                .filter(|(_, kind)| matches!(kind, PendingKind::Run | PendingKind::Steer))
+            {
+                if st.tracker.contains_id(id) && !st.pending.iter().any(|p| &p.message_id == id) {
+                    st.awaiting_turn = Some(AwaitingTurn {
+                        message_id: id.clone(),
+                        since_ms: now,
+                    });
+                }
+            }
+            if let Some(waiting) = &st.awaiting_turn
+                && !waiting.still_waiting(host_indicator, streaming, st.tracker.entries(), now)
+            {
+                st.awaiting_turn = None;
+            }
+            let starting = st.awaiting_turn.is_some();
+            let working = indicator_working || streaming || sending || starting;
             let live = LiveFlags {
-                working: indicator_working || streaming || sending,
+                working,
                 working_since_ms,
+                history_pending: st.history_pending,
+                history_received: st.history_received,
+                // No end-of-turn row while a turn runs or is about to, nor
+                // under a send of ours still in flight, queued or failed.
+                outcome: if working || !st.pending.is_empty() {
+                    None
+                } else {
+                    row.as_deref().and_then(|row| {
+                        turn_outcome(
+                            row.last_outcome,
+                            row.last_activity_ms,
+                            st.tracker.entries(),
+                            now,
+                        )
+                    })
+                },
             };
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
+                || previous.outcome != live.outcome
+                || previous.history_pending != live.history_pending
+                || previous.history_received_bytes != live.history_received
                 || previous.hydrated != st.hydrated;
             if change.is_some()
                 || echoes_changed
@@ -601,6 +696,21 @@ impl SessionCore {
     pub(crate) fn touched_ms(&self) -> i64 {
         self.touched_ms.load(Ordering::Acquire)
     }
+
+    /// When the view last left the screen (0 = it never was on screen).
+    pub(crate) fn detached_ms(&self) -> i64 {
+        self.detached_ms.load(Ordering::Acquire)
+    }
+
+    /// Another session's transcript view is on screen.
+    pub(crate) fn other_view_attached(&self) -> bool {
+        self.client().is_ok_and(|client| {
+            client
+                .cores()
+                .iter()
+                .any(|core| core.chat_id != self.chat_id && core.view_attached())
+        })
+    }
 }
 
 fn empty_composer(chat_id: &str) -> ComposerState {
@@ -700,7 +810,13 @@ fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
 
 /// Own run/steer commands whose message hasn't landed = pending echoes.
 /// Returns whether the echo set/states changed.
-fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64) -> bool {
+fn derive_pending(
+    st: &mut CoreState,
+    device_id: &str,
+    degraded: bool,
+    uploading: bool,
+    now: i64,
+) -> bool {
     struct Attempt {
         text: String,
         kind: PendingKind,
@@ -760,7 +876,13 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
             .unwrap_or(attempt.first_issued);
         let parsed = attachments::parse_user_message(&attempt.text);
         next.push(PendingSend {
-            state: send_state(started, degraded, attempt.dead && !attempt.live, now),
+            state: send_state(
+                started,
+                degraded,
+                attempt.dead && !attempt.live,
+                uploading,
+                now,
+            ),
             message_id,
             text: attempt.text.clone(),
             visible_text: parsed.text,
@@ -821,6 +943,226 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
 struct LiveFlags {
     working: bool,
     working_since_ms: Option<i64>,
+    outcome: Option<TurnOutcome>,
+    history_pending: bool,
+    history_received: u64,
+}
+
+/// How long after the host adopted a send of ours the transcript keeps
+/// saying "working" without the host reporting the turn (the session status
+/// rides another feed: a heartbeat every ~3 s, later over a slow relay).
+pub(crate) const TURN_START_GRACE_MS: i64 = 30_000;
+
+/// A send of ours the host adopted (its user entry is in the transcript)
+/// whose turn the host hasn't reported running yet.
+#[derive(Debug, Clone)]
+struct AwaitingTurn {
+    message_id: String,
+    /// When it was adopted (phone clock).
+    since_ms: i64,
+}
+
+impl AwaitingTurn {
+    /// Still waiting: the host reports no turn running or waiting on input
+    /// yet, no reply after the message has finished (a turn quicker than
+    /// the status feed), and the grace hasn't run out.
+    fn still_waiting(
+        &self,
+        host: ChatIndicator,
+        streaming: bool,
+        entries: &[Arc<Entry>],
+        now: i64,
+    ) -> bool {
+        if streaming
+            || matches!(host, ChatIndicator::Working | ChatIndicator::AwaitingInput)
+            || now - self.since_ms > TURN_START_GRACE_MS
+        {
+            return false;
+        }
+        let Some(at) = entries.iter().position(|e| e.id == self.message_id) else {
+            return false;
+        };
+        !entries[at + 1..].iter().any(|e| {
+            e.message.role == zeron_doc::MessageRole::Assistant
+                && e.message
+                    .status
+                    .is_some_and(|s| s != MessageStatus::Streaming)
+        })
+    }
+}
+
+/// [`SessionSnapshot::outcome`] from the session row's `last_outcome` (the
+/// outcome its glyph shows on the home list) and the transcript (when the
+/// turn ended; else the row's `last_activity_ms`).
+pub(crate) fn turn_outcome(
+    last_outcome: ChatIndicator,
+    last_activity_ms: i64,
+    entries: &[Arc<Entry>],
+    now: i64,
+) -> Option<TurnOutcome> {
+    let failed = match last_outcome {
+        ChatIndicator::Completed => false,
+        ChatIndicator::Errored => true,
+        _ => return None,
+    };
+    let last = entries
+        .iter()
+        .rev()
+        .map(|e| &e.message)
+        .find(|m| m.role == zeron_doc::MessageRole::Assistant);
+    // A turn the user stopped neither completed nor failed.
+    if !failed && last.is_some_and(|m| m.status == Some(zeron_doc::MessageStatus::Aborted)) {
+        return None;
+    }
+    let ended = last
+        .filter(|m| m.created_at > 0)
+        .and_then(|m| m.duration_ms.map(|d| m.created_at.saturating_add(d.max(0))));
+    let at_ms = ended.unwrap_or(last_activity_ms).min(now);
+    Some(TurnOutcome { failed, at_ms })
+}
+
+#[cfg(test)]
+mod turn_outcome_tests {
+    use super::*;
+    use zeron_doc::{MessageRole, MessageStatus};
+
+    fn entry(
+        role: MessageRole,
+        status: Option<MessageStatus>,
+        at: i64,
+        took: Option<i64>,
+    ) -> Arc<Entry> {
+        Arc::new(Entry {
+            id: format!("e{at}"),
+            rev: 1,
+            message: Arc::new(SessionMessageEntry {
+                id: format!("e{at}"),
+                role,
+                parts: Vec::new(),
+                created_at: at,
+                device_id: "pc".into(),
+                status,
+                continuation_of: None,
+                duration_ms: took,
+            }),
+            echo: None,
+            append: None,
+        })
+    }
+
+    #[test]
+    fn an_adopted_send_waits_for_its_turn_until_the_host_or_the_transcript_says_so() {
+        let now = 10_000_000;
+        let sent = entry(MessageRole::User, None, 2_000_000, None);
+        let wait = AwaitingTurn {
+            message_id: sent.id.clone(),
+            since_ms: now,
+        };
+        let finished = vec![
+            entry(MessageRole::User, None, 1_000_000, None),
+            entry(
+                MessageRole::Assistant,
+                Some(MessageStatus::Complete),
+                1_000_500,
+                Some(1),
+            ),
+            sent.clone(),
+        ];
+        // Adopted, the host still says idle (its status on its way): waiting.
+        assert!(wait.still_waiting(ChatIndicator::Idle, false, &finished, now + 500));
+        assert!(wait.still_waiting(ChatIndicator::Completed, false, &finished, now + 500));
+        // The host says it runs (or asks), or the reply streams: not waiting.
+        for host in [ChatIndicator::Working, ChatIndicator::AwaitingInput] {
+            assert!(!wait.still_waiting(host, false, &finished, now + 500));
+        }
+        assert!(!wait.still_waiting(ChatIndicator::Idle, true, &finished, now + 500));
+        // A turn quicker than the host's status: its reply finished.
+        let mut replied = finished.clone();
+        replied.push(entry(
+            MessageRole::Assistant,
+            Some(MessageStatus::Complete),
+            2_000_100,
+            Some(1),
+        ));
+        assert!(!wait.still_waiting(ChatIndicator::Completed, false, &replied, now + 500));
+        // Gone from the transcript, or never started: give up.
+        assert!(!wait.still_waiting(ChatIndicator::Idle, false, &finished[..2], now + 500));
+        assert!(!wait.still_waiting(
+            ChatIndicator::Idle,
+            false,
+            &finished,
+            now + TURN_START_GRACE_MS + 1
+        ));
+    }
+
+    #[test]
+    fn a_finished_turn_ends_the_transcript_with_its_outcome_and_end_time() {
+        let now = 10_000_000;
+        let turn = vec![
+            entry(MessageRole::User, None, 1_000_000, None),
+            entry(
+                MessageRole::Assistant,
+                Some(MessageStatus::Complete),
+                1_000_500,
+                Some(143_000),
+            ),
+        ];
+        // Ended = the assistant segment's start + its stamped duration.
+        assert_eq!(
+            turn_outcome(ChatIndicator::Completed, 1_000_000, &turn, now),
+            Some(TurnOutcome {
+                failed: false,
+                at_ms: 1_143_500
+            })
+        );
+        assert_eq!(
+            turn_outcome(ChatIndicator::Errored, 1_000_000, &turn, now),
+            Some(TurnOutcome {
+                failed: true,
+                at_ms: 1_143_500
+            })
+        );
+        // No duration stamped (older docs): the row's time, as on the home list.
+        let unstamped = vec![entry(
+            MessageRole::Assistant,
+            Some(MessageStatus::Complete),
+            1_000_500,
+            None,
+        )];
+        assert_eq!(
+            turn_outcome(ChatIndicator::Completed, 1_200_000, &unstamped, now),
+            Some(TurnOutcome {
+                failed: false,
+                at_ms: 1_200_000
+            })
+        );
+        // Running, waiting, never ran: no outcome. A stopped turn: no check.
+        for live in [
+            ChatIndicator::Working,
+            ChatIndicator::AwaitingInput,
+            ChatIndicator::Idle,
+        ] {
+            assert_eq!(turn_outcome(live, 1_000_000, &turn, now), None);
+        }
+        let stopped = vec![entry(
+            MessageRole::Assistant,
+            Some(MessageStatus::Aborted),
+            1_000_500,
+            Some(5_000),
+        )];
+        assert_eq!(
+            turn_outcome(ChatIndicator::Completed, 1_000_000, &stopped, now),
+            None
+        );
+        // Never in the future.
+        assert_eq!(
+            turn_outcome(ChatIndicator::Completed, now + 60_000, &[], now),
+            Some(TurnOutcome {
+                failed: false,
+                at_ms: now
+            })
+        );
+    }
 }
 
 fn build_snapshot(
@@ -853,6 +1195,9 @@ fn build_snapshot(
         streaming,
         working: live.working,
         working_since_ms: live.working_since_ms,
+        outcome: live.outcome,
+        history_pending: live.history_pending,
+        history_received_bytes: live.history_received,
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
@@ -946,6 +1291,9 @@ impl SessionHandle {
     pub fn set_view_attached(&self, attached: bool) {
         let was = self.core.view_attached.swap(attached, Ordering::AcqRel);
         self.core.touch();
+        if !attached && was {
+            self.core.detached_ms.store(now_ms(), Ordering::Release);
+        }
         if attached
             && !was
             && let Some(room) = self.core.room()
@@ -955,8 +1303,21 @@ impl SessionHandle {
             // chat someone is looking at).
             room.kick();
         }
+        if !attached
+            && was
+            && let Ok(client) = self.core.client()
+            && let Some(direct) = client.direct()
+        {
+            direct.session_detached();
+        }
         if attached && !was {
             self.mark_seen();
+            // Direct links stream only the transcripts on screen.
+            if let Ok(client) = self.core.client()
+                && let Some(direct) = client.direct()
+            {
+                direct.session_attached(&self.core);
+            }
         }
     }
 

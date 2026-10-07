@@ -1,7 +1,8 @@
 //! Tool groups, laid out like the desktop transcript (`ui/src/transcript.rs`):
-//! a 26pt header (chevron on the rail's trunk, summary title), then one 32pt
-//! row per call — rail elbow, tool icon, verb, detail or file badge — each
-//! with an inline detail (invocation, output / diff / stats, thought text).
+//! a 26pt header (chevron on the rail's trunk, summary title), then one row
+//! per call. On the phone (the iOS frame) a row is two lines: the tool icon
+//! on the rail's trunk and the verb, then the argument in Geist Mono. Each row
+//! has an inline detail (invocation, output / diff / stats, thought text).
 //! Subagent spawns render as their own card group. Desktop metrics scale by
 //! [`T`] so 12pt desktop text lands on the phone's 13.5pt small size.
 
@@ -13,7 +14,7 @@ use zeron_proto::ToolCall;
 use zeron_text::WhiteSpace;
 
 use super::display::{ColorRole, Decoration, DisplayBuilder, FadeEdge, WidgetKind};
-use super::file_icons::{basename, file_icon_asset};
+use super::file_icons::file_icon_asset;
 use super::markdown::{Ctx, PText, Px, SpanPaint, place_text, prepare_plain};
 use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, quick_hash, row_key};
 use super::style::{Family, Weight, baseline};
@@ -22,14 +23,6 @@ use super::style::{Family, Weight, baseline};
 const T: f32 = 1.125;
 const HEADER_H: f32 = 26.0;
 const TOP_PAD: f32 = 2.0;
-const ROW_H: f32 = 32.0;
-const TRUNK_X: f32 = 12.5;
-const BEND: f32 = 6.0;
-const BRANCH_END: f32 = 28.0;
-const ICON_LEFT: f32 = 32.0;
-const ICON: f32 = 16.0;
-const TEXT_X: f32 = 56.0;
-const TITLE_X: f32 = 28.0;
 const OUT_LH: f32 = 18.0;
 const BODY_PAD: f32 = 6.0;
 const SEPARATOR: f32 = 1.0;
@@ -37,6 +30,26 @@ const MAX_LINES: usize = 24;
 const DIFF_MAX_LINES: usize = 600;
 const CALL_WRAP_COLS: usize = 80;
 const AGENT_ROW: f32 = 38.0;
+
+// Phone rows (the iOS tool-activity frame, measured at @3x, in points — not
+// desktop metrics, so no `T`): icon on the rail's trunk, verb on the first
+// line, the argument in Geist Mono on its own second line.
+const P_TRUNK: f32 = 14.75;
+const P_TITLE_X: f32 = 37.5;
+const P_ICON: f32 = 16.0;
+/// Row top → title line top.
+const P_TOP: f32 = 14.2;
+/// Title line top → argument line top.
+const P_ARG_DY: f32 = 21.5;
+const P_ARG_LH: f32 = 20.0;
+/// Two-line row pitch (179px @3x).
+const P_ROW: f32 = 179.0 / 3.0;
+/// Rail segments stop this far from an icon's center.
+const P_RAIL_GAP: f32 = 14.3;
+/// Chevron center → first rail segment.
+const P_RAIL_HEAD: f32 = 22.0;
+const P_ARG_SIZE: f32 = 13.0;
+const P_STATUS_SIZE: f32 = 12.0;
 const AGENT_CARD: f32 = 30.0;
 
 fn d(px: Px, v: f32) -> f32 {
@@ -50,6 +63,8 @@ pub(crate) struct ToolLine {
     /// File calls show a badge: (file-icon asset, basename).
     pub badge: Option<(String, PText)>,
     pub failed: bool,
+    /// "Failed" beside the verb when the call errored. The command stays secondary.
+    pub status: Option<PText>,
     pub running: bool,
     pub key: u64,
     pub open: bool,
@@ -145,6 +160,15 @@ fn file_path(call: &ToolCall) -> Option<&str> {
     }
 }
 
+/// `crates/ui/src/shell/transcript.rs` → `shell/transcript.rs`.
+fn short_path(path: &str) -> String {
+    let parts: Vec<&str> = path.trim_end_matches('/').rsplitn(3, '/').collect();
+    match parts.as_slice() {
+        [name, parent, _] | [name, parent] if !parent.is_empty() => format!("{parent}/{name}"),
+        _ => path.to_owned(),
+    }
+}
+
 fn wrap_cols(line: &str, cols: usize) -> Vec<String> {
     if line.chars().count() <= cols {
         return vec![line.to_owned()];
@@ -191,6 +215,9 @@ fn call_text(call: &ToolCall) -> String {
 
 struct Styles {
     label: super::style::Resolved,
+    arg: super::style::Resolved,
+    status: super::style::Resolved,
+    arg_lh: f32,
     mono: super::style::Resolved,
     mono_small: super::style::Resolved,
     /// Detail type size in points (pre-text-scale), for thought run faces.
@@ -770,6 +797,9 @@ impl RowBuilder {
         let size = 12.0 * T;
         let st = Styles {
             label: ctx.typo.style(Family::Sans, Weight::Regular, false, size),
+            arg: ctx.typo.style(Family::Mono, Weight::Regular, false, P_ARG_SIZE),
+            status: ctx.typo.style(Family::Sans, Weight::Regular, false, P_STATUS_SIZE),
+            arg_lh: ctx.typo.px(P_ARG_LH),
             mono: ctx.typo.style(Family::Mono, Weight::Regular, false, size),
             mono_small: ctx.typo.style(Family::Mono, Weight::Regular, false, 11.0 * T),
             size,
@@ -777,7 +807,10 @@ impl RowBuilder {
             out_lh: ctx.typo.px(OUT_LH * T),
         };
         let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
-        let summary = prepare_plain(ctx, &group_summary(thoughts, &calls), st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::Pre);
+        // Wraps instead of truncating: the iOS header shows the whole summary.
+        // Wrap between segments only ("1 failed" never splits).
+        let glued = group_summary(thoughts, &calls).replace(' ', "\u{a0}").replace("\u{a0}·\u{a0}", "\u{a0}· ");
+        let summary = prepare_plain(ctx, &glued, st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::PreWrap);
         let mut lines = Vec::new();
         if expanded {
             let last = parts.len().saturating_sub(1);
@@ -799,13 +832,22 @@ impl RowBuilder {
                             (!*resolved, is_error)
                         };
                         let color = if *is_error { ColorRole::Danger } else { ColorRole::TextSecondary };
-                        let badge = if agents {
-                            None
-                        } else {
-                            file_path(call).map(|p| (file_icon_asset(p), prepare_plain(ctx, basename(p), st.label, st.lh, if *is_error { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre)))
+                        // Phone rows: no file badge — the path is the mono argument
+                        // line (parent folder + file name, like the iOS frame).
+                        let badge: Option<(String, PText)> = None;
+                        let detail_text = match file_path(call) {
+                            Some(p) if !agents => short_path(p),
+                            _ => detail.clone(),
                         };
-                        let detail_color = if agents && !*is_error { ColorRole::TextSoft } else { color };
-                        let detail = (badge.is_none() && !detail.is_empty()).then(|| prepare_plain(ctx, &detail, st.label, st.lh, detail_color, WhiteSpace::Pre));
+                        let detail = (!detail_text.is_empty()).then(|| {
+                            if agents {
+                                let c = if *is_error { color } else { ColorRole::TextSoft };
+                                prepare_plain(ctx, &detail_text, st.label, st.lh, c, WhiteSpace::Pre)
+                            } else {
+                                prepare_plain(ctx, &detail_text, st.arg, st.arg_lh, ColorRole::TextSoft, WhiteSpace::Pre)
+                            }
+                        });
+                        let status = (*is_error && !agents).then(|| prepare_plain(ctx, "Failed", st.status, st.lh, ColorRole::Danger, WhiteSpace::Pre));
                         let open = !agents && self.detail_open.get(&dkey).copied().unwrap_or(false);
                         let mut body = Vec::new();
                         if open {
@@ -818,6 +860,7 @@ impl RowBuilder {
                             detail,
                             badge,
                             failed: *is_error,
+                            status,
                             running,
                             key: dkey,
                             open,
@@ -845,6 +888,7 @@ impl RowBuilder {
                             detail: None,
                             badge: None,
                             failed: false,
+                            status: None,
                             running: false,
                             key: dkey,
                             open,
@@ -872,86 +916,85 @@ pub(crate) fn place_tools(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut ou
     if t.agents {
         return place_agents(t, px, x, y, cw, out);
     }
-    let hh = d(px, HEADER_H);
+    let base_hh = d(px, HEADER_H);
+    let trunk = x + px.v(P_TRUNK);
+    let tx = x + px.v(P_TITLE_X);
+    let tw = (cw - px.v(P_TITLE_X) - d(px, 4.0)).max(1.0);
+    let summary_lines = t.summary.p.line_count(tw).max(1);
+    let hh = base_hh + (summary_lines - 1) as f32 * t.summary.lh;
+    let chevron_cy = y + base_hh / 2.0;
     if let Some(o) = out.as_deref_mut() {
         let cs = d(px, 14.0);
-        o.widget(WidgetKind::Chevron { expanded: t.expanded }, (x + d(px, TRUNK_X) - cs / 2.0, y + (hh - cs) / 2.0, cs, cs), None);
-        let tx = x + d(px, TITLE_X);
-        let tw = (cw - d(px, TITLE_X) - d(px, 4.0)).max(1.0);
+        o.widget(WidgetKind::Chevron { expanded: t.expanded }, (trunk - cs / 2.0, chevron_cy - cs / 2.0, cs, cs), None);
         let sw = t.summary.p.max_content_width().min(tw);
-        let ty = y + (hh - t.summary.lh) / 2.0;
-        place_text_lines(&t.summary, tx, ty, tw, 1, px, o);
+        let ty = y + (base_hh - t.summary.lh) / 2.0;
+        place_text_lines(&t.summary, tx, ty, tw, summary_lines, px, o);
         if t.live {
-            o.widget(WidgetKind::Shimmer, (tx, ty, sw, t.summary.lh), None);
+            o.widget(WidgetKind::Shimmer, (tx, ty, sw, t.summary.lh * summary_lines as f32), None);
         }
-        o.widget(WidgetKind::Disclosure { expanded: t.expanded }, (x, y, (d(px, TITLE_X) + sw + d(px, 12.0)).min(cw), hh), None);
+        o.widget(WidgetKind::Disclosure { expanded: t.expanded }, (x, y, (px.v(P_TITLE_X) + sw + d(px, 12.0)).min(cw), hh), None);
     }
     if !t.expanded || t.lines.is_empty() {
         return hh;
     }
-    let row_h = d(px, ROW_H);
     let mut ry = y + hh + d(px, TOP_PAD);
-    let mut tops = Vec::with_capacity(t.lines.len());
-    let mut heights = Vec::with_capacity(t.lines.len());
-    let bx = x + d(px, TEXT_X);
-    let bw = (cw - d(px, TEXT_X)).max(1.0);
-    for line in &t.lines {
+    let bx = tx;
+    let bw = (cw - px.v(P_TITLE_X)).max(1.0);
+    // Rail: 1pt segments on the trunk between the chevron and each icon,
+    // interrupted around the icons (no elbows on the phone).
+    let mut prev_bottom = chevron_cy + px.v(P_RAIL_HEAD);
+    let rail_w = px.v(1.0);
+    let n = t.lines.len();
+    for (i, line) in t.lines.iter().enumerate() {
+        let row_h = line_height(line, px);
+        let title_cy = ry + px.v(P_TOP) + line.label.lh / 2.0;
         if let Some(o) = out.as_deref_mut() {
+            let top = title_cy - px.v(P_RAIL_GAP);
+            if top > prev_bottom {
+                o.fill(trunk - rail_w / 2.0, prev_bottom, rail_w, top - prev_bottom, 0.0, ColorRole::ToolRail);
+            }
             place_line_header(line, px, x, ry, cw, o);
         }
         let body = place_body(line, px, bx, ry + row_h, bw, out.as_deref_mut());
-        tops.push(ry - y);
-        heights.push(row_h + body);
+        prev_bottom = title_cy + px.v(P_RAIL_GAP);
         ry += row_h + body;
-    }
-    if let Some(o) = out {
-        o.widget(
-            WidgetKind::ToolRail {
-                trunk_x: d(px, TRUNK_X),
-                bend: d(px, BEND),
-                branch_end: d(px, BRANCH_END),
-                row_mid: row_h / 2.0,
-                tops,
-                heights,
-            },
-            (x, y, d(px, TEXT_X), ry - y),
-            None,
-        );
+        if i + 1 == n && body > 0.0 {
+            if let Some(o) = out.as_deref_mut() {
+                o.fill(trunk - rail_w / 2.0, prev_bottom, rail_w, (ry - prev_bottom).max(0.0), 0.0, ColorRole::ToolRail);
+            }
+        }
     }
     ry - y
 }
 
+/// Two lines (verb, then the mono argument) or one when there is no argument.
+fn line_height(line: &ToolLine, px: Px) -> f32 {
+    if line.detail.is_some() {
+        px.v(P_ROW)
+    } else {
+        px.v(P_ROW - P_ARG_DY)
+    }
+}
+
 fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut DisplayBuilder) {
-    let row_h = d(px, ROW_H);
-    let is = d(px, ICON);
+    let row_h = line_height(line, px);
+    let is = px.v(P_ICON);
+    let title_y = ry + px.v(P_TOP);
+    let title_cy = title_y + line.label.lh / 2.0;
     let icon_color = if line.failed { ColorRole::Danger } else { ColorRole::TextSecondary };
-    o.widget(WidgetKind::Icon { name: line.icon.clone(), color: icon_color }, (x + d(px, ICON_LEFT), ry + (row_h - is) / 2.0, is, is), None);
-    let tx = x + d(px, TEXT_X);
+    o.widget(WidgetKind::Icon { name: line.icon.clone(), color: icon_color }, (x + px.v(P_TRUNK) - is / 2.0, title_cy - is / 2.0, is, is), None);
+    let tx = x + px.v(P_TITLE_X);
     let lw = line.label.p.max_content_width();
-    place_text(&line.label, tx, ry + (row_h - line.label.lh) / 2.0, lw + 1.0, Some(o));
-    let dx = tx + lw + d(px, 8.0);
-    let avail = (x + cw - dx).max(0.0);
-    if let Some((asset, name)) = &line.badge {
-        let bh = d(px, 22.0);
-        let by = ry + (row_h - bh) / 2.0;
-        let nw = name.p.max_content_width();
-        let bw = (d(px, 1.0 + 20.0 + 6.0 + 6.0) + nw).min(avail);
-        if bw > d(px, 34.0) {
-            o.fill(dx, by, bw, bh, d(px, 5.0), ColorRole::ToolBadge);
-            let well = d(px, 20.0);
-            o.fill(dx + d(px, 1.0), by + d(px, 1.0), well, well, d(px, 4.0), ColorRole::ToolWell);
-            let fs = d(px, 14.0);
-            o.widget(
-                WidgetKind::Icon { name: asset.clone(), color: ColorRole::TextSoft },
-                (dx + d(px, 1.0) + (well - fs) / 2.0, by + d(px, 1.0) + (well - fs) / 2.0, fs, fs),
-                None,
-            );
-            place_text_lines(name, dx + d(px, 27.0), ry + (row_h - name.lh) / 2.0, (bw - d(px, 33.0)).max(1.0), 1, px, o);
-        }
-    } else if let Some(detail) = &line.detail {
-        if avail > 1.0 {
-            place_text_lines(detail, dx, ry + (row_h - detail.lh) / 2.0, avail, 1, px, o);
-        }
+    place_text(&line.label, tx, title_y, lw + 1.0, Some(o));
+    if let Some(status) = &line.status {
+        let sw = status.p.max_content_width();
+        // Share the verb's baseline.
+        let sy = title_y + line.label.base - status.base;
+        place_text(status, tx + lw + d(px, 6.0), sy, sw + 1.0, Some(o));
+    }
+    if let Some(detail) = &line.detail {
+        let avail = (x + cw - tx).max(1.0);
+        place_text_lines(detail, tx, title_y + px.v(P_ARG_DY), avail, 1, px, o);
     }
     o.widget(WidgetKind::ToolToggle { detail: line.key, open: line.open }, (x, ry, cw, row_h), None);
 }
@@ -1118,6 +1161,7 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
             .iter()
             .map(|l| {
                 l.label.p.heap_bytes()
+                    + l.status.as_ref().map_or(0, |s| s.p.heap_bytes())
                     + l.detail.as_ref().map_or(0, |d| d.p.heap_bytes())
                     + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes())
                     + l.body

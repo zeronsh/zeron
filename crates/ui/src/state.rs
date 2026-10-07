@@ -1711,16 +1711,27 @@ impl AppState {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                 || self.chat_delivery_degraded(chat_id)
+                || self.attachments_in_transit()
         })
+    }
+
+    /// Any attachment bytes still moving — local staging/upload or the
+    /// engine-side push to the host (`WatchTransfers`).
+    fn attachments_in_transit(&self) -> bool {
+        self.upload_progress.is_some() || !self.transfers.is_empty()
     }
 
     /// The send has sat unadopted past the grace window: surface the
     /// EXPLICIT failed state ("Not delivered — retry") instead of either
-    /// faking progress or silently forgetting the send ever happened.
+    /// faking progress or silently forgetting the send ever happened. A
+    /// live attachment upload holds this too — bytes still moving is not a
+    /// failed send.
     pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.pending_sends.get(chat_id).is_some_and(|p| {
-            now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
-        })
+        !self.attachments_in_transit()
+            && self.pending_sends.get(chat_id).is_some_and(|p| {
+                now.signed_duration_since(p.started).num_milliseconds()
+                    > UNDELIVERED_GRACE_MS
+            })
     }
 
     /// Retry pressed: restart the grace clock so the overlay returns to its

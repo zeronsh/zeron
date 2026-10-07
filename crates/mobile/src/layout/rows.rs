@@ -31,6 +31,8 @@ pub enum RowKind {
     Tools,
     Chip,
     Image,
+    /// The transcript's tail status row: a running turn, or how the last
+    /// one ended.
     Working,
 }
 
@@ -50,6 +52,12 @@ pub struct TranscriptInput {
     pub working: bool,
     pub working_since_ms: Option<i64>,
     pub streaming: bool,
+    /// How the last turn ended (the tail done/failed row once none runs);
+    /// `None` shows no such row.
+    pub outcome: Option<zeron_client::TurnOutcome>,
+    /// Older rows are still on their way (`Some(bytes received so far)`):
+    /// the head row says so. `None` shows no such row.
+    pub history_pending: Option<u64>,
 }
 
 pub(crate) fn row_key(id: &str) -> u64 {
@@ -92,6 +100,8 @@ pub(crate) enum Content {
     Chip(Chip),
     Image { reference: String },
     Working { since_ms: Option<i64>, streaming: bool },
+    TurnEnd { failed: bool, at_ms: i64 },
+    HistoryPending { received_bytes: u64 },
 }
 
 /// A width-independent row: identity, top gap class and prepared content.
@@ -132,6 +142,8 @@ pub(crate) mod geom {
     pub const BUBBLE_PAD_X: f32 = 15.0;
     pub const BUBBLE_PAD_Y: f32 = 10.0;
     pub const BUBBLE_RADIUS: f32 = 20.0;
+    /// The iOS frame's bubble ends 7px (@3x) short of the column's right edge.
+    pub const BUBBLE_TRAIL: f32 = 7.0 / 3.0;
     /// Width of a trailing overflow fade.
     pub const FADE: f32 = 28.0;
     pub const BUBBLE_FOLD_LINES: usize = 8;
@@ -141,6 +153,8 @@ pub(crate) mod geom {
     pub const CHIP_LINE: f32 = 32.0;
     pub const IMAGE: f32 = 260.0;
     pub const WORKING: f32 = 36.0;
+    pub const TURN_END: f32 = 28.0;
+    pub const HISTORY_PENDING: f32 = 32.0;
 }
 
 impl Gap {
@@ -180,6 +194,8 @@ pub(crate) struct RowBuilder {
     entries: HashMap<String, EntryState>,
     pending: HashMap<String, (String, Arc<RowCore>)>,
     working: Option<Arc<RowCore>>,
+    turn_end: Option<Arc<RowCore>>,
+    history: Option<Arc<RowCore>>,
     pub expanded: HashSet<u64>,
     pub collapsed: HashSet<u64>,
     /// Per-tool inline detail overrides (row detail key → open).
@@ -285,6 +301,44 @@ impl RowBuilder {
             }
             let core = self.working.clone().expect("set above");
             out.push(Placed { core, gap: Gap::Reply });
+        } else if let Some(outcome) = input.outcome.filter(|_| !out.is_empty() && input.pending.is_empty()) {
+            let stale = self.turn_end.as_ref().is_none_or(|w| {
+                !matches!(&w.content, Content::TurnEnd { failed, at_ms } if *failed == outcome.failed && *at_ms == outcome.at_ms)
+            });
+            if stale {
+                self.turn_end = Some(Arc::new(RowCore {
+                    key: row_key("#turn-end"),
+                    version: next_version(),
+                    kind: RowKind::Working,
+                    entry_id: Arc::from(""),
+                    content: Content::TurnEnd {
+                        failed: outcome.failed,
+                        at_ms: outcome.at_ms,
+                    },
+                    copy_text: String::new(),
+                }));
+            }
+            let core = self.turn_end.clone().expect("set above");
+            out.push(Placed { core, gap: Gap::Reply });
+        }
+        // Older rows still downloading: the head says so (scrolling up to
+        // it is where they'd be missed).
+        if let Some(received_bytes) = input.history_pending.filter(|_| !out.is_empty()) {
+            let stale = self.history.as_ref().is_none_or(|h| {
+                !matches!(&h.content, Content::HistoryPending { received_bytes: r } if *r == received_bytes)
+            });
+            if stale {
+                self.history = Some(Arc::new(RowCore {
+                    key: row_key("#history-pending"),
+                    version: next_version(),
+                    kind: RowKind::Working,
+                    entry_id: Arc::from(""),
+                    content: Content::HistoryPending { received_bytes },
+                    copy_text: String::new(),
+                }));
+            }
+            let core = self.history.clone().expect("set above");
+            out.insert(0, Placed { core, gap: Gap::First });
         }
         out
     }
@@ -731,6 +785,33 @@ pub(crate) fn place_row(core: &RowCore, gap: Gap, px: Px, width: f32, mut out: O
             }
             side
         }
+        Content::HistoryPending { received_bytes } => {
+            let h = px.v(HISTORY_PENDING);
+            if let Some(out) = out {
+                out.widget(
+                    WidgetKind::HistoryPending {
+                        received_bytes: *received_bytes,
+                    },
+                    (x, top, cw, h),
+                    None,
+                );
+            }
+            h
+        }
+        Content::TurnEnd { failed, at_ms } => {
+            let h = px.v(TURN_END);
+            if let Some(out) = out {
+                out.widget(
+                    WidgetKind::TurnEnd {
+                        failed: *failed,
+                        at_ms: *at_ms,
+                    },
+                    (x, top, cw, h),
+                    None,
+                );
+            }
+            h
+        }
         Content::Working { since_ms, streaming } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
@@ -790,14 +871,18 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     use geom::*;
     let pad_x = px.v(BUBBLE_PAD_X);
     let pad_y = px.v(BUBBLE_PAD_Y);
-    let max_w = (cw * 0.86).max(cw - px.v(56.0)).min(cw);
+    // iOS transcript frame: the bubble hugs its text (widest line + padding)
+    // and is right-aligned, ending BUBBLE_TRAIL short of the column edge.
+    // Wrapping uses nearly the whole column, so a long note starts ~26pt in.
+    let max_w = (cw - px.v(BUBBLE_TRAIL)).max(20.0);
     let text_w = (max_w - pad_x * 2.0).max(20.0);
     let stats = u.text.p.stats(text_w);
     let folds = stats.line_count > BUBBLE_FOLD_LINES;
     let shown = if folds && !u.expanded { BUBBLE_FOLD_SHOW } else { stats.line_count };
     let text_h = shown as f32 * u.text.lh;
     let more_h = if folds { u.more.lh + px.v(4.0) } else { 0.0 };
-    let bubble_w = if folds { max_w } else { stats.max_line_width.ceil() + pad_x * 2.0 };
+    let natural = stats.max_line_width.ceil() + pad_x * 2.0;
+    let bubble_w = if folds { max_w } else { natural.min(max_w) };
     let bubble_h = if stats.line_count == 0 { 0.0 } else { text_h + more_h + pad_y * 2.0 };
     let side = px.v(THUMB);
     let gap = px.v(6.0);
@@ -809,7 +894,7 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     let h = thumbs_h + bubble_h;
     let Some(out) = out else { return h };
     // Thumbnails right-aligned above the bubble.
-    let mut tx = x + cw - side;
+    let mut tx = x + max_w - side;
     for img in u.images.iter().rev() {
         out.fill(tx, y, side, side, px.v(12.0), ColorRole::ChipBackground);
         out.widget(WidgetKind::Image { reference: img.clone() }, (tx, y, side, side), None);
@@ -830,7 +915,7 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         fy += pill_h + gap;
     }
     if bubble_h > 0.0 {
-        let bx = x + cw - bubble_w;
+        let bx = x + max_w - bubble_w;
         let by = y + thumbs_h;
         out.fill(bx, by, bubble_w, bubble_h, px.v(BUBBLE_RADIUS).min(bubble_h / 2.0), ColorRole::UserBubble);
         place_text_lines(&u.text, bx + pad_x, by + pad_y, text_w, shown, px, out);
@@ -871,6 +956,6 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
-        Content::Working { .. } => 0,
+        Content::Working { .. } | Content::TurnEnd { .. } | Content::HistoryPending { .. } => 0,
     }
 }

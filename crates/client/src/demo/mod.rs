@@ -52,7 +52,7 @@ pub(crate) struct DemoServer {
 }
 
 impl DemoServer {
-    fn settle(&mut self, doc: &mut RegistryDoc) {
+    pub(crate) fn settle(&mut self, doc: &mut RegistryDoc) {
         loop {
             let batches = doc.take_pushable();
             if batches.is_empty() {
@@ -964,12 +964,22 @@ impl DemoHost {
             installed: true,
             enabled: Some(true),
         });
+        // Pi with two providers serving the same models (see `demo_models`).
+        list.push(HarnessInfo {
+            id: "pi".into(),
+            label: "Pi".into(),
+            supports_steering: Some(true),
+            steering_mode: Some("step-boundary".into()),
+            reasoning_levels: Vec::new(),
+            installed: true,
+            enabled: Some(true),
+        });
         list
     }
 
     pub(crate) async fn list_models(&self, harness: &str) -> Vec<ModelInfo> {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        catalog::fallback_models(harness)
+        demo_models(harness)
     }
 
     fn seeded_refs(path: &str) -> Vec<RepoRef> {
@@ -1064,6 +1074,22 @@ impl DemoHost {
             "/Users/dev/Projects/blog" => &["content", "public"],
             "/srv" => &["backups", "deploys"],
             "/srv/deploys" => &["edge", "landing"],
+            "/Users/dev/zeron" => &["apps", "crates", "docs", "scripts"],
+            _ => &[],
+        };
+        // Files, listed after the folders like the engine does (the folder
+        // browser hides them; the composer's file picker shows them).
+        let files: &[&str] = match path.as_str() {
+            "/Users/dev" => &["todo.md"],
+            "/Users/dev/zeron" => &[
+                "Cargo.lock",
+                "Cargo.toml",
+                "CHANGELOG.md",
+                "README.md",
+                "rustfmt.toml",
+            ],
+            "/Users/dev/zeron/docs" => &["chat2-sync.md", "feature-inventory.md", "release.md"],
+            "/Users/dev/Documents" => &["invoice-2026-09.pdf"],
             _ => &[],
         };
         const REPOS: &[&str] = &[
@@ -1084,6 +1110,11 @@ impl DemoHost {
                     is_dir: true,
                     is_repo: REPOS.contains(name),
                 })
+                .chain(files.iter().map(|name| FolderEntry {
+                    name: (*name).into(),
+                    is_dir: false,
+                    is_repo: false,
+                }))
                 .collect(),
             truncated: false,
         })
@@ -1150,4 +1181,69 @@ fn text_hash(text: &str) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+/// Demo's model lists: the built-in ones, except Pi, which lists what a pi
+/// config with two providers serving the same models reports (providers
+/// `AG.20` and `AG.50`, both offering gpt-6-astra and gpt-6.1-sol under the
+/// same names). The rows differ only by the `provider/` prefix of their
+/// engine ids, so the pickers have to name the provider under each one.
+pub(crate) fn demo_models(harness: &str) -> Vec<ModelInfo> {
+    if harness != "pi" {
+        return catalog::fallback_models(harness);
+    }
+    let ladder: Vec<String> = ["minimal", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    ["AG.20", "AG.50"]
+        .iter()
+        .flat_map(|provider| {
+            [
+                ("gpt-6-astra", "GPT-6 Astra"),
+                ("gpt-6.1-sol", "GPT-6.1 Sol"),
+            ]
+            .iter()
+            .map(|(id, label)| ModelInfo {
+                id: format!("{provider}/{id}"),
+                label: (*label).to_owned(),
+                // pi-acp sends no description; the provider is in the id.
+                description: None,
+                reasoning_levels: ladder.clone(),
+                options: Vec::new(),
+            })
+            .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// What Demo's computer answers for a file link: a short Markdown report
+/// (any path; it shows which one was asked for).
+pub(crate) fn demo_file(path: &str) -> crate::file_links::WorkspaceFile {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let text = if name.ends_with(".md") || name.ends_with(".markdown") {
+        format!(
+            "# 传输层重构报告\n\n\
+             > 由 Codex 生成 · `{path}`\n\n\
+             ## 结论\n\n\
+             新的 **SSH 隧道** 在局域网与 Tailscale 之间切换时不再丢失会话，冷启动连接从 *9.8 s* 降到 **2.1 s**。\n\n\
+             ## 改动\n\n\
+             - 每个地址单独的连接超时（局域网 4 s，Tailscale 12 s）\n\
+             - 失败时在连接详情里写明原因\n\
+             - 模型列表读取失败会显示「重试」\n\n\
+             ## 下一步\n\n\
+             1. 在真机上复测弱网\n\
+             2. 合并到 `main`\n\n\
+             ```rust\nlet budget = relay::deadline(method).max(CALL_TIMEOUT);\n```\n\n\
+             详见 [连接诊断](https://zeron.sh/docs/connect)。\n"
+        )
+    } else {
+        format!("// {path}\nfn main() {{\n    println!(\"hello from the demo computer\");\n}}\n")
+    };
+    crate::file_links::WorkspaceFile {
+        path: path.to_owned(),
+        size: text.len() as u64,
+        text: Some(text),
+        truncated: false,
+    }
 }

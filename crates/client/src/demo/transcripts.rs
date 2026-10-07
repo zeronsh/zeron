@@ -601,6 +601,67 @@ fn cjk(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
+/// Simplified Chinese: a title, a user note, a tool group whose arguments are
+/// CJK (mono, two cells per character), inline code and aligned code blocks.
+fn zh(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user(
+            "m1",
+            now - 400_000,
+            "帮我检查一下中文在 transcript 里的折行，还有等宽字体里汉字是不是正好占两格。",
+        ),
+        assistant(
+            "m2",
+            host,
+            now - 380_000,
+            vec![
+                tool(
+                    "k1",
+                    ToolCall::Search {
+                        pattern: "字体回退".into(),
+                        path: Some("apps/android".into()),
+                    },
+                    false,
+                    None,
+                ),
+                tool(
+                    "k2",
+                    exec("rg -n \"中文标题\" docs/排版"),
+                    false,
+                    Some("docs/排版/说明.md:12:## 中文标题"),
+                ),
+                tool("k3", read("docs/排版/说明.md"), false, Some("# 排版说明")),
+                tool(
+                    "k4",
+                    exec("cargo test -p zeron-text 中文折行"),
+                    true,
+                    Some("error: 没有匹配 `中文折行` 的测试"),
+                ),
+                text(
+                    "t0",
+                    r#"已确认：`FontChain` 先用 Geist，缺字时回退到 Noto Sans CJK SC。Rust 的测量和 Android 的绘制走同一条字体链，所以折行位置和行高完全一致，长句子也会在标点前后自然断开。
+
+等宽对齐（每个汉字正好占两格）：
+
+```text
+| 名称     | 状态   |
+|----------|--------|
+| 中文标题 | 通过   |
+| ASCII    | ok     |
+```
+
+```rust
+// 汉字在等宽上下文中占两格
+fn 宽度(c: char) -> usize {
+    if is_wide(c) { 2 } else { 1 }
+}
+```"#,
+                ),
+            ],
+        ),
+    ]
+}
+
 fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageEntry> {
     vec![
         user("m1", now - 120_000, prompt),
@@ -619,6 +680,7 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         "chat-ios-scroll" => scroll(host, now),
         "chat-home" => home(host, now),
         "chat-cjk" => cjk(host, now),
+        "chat-zh" => zh(host, now),
         "chat-deploy" => short(
             host,
             now,

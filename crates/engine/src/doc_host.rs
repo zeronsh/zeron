@@ -105,6 +105,15 @@ const ATTACHMENT_WAIT_MAX_MS: i64 = ATTACHMENT_WAIT_MAX.as_millis() as i64;
 /// (the happy path is event-driven — UploadCommit kicks the drain — this
 /// timer only covers the give-up transition and missed kicks).
 const ATTACHMENT_WAIT_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+/// Head-of-line bound when NO chunk of a missing ref has ever landed here:
+/// a real uploader lands its first chunk within seconds of the command
+/// showing up (bytes are staged before the command is written), so a
+/// command that still has zero staging after this window is waiting on a
+/// client that can't or won't send — an old client, a backend without
+/// attachment support, a dead app. It gets rejected and the queue moves;
+/// it must NOT sit for the full in-transit window starving every command
+/// behind it.
+const NO_UPLOAD_WAIT_MS: i64 = 3 * 60_000;
 
 /// Transfer attempt outcome: transient failures retry (the link may heal),
 /// permanent ones stop (the host actively refused, or the bytes are gone).
@@ -262,6 +271,11 @@ struct DocHostInner {
     /// deferred on in-transit attachment bytes re-checks on a cadence, and
     /// each deferral must not stack another timer.
     drain_waiting: Mutex<HashSet<String>>,
+    /// Command id → when THIS host first saw it missing attachment bytes.
+    /// The wait caps are measured on this clock — `issued_at` comes from
+    /// the issuing client and can be minutes off (or ahead), which would
+    /// either expire the wait instantly or stretch it past every bound.
+    missing_since: Mutex<HashMap<String, i64>>,
     /// Uploads store (engine assembly) — resolves `pending://` attachment
     /// refs and jails transfer reads to the uploads dir.
     uploads: OnceLock<crate::uploads::Uploads>,
@@ -920,6 +934,7 @@ impl DocHost {
                 seeding: Mutex::new(HashSet::new()),
                 seed_waiting: Mutex::new(HashSet::new()),
                 drain_waiting: Mutex::new(HashSet::new()),
+                missing_since: Mutex::new(HashMap::new()),
                 uploads: OnceLock::new(),
                 connectivity: OnceLock::new(),
                 connectivity_started: AtomicBool::new(false),
@@ -4949,13 +4964,33 @@ impl DocHost {
             // bounded; past it the command fails loudly.
             if matches!(disposition, CommandDisposition::Execute) {
                 let missing = self.missing_attachments(&entry);
-                if !missing.is_empty() {
-                    if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS {
+                if missing.is_empty() {
+                    lock(&self.inner.missing_since).remove(&entry.id);
+                } else {
+                    // Two windows, both measured on THIS host's clock from
+                    // the first drain that saw the bytes missing (the
+                    // client's `issued_at` can skew):
+                    // - a staging dir exists for a missing ref → bytes are
+                    //   demonstrably landing → wait the full transfer window;
+                    // - zero staging after NO_UPLOAD_WAIT_MS → no uploader is
+                    //   coming → reject early so the queue doesn't wedge.
+                    let in_transit = missing.iter().any(|r| self.transfer_started(r));
+                    let first_seen = *lock(&self.inner.missing_since)
+                        .entry(entry.id.clone())
+                        .or_insert_with(now_ms);
+                    let cap = if in_transit {
+                        ATTACHMENT_WAIT_MAX_MS
+                    } else {
+                        NO_UPLOAD_WAIT_MS
+                    };
+                    if now_ms().saturating_sub(first_seen) < cap {
                         tracing::info!(chat = %handle.chat_id, command = %entry.id,
-                            missing = missing.len(), "command deferred: attachment bytes in transit");
+                            missing = missing.len(), in_transit,
+                            "command deferred: attachment bytes in transit");
                         self.arm_attachment_wait(handle);
                         return; // preserve order; UploadCommit / the wait timer re-kick
                     }
+                    lock(&self.inner.missing_since).remove(&entry.id);
                     if let Err(err) = self.inner.store.mark_processed(&entry.id) {
                         tracing::error!(chat = %handle.chat_id, error = %err,
                             "processed-ledger write failed; halting drain");
@@ -5032,6 +5067,20 @@ impl DocHost {
         refs.into_iter()
             .filter(|r| uploads.resolve_pending(r).is_none())
             .collect()
+    }
+
+    /// Has at least one chunk of this `pending://` ref's upload landed here?
+    /// (Staging dir exists.) Distinguishes "bytes actively arriving — wait
+    /// the full window" from "no uploader is coming — reject on the short
+    /// head-of-line bound".
+    fn transfer_started(&self, pending_ref: &str) -> bool {
+        let (Some(uploads), Some((upload_id, _))) = (
+            self.inner.uploads.get(),
+            crate::uploads::parse_pending_ref(pending_ref),
+        ) else {
+            return false;
+        };
+        uploads.transfer_started(upload_id)
     }
 
     /// Arm (once per chat) the deferred-command re-check loop: while a

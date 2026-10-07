@@ -1,0 +1,696 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- values/ is English; values-zh/ is Simplified Chinese for every zh locale.
+     Brand, product and model names, and anything the desktop engine or an
+     agent sends (titles, messages, tool output, errors), stay untranslated. -->
+<resources>
+    <!-- Scheduled send -->
+    <string name="schedule_send_title">Schedule send</string>
+    <string name="schedule_menu_entry">Schedule send…</string>
+    <string name="schedule_today">Today %1$s</string>
+    <string name="schedule_tomorrow">Tomorrow %1$s</string>
+    <string name="schedule_confirm">Schedule</string>
+    <string name="schedule_dismiss">Cancel</string>
+    <string name="schedule_exact_hint">Exact alarms are off for Zeron, so this may send a few minutes late.</string>
+    <string name="schedule_exact_allow">Allow</string>
+    <string name="schedule_chip">Scheduled for %1$s</string>
+    <string name="schedule_chip_cancel">Cancel</string>
+    <string name="schedule_toast">Scheduled for %1$s</string>
+    <string name="schedule_cancelled">Scheduled message cancelled</string>
+    <string name="schedule_channel_progress">Sending scheduled messages</string>
+    <string name="schedule_channel_result">Scheduled message results</string>
+    <string name="schedule_notif_sending">Sending scheduled message…</string>
+    <string name="schedule_notif_sent">Scheduled message sent</string>
+    <string name="schedule_notif_pending">Scheduled message not confirmed yet</string>
+    <string name="schedule_notif_pending_body">It stays queued and goes out when Zeron reconnects.</string>
+    <string name="schedule_notif_failed">Scheduled message not sent</string>
+    <string name="schedule_notif_failed_body">%1$s\n\n%2$s</string>
+
+    <!-- Settings > Language (per-app locale, see AppLanguage) -->
+    <string name="settings_language">Language</string>
+    <string name="language_system">Follow System</string>
+    <string name="language_english">English</string>
+    <string name="language_chinese">简体中文</string>
+
+    <!-- Compact times: session-row age (RelativeTime) and the Working timer (ElapsedFormat). Keep them short. -->
+    <string name="time_now">now</string>
+    <string name="time_minutes">%1$dm</string>
+    <string name="time_hours">%1$dh</string>
+    <string name="time_days">%1$dd</string>
+    <string name="elapsed_s">%1$ds</string>
+    <string name="elapsed_m_s">%1$dm %2$ds</string>
+    <string name="elapsed_h_m">%1$dh %2$dm</string>
+    <string name="elapsed_d_h">%1$dd %2$dh</string>
+
+    <!-- Shared actions and labels -->
+    <string name="cancel">Cancel</string>
+    <string name="close">Close</string>
+    <string name="done">Done</string>
+    <string name="save">Save</string>
+    <string name="edit">Edit</string>
+    <string name="copy">Copy</string>
+    <string name="copied">Copied</string>
+    <string name="delete">Delete</string>
+    <string name="loading">Loading…</string>
+    <string name="online">Online</string>
+    <string name="offline">Offline</string>
+    <string name="undo">Undo</string>
+    <string name="rename">Rename</string>
+    <string name="rename_ellipsis">Rename…</string>
+    <string name="pin">Pin</string>
+    <string name="unpin">Unpin</string>
+    <string name="archive">Archive</string>
+    <string name="unarchive">Unarchive</string>
+    <string name="usage">Usage</string>
+    <string name="retry_now">Retry now</string>
+
+    <!-- Sessions list, row menus, folders, search -->
+    <string name="opening_workspace">Opening the workspace…</string>
+    <string name="try_demo">Try the demo</string>
+    <string name="accounts_computers_ellipsis">Accounts &amp; Computers…</string>
+    <string name="move_to_named">Move to %1$s</string>
+    <string name="no_section">No Section</string>
+    <string name="new_section_ellipsis">New Section…</string>
+    <string name="new_section">New Section</string>
+    <string name="create">Create</string>
+    <string name="move_to_section">Move to Section</string>
+    <string name="open">Open</string>
+    <string name="reorder_ellipsis">Reorder…</string>
+    <string name="rename_section_ellipsis">Rename Section…</string>
+    <string name="rename_section">Rename Section</string>
+    <string name="delete_section">Delete Section</string>
+    <string name="pinned">Pinned</string>
+    <string name="sessions">Sessions</string>
+    <string name="list_view">View</string>
+    <string name="by_project">By Project</string>
+    <string name="by_activity">By Activity</string>
+    <string name="collapse_all">Collapse All</string>
+    <string name="archived">Archived</string>
+    <string name="move">Move</string>
+    <string name="status_failed">Failed</string>
+    <string name="status_working">Working</string>
+    <string name="status_input">Input</string>
+    <string name="status_done">Done</string>
+    <string name="history_loading">Loading earlier messages…</string>
+    <string name="history_received">%1$s received</string>
+    <string name="nothing_here">Nothing here</string>
+    <string name="search">Search</string>
+    <string name="search_placeholder">Sessions, projects, messages</string>
+    <string name="no_matches">No matches</string>
+
+    <!-- Settings -->
+    <string name="settings">Settings</string>
+    <string name="settings_account">Account</string>
+    <string name="settings_demo_sub">Offline workspace · tap to switch</string>
+    <string name="signed_in_org">Signed in · %1$s</string>
+    <string name="accounts_computers">Accounts &amp; Computers</string>
+    <string name="add_computer_ssh">Add Computer (SSH)…</string>
+    <string name="add_computer_ssh_sub">Connect straight to Zeron on your PC over SSH</string>
+    <string name="connection_details">Connection Details</string>
+    <string name="connection_details_sub">Link state, engine version, streams and log</string>
+    <string name="settings_devices">Devices</string>
+    <string name="this_device">This device</string>
+    <string name="no_other_hosts">No other hosts in the demo</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="appearance_system">System</string>
+    <string name="appearance_light">Light</string>
+    <string name="appearance_dark">Dark</string>
+    <string name="wallpaper">Wallpaper</string>
+    <string name="change_wallpaper">Change Wallpaper…</string>
+    <string name="choose_wallpaper">Choose Wallpaper…</string>
+    <string name="wallpaper_sub">Shown behind new chats and the sessions list</string>
+    <string name="wallpaper_effect_row">Effect</string>
+    <string name="remove_wallpaper">Remove Wallpaper</string>
+    <string name="wallpaper_effect_title">Wallpaper Effect</string>
+    <string name="effect_none">None</string>
+    <string name="effect_dither">Dither</string>
+    <string name="effect_ascii">ASCII</string>
+    <string name="effect_halftone">Halftone</string>
+    <string name="effect_scanlines">Scanlines</string>
+    <string name="archived_sessions">Archived Sessions</string>
+    <string name="new_project">New Project</string>
+    <string name="new_project_sub">Browse a host folder</string>
+    <string name="settings_about">About</string>
+    <string name="check_for_updates">Check for Updates</string>
+    <string name="update_available">%1$s is available</string>
+    <string name="version_build">%1$s · build %2$d</string>
+    <string name="sign_out">Sign Out</string>
+    <string name="sign_out_sub">Local drafts stay on this device.</string>
+    <string name="sign_out_confirm">Sign out?</string>
+    <string name="project_added">Added %1$s</string>
+
+    <!-- Chat: header, composer, menus, status pill, queue, questions, sign-in -->
+    <string name="session_fallback">Session</string>
+    <string name="no_project">No project</string>
+    <string name="the_agent">the agent</string>
+    <string name="composer_placeholder">Message %1$s</string>
+    <string name="composer_edit_queued">Edit queued message</string>
+    <string name="edit_save_failed">Couldn\'t save the edit</string>
+    <string name="queued_not_editable">That message isn\'t editable right now</string>
+    <string name="send_failed">Couldn\'t send: %1$s</string>
+    <string name="unknown_error">unknown error</string>
+    <string name="copy_transcript">Copy Transcript</string>
+    <string name="nothing_to_copy">Nothing to copy yet</string>
+    <string name="transcript_copied">Transcript copied</string>
+    <string name="attachment">Attachment</string>
+    <string name="change_session_failed">Couldn\'t change the session</string>
+    <string name="model">Model</string>
+    <string name="model_options">Model options</string>
+    <string name="model_list_stale">Couldn\'t get the latest list · Retry</string>
+    <string name="model_list_reading">Reading the list…</string>
+    <string name="model_list_showing_saved">Showing the list saved last time</string>
+    <string name="model_list_showing_builtin">Showing the built-in list</string>
+    <string name="model_list_stale_short">Couldn\'t get the latest list</string>
+    <string name="model_list_retry_for">%1$s · Tap to retry</string>
+    <string name="model_list_refresh">Refresh model list</string>
+    <string name="model_list_refresh_hint">Read it again from the computer</string>
+    <string name="model_list_refreshed">Updated from the computer</string>
+    <string name="model_list_refresh_failed">Couldn\'t refresh: %1$s</string>
+    <string name="reasoning_effort">Reasoning effort</string>
+    <string name="open_pull_request">Open Pull Request</string>
+    <string name="copy_link">Copy Link</string>
+    <string name="copy_branch_name">Copy Branch Name</string>
+    <string name="pill_editing">Editing queued message · Tap to cancel</string>
+    <string name="pill_not_delivered">Not delivered · Tap to retry</string>
+    <string name="pill_host_offline">%1$s is offline — will send when it\'s back</string>
+    <string name="host_fallback">Host</string>
+    <string name="pill_uploading">Uploading · %1$d%%</string>
+    <string name="pill_offline">Offline — sends are saved</string>
+    <string name="pill_reconnecting">Reconnecting in %1$ds</string>
+    <string name="status_writing">Writing</string>
+    <string name="queued">Queued</string>
+    <string name="queue_editing">Editing</string>
+    <string name="queue_being_edited">Being edited</string>
+    <string name="queue_needs_review">Needs review</string>
+    <string name="queue_updating">Updating</string>
+    <string name="queue_send_now">Now</string>
+    <string name="remove">Remove</string>
+    <string name="question_progress">%1$d of %2$d · %3$s</string>
+    <string name="back">Back</string>
+    <string name="send">Send</string>
+    <string name="next">Next</string>
+    <string name="deliver_queue">Queue for next turn</string>
+    <string name="deliver_steer">Steer now</string>
+    <string name="deliver_interrupt">Stop and send</string>
+    <string name="signin_tagline">Your coding agents, from anywhere.</string>
+    <string name="choose_org">Choose an organization</string>
+    <string name="signing_in">Signing in…</string>
+    <string name="sign_in">Sign In</string>
+    <string name="explore_demo">Explore the demo</string>
+    <string name="connect_ssh">Connect to your computer (SSH)</string>
+
+    <!-- Usage sheet -->
+    <string name="usage_context_window">Context window</string>
+    <string name="usage_percent_used">%1$d%% used</string>
+    <string name="usage_tokens_of">%1$s of %2$s tokens</string>
+    <string name="usage_tokens_in_context">%1$s tokens in context</string>
+    <string name="usage_no_context">%1$s hasn\'t reported context usage for this session yet.</string>
+    <string name="usage_plan">Plan usage · %1$s</string>
+    <string name="updating">Updating…</string>
+    <string name="refresh">Refresh</string>
+    <string name="usage_unsupported">This computer\'s engine doesn\'t report plan usage.</string>
+    <string name="usage_load_failed">Couldn\'t load usage: %1$s</string>
+    <string name="usage_no_login">No %1$s login on this computer reports usage.</string>
+    <string name="signed_in">Signed in</string>
+    <string name="active">Active</string>
+    <string name="usage_none_yet">No usage reported yet.</string>
+    <string name="usage_updated">Updated %1$s</string>
+    <string name="usage_resets">resets %1$s</string>
+    <string name="ago_just_now">just now</string>
+    <string name="ago_minutes">%1$dm ago</string>
+    <string name="ago_hours">%1$dh ago</string>
+    <string name="ago_days">%1$dd ago</string>
+
+    <!-- Connection state (direct SSH link) and Connection Details -->
+    <string name="direct_connecting">connecting…</string>
+    <string name="direct_connected">connected</string>
+    <string name="direct_connected_version">connected · Zeron %1$s</string>
+    <string name="direct_syncing">connected · loading sessions…</string>
+    <string name="direct_not_connected">not connected</string>
+    <string name="retrying_in">Retrying in %1$ds</string>
+    <string name="retrying">Retrying…</string>
+    <string name="ok">OK</string>
+    <string name="banner_skipped_title">Some sessions couldn\'t be read</string>
+    <plurals name="banner_skipped_detail">
+        <item quantity="one">%1$d row from Zeron %2$s was skipped. Tap Details.</item>
+        <item quantity="other">%1$d rows from Zeron %2$s were skipped. Tap Details.</item>
+    </plurals>
+    <string name="details">Details</string>
+    <string name="computers">Computers</string>
+    <string name="no_sessions_yet">No sessions yet</string>
+    <string name="no_sessions_on">No sessions on %1$s yet</string>
+    <string name="not_connected">Not connected</string>
+    <string name="loading_sessions_from">Loading sessions from %1$s…</string>
+    <string name="not_connected_machine">Not connected to a machine</string>
+    <string name="link_live">Live · synced</string>
+    <string name="link_syncing">Tunnel open · waiting for the workspace</string>
+    <string name="link_connecting">Connecting</string>
+    <string name="link_state">State</string>
+    <string name="link_engine">Zeron engine</string>
+    <string name="link_device">device %1$s</string>
+    <string name="link_not_reached">not reached yet</string>
+    <string name="link_last_error">Last error</string>
+    <string name="link_note">Note</string>
+    <string name="link_streams">Streams</string>
+    <plurals name="stream_frames">
+        <item quantity="one">%1$d frame</item>
+        <item quantity="other">%1$d frames</item>
+    </plurals>
+    <plurals name="stream_rows">
+        <item quantity="one">%1$d row</item>
+        <item quantity="other">%1$d rows</item>
+    </plurals>
+    <plurals name="stream_skipped">
+        <item quantity="other">%1$d skipped</item>
+    </plurals>
+    <plurals name="stream_repaired">
+        <item quantity="other">%1$d read with unknown values ignored</item>
+    </plurals>
+    <string name="stream_last">last %1$s</string>
+    <string name="link_on_phone">On this phone</string>
+    <plurals name="count_projects">
+        <item quantity="one">%1$d project</item>
+        <item quantity="other">%1$d projects</item>
+    </plurals>
+    <plurals name="count_recent">
+        <item quantity="other">%1$d recent</item>
+    </plurals>
+    <plurals name="count_archived">
+        <item quantity="other">%1$d archived</item>
+    </plurals>
+    <string name="link_log">Log</string>
+    <string name="not_signed_in_cloud">Not signed in to Zeron Cloud</string>
+    <string name="computer_removed">That computer was removed</string>
+
+    <!-- Accounts & Computers, add/edit computer -->
+    <string name="your_computers_ssh">Your computers (SSH)</string>
+    <string name="not_verified_yet">not verified yet</string>
+    <string name="add_a_computer">Add a computer</string>
+    <string name="add_computer_first_sub">Connect straight to Zeron on your PC over SSH: no cloud account needed.</string>
+    <string name="connect_over_ssh">Connect over SSH</string>
+    <string name="other_workspaces">Other workspaces</string>
+    <string name="cloud_sub">Your Zeron account, through the relay</string>
+    <string name="demo">Demo</string>
+    <string name="demo_sub">Offline sample workspace</string>
+    <string name="phone_ssh_key">This phone\'s SSH key</string>
+    <string name="copy_public_key">Copy public key</string>
+    <string name="public_key_copied">Public key copied</string>
+    <string name="phone_key_hint">Add it to administrators_authorized_keys on Windows (see docs/ssh-direct.md).</string>
+    <string name="test_ok">Connected · Zeron %1$s answered in %2$d ms</string>
+    <string name="engine">engine</string>
+    <string name="host_key_changed_bang">The host key changed!</string>
+    <string name="couldnt_connect">Couldn\'t connect</string>
+    <string name="edit_computer">Edit Computer</string>
+    <string name="add_computer">Add Computer</string>
+    <string name="computer">Computer</string>
+    <string name="field_name">Name</string>
+    <string name="name_hint">My PC</string>
+    <string name="field_host">Host</string>
+    <string name="host_hint">192.168.1.20 or pc.local</string>
+    <string name="ssh_port">SSH port</string>
+    <string name="zeron_port">Zeron port</string>
+    <string name="field_user">User</string>
+    <string name="user_hint">Windows user name</string>
+    <string name="sign_in_with">Sign in with</string>
+    <string name="auth_phone">This phone\'s key</string>
+    <string name="auth_import">Import key</string>
+    <string name="auth_password">Password</string>
+    <string name="public_key_line_hint">Public key: add this line to the machine\'s authorized keys</string>
+    <string name="private_key">Private key</string>
+    <string name="saved_paste_replace">Saved (paste to replace)</string>
+    <string name="saved_type_replace">Saved (type to replace)</string>
+    <string name="connection">Connection</string>
+    <string name="host_key_value">Host key: %1$s</string>
+    <string name="host_key_unverified">Host key not verified yet: Test to see it and trust it.</string>
+    <string name="testing">Testing…</string>
+    <string name="test">Test</string>
+    <string name="save_connect">Save &amp; Connect</string>
+    <string name="delete_machine">Delete Machine</string>
+    <string name="trust_machine_title">Trust this machine?</string>
+    <string name="trust_first">First connection to %1$s:%2$s. Check that the fingerprint matches the machine before trusting it.</string>
+    <string name="windows_fingerprint_hint">On Windows: ssh-keygen -lf C:\\ProgramData\\ssh\\ssh_host_ed25519_key.pub</string>
+    <string name="trust">Trust</string>
+    <string name="host_key_changed">Host key changed</string>
+    <string name="host_key_changed_body">The machine presented a different key than the one you trusted. This happens after reinstalling OpenSSH, but it can also mean someone is intercepting the connection.</string>
+    <string name="host_key_trusted">Trusted: %1$s</string>
+    <string name="host_key_now">Now: %1$s</string>
+    <string name="trust_new_key">Trust new key</string>
+    <string name="delete_named">Delete %1$s?</string>
+    <string name="delete_machine_body">Its saved key or password is removed from this phone.</string>
+
+    <!-- New Session and New Project (folder browser) -->
+    <string name="project">Project</string>
+    <string name="new_worktree">New worktree</string>
+    <string name="current_branch">Current branch</string>
+    <string name="choose_host">Choose host</string>
+    <string name="new_session">New Session</string>
+    <string name="new_session_headline">What are we building?</string>
+    <string name="new_session_placeholder">Describe the task</string>
+    <string name="choose_project_or_host">Choose a project or a host that can run it.</string>
+    <string name="start_session_failed">Couldn\'t start the session</string>
+    <string name="host_offline_suffix">%1$s · offline</string>
+    <string name="no_project_ellipsis">No Project…</string>
+    <string name="new_project_ellipsis">New Project…</string>
+    <string name="add_computer_ellipsis">Add Computer…</string>
+    <string name="run_on">Run on</string>
+    <string name="checkout">Checkout</string>
+    <string name="branch">Branch</string>
+    <string name="checked_out">Checked out</string>
+    <string name="no_branches">No branches found</string>
+    <string name="read_folder_failed">Couldn\'t read that folder</string>
+    <string name="home_folder">Home</string>
+    <string name="device_offline">%1$s is offline.</string>
+    <string name="folders_truncated">Only the first folders are shown.</string>
+    <string name="no_folders">No folders here.</string>
+    <string name="create_project_failed">Couldn\'t create the project</string>
+    <string name="adding">Adding…</string>
+    <string name="use_folder_named">Use “%1$s”</string>
+    <string name="use_this_folder">Use this folder</string>
+
+    <!-- Software update (GitHub Releases) -->
+    <string name="software_update">Software Update</string>
+    <string name="update_installed">Installed</string>
+    <string name="update_build">Build %1$d</string>
+    <string name="update_latest_github">Latest on GitHub</string>
+    <string name="update_checking">Checking…</string>
+    <string name="update_not_checked">Not checked yet</string>
+    <string name="update_build_newer">Build %1$d · newer than this one</string>
+    <string name="update_build_current">Build %1$d · you\'re up to date</string>
+    <string name="update_downloaded">Downloaded. Opening the installer…</string>
+    <string name="update_downloading">Downloading… %1$d%%</string>
+    <string name="update_install">Install</string>
+    <string name="update_download_install">Download &amp; Install</string>
+    <string name="update_check_again">Check Again</string>
+    <string name="update_install_hint">Android asks you to confirm every install. The first time, allow “Install unknown apps” for Zeron.</string>
+    <string name="update_advanced">Advanced</string>
+    <string name="update_mirror_token">Download mirror &amp; GitHub token</string>
+    <string name="update_mirror_value">Mirror: %1$s</string>
+    <string name="off">Off</string>
+    <string name="update_mirror_hint">Preferred mirror prefix (optional), e.g. https://ghfast.top/: tried first, before GitHub and the built-in mirrors.</string>
+    <string name="update_token_hint">GitHub token (optional, read-only): only to avoid API rate limits.</string>
+    <string name="saved">Saved</string>
+    <string name="clear_token">Clear token</string>
+    <string name="token_removed">Token removed</string>
+    <string name="update_err_no_release">No release published yet.</string>
+    <string name="update_err_401">GitHub rejected the token (401). Clear or replace it in Settings.</string>
+    <string name="update_err_no_apk">Release %1$s has no APK attached.</string>
+    <string name="update_err_save">Couldn\'t save the download.</string>
+
+    <!-- Model toasts and errors raised by the app itself -->
+    <string name="toast_pinned">Pinned</string>
+    <string name="toast_unpinned">Unpinned</string>
+    <string name="toast_archived">Archived</string>
+    <string name="toast_unarchived">Unarchived</string>
+    <string name="toast_signed_out">Signed out</string>
+    <string name="machine_fallback">Machine</string>
+    <string name="machine_key_failed">Couldn\'t read this machine\'s key</string>
+    <string name="update_check_failed">Couldn\'t reach GitHub. Check the network and try again.</string>
+    <string name="update_download_failed">Download failed. Try again.</string>
+    <string name="open_workspace_failed">Couldn\'t open the workspace</string>
+    <string name="generic_update_failed">Couldn\'t update</string>
+    <string name="signin_incomplete_retry">Sign-in didn\'t complete. Try again.</string>
+    <string name="signin_incomplete">Sign-in didn\'t complete.</string>
+    <string name="signin_no_org">This account isn\'t in an organization yet.</string>
+    <string name="join_org_failed">Couldn\'t join that organization.</string>
+    <string name="sched_connect_timeout">Couldn\'t connect in time</string>
+    <string name="sched_unavailable">Unavailable</string>
+    <string name="sched_send_failed">Couldn\'t send</string>
+
+    <!-- Navigation -->
+    <string name="nav_back">Back</string>
+
+    <!-- New Session: two-level model picker, project sort -->
+    <string name="sort_projects">Sort Projects</string>
+    <string name="sort_recent">Recently Used</string>
+    <string name="sort_name">Name (A–Z)</string>
+    <plurals name="model_count">
+        <item quantity="one">%1$d model</item>
+        <item quantity="other">%1$d models</item>
+    </plurals>
+
+    <!-- Accessibility labels -->
+    <string name="more_options">More</string>
+
+    <!-- Software update: multi-source download (GitHub, then mirrors) -->
+    <string name="update_err_check_all">Couldn\'t reach GitHub or any mirror:</string>
+    <string name="update_err_download_all">Download failed from every source:</string>
+    <string name="update_err_signature">The file from %1$s isn\'t signed with the Zeron release key, so it won\'t be installed.</string>
+    <string name="update_reason_timeout">timed out</string>
+    <string name="update_reason_slow">too slow (%1$s/s)</string>
+    <string name="update_reason_http">HTTP %1$s</string>
+    <string name="update_reason_rate_limited">rate limited (HTTP %1$d)</string>
+    <string name="update_reason_unexpected">unexpected response (%1$s)</string>
+    <string name="update_reason_bad_response">unexpected response</string>
+    <string name="update_reason_size">incomplete file</string>
+    <string name="update_reason_digest">checksum doesn\'t match</string>
+    <string name="update_reason_dns">DNS lookup failed</string>
+    <string name="update_reason_tls">secure connection failed</string>
+    <string name="update_downloading_from">Downloading from %1$s… %2$d%% · %3$s/s</string>
+    <string name="update_downloading_from_size">Downloading from %1$s… %2$s · %3$s/s</string>
+    <string name="update_open_browser">Open in Browser</string>
+    <string name="update_copy_link">Copy Link</string>
+    <string name="update_no_browser">No browser to open the link</string>
+    <string name="update_sources_hint">If GitHub is slow or unreachable, the app switches to public GitHub mirrors (ghfast.top, gh-proxy.com, gh.llkk.cc) by itself. Every download is checked against the release checksum and signing key before installing.</string>
+
+    <!-- Home title bar: connection chip, quick switcher, failure sheet -->
+    <string name="conn_state_connected">Connected</string>
+    <string name="conn_state_connecting">Connecting…</string>
+    <string name="conn_state_failed">Not connected</string>
+    <string name="conn_state_demo">Offline sample</string>
+    <string name="conn_chip_desc">Computer: %1$s, %2$s. Tap to switch.</string>
+    <string name="switch_computer">Switch Computer</string>
+    <string name="conn_fail_title">Couldn\'t connect to %1$s</string>
+    <string name="conn_retry">Retry</string>
+    <string name="conn_auto_retry_in">Retrying automatically in %1$d s</string>
+    <string name="conn_auto_retry_now">Retrying automatically…</string>
+    <string name="conn_waiting_for_you">Automatic retries are paused until this is fixed.</string>
+    <string name="conn_show_details">Show details</string>
+    <string name="conn_hide_details">Hide details</string>
+    <string name="conn_kind_timeout">Connection timed out</string>
+    <string name="conn_hint_timeout">The computer didn’t answer. Check that it’s on and awake, that the phone is on the same Wi-Fi (or Tailscale is connected), and that the address is right.</string>
+    <string name="conn_kind_refused">The computer refused the connection</string>
+    <string name="conn_hint_refused">The SSH service is probably not running. On Windows, run Start-Service sshd in an admin PowerShell.</string>
+    <string name="conn_kind_unreachable">Can’t reach the computer</string>
+    <string name="conn_hint_unreachable">There’s no network path to it. Check Wi-Fi, Tailscale or VPN (Android runs one VPN at a time), and the address.</string>
+    <string name="conn_kind_dns">Computer name not found</string>
+    <string name="conn_hint_dns">The host name didn’t resolve. Try its IP address instead.</string>
+    <string name="conn_kind_auth_key">The computer rejected this phone’s key</string>
+    <string name="conn_hint_auth_key">Add this phone’s public key to authorized_keys on the computer (administrators_authorized_keys for Windows admin accounts), and check the user name.</string>
+    <string name="conn_kind_auth_password">Wrong user name or password</string>
+    <string name="conn_hint_auth_password">Edit the computer and re-enter the password.</string>
+    <string name="conn_kind_auth">Sign-in failed</string>
+    <string name="conn_hint_auth">Check the user name and sign-in method for this computer.</string>
+    <string name="conn_kind_host_unknown">Host key not trusted yet</string>
+    <string name="conn_hint_host_unknown">Edit the computer and tap Test to check its fingerprint and trust it.</string>
+    <string name="conn_kind_host_changed">Host key changed</string>
+    <string name="conn_hint_host_changed">The computer presented a different key than the one you trusted. That happens after reinstalling OpenSSH, but can also mean the connection is intercepted. Check the fingerprint in the computer editor.</string>
+    <string name="conn_kind_key">Can’t use the sign-in key</string>
+    <string name="conn_hint_key">The saved or imported key couldn’t be read. Edit the computer and choose the key again.</string>
+    <string name="conn_kind_engine">Zeron isn’t answering on the computer</string>
+    <string name="conn_hint_engine">SSH works, but Zeron isn’t running there (or not on the Zeron port, 27654 by default). Open Zeron on the computer and retry.</string>
+    <string name="conn_kind_lost">Connection lost</string>
+    <string name="conn_hint_lost">The link to the computer dropped. The app reconnects by itself.</string>
+    <string name="conn_kind_sync">Couldn’t load sessions</string>
+    <string name="conn_hint_sync">The computer answered, but its data couldn’t be read. Updating the app may help.</string>
+    <string name="conn_kind_offline">Offline</string>
+    <string name="conn_hint_offline">No connection to Zeron Cloud. Check the network.</string>
+    <string name="conn_kind_unknown">Not connected</string>
+    <string name="conn_hint_unknown">See the details below, or open Connection Details.</string>
+    <!-- Connection diagnosis: the phone's own network explains the failure. -->
+    <string name="conn_diag_no_network">This phone is offline</string>
+    <string name="conn_diag_hint_no_network">Turn on Wi-Fi or mobile data; Zeron reconnects by itself.</string>
+    <string name="conn_diag_tailscale_off">Tailscale isn’t running</string>
+    <string name="conn_diag_hint_tailscale_off">This computer is reached through Tailscale, but Tailscale is off on this phone. Turn it on and Zeron reconnects by itself.</string>
+    <string name="conn_diag_hint_tailscale_off_lan">The computer’s LAN address didn’t answer, and Tailscale is off on this phone. Turn Tailscale on and Zeron reconnects by itself.</string>
+    <string name="conn_diag_hint_other_vpn">Another VPN is on. Android runs one VPN at a time: turn it off, then turn Tailscale on.</string>
+    <string name="conn_diag_away_tailscale_off">Not on the computer’s Wi-Fi, and Tailscale is off</string>
+    <string name="conn_diag_hint_away_tailscale_off">Join the same Wi-Fi as the computer, or turn Tailscale on here. Zeron reconnects by itself.</string>
+    <string name="conn_diag_tailscale_missing">Tailscale isn’t installed on this phone</string>
+    <string name="conn_diag_hint_tailscale_missing">Away from the computer’s Wi-Fi, Zeron connects through Tailscale. Install it and sign in with the same account as the computer.</string>
+    <string name="conn_diag_not_same_wifi">Not on the computer’s Wi-Fi</string>
+    <string name="conn_diag_hint_not_same_wifi">This computer has only LAN addresses. Join its Wi-Fi, or set up Tailscale on both and add the computer’s Tailscale address.</string>
+    <string name="conn_diag_hint_picked_lan">A LAN route is picked by hand. Pick the Tailscale route, or turn on Auto-Select Route.</string>
+    <string name="conn_diag_pc_unreachable">Tailscale is on, but the computer doesn’t answer</string>
+    <string name="conn_diag_hint_pc_unreachable">The computer may be asleep or off, or Tailscale may be off on the computer. Wake it, check its Tailscale is connected, then retry.</string>
+    <string name="conn_diag_lan_unreachable">On the same Wi-Fi, but the computer doesn’t answer</string>
+    <string name="conn_diag_hint_lan_unreachable">The computer may be asleep or off, or its IP address changed. Wake it and retry, or add its Tailscale address as a fallback.</string>
+    <string name="conn_reconnects_by_itself">Reconnects by itself once the network allows.</string>
+    <string name="conn_open_tailscale">Open Tailscale</string>
+    <string name="conn_install_tailscale">Install Tailscale</string>
+    <string name="conn_tailscale_missing_toast">Tailscale isn’t installed on this phone</string>
+    <string name="conn_status_group">Connection status</string>
+    <string name="conn_status_route">%1$s · via %2$s</string>
+    <string name="conn_status_inactive">Not the current computer</string>
+    <string name="conn_use_this_computer">Connect</string>
+
+    <!-- Auto-update: settings toggle and title-bar badge -->
+    <string name="auto_update">Auto-check &amp; download updates</string>
+    <string name="auto_update_sub_on">Checks every 30 minutes while the app is open and downloads new versions on Wi-Fi. You still confirm the install.</string>
+    <string name="auto_update_sub_off">No automatic checks; use Check for Updates to check by hand.</string>
+    <string name="badge_available_desc">Update %1$s available. Tap to download.</string>
+    <string name="badge_downloading_desc">Downloading update, %1$d%%</string>
+    <string name="badge_ready_desc">Update %1$s ready. Tap to install.</string>
+    <string name="badge_details">Update details</string>
+    <string name="badge_download_failed">Couldn’t download the update. Tap the arrow to try again.</string>
+
+    <!-- Scheduled send: relative ("After") mode and day labels -->
+    <string name="schedule_tab_at">At time</string>
+    <string name="schedule_tab_after">After</string>
+    <string name="schedule_minutes_short">%1$d min</string>
+    <string name="schedule_hours_short">%1$d hr</string>
+    <string name="schedule_hours_unit">hr</string>
+    <string name="schedule_minutes_unit">min</string>
+    <string name="schedule_custom">Custom</string>
+    <string name="schedule_when_tomorrow">tomorrow %1$s</string>
+    <string name="schedule_when_date">%1$s %2$s</string>
+
+    <!-- Scheduled send from the New Session screen -->
+    <string name="sched_new_session_title">New session · %1$s</string>
+    <string name="sched_new_home_title">Scheduled new session · %1$s</string>
+    <string name="sched_new_toast">New session scheduled for %1$s</string>
+
+    <!-- Themes and accent colors (desktop names) -->
+    <string name="theme_light">Light theme</string>
+    <string name="theme_dark">Dark theme</string>
+    <string name="theme_light_sub">Used when the app is in light appearance.</string>
+    <string name="theme_dark_sub">Used when the app is in dark appearance.</string>
+    <string name="accent_color">Accent color</string>
+    <string name="accent_theme_default">Theme default</string>
+
+    <!-- Connection details: clock offset -->
+    <string name="link_clock">Clock</string>
+    <string name="link_clock_in_sync">Phone and computer agree</string>
+    <string name="link_clock_phone_ahead">Phone is %1$d s ahead of the computer</string>
+    <string name="link_clock_phone_behind">Phone is %1$d s behind the computer</string>
+
+    <!-- update download: cancel / switch mirror -->
+    <string name="download_cancel">Cancel download</string>
+    <string name="download_switch">Switch mirror</string>
+    <string name="download_sheet_title">Downloading %1$s</string>
+    <string name="download_bytes">%1$s of %2$s</string>
+    <string name="download_from">From %1$s · %2$s/s</string>
+    <string name="download_connecting">From %1$s · connecting…</string>
+    <string name="download_starting">Connecting…</string>
+    <string name="download_cancelled">Download cancelled.</string>
+    <string name="download_cancelled_keep">Cancelled. The %1$s downloaded so far is kept for next time; cancel again to delete it.</string>
+    <string name="download_cancelled_clean">Cancelled, and deleted the partial download.</string>
+    <string name="source_picker_title">Download from</string>
+    <string name="source_picker_sub">Picks up from the %1$s already downloaded.</string>
+    <string name="source_picker_sub_empty">Starts from the beginning.</string>
+    <string name="source_current">In use</string>
+    <string name="source_speed_now">%1$s/s</string>
+    <string name="source_speed_last">%1$s/s last time</string>
+    <string name="source_failed_last">Failed: %1$s</string>
+    <string name="source_custom">Your mirror</string>
+    <string name="source_direct">Direct</string>
+    <string name="source_untried">Not tried yet</string>
+
+    <!-- device groups: merge -->
+    <string name="computers_merged">Merged into one computer.</string>
+
+    <!-- device groups: routes -->
+    <string name="route_lan">LAN</string>
+    <string name="route_tailscale">Tailscale</string>
+    <string name="route_other">Other</string>
+    <string name="route_group">Routes</string>
+    <string name="route_auto_hint">Picked for the network you’re on: the LAN on your home Wi-Fi, Tailscale elsewhere. Addresses are tried in this order.</string>
+    <string name="route_network">Network</string>
+    <string name="net_wifi">Wi-Fi %1$s</string>
+    <string name="net_ethernet">Ethernet %1$s</string>
+    <string name="net_cellular">Mobile data</string>
+    <string name="net_none">No network</string>
+    <string name="net_other">Other network</string>
+    <string name="net_vpn_tailscale">Tailscale on</string>
+    <string name="net_vpn_other">Another VPN is on (not Tailscale)</string>
+    <string name="net_vpn_none">No VPN</string>
+    <string name="route_in_use">In use</string>
+    <string name="route_in_use_ms">In use · connected in %1$d ms</string>
+    <string name="route_ok_at">Worked at %1$s</string>
+    <string name="route_failed">Failed: %1$s</string>
+    <string name="route_untried">Not tried yet</string>
+    <string name="route_trying">Trying…</string>
+    <string name="route_stranger">Another device answered at this address</string>
+    <string name="conn_fail_per_address">Each address</string>
+
+    <!-- device groups: addresses editor -->
+    <string name="addresses_group">Addresses</string>
+    <string name="addresses_hint">Several addresses of this one computer, e.g. its LAN IP and its Tailscale IP. The app picks one for the network you’re on and falls back to the next; they share the sign-in and host key. Add a port as host:2222.</string>
+    <string name="address_add_placeholder">192.168.1.102 or 100.x.y.z</string>
+    <string name="address_add">Add</string>
+    <string name="address_move_up">Move up</string>
+    <string name="address_move_down">Move down</string>
+    <string name="address_remove">Remove</string>
+    <string name="address_split">Split off</string>
+    <string name="address_split_done">Split off as “%1$s”.</string>
+    <string name="address_test_ok">Reachable · %1$d ms</string>
+    <string name="address_duplicate">That address is already listed.</string>
+    <string name="address_invalid">That isn’t an address.</string>
+    <string name="merge_computer">Merge another computer…</string>
+    <string name="merge_computer_sub">Adds its addresses here, for the same computer saved twice</string>
+    <string name="merge_pick_title">Merge into “%1$s”</string>
+    <string name="merge_pick_body">Its addresses join this computer and it leaves the list. Pick the same computer only: they must share the sign-in and host key.</string>
+
+    <!-- manual route choice -->
+    <string name="auto_route">Auto-select route</string>
+    <string name="auto_route_sub_on">On the same LAN, connect straight to the computer’s LAN address; elsewhere use Tailscale. Switches by itself when the network changes.</string>
+    <string name="auto_route_sub_off">Off: each computer uses only the address you pick in Switch computer or Edit computer.</string>
+    <string name="route_manual_hint">Auto-select route is off: only the address you picked is used. Change it in Switch computer or Edit computer, or turn Auto-select route on in Settings.</string>
+    <string name="route_picked">Using %1$s</string>
+    <string name="route_selected">In use</string>
+    <string name="route_use">Use</string>
+    <string name="conn_switch_route">Try another route</string>
+    <string name="addresses_pick_hint">Auto-select route is off: tap an address to use it (only that one is tried).</string>
+    <string name="crash_last_title">Zeron Quit Unexpectedly</string>
+    <string name="crash_last_body">A crash log was saved on this phone only (never uploaded). Copy or share it to report the problem.</string>
+    <string name="crash_copy_log">Copy Log</string>
+    <string name="crash_share">Share</string>
+    <string name="crash_share_subject">Zeron crash log</string>
+    <string name="crash_logs">Crash Logs</string>
+    <string name="crash_logs_none">None</string>
+    <plurals name="crash_logs_count">
+        <item quantity="one">%1$d saved</item>
+        <item quantity="other">%1$d saved</item>
+    </plurals>
+    <string name="crash_logs_note">Kept only on this phone (the last 5) and never uploaded. IP addresses, host names and user names are removed.</string>
+    <string name="crash_logs_empty">No crashes recorded.</string>
+    <string name="crash_logs_clear">Clear</string>
+    <string name="crash_logs_clear_confirm">Clear all crash logs?</string>
+    <string name="home_stats_idle">Idle</string>
+    <string name="home_stats_a11y">%1$s: %2$s</string>
+    <string name="home_stats_separator">, </string>
+    <string name="home_stats_open">Show running and failed sessions</string>
+    <plurals name="home_stats_running">
+        <item quantity="one">%1$d running</item>
+        <item quantity="other">%1$d running</item>
+    </plurals>
+    <plurals name="home_stats_failed">
+        <item quantity="one">%1$d failed</item>
+        <item quantity="other">%1$d failed</item>
+    </plurals>
+    <!-- Session message navigator (right-edge outline of your messages) -->
+    <string name="msg_nav_open">Your messages: jump to one</string>
+    <string name="msg_nav_title">Your messages</string>
+    <string name="msg_nav_attachment">Attachment</string>
+    <string name="image_unavailable">This image isn’t readable on the host</string>
+    <!-- Composer attach: phone photos or files on the computer -->
+    <string name="attach_phone_photos">Phone photos</string>
+    <string name="attach_pc_files">Computer files</string>
+    <string name="pc_files_title">Computer files</string>
+    <string name="pc_files_pick">Select files</string>
+    <plurals name="pc_files_insert">
+        <item quantity="one">Insert %d file</item>
+        <item quantity="other">Insert %d files</item>
+    </plurals>
+    <string name="no_files">Nothing here.</string>
+    <string name="file_share">Share</string>
+    <string name="file_reading">Reading from the computer…</string>
+    <string name="file_outside_project">This file isn’t inside the session’s project folder, so it can’t be opened here.</string>
+    <string name="file_read_failed">Couldn’t read the file from the computer</string>
+    <string name="file_binary">This is a binary file (%1$s) and can’t be previewed.</string>
+    <string name="file_truncated">The file is large; only the beginning is shown.</string>
+    <string name="browse_files">Files</string>
+    <string name="file_preview_open">Preview</string>
+    <string name="mention">Mention</string>
+    <string name="copy_path">Copy Path</string>
+    <string name="copy_rel_path">Copy Relative Path</string>
+    <string name="folder_load_retry">Couldn’t read that folder — tap to retry.</string>
+</resources>

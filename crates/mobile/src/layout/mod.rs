@@ -345,6 +345,14 @@ pub struct TranscriptView {
     shared: Arc<Shared>,
     /// Live session subscription (Rust→Rust; rows never cross FFI).
     watch: Mutex<Option<zeron_client::SnapshotWatch>>,
+    /// Show how the last turn ended at the transcript's end (opt-in per
+    /// platform; see [`TranscriptView::set_turn_end_marker`]).
+    turn_end: Arc<std::sync::atomic::AtomicBool>,
+    /// Head the transcript with "loading earlier messages" while only its
+    /// newest rows are here (opt-in; see [`TranscriptView::set_history_marker`]).
+    history_marker: Arc<std::sync::atomic::AtomicBool>,
+    /// [`TranscriptView::set_debug_history_pending`]: bytes received, or -1.
+    debug_history: std::sync::atomic::AtomicI64,
 }
 
 #[uniffi::export]
@@ -364,6 +372,9 @@ impl TranscriptView {
             tx: Mutex::new(tx),
             shared,
             watch: Mutex::new(None),
+            turn_end: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            history_marker: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            debug_history: std::sync::atomic::AtomicI64::new(-1),
         })
     }
 
@@ -374,6 +385,8 @@ impl TranscriptView {
             return false;
         };
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        let turn_end = self.turn_end.clone();
+        let history_marker = self.history_marker.clone();
         let guard = handle.watch(move |snap| {
             let input = TranscriptInput {
                 entries: snap.transcript_messages(),
@@ -388,11 +401,34 @@ impl TranscriptView {
                 working: snap.working,
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
+                outcome: if turn_end.load(std::sync::atomic::Ordering::Relaxed) {
+                    snap.outcome
+                } else {
+                    None
+                },
+                history_pending: (snap.history_pending
+                    && history_marker.load(std::sync::atomic::Ordering::Relaxed))
+                .then_some(snap.history_received_bytes),
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
         *self.watch.lock().unwrap() = Some(guard);
         true
+    }
+
+    /// Once no turn runs, end the transcript with how the last one ended
+    /// (a done check / failed dot and the time; `WidgetKind::TurnEnd`).
+    /// Off by default; call before `attach`.
+    pub fn set_turn_end_marker(&self, on: bool) {
+        self.turn_end.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// While only a transcript's newest rows are here (a Direct link's
+    /// opening tail) and the older ones are still downloading, head it with
+    /// a spinner, "Loading earlier messages…" and how much has come in
+    /// (`WidgetKind::HistoryPending`). Off by default; call before `attach`.
+    pub fn set_history_marker(&self, on: bool) {
+        self.history_marker.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_viewport(&self, width: f32, text_scale: f32) {
@@ -419,7 +455,18 @@ impl TranscriptView {
 
     /// Feed markdown fixtures directly (demo screens, benchmarks, tests).
     pub fn set_debug_entries(&self, entries: Vec<DebugEntry>, working: bool) {
-        self.send(Msg::Input(debug_input(entries, working)));
+        let mut input = debug_input(entries, working);
+        let history = self.debug_history.load(std::sync::atomic::Ordering::Relaxed);
+        input.history_pending = u64::try_from(history).ok();
+        self.send(Msg::Input(input));
+    }
+
+    /// Head the next [`TranscriptView::set_debug_entries`] fixtures with the
+    /// "loading earlier messages" row (`received_bytes` so far), or not
+    /// (`None`). Renders and tests.
+    pub fn set_debug_history_pending(&self, received_bytes: Option<u64>) {
+        let v = received_bytes.map_or(-1, |b| i64::try_from(b).unwrap_or(i64::MAX));
+        self.debug_history.store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn close(&self) {
@@ -468,6 +515,8 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         pending: Vec::new(),
         working,
         working_since_ms: None,
+        outcome: None,
+        history_pending: None,
         streaming: working,
     }
 }
@@ -487,9 +536,17 @@ pub(crate) struct Worker {
     input: TranscriptInput,
     width: f32,
     revision: u64,
+    /// First paint after attach renders only the newest entries; the rest
+    /// follow in the very next pass (`followup`), behind the first frame.
+    opened: bool,
+    followup: bool,
     shared: Arc<Shared>,
     listener: Option<Arc<dyn LayoutListener>>,
 }
+
+/// Parts kept for the first frame of a cold open (a couple of screens;
+/// everything above lands in the immediate second pass).
+const OPENING_PARTS: usize = 48;
 
 impl Worker {
     fn new(text: &TextSystem, shared: Arc<Shared>, listener: Arc<dyn LayoutListener>) -> Self {
@@ -508,6 +565,8 @@ impl Worker {
             input: TranscriptInput::default(),
             width: 0.0,
             revision: 0,
+            opened: false,
+            followup: false,
             shared,
             listener: Some(listener),
         }
@@ -560,6 +619,11 @@ impl Worker {
             }
             if dirty && self.width > 0.0 && self.typo.has_faces() {
                 self.pass();
+                // A first frame that showed only the newest entries is
+                // followed at once by the whole transcript.
+                while self.followup {
+                    self.pass();
+                }
                 // The width cache never evicts, and a streaming block that
                 // falls back to the platform (CJK, emoji) or can't break (a
                 // long hash) adds a whole-prefix entry per update. Past the
@@ -583,14 +647,47 @@ impl Worker {
             })
     }
 
+    /// What the next pass lays out. A cold open keeps only the newest
+    /// ~[`OPENING_PARTS`] parts (marked `followup` so the caller re-runs at
+    /// once): preparing a transcript's every row before the first frame
+    /// held a big chat's paint for seconds after its data had arrived.
+    /// The dropped prefix is honest about it — the "loading earlier" head
+    /// row is what that row exists for.
+    fn opening_input(&mut self) -> (TranscriptInput, bool) {
+        if self.opened || self.followup {
+            return (self.input.clone(), false);
+        }
+        let mut parts = 0usize;
+        let mut drop = 0usize;
+        for (i, entry) in self.input.entries.iter().enumerate().rev() {
+            parts += entry.parts.len();
+            if parts >= OPENING_PARTS {
+                drop = i;
+                break;
+            }
+        }
+        if drop == 0 {
+            return (self.input.clone(), false);
+        }
+        let mut input = self.input.clone();
+        input.entries.drain(..drop);
+        input.history_pending = input.history_pending.or(Some(0));
+        (input, true)
+    }
+
     pub(crate) fn pass(&mut self) -> Arc<LayoutFrame> {
         let started = Instant::now();
+        let (input, deferred) = self.opening_input();
+        // An empty pass (attach fires an empty snapshot before the mirror
+        // delivers) must not count as "opened": the real transcript still
+        // gets its segmented first paint.
+        let had_entries = !input.entries.is_empty();
         let placed: Vec<Placed> = {
             let mut ctx = Ctx {
                 typo: &mut self.typo,
                 cache: &mut self.cache,
             };
-            self.builder.build(&mut ctx, &self.input)
+            self.builder.build(&mut ctx, &input)
         };
         let px = Px(self.typo.scale);
         let mut rows = Vec::with_capacity(placed.len());
@@ -636,6 +733,8 @@ impl Worker {
         if let Some(l) = &self.listener {
             l.frame_ready(self.revision);
         }
+        self.opened = self.opened || (!deferred && had_entries);
+        self.followup = deferred;
         frame
     }
 }

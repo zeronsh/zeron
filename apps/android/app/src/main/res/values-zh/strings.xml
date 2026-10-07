@@ -1,0 +1,687 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- values/ is English; values-zh/ is Simplified Chinese for every zh locale.
+     Brand, product and model names, and anything the desktop engine or an
+     agent sends (titles, messages, tool output, errors), stay untranslated. -->
+<resources>
+    <!-- Scheduled send -->
+    <string name="schedule_send_title">定时发送</string>
+    <string name="schedule_menu_entry">定时发送…</string>
+    <string name="schedule_today">今天 %1$s</string>
+    <string name="schedule_tomorrow">明天 %1$s</string>
+    <string name="schedule_confirm">定时发送</string>
+    <string name="schedule_dismiss">取消</string>
+    <string name="schedule_exact_hint">Zeron 未获准使用精确闹钟，可能会晚几分钟发送。</string>
+    <string name="schedule_exact_allow">去允许</string>
+    <string name="schedule_chip">定时 %1$s 发送</string>
+    <string name="schedule_chip_cancel">取消</string>
+    <string name="schedule_toast">已定时 %1$s 发送</string>
+    <string name="schedule_cancelled">已取消定时消息</string>
+    <string name="schedule_channel_progress">发送定时消息</string>
+    <string name="schedule_channel_result">定时消息结果</string>
+    <string name="schedule_notif_sending">正在发送定时消息…</string>
+    <string name="schedule_notif_sent">定时消息已发送</string>
+    <string name="schedule_notif_pending">定时消息尚未确认送达</string>
+    <string name="schedule_notif_pending_body">消息已排队，Zeron 重新连接后会发出。</string>
+    <string name="schedule_notif_failed">定时消息发送失败</string>
+    <string name="schedule_notif_failed_body">%1$s\n\n%2$s</string>
+
+    <!-- Settings > Language (per-app locale, see AppLanguage) -->
+    <string name="settings_language">语言</string>
+    <string name="language_system">跟随系统</string>
+    <string name="language_english">English</string>
+    <string name="language_chinese">简体中文</string>
+
+    <!-- Compact times: session-row age (RelativeTime) and the Working timer (ElapsedFormat). Keep them short. -->
+    <string name="time_now">刚刚</string>
+    <string name="time_minutes">%1$d分钟</string>
+    <string name="time_hours">%1$d小时</string>
+    <string name="time_days">%1$d天</string>
+    <string name="elapsed_s">%1$d秒</string>
+    <string name="elapsed_m_s">%1$d分%2$d秒</string>
+    <string name="elapsed_h_m">%1$d小时%2$d分</string>
+    <string name="elapsed_d_h">%1$d天%2$d小时</string>
+
+    <!-- Shared actions and labels -->
+    <string name="cancel">取消</string>
+    <string name="close">关闭</string>
+    <string name="done">完成</string>
+    <string name="save">保存</string>
+    <string name="edit">编辑</string>
+    <string name="copy">复制</string>
+    <string name="copied">已复制</string>
+    <string name="delete">删除</string>
+    <string name="loading">正在加载…</string>
+    <string name="online">在线</string>
+    <string name="offline">离线</string>
+    <string name="undo">撤销</string>
+    <string name="rename">重命名</string>
+    <string name="rename_ellipsis">重命名…</string>
+    <string name="pin">置顶</string>
+    <string name="unpin">取消置顶</string>
+    <string name="archive">归档</string>
+    <string name="unarchive">取消归档</string>
+    <string name="usage">用量</string>
+    <string name="retry_now">立即重试</string>
+
+    <!-- Sessions list, row menus, folders, search -->
+    <string name="opening_workspace">正在打开工作区…</string>
+    <string name="try_demo">试用演示</string>
+    <string name="accounts_computers_ellipsis">账户与电脑…</string>
+    <string name="move_to_named">移到“%1$s”</string>
+    <string name="no_section">无分组</string>
+    <string name="new_section_ellipsis">新建分组…</string>
+    <string name="new_section">新建分组</string>
+    <string name="create">创建</string>
+    <string name="move_to_section">移到分组</string>
+    <string name="open">打开</string>
+    <string name="reorder_ellipsis">调整顺序…</string>
+    <string name="rename_section_ellipsis">重命名分组…</string>
+    <string name="rename_section">重命名分组</string>
+    <string name="delete_section">删除分组</string>
+    <string name="pinned">置顶</string>
+    <string name="sessions">会话</string>
+    <string name="list_view">显示方式</string>
+    <string name="by_project">按项目</string>
+    <string name="by_activity">按活跃</string>
+    <string name="collapse_all">全部折叠</string>
+    <string name="archived">已归档</string>
+    <string name="move">移动</string>
+    <string name="status_failed">失败</string>
+    <string name="status_working">运行中</string>
+    <string name="status_input">待输入</string>
+    <string name="status_done">完成</string>
+    <string name="history_loading">正在加载更早的消息…</string>
+    <string name="history_received">已收到 %1$s</string>
+    <string name="nothing_here">暂无内容</string>
+    <string name="search">搜索</string>
+    <string name="search_placeholder">会话、项目、消息</string>
+    <string name="no_matches">无结果</string>
+
+    <!-- Settings -->
+    <string name="settings">设置</string>
+    <string name="settings_account">账户</string>
+    <string name="settings_demo_sub">离线工作区 · 轻点切换</string>
+    <string name="signed_in_org">已登录 · %1$s</string>
+    <string name="accounts_computers">账户与电脑</string>
+    <string name="add_computer_ssh">添加电脑（SSH）…</string>
+    <string name="add_computer_ssh_sub">通过 SSH 直接连接电脑上的 Zeron</string>
+    <string name="connection_details">连接详情</string>
+    <string name="connection_details_sub">连接状态、引擎版本、数据流和日志</string>
+    <string name="settings_devices">设备</string>
+    <string name="this_device">本机</string>
+    <string name="no_other_hosts">演示中没有其他主机</string>
+    <string name="settings_appearance">外观</string>
+    <string name="appearance_system">跟随系统</string>
+    <string name="appearance_light">浅色</string>
+    <string name="appearance_dark">深色</string>
+    <string name="wallpaper">壁纸</string>
+    <string name="change_wallpaper">更换壁纸…</string>
+    <string name="choose_wallpaper">选择壁纸…</string>
+    <string name="wallpaper_sub">显示在新会话和会话列表背后</string>
+    <string name="wallpaper_effect_row">效果</string>
+    <string name="remove_wallpaper">移除壁纸</string>
+    <string name="wallpaper_effect_title">壁纸效果</string>
+    <string name="effect_none">无</string>
+    <string name="effect_dither">抖动</string>
+    <string name="effect_ascii">ASCII</string>
+    <string name="effect_halftone">半色调</string>
+    <string name="effect_scanlines">扫描线</string>
+    <string name="archived_sessions">已归档会话</string>
+    <string name="new_project">新建项目</string>
+    <string name="new_project_sub">浏览主机上的文件夹</string>
+    <string name="settings_about">关于</string>
+    <string name="check_for_updates">检查更新</string>
+    <string name="update_available">有新版本：%1$s</string>
+    <string name="version_build">%1$s · 构建 %2$d</string>
+    <string name="sign_out">退出登录</string>
+    <string name="sign_out_sub">本地草稿会保留在此设备上。</string>
+    <string name="sign_out_confirm">要退出登录吗？</string>
+    <string name="project_added">已添加“%1$s”</string>
+
+    <!-- Chat: header, composer, menus, status pill, queue, questions, sign-in -->
+    <string name="session_fallback">会话</string>
+    <string name="no_project">无项目</string>
+    <string name="the_agent">智能体</string>
+    <string name="composer_placeholder">给 %1$s 发消息</string>
+    <string name="composer_edit_queued">编辑排队中的消息</string>
+    <string name="edit_save_failed">无法保存修改</string>
+    <string name="queued_not_editable">这条消息暂时无法编辑</string>
+    <string name="send_failed">发送失败：%1$s</string>
+    <string name="unknown_error">未知错误</string>
+    <string name="copy_transcript">复制对话记录</string>
+    <string name="nothing_to_copy">暂无可复制的内容</string>
+    <string name="transcript_copied">已复制对话记录</string>
+    <string name="attachment">附件</string>
+    <string name="change_session_failed">无法更改会话设置</string>
+    <string name="model">模型</string>
+    <string name="model_options">模型选项</string>
+    <string name="model_list_stale">没能从电脑读取最新列表 · 重试</string>
+    <string name="model_list_reading">正在从电脑读取列表…</string>
+    <string name="model_list_showing_saved">显示的是上次保存的列表</string>
+    <string name="model_list_showing_builtin">显示的是内置列表</string>
+    <string name="model_list_stale_short">没能从电脑读取最新列表</string>
+    <string name="model_list_retry_for">%1$s · 点按重试</string>
+    <string name="model_list_refresh">刷新模型列表</string>
+    <string name="model_list_refresh_hint">从电脑重新读取</string>
+    <string name="model_list_refreshed">已从电脑更新</string>
+    <string name="model_list_refresh_failed">刷新失败：%1$s</string>
+    <string name="reasoning_effort">推理强度</string>
+    <string name="open_pull_request">打开 Pull Request</string>
+    <string name="copy_link">复制链接</string>
+    <string name="copy_branch_name">复制分支名</string>
+    <string name="pill_editing">正在编辑排队中的消息 · 轻点取消</string>
+    <string name="pill_not_delivered">未送达 · 轻点重试</string>
+    <string name="pill_host_offline">%1$s 已离线，恢复后自动发送</string>
+    <string name="host_fallback">主机</string>
+    <string name="pill_uploading">正在上传 · %1$d%%</string>
+    <string name="pill_offline">已离线，消息会先保存</string>
+    <string name="pill_reconnecting">%1$d秒后重新连接</string>
+    <string name="status_writing">输出中</string>
+    <string name="queued">排队中</string>
+    <string name="queue_editing">编辑中</string>
+    <string name="queue_being_edited">正被编辑</string>
+    <string name="queue_needs_review">待审核</string>
+    <string name="queue_updating">更新中</string>
+    <string name="queue_send_now">立即发送</string>
+    <string name="remove">移除</string>
+    <string name="question_progress">%1$d/%2$d · %3$s</string>
+    <string name="back">上一步</string>
+    <string name="send">发送</string>
+    <string name="next">下一步</string>
+    <string name="deliver_queue">排到下一轮</string>
+    <string name="deliver_steer">立即引导</string>
+    <string name="deliver_interrupt">停止并发送</string>
+    <string name="signin_tagline">随时随地，使用你的编程智能体。</string>
+    <string name="choose_org">选择组织</string>
+    <string name="signing_in">正在登录…</string>
+    <string name="sign_in">登录</string>
+    <string name="explore_demo">体验演示</string>
+    <string name="connect_ssh">连接你的电脑（SSH）</string>
+
+    <!-- Usage sheet -->
+    <string name="usage_context_window">上下文窗口</string>
+    <string name="usage_percent_used">已用 %1$d%%</string>
+    <string name="usage_tokens_of">%1$s / %2$s token</string>
+    <string name="usage_tokens_in_context">上下文已用 %1$s token</string>
+    <string name="usage_no_context">%1$s 尚未报告此会话的上下文用量。</string>
+    <string name="usage_plan">套餐用量 · %1$s</string>
+    <string name="updating">正在更新…</string>
+    <string name="refresh">刷新</string>
+    <string name="usage_unsupported">这台电脑上的引擎不提供套餐用量。</string>
+    <string name="usage_load_failed">无法加载用量：%1$s</string>
+    <string name="usage_no_login">这台电脑上没有可报告用量的 %1$s 账户。</string>
+    <string name="signed_in">已登录</string>
+    <string name="active">使用中</string>
+    <string name="usage_none_yet">尚无用量数据。</string>
+    <string name="usage_updated">%1$s更新</string>
+    <string name="usage_resets">%1$s 重置</string>
+    <string name="ago_just_now">刚刚</string>
+    <string name="ago_minutes">%1$d分钟前</string>
+    <string name="ago_hours">%1$d小时前</string>
+    <string name="ago_days">%1$d天前</string>
+
+    <!-- Connection state (direct SSH link) and Connection Details -->
+    <string name="direct_connecting">正在连接…</string>
+    <string name="direct_connected">已连接</string>
+    <string name="direct_connected_version">已连接 · Zeron %1$s</string>
+    <string name="direct_syncing">已连接 · 正在加载会话…</string>
+    <string name="direct_not_connected">未连接</string>
+    <string name="retrying_in">%1$d秒后重试</string>
+    <string name="retrying">正在重试…</string>
+    <string name="ok">好</string>
+    <string name="banner_skipped_title">部分会话无法读取</string>
+    <plurals name="banner_skipped_detail">
+        <item quantity="other">已跳过来自 Zeron %2$s 的 %1$d 行。轻点“详情”查看。</item>
+    </plurals>
+    <string name="details">详情</string>
+    <string name="computers">电脑</string>
+    <string name="no_sessions_yet">暂无会话</string>
+    <string name="no_sessions_on">%1$s 上暂无会话</string>
+    <string name="not_connected">未连接</string>
+    <string name="loading_sessions_from">正在从 %1$s 加载会话…</string>
+    <string name="not_connected_machine">未连接到电脑</string>
+    <string name="link_live">在线 · 已同步</string>
+    <string name="link_syncing">隧道已打开 · 等待工作区</string>
+    <string name="link_connecting">正在连接</string>
+    <string name="link_state">状态</string>
+    <string name="link_engine">Zeron 引擎</string>
+    <string name="link_device">设备 %1$s</string>
+    <string name="link_not_reached">尚未连通</string>
+    <string name="link_last_error">最近错误</string>
+    <string name="link_note">备注</string>
+    <string name="link_streams">数据流</string>
+    <plurals name="stream_frames">
+        <item quantity="other">%1$d 帧</item>
+    </plurals>
+    <plurals name="stream_rows">
+        <item quantity="other">%1$d 行</item>
+    </plurals>
+    <plurals name="stream_skipped">
+        <item quantity="other">跳过 %1$d 行</item>
+    </plurals>
+    <plurals name="stream_repaired">
+        <item quantity="other">%1$d 行忽略了未知值</item>
+    </plurals>
+    <string name="stream_last">最近 %1$s</string>
+    <string name="link_on_phone">本机数据</string>
+    <plurals name="count_projects">
+        <item quantity="other">%1$d 个项目</item>
+    </plurals>
+    <plurals name="count_recent">
+        <item quantity="other">%1$d 个最近</item>
+    </plurals>
+    <plurals name="count_archived">
+        <item quantity="other">%1$d 个已归档</item>
+    </plurals>
+    <string name="link_log">日志</string>
+    <string name="not_signed_in_cloud">未登录 Zeron Cloud</string>
+    <string name="computer_removed">该电脑已被移除</string>
+
+    <!-- Accounts & Computers, add/edit computer -->
+    <string name="your_computers_ssh">你的电脑（SSH）</string>
+    <string name="not_verified_yet">尚未验证</string>
+    <string name="add_a_computer">添加电脑</string>
+    <string name="add_computer_first_sub">通过 SSH 直接连接电脑上的 Zeron，无需云账户。</string>
+    <string name="connect_over_ssh">通过 SSH 连接</string>
+    <string name="other_workspaces">其他工作区</string>
+    <string name="cloud_sub">你的 Zeron 账户，经中继连接</string>
+    <string name="demo">演示</string>
+    <string name="demo_sub">离线示例工作区</string>
+    <string name="phone_ssh_key">本机 SSH 密钥</string>
+    <string name="copy_public_key">复制公钥</string>
+    <string name="public_key_copied">已复制公钥</string>
+    <string name="phone_key_hint">在 Windows 上将其添加到 administrators_authorized_keys（见 docs/ssh-direct.md）。</string>
+    <string name="test_ok">已连接 · Zeron %1$s 响应用时 %2$d ms</string>
+    <string name="engine">引擎</string>
+    <string name="host_key_changed_bang">主机密钥已变更！</string>
+    <string name="couldnt_connect">无法连接</string>
+    <string name="edit_computer">编辑电脑</string>
+    <string name="add_computer">添加电脑</string>
+    <string name="computer">电脑</string>
+    <string name="field_name">名称</string>
+    <string name="name_hint">我的电脑</string>
+    <string name="field_host">主机</string>
+    <string name="host_hint">192.168.1.20 或 pc.local</string>
+    <string name="ssh_port">SSH 端口</string>
+    <string name="zeron_port">Zeron 端口</string>
+    <string name="field_user">用户名</string>
+    <string name="user_hint">Windows 用户名</string>
+    <string name="sign_in_with">登录方式</string>
+    <string name="auth_phone">本机密钥</string>
+    <string name="auth_import">导入密钥</string>
+    <string name="auth_password">密码</string>
+    <string name="public_key_line_hint">公钥：将此行添加到该电脑的 authorized_keys</string>
+    <string name="private_key">私钥</string>
+    <string name="saved_paste_replace">已保存（粘贴以替换）</string>
+    <string name="saved_type_replace">已保存（输入以替换）</string>
+    <string name="connection">连接</string>
+    <string name="host_key_value">主机密钥：%1$s</string>
+    <string name="host_key_unverified">尚未验证主机密钥：轻点“测试”查看并信任。</string>
+    <string name="testing">正在测试…</string>
+    <string name="test">测试</string>
+    <string name="save_connect">保存并连接</string>
+    <string name="delete_machine">删除电脑</string>
+    <string name="trust_machine_title">信任这台电脑吗？</string>
+    <string name="trust_first">首次连接 %1$s:%2$s。请先确认指纹与该电脑一致，再信任。</string>
+    <string name="windows_fingerprint_hint">Windows 上：ssh-keygen -lf C:\\ProgramData\\ssh\\ssh_host_ed25519_key.pub</string>
+    <string name="trust">信任</string>
+    <string name="host_key_changed">主机密钥已变更</string>
+    <string name="host_key_changed_body">这台电脑提供的密钥与你之前信任的不同。重装 OpenSSH 后会出现这种情况，但也可能意味着有人正在拦截连接。</string>
+    <string name="host_key_trusted">已信任：%1$s</string>
+    <string name="host_key_now">当前：%1$s</string>
+    <string name="trust_new_key">信任新密钥</string>
+    <string name="delete_named">删除“%1$s”？</string>
+    <string name="delete_machine_body">其保存的密钥或密码将从此手机中移除。</string>
+
+    <!-- New Session and New Project (folder browser) -->
+    <string name="project">项目</string>
+    <string name="new_worktree">新建工作树</string>
+    <string name="current_branch">当前分支</string>
+    <string name="choose_host">选择主机</string>
+    <string name="new_session">新建会话</string>
+    <string name="new_session_headline">今天要做点什么？</string>
+    <string name="new_session_placeholder">描述任务</string>
+    <string name="choose_project_or_host">请选择一个项目或可运行的主机。</string>
+    <string name="start_session_failed">无法创建会话</string>
+    <string name="host_offline_suffix">%1$s · 离线</string>
+    <string name="no_project_ellipsis">无项目…</string>
+    <string name="new_project_ellipsis">新建项目…</string>
+    <string name="add_computer_ellipsis">添加电脑…</string>
+    <string name="run_on">运行于</string>
+    <string name="checkout">检出</string>
+    <string name="branch">分支</string>
+    <string name="checked_out">已检出</string>
+    <string name="no_branches">未找到分支</string>
+    <string name="read_folder_failed">无法读取该文件夹</string>
+    <string name="home_folder">主目录</string>
+    <string name="device_offline">%1$s 已离线。</string>
+    <string name="folders_truncated">仅显示前面的部分文件夹。</string>
+    <string name="no_folders">这里没有文件夹。</string>
+    <string name="create_project_failed">无法创建项目</string>
+    <string name="adding">正在添加…</string>
+    <string name="use_folder_named">使用“%1$s”</string>
+    <string name="use_this_folder">使用此文件夹</string>
+
+    <!-- Software update (GitHub Releases) -->
+    <string name="software_update">软件更新</string>
+    <string name="update_installed">已安装</string>
+    <string name="update_build">构建 %1$d</string>
+    <string name="update_latest_github">GitHub 上的最新版本</string>
+    <string name="update_checking">正在检查…</string>
+    <string name="update_not_checked">尚未检查</string>
+    <string name="update_build_newer">构建 %1$d · 比当前版本新</string>
+    <string name="update_build_current">构建 %1$d · 已是最新版本</string>
+    <string name="update_downloaded">已下载，正在打开安装程序…</string>
+    <string name="update_downloading">正在下载… %1$d%%</string>
+    <string name="update_install">安装</string>
+    <string name="update_download_install">下载并安装</string>
+    <string name="update_check_again">重新检查</string>
+    <string name="update_install_hint">每次安装 Android 都会请你确认。首次安装时，请允许 Zeron“安装未知应用”。</string>
+    <string name="update_advanced">高级</string>
+    <string name="update_mirror_token">下载镜像与 GitHub 令牌</string>
+    <string name="update_mirror_value">镜像：%1$s</string>
+    <string name="off">关闭</string>
+    <string name="update_mirror_hint">优先使用的镜像前缀（可选），例如 https://ghfast.top/：会先于 GitHub 和内置镜像尝试。</string>
+    <string name="update_token_hint">GitHub 令牌（可选，只读）：仅用于避免 API 频率限制。</string>
+    <string name="saved">已保存</string>
+    <string name="clear_token">清除令牌</string>
+    <string name="token_removed">已移除令牌</string>
+    <string name="update_err_no_release">尚未发布任何版本。</string>
+    <string name="update_err_401">GitHub 拒绝了该令牌（401）。请在设置中清除或更换。</string>
+    <string name="update_err_no_apk">版本 %1$s 未附带 APK。</string>
+    <string name="update_err_save">无法保存下载的文件。</string>
+
+    <!-- Model toasts and errors raised by the app itself -->
+    <string name="toast_pinned">已置顶</string>
+    <string name="toast_unpinned">已取消置顶</string>
+    <string name="toast_archived">已归档</string>
+    <string name="toast_unarchived">已取消归档</string>
+    <string name="toast_signed_out">已退出登录</string>
+    <string name="machine_fallback">电脑</string>
+    <string name="machine_key_failed">无法读取这台电脑的密钥</string>
+    <string name="update_check_failed">无法连接 GitHub，请检查网络后重试。</string>
+    <string name="update_download_failed">下载失败，请重试。</string>
+    <string name="open_workspace_failed">无法打开工作区</string>
+    <string name="generic_update_failed">操作失败</string>
+    <string name="signin_incomplete_retry">登录未完成，请重试。</string>
+    <string name="signin_incomplete">登录未完成。</string>
+    <string name="signin_no_org">此账户尚未加入任何组织。</string>
+    <string name="join_org_failed">无法加入该组织。</string>
+    <string name="sched_connect_timeout">未能及时连接</string>
+    <string name="sched_unavailable">不可用</string>
+    <string name="sched_send_failed">发送失败</string>
+
+    <!-- Navigation -->
+    <string name="nav_back">返回</string>
+
+    <!-- New Session: two-level model picker, project sort -->
+    <string name="sort_projects">项目排序</string>
+    <string name="sort_recent">最近使用</string>
+    <string name="sort_name">名称（A–Z）</string>
+    <plurals name="model_count">
+        <item quantity="other">%1$d 个模型</item>
+    </plurals>
+
+    <!-- Accessibility labels -->
+    <string name="more_options">更多</string>
+
+    <!-- Software update: multi-source download (GitHub, then mirrors) -->
+    <string name="update_err_check_all">无法连接 GitHub，镜像也都不可用：</string>
+    <string name="update_err_download_all">所有下载源都失败了：</string>
+    <string name="update_err_signature">来自 %1$s 的文件不是用 Zeron 发布密钥签名的，已停止安装。</string>
+    <string name="update_reason_timeout">连接超时</string>
+    <string name="update_reason_slow">速度太慢（%1$s/s）</string>
+    <string name="update_reason_http">HTTP %1$s</string>
+    <string name="update_reason_rate_limited">请求次数超限（HTTP %1$d）</string>
+    <string name="update_reason_unexpected">响应异常（%1$s）</string>
+    <string name="update_reason_bad_response">响应异常</string>
+    <string name="update_reason_size">文件不完整</string>
+    <string name="update_reason_digest">校验值不一致</string>
+    <string name="update_reason_dns">域名解析失败</string>
+    <string name="update_reason_tls">安全连接失败</string>
+    <string name="update_downloading_from">正在从 %1$s 下载… %2$d%% · %3$s/s</string>
+    <string name="update_downloading_from_size">正在从 %1$s 下载… %2$s · %3$s/s</string>
+    <string name="update_open_browser">在浏览器中下载</string>
+    <string name="update_copy_link">复制下载链接</string>
+    <string name="update_no_browser">没有可打开链接的浏览器</string>
+    <string name="update_sources_hint">GitHub 很慢或连不上时，app 会自动改用公共 GitHub 镜像（ghfast.top、gh-proxy.com、gh.llkk.cc）。每次下载在安装前都会核对发布的校验值和签名密钥。</string>
+
+    <!-- Home title bar: connection chip, quick switcher, failure sheet -->
+    <string name="conn_state_connected">已连接</string>
+    <string name="conn_state_connecting">正在连接…</string>
+    <string name="conn_state_failed">未连接</string>
+    <string name="conn_state_demo">离线示例</string>
+    <string name="conn_chip_desc">电脑：%1$s，%2$s。轻点切换。</string>
+    <string name="switch_computer">切换电脑</string>
+    <string name="conn_fail_title">无法连接到 %1$s</string>
+    <string name="conn_retry">重试</string>
+    <string name="conn_auto_retry_in">%1$d 秒后自动重试</string>
+    <string name="conn_auto_retry_now">正在自动重试…</string>
+    <string name="conn_waiting_for_you">问题解决前不会自动重试。</string>
+    <string name="conn_show_details">显示详细信息</string>
+    <string name="conn_hide_details">隐藏详细信息</string>
+    <string name="conn_kind_timeout">连接超时</string>
+    <string name="conn_hint_timeout">电脑没有响应。请确认电脑已开机且未睡眠、手机和电脑在同一 Wi-Fi（或 Tailscale 已连接），并检查地址是否正确。</string>
+    <string name="conn_kind_refused">电脑拒绝了连接</string>
+    <string name="conn_hint_refused">SSH 服务可能没有运行。在 Windows 上用管理员 PowerShell 执行 Start-Service sshd。</string>
+    <string name="conn_kind_unreachable">无法访问这台电脑</string>
+    <string name="conn_hint_unreachable">网络不通。请检查 Wi-Fi、Tailscale 或 VPN（安卓同一时间只能开一个 VPN），以及地址是否正确。</string>
+    <string name="conn_kind_dns">找不到这台电脑的名称</string>
+    <string name="conn_hint_dns">主机名无法解析，请改用 IP 地址。</string>
+    <string name="conn_kind_auth_key">电脑不接受本机的密钥</string>
+    <string name="conn_hint_auth_key">把本机公钥添加到电脑的 authorized_keys（Windows 管理员账户为 administrators_authorized_keys），并检查用户名。</string>
+    <string name="conn_kind_auth_password">用户名或密码错误</string>
+    <string name="conn_hint_auth_password">编辑电脑，重新输入密码。</string>
+    <string name="conn_kind_auth">登录失败</string>
+    <string name="conn_hint_auth">请检查这台电脑的用户名和登录方式。</string>
+    <string name="conn_kind_host_unknown">尚未信任主机密钥</string>
+    <string name="conn_hint_host_unknown">编辑电脑并轻点“测试”，核对指纹后信任。</string>
+    <string name="conn_kind_host_changed">主机密钥已变更</string>
+    <string name="conn_hint_host_changed">电脑出示的密钥和之前信任的不一致。重装 OpenSSH 后会这样，也可能是连接被拦截。请在电脑编辑页核对指纹。</string>
+    <string name="conn_kind_key">无法使用登录密钥</string>
+    <string name="conn_hint_key">无法读取保存或导入的密钥。请编辑电脑，重新选择密钥。</string>
+    <string name="conn_kind_engine">电脑上的 Zeron 没有响应</string>
+    <string name="conn_hint_engine">SSH 已连上，但电脑上的 Zeron 没有运行（或端口不是默认的 27654）。在电脑上打开 Zeron 后重试。</string>
+    <string name="conn_kind_lost">连接已断开</string>
+    <string name="conn_hint_lost">与电脑的连接中断了，app 会自动重连。</string>
+    <string name="conn_kind_sync">无法加载会话</string>
+    <string name="conn_hint_sync">电脑有响应，但数据无法读取。更新 app 可能会解决。</string>
+    <string name="conn_kind_offline">离线</string>
+    <string name="conn_hint_offline">无法连接 Zeron Cloud，请检查网络。</string>
+    <string name="conn_kind_unknown">未连接</string>
+    <string name="conn_hint_unknown">请查看下方详细信息，或打开“连接详情”。</string>
+    <!-- 连接诊断：用手机自身的网络情况解释失败原因。 -->
+    <string name="conn_diag_no_network">手机没有网络</string>
+    <string name="conn_diag_hint_no_network">打开 Wi-Fi 或移动数据后会自动重连。</string>
+    <string name="conn_diag_tailscale_off">Tailscale 未启动</string>
+    <string name="conn_diag_hint_tailscale_off">这台电脑需要通过 Tailscale 连接，但手机上的 Tailscale 没有开启。打开后会自动重连。</string>
+    <string name="conn_diag_hint_tailscale_off_lan">电脑的局域网地址没有响应，手机上的 Tailscale 也没有开启。打开 Tailscale 后会自动重连。</string>
+    <string name="conn_diag_hint_other_vpn">手机上开着其他 VPN。安卓同一时间只能开一个 VPN，请先关掉它，再打开 Tailscale。</string>
+    <string name="conn_diag_away_tailscale_off">不在电脑所在的 Wi-Fi，Tailscale 也未启动</string>
+    <string name="conn_diag_hint_away_tailscale_off">连上和电脑相同的 Wi-Fi，或打开手机上的 Tailscale，之后会自动重连。</string>
+    <string name="conn_diag_tailscale_missing">手机上没有安装 Tailscale</string>
+    <string name="conn_diag_hint_tailscale_missing">不在电脑所在的 Wi-Fi 时，需要通过 Tailscale 连接。请安装 Tailscale，并登录和电脑相同的账号。</string>
+    <string name="conn_diag_not_same_wifi">不在电脑所在的 Wi-Fi</string>
+    <string name="conn_diag_hint_not_same_wifi">这台电脑只有局域网地址。请连上同一 Wi-Fi，或在电脑和手机上都装好 Tailscale，再添加电脑的 Tailscale 地址。</string>
+    <string name="conn_diag_hint_picked_lan">当前手动选了局域网线路。请换到 Tailscale 线路，或打开“自动选择线路”。</string>
+    <string name="conn_diag_pc_unreachable">Tailscale 已开启，但连不上电脑</string>
+    <string name="conn_diag_hint_pc_unreachable">电脑可能睡眠或关机了，也可能电脑上的 Tailscale 没有开启。唤醒电脑、确认它的 Tailscale 已连接后重试。</string>
+    <string name="conn_diag_lan_unreachable">同一 Wi-Fi 下，电脑没有响应</string>
+    <string name="conn_diag_hint_lan_unreachable">电脑可能睡眠或关机了，或者它的 IP 地址变了。唤醒电脑后重试，或添加它的 Tailscale 地址作为备用。</string>
+    <string name="conn_reconnects_by_itself">网络条件满足后会自动重连。</string>
+    <string name="conn_open_tailscale">打开 Tailscale</string>
+    <string name="conn_install_tailscale">安装 Tailscale</string>
+    <string name="conn_tailscale_missing_toast">手机上没有安装 Tailscale</string>
+    <string name="conn_status_group">连接状态</string>
+    <string name="conn_status_route">%1$s · 经%2$s</string>
+    <string name="conn_status_inactive">不是当前使用的电脑</string>
+    <string name="conn_use_this_computer">连接</string>
+
+    <!-- Auto-update: settings toggle and title-bar badge -->
+    <string name="auto_update">自动检查并下载更新</string>
+    <string name="auto_update_sub_on">App 在前台时每 30 分钟检查一次，连 Wi-Fi 时自动下载新版本；安装前仍需你确认。</string>
+    <string name="auto_update_sub_off">不会自动检查；可在「检查更新」里手动检查。</string>
+    <string name="badge_available_desc">有新版本 %1$s，轻点下载。</string>
+    <string name="badge_downloading_desc">正在下载更新，%1$d%%</string>
+    <string name="badge_ready_desc">新版本 %1$s 已就绪，轻点安装。</string>
+    <string name="badge_details">更新详情</string>
+    <string name="badge_download_failed">更新下载失败，轻点箭头重试。</string>
+
+    <!-- Scheduled send: relative ("After") mode and day labels -->
+    <string name="schedule_tab_at">指定时间</string>
+    <string name="schedule_tab_after">多久后</string>
+    <string name="schedule_minutes_short">%1$d分钟</string>
+    <string name="schedule_hours_short">%1$d小时</string>
+    <string name="schedule_hours_unit">小时</string>
+    <string name="schedule_minutes_unit">分钟</string>
+    <string name="schedule_custom">自定义</string>
+    <string name="schedule_when_tomorrow">明天 %1$s</string>
+    <string name="schedule_when_date">%1$s %2$s</string>
+
+    <!-- Scheduled send from the New Session screen -->
+    <string name="sched_new_session_title">新会话 · %1$s</string>
+    <string name="sched_new_home_title">定时新会话 · %1$s</string>
+    <string name="sched_new_toast">已定时 %1$s 开始新会话</string>
+
+    <!-- Themes and accent colors (desktop names) -->
+    <string name="theme_light">浅色主题</string>
+    <string name="theme_dark">深色主题</string>
+    <string name="theme_light_sub">应用处于浅色外观时使用。</string>
+    <string name="theme_dark_sub">应用处于深色外观时使用。</string>
+    <string name="accent_color">强调色</string>
+    <string name="accent_theme_default">跟随主题</string>
+
+    <!-- Connection details: clock offset -->
+    <string name="link_clock">时钟</string>
+    <string name="link_clock_in_sync">手机与电脑时间一致</string>
+    <string name="link_clock_phone_ahead">手机比电脑快 %1$d 秒</string>
+    <string name="link_clock_phone_behind">手机比电脑慢 %1$d 秒</string>
+
+    <!-- update download: cancel / switch mirror -->
+    <string name="download_cancel">取消下载</string>
+    <string name="download_switch">换个镜像</string>
+    <string name="download_sheet_title">正在下载 %1$s</string>
+    <string name="download_bytes">%1$s / %2$s</string>
+    <string name="download_from">来源：%1$s · %2$s/s</string>
+    <string name="download_connecting">来源：%1$s · 正在连接…</string>
+    <string name="download_starting">正在连接…</string>
+    <string name="download_cancelled">已取消下载。</string>
+    <string name="download_cancelled_keep">已取消。已下载的 %1$s 会保留，下次接着下；再取消一次会删掉。</string>
+    <string name="download_cancelled_clean">已取消，并删掉了已下载的部分。</string>
+    <string name="source_picker_title">换个下载源</string>
+    <string name="source_picker_sub">从已下载的 %1$s 接着下，不用重来。</string>
+    <string name="source_picker_sub_empty">从头开始下载。</string>
+    <string name="source_current">正在使用</string>
+    <string name="source_speed_now">%1$s/s</string>
+    <string name="source_speed_last">上次 %1$s/s</string>
+    <string name="source_failed_last">上次失败：%1$s</string>
+    <string name="source_custom">你的镜像</string>
+    <string name="source_direct">直连</string>
+    <string name="source_untried">还没试过</string>
+
+    <!-- device groups: merge -->
+    <string name="computers_merged">已合并为一台电脑。</string>
+
+    <!-- device groups: routes -->
+    <string name="route_lan">局域网</string>
+    <string name="route_tailscale">Tailscale</string>
+    <string name="route_other">其他地址</string>
+    <string name="route_group">线路</string>
+    <string name="route_auto_hint">按当前网络自动选择：在家里的 Wi-Fi 上走局域网，在外面走 Tailscale。按这个顺序尝试。</string>
+    <string name="route_network">当前网络</string>
+    <string name="net_wifi">Wi-Fi %1$s</string>
+    <string name="net_ethernet">有线网络 %1$s</string>
+    <string name="net_cellular">移动数据</string>
+    <string name="net_none">无网络</string>
+    <string name="net_other">其他网络</string>
+    <string name="net_vpn_tailscale">Tailscale 已开启</string>
+    <string name="net_vpn_other">开着其他 VPN（不是 Tailscale）</string>
+    <string name="net_vpn_none">未开 VPN</string>
+    <string name="route_in_use">正在使用</string>
+    <string name="route_in_use_ms">正在使用 · %1$d 毫秒连上</string>
+    <string name="route_ok_at">上次成功 %1$s</string>
+    <string name="route_failed">失败：%1$s</string>
+    <string name="route_untried">还没试过</string>
+    <string name="route_trying">正在尝试…</string>
+    <string name="route_stranger">这个地址上是另一台设备</string>
+    <string name="conn_fail_per_address">各地址</string>
+
+    <!-- device groups: addresses editor -->
+    <string name="addresses_group">地址</string>
+    <string name="addresses_hint">同一台电脑的多个地址，比如局域网 IP 和 Tailscale IP。连接时按当前网络自动选择，连不上就换下一个；它们共用登录方式和主机密钥。端口不是 22 时写成 地址:2222。</string>
+    <string name="address_add_placeholder">192.168.1.102 或 100.x.y.z</string>
+    <string name="address_add">添加</string>
+    <string name="address_move_up">上移</string>
+    <string name="address_move_down">下移</string>
+    <string name="address_remove">移除</string>
+    <string name="address_split">拆分</string>
+    <string name="address_split_done">已拆成“%1$s”。</string>
+    <string name="address_test_ok">能连上 · %1$d 毫秒</string>
+    <string name="address_duplicate">这个地址已经在列表里了。</string>
+    <string name="address_invalid">地址格式不对。</string>
+    <string name="merge_computer">合并另一台电脑…</string>
+    <string name="merge_computer_sub">把它的地址并到这里（同一台电脑保存了两次时用）</string>
+    <string name="merge_pick_title">合并到“%1$s”</string>
+    <string name="merge_pick_body">它的地址会并到这台电脑，它自己从列表里移除。只合并同一台电脑：两者必须共用登录方式和主机密钥。</string>
+
+    <!-- manual route choice -->
+    <string name="auto_route">自动选择线路</string>
+    <string name="auto_route_sub_on">在同一局域网时直连电脑的局域网地址，否则自动走 Tailscale；网络变化时自动切换。</string>
+    <string name="auto_route_sub_off">已关闭：每台电脑只用你在“切换电脑”或“编辑电脑”里选的地址。</string>
+    <string name="route_manual_hint">自动选择线路已关闭：只使用你选的地址。可在“切换电脑”或“编辑电脑”里更换，或在设置中重新开启自动选择线路。</string>
+    <string name="route_picked">已改用 %1$s</string>
+    <string name="route_selected">正在使用</string>
+    <string name="route_use">使用</string>
+    <string name="conn_switch_route">换一条线路</string>
+    <string name="addresses_pick_hint">自动选择线路已关闭：点一个地址来使用它（只尝试这一个）。</string>
+    <string name="crash_last_title">上次意外退出</string>
+    <string name="crash_last_body">已在本机保存一份崩溃日志（不会上传）。可以复制或分享给开发者，帮助排查问题。</string>
+    <string name="crash_copy_log">复制日志</string>
+    <string name="crash_share">分享</string>
+    <string name="crash_share_subject">Zeron 崩溃日志</string>
+    <string name="crash_logs">崩溃日志</string>
+    <string name="crash_logs_none">无</string>
+    <plurals name="crash_logs_count">
+        <item quantity="other">%1$d 条</item>
+    </plurals>
+    <string name="crash_logs_note">只保存在本机（最近 5 次），不会上传。IP 地址、主机名和用户名已去除。</string>
+    <string name="crash_logs_empty">没有崩溃记录。</string>
+    <string name="crash_logs_clear">清除</string>
+    <string name="crash_logs_clear_confirm">清除全部崩溃日志？</string>
+    <string name="home_stats_idle">空闲</string>
+    <string name="home_stats_a11y">%1$s：%2$s</string>
+    <string name="home_stats_separator">，</string>
+    <string name="home_stats_open">查看运行中和失败的会话</string>
+    <plurals name="home_stats_running">
+        <item quantity="other">%1$d 个运行中</item>
+    </plurals>
+    <plurals name="home_stats_failed">
+        <item quantity="other">%1$d 个失败</item>
+    </plurals>
+    <!-- 会话消息导航（右侧你的消息大纲） -->
+    <string name="msg_nav_open">你的消息：点按跳转</string>
+    <string name="msg_nav_title">你的消息</string>
+    <string name="msg_nav_attachment">附件</string>
+    <string name="image_unavailable">这张图片在电脑上读不出来</string>
+    <!-- 输入框附件：手机图片或电脑上的文件 -->
+    <string name="attach_phone_photos">手机图片</string>
+    <string name="attach_pc_files">电脑文件</string>
+    <string name="pc_files_title">电脑文件</string>
+    <string name="pc_files_pick">选择文件</string>
+    <plurals name="pc_files_insert">
+        <item quantity="other">插入 %d 个文件</item>
+    </plurals>
+    <string name="no_files">这里是空的。</string>
+    <string name="file_share">分享</string>
+    <string name="file_reading">正在从电脑读取…</string>
+    <string name="file_outside_project">这个文件不在该会话的项目目录内，无法在这里打开。</string>
+    <string name="file_read_failed">没能从电脑读取文件</string>
+    <string name="file_binary">这是二进制文件（%1$s），无法预览。</string>
+    <string name="file_truncated">文件较大，只显示了开头部分。</string>
+    <string name="browse_files">文件</string>
+    <string name="file_preview_open">预览</string>
+    <string name="mention">提及</string>
+    <string name="copy_path">复制路径</string>
+    <string name="copy_rel_path">复制相对路径</string>
+    <string name="folder_load_retry">无法读取该文件夹，点按重试。</string>
+</resources>

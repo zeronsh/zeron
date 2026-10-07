@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use zeron_proto::CheckoutChangeRequestStatus;
 use zeron_rpc::{LinkCache, LinkCacheConfig, PeerLiveness, RpcError, methods};
 
-use super::{Bearer, b64};
+use super::Bearer;
 use crate::client::ClientInner;
 use crate::error::{ClientError, Result};
 use crate::rpc::ProgressFn;
@@ -19,11 +19,6 @@ use crate::{lock, now_ms};
 
 /// Default unary deadline (engine forward DEFAULT); long ones below.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Raw bytes per UploadChunk slice (≈680k base64 chars — under Cloudflare's
-/// 1 MiB WS message cap with envelope headroom; a multiple of 3 so slices
-/// encode independently).
-const UPLOAD_SLICE_BYTES: usize = 510_000;
-const UPLOAD_PARALLEL: usize = 3;
 /// A device with presence older than this reads Dark (no dial) once the
 /// registry has been live long enough to have heard its beats.
 const DARK_AFTER_MS: i64 = 5 * 60_000;
@@ -33,6 +28,8 @@ pub(crate) fn deadline(method: &str) -> Duration {
     match method {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
+        // A forced usage probe hits every provider the host is signed into.
+        methods::LIST_AGENT_ACCOUNTS => Duration::from_secs(60),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
         _ => CALL_TIMEOUT,
     }
@@ -158,128 +155,42 @@ impl Relay {
         unreachable!("the second attempt always returns")
     }
 
+    /// The chunked-transfer RPC surface as a transport-agnostic call:
+    /// `attachments::upload_chunks`/`read_chunks` work over this or a direct
+    /// SSH link identically.
+    fn rpc_call(self: &Arc<Self>, device_id: &str) -> crate::attachments::RpcCall {
+        let relay = self.clone();
+        let device_id = device_id.to_owned();
+        Arc::new(move |method, params| {
+            let relay = relay.clone();
+            let device_id = device_id.clone();
+            Box::pin(async move { relay.call(&device_id, method, params).await })
+        })
+    }
+
     /// Chunked upload (`UploadChunk` ×N with `seq`, then `UploadCommit`).
     /// Returns the durable host path. Idempotent per `upload_id`.
     pub(crate) async fn upload(
-        &self,
+        self: &Arc<Self>,
         device_id: &str,
         upload_id: &str,
         file_name: &str,
         data: &[u8],
         progress: Option<ProgressFn>,
     ) -> Result<String> {
-        let slices: Vec<&[u8]> = if data.is_empty() {
-            vec![&[][..]]
-        } else {
-            data.chunks(UPLOAD_SLICE_BYTES).collect()
-        };
-        let total = slices.len();
-        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let report = |done: usize| {
-            if let Some(progress) = &progress {
-                progress((done as f64 / total as f64).min(0.99));
-            }
-        };
-        report(0);
-        let mut next = 0usize;
-        while next < total {
-            let batch: Vec<(usize, &[u8])> = slices
-                .iter()
-                .enumerate()
-                .skip(next)
-                .take(UPLOAD_PARALLEL)
-                .map(|(i, s)| (i, *s))
-                .collect();
-            next += batch.len();
-            let calls = batch.into_iter().map(|(seq, slice)| {
-                let done = done.clone();
-                let report = &report;
-                async move {
-                    let params =
-                        json!({ "uploadId": upload_id, "seq": seq, "data": b64::encode(slice) });
-                    let mut last = None;
-                    for attempt in 0..3u64 {
-                        if attempt > 0 {
-                            tokio::time::sleep(Duration::from_millis(
-                                50 * attempt * (seq as u64 + 1),
-                            ))
-                            .await;
-                        }
-                        match self
-                            .call(device_id, methods::UPLOAD_CHUNK, params.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                let now =
-                                    done.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
-                                report(now);
-                                return Ok(());
-                            }
-                            Err(
-                                err @ (ClientError::Unsupported(_) | ClientError::HostError(_)),
-                            ) => return Err(err),
-                            Err(err) => last = Some(err),
-                        }
-                    }
-                    Err(last.unwrap_or(ClientError::HostUnavailable(device_id.to_owned())))
-                }
-            });
-            for result in futures::future::join_all(calls).await {
-                result?;
-            }
-        }
-        let reply = self
-            .call(
-                device_id,
-                methods::UPLOAD_COMMIT,
-                json!({ "uploadId": upload_id, "fileName": file_name }),
-            )
-            .await?;
-        if let Some(progress) = &progress {
-            progress(1.0);
-        }
-        reply
-            .get("path")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| ClientError::HostError("UploadCommit returned no path".into()))
+        crate::attachments::upload_chunks(
+            self.rpc_call(device_id),
+            upload_id,
+            file_name,
+            data,
+            progress,
+        )
+        .await
     }
 
     /// `ReadAttachmentChunk` until done.
-    pub(crate) async fn read_attachment(&self, device_id: &str, path: &str) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut offset: u64 = 0;
-        for _ in 0..1000 {
-            let reply = self
-                .call(
-                    device_id,
-                    methods::READ_ATTACHMENT_CHUNK,
-                    json!({ "path": path, "offset": offset }),
-                )
-                .await?;
-            let data = reply
-                .get("data")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            out.extend(
-                b64::decode(data)
-                    .ok_or_else(|| ClientError::HostError("bad attachment chunk".into()))?,
-            );
-            if reply.get("done").and_then(Value::as_bool).unwrap_or(true) {
-                return Ok(out);
-            }
-            let next = reply
-                .get("nextOffset")
-                .and_then(Value::as_u64)
-                .unwrap_or(offset);
-            if next <= offset {
-                return Err(ClientError::HostError(
-                    "attachment read made no progress".into(),
-                ));
-            }
-            offset = next;
-        }
-        Err(ClientError::HostError("attachment too large".into()))
+    pub(crate) async fn read_attachment(self: &Arc<Self>, device_id: &str, path: &str) -> Result<Vec<u8>> {
+        crate::attachments::read_chunks(self.rpc_call(device_id), path).await
     }
 
     pub(crate) fn clear_unsupported(&self) {

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Languages offered in Android 13+ Settings > Apps > Zeron > Language and
+     in the in-app picker (Settings > Language). values/ is English;
+     values-zh/ is Simplified Chinese and serves every zh-* locale. -->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en" />
+    <locale android:name="zh-CN" />
+</locale-config>

@@ -185,6 +185,17 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            branch: Some("cjk-fallback"),
+            last_ago_ms: 6 * MIN,
+            ..chat(
+                "chat-zh",
+                Some("space-zeron"),
+                MAC,
+                "中文排版：折行与等宽对齐",
+                "Rust 测量和 Android 绘制走同一条字体链。",
+            )
+        },
+        DemoChat {
             last_ago_ms: 5 * DAY,
             created_ago_ms: 6 * DAY,
             ..chat(
