@@ -200,6 +200,9 @@ pub(crate) struct SessionCore {
     view_attached: AtomicBool,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
+    /// `(doc op count, snapshot bytes)` behind [`Self::resident_estimate`]:
+    /// sizing means exporting the doc, so re-do it only once ops landed.
+    size_cache: Mutex<Option<(usize, usize)>>,
 }
 
 impl SessionCore {
@@ -254,6 +257,7 @@ impl SessionCore {
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+            size_cache: Mutex::new(None),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
         // ~one refresh per frame, not N).
@@ -600,6 +604,26 @@ impl SessionCore {
 
     pub(crate) fn touched_ms(&self) -> i64 {
         self.touched_ms.load(Ordering::Acquire)
+    }
+
+    /// Rough resident bytes of this session's doc, for the warm-set budget.
+    pub(crate) fn resident_estimate(&self) -> usize {
+        let ops = self.doc.doc().len_ops();
+        let mut cache = lock(&self.size_cache);
+        let snapshot_bytes = match *cache {
+            Some((cached_ops, bytes)) if cached_ops == ops => bytes,
+            _ => {
+                // A failed export keeps the last known size (0 when none):
+                // the floor still counts the session.
+                let bytes = self
+                    .doc
+                    .export_snapshot()
+                    .map_or(cache.map_or(0, |(_, bytes)| bytes), |b| b.len());
+                *cache = Some((ops, bytes));
+                bytes
+            }
+        };
+        zeron_doc::resident_estimate(snapshot_bytes)
     }
 }
 

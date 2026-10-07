@@ -17,6 +17,19 @@ pub const STREAM_COMMIT_MS: u64 = 120;
 pub const DO_FLUSH_MS: u64 = 5_000;
 /// Byte budget for the in-memory doc LRU on device backends.
 pub const DOC_LRU_BYTE_BUDGET: usize = 80 * 1024 * 1024;
+/// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
+/// columnar+compressed; the in-memory doc plus mirror runs well above the blob
+/// size. A rough multiplier is enough for the LRU budgets — they are safety
+/// ceilings, the count caps do the day-to-day work.
+pub const RESIDENT_BYTES_PER_SNAPSHOT_BYTE: usize = 6;
+/// Floor per open doc (room socket buffers, tasks) regardless of content size.
+pub const DOC_RESIDENT_FLOOR_BYTES: usize = 512 * 1024;
+
+/// Rough resident cost of an open doc whose snapshot is `snapshot_bytes`,
+/// shared by the desktop doc LRU and the mobile warm-session budget.
+pub fn resident_estimate(snapshot_bytes: usize) -> usize {
+    (snapshot_bytes * RESIDENT_BYTES_PER_SNAPSHOT_BYTE).max(DOC_RESIDENT_FLOOR_BYTES)
+}
 /// Number of trailing messages materialized into the tail sidecar.
 pub const TAIL_MESSAGE_COUNT: usize = 64;
 /// Terminal output batching cadence (ms).
