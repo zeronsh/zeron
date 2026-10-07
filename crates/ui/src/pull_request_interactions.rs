@@ -21,9 +21,7 @@ impl PullRequestDetailPage {
                     self.mention_choices = std::iter::once(&detail.author.login)
                         .chain(
                             detail
-                                .comments
-                                .iter()
-                                .chain(&detail.reviews)
+                                .activity_comments()
                                 .map(|comment| &comment.author.login),
                         )
                         .filter(|login| !login.is_empty() && login.to_lowercase().contains(&query))
@@ -77,7 +75,7 @@ impl PullRequestDetailPage {
 
     fn send_comment(&mut self, cx: &mut Context<Self>) {
         let body = self.comment_input.read(cx).text().to_owned();
-        if self.sending || self.detail.is_none() || body.trim().is_empty() {
+        if self.submission.is_some() || self.detail.is_none() || body.trim().is_empty() {
             return;
         }
         if body.len() > 60_000 {
@@ -92,14 +90,28 @@ impl PullRequestDetailPage {
         self.task = None;
         self.loading = false;
         self.comment_error = None;
-        self.sending = true;
+        let key = (self.target.clone(), self.url.clone());
+        let pending = self.cache.borrow().submissions.get(&key).cloned();
+        if let Some(pending) = pending {
+            self.observe_submission(pending, cx);
+            return;
+        }
         self.save_draft(cx);
+        let submission = cx.new(|_| CommentSubmission {
+            body: body.clone(),
+            result: None,
+        });
+        self.cache
+            .borrow_mut()
+            .submissions
+            .insert(key, submission.clone());
+        self.observe_submission(submission.clone(), cx);
         let mut params = self.params(false);
         params["body"] = body.clone().into();
         let (cache, target, url) = (self.cache.clone(), self.target.clone(), self.url.clone());
         // Detached: leaving the pull request neither stops the post nor loses
         // its outcome.
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_, cx| {
             let result = engine
                 .client()
                 .call(methods::POST_CHANGE_REQUEST_COMMENT, params)
@@ -128,68 +140,89 @@ impl PullRequestDetailPage {
                     })
                 })
                 .await;
-            let failure = result.as_ref().err().cloned();
-            let shown = this.update(cx, |page, cx| {
-                page.sending = false;
-                match result {
-                    Ok((comment, parsed)) => {
-                        if let Some(detail) = &mut page.detail {
+            // Settle shared state before notifying any replacement view. A
+            // completion owns only its submitted body, never later draft edits.
+            {
+                let mut cache = cache.borrow_mut();
+                cache.submissions.remove(&(target.clone(), url.clone()));
+                let matches_submission = cache.drafts.get(&(target.clone(), url.clone()))
+                    .is_some_and(|(text, _)| text == &body);
+                if result.is_ok() {
+                    cache.evict(&target, &url);
+                }
+                if matches_submission {
+                    match &result {
+                        Ok(_) => cache.set_draft(&target, &url, "", None),
+                        Err(error) => cache.set_draft(&target, &url, &body, Some(error.clone())),
+                    }
+                }
+            }
+            let _ = submission.update(cx, |submission, cx| {
+                submission.result = Some(result);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn observe_submission(
+        &mut self,
+        submission: Entity<CommentSubmission>,
+        cx: &mut Context<Self>,
+    ) {
+        self.submission = Some(submission.clone());
+        self.submission_subscription = Some(cx.observe(&submission, |page, submission, cx| {
+            let submission = submission.read(cx);
+            let Some(result) = submission.result.clone() else {
+                return;
+            };
+            let body = submission.body.clone();
+            page.submission = None;
+            page.submission_subscription = None;
+            match result {
+                Ok((comment, parsed)) => {
+                    // Discard any read started before the accepted write.
+                    page.task = None;
+                    page.loading = false;
+                    if let Some(detail) = &mut page.detail {
+                        if comment.id.is_empty()
+                            || !detail
+                                .comments
+                                .iter()
+                                .any(|existing| existing.id == comment.id)
+                        {
                             page.activity_bodies.insert(detail.comments.len(), parsed);
                             detail.comments.push(comment);
                         }
-                        if page.comment_input.read(cx).text() == body {
-                            page.comment_input
-                                .update(cx, |input, cx| input.set_text("", cx));
-                        }
-                        page.save_draft(cx);
-                        if let (Some(detail), Some(parsed)) = (&page.detail, &page.body) {
-                            let snapshot = DetailSnapshot {
+                    } else {
+                        page.load(true, cx);
+                    }
+                    if page.comment_input.read(cx).text() == body {
+                        page.comment_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                    }
+                    page.comment_error = None;
+                    if let (Some(detail), Some(parsed)) = (&page.detail, &page.body) {
+                        page.cache.borrow_mut().put(
+                            page.target.clone(),
+                            page.url.clone(),
+                            DetailSnapshot {
                                 detail: detail.clone(),
                                 body: parsed.clone(),
                                 activity: page.activity_bodies.clone(),
                                 fetched: page.fetched.unwrap_or_else(Instant::now),
                                 diff: page.diff.clone(),
                                 diff_refresh_owed: page.diff_refresh_owed,
-                            };
-                            page.cache.borrow_mut().put(
-                                page.target.clone(),
-                                page.url.clone(),
-                                snapshot,
-                            );
-                        }
-                        page.scroll
-                            .scroll
-                            .set_offset(gpui::point(px(0.0), px(-1_000_000.0)));
-                    }
-                    Err(error) => {
-                        page.comment_error = Some(error);
-                        page.save_draft(cx);
+                            },
+                        );
                     }
                 }
-                cx.notify();
-            });
-            if shown.is_err() {
-                // The view is gone. A posted comment makes the thread stale,
-                // but only the submitted draft belongs to this completion.
-                // Later edits (including clearing the composer) must win.
-                let mut cache = cache.borrow_mut();
-                let matches_submission = cache
-                    .drafts
-                    .get(&(target.clone(), url.clone()))
-                    .is_some_and(|(text, _)| text == &body);
-                if failure.is_none() {
-                    cache.evict(&target, &url);
-                }
-                if matches_submission {
-                    match failure {
-                        None => cache.set_draft(&target, &url, "", None),
-                        Some(error) => cache.set_draft(&target, &url, &body, Some(error)),
-                    }
-                }
+                Err(error) => page.comment_error = Some(error),
             }
-        })
-        .detach();
-        cx.notify();
+            page.save_draft(cx);
+            cx.notify();
+        }));
     }
 
     /// Keep the unsent comment for the next visit to this pull request.
@@ -203,11 +236,31 @@ impl PullRequestDetailPage {
     }
 
     pub(super) fn comment_composer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let sending = self.sending;
+        let sending = self.submission.is_some();
         let can_send = !sending
             && self.detail.is_some()
             && !self.comment_input.read(cx).text().trim().is_empty();
         let mut stack = div().relative().flex().flex_col().gap(px(8.0));
+        if let Some(submission) = &self.submission {
+            let excerpt: String = submission
+                .read(cx)
+                .body
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(160)
+                .collect();
+            stack = stack.child(
+                div()
+                    .id("pr-comment-pending")
+                    .debug_selector(|| "pr-comment-pending".into())
+                    .text_color(theme.text_muted)
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .truncate()
+                    .child(format!("Posting: {excerpt}")),
+            );
+        }
         if self.mention_token.is_some() {
             let popup_theme = theme.for_popup();
             let mut menu = crate::popover::popover_card(&popup_theme)
@@ -588,7 +641,7 @@ mod tests {
             page.send_comment(cx);
         });
         rpc.settle(cx, &runtime, |cx| {
-            page.read_with(cx, |page, _| !page.sending)
+            page.read_with(cx, |page, _| page.submission.is_none())
         });
         page.update(cx, |page, cx| {
             assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -603,7 +656,7 @@ mod tests {
             page.send_comment(cx);
         });
         rpc.settle(cx, &runtime, |cx| {
-            page.read_with(cx, |page, _| !page.sending)
+            page.read_with(cx, |page, _| page.submission.is_none())
         });
         page.read_with(cx, |page, cx| {
             assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -611,6 +664,113 @@ mod tests {
             assert!(page.comment_error.is_some());
             assert_eq!(page.detail.as_ref().unwrap().comments.len(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn pull_request_pending_comment_is_shared_across_reopening(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        for succeeds in [true, false] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let release = Arc::new(tokio::sync::Notify::new());
+            let rpc = ScriptedRpc::new({
+                let calls = calls.clone();
+                let release = release.clone();
+                move |method, params| {
+                    let calls = calls.clone();
+                    let release = release.clone();
+                    async move {
+                        assert_eq!(method, methods::POST_CHANGE_REQUEST_COMMENT);
+                        assert_eq!(params["body"], "Submitted A");
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        release.notified().await;
+                        if !succeeds {
+                            return Err(zeron_rpc::RpcError::Failed("offline".into()));
+                        }
+                        zeron_rpc::RpcReply::value(&zeron_proto::ChangeRequestComment {
+                            body: "Submitted A".into(),
+                            ..Default::default()
+                        })
+                    }
+                }
+            });
+            let cache = Rc::new(RefCell::new(PullRequestCache::default()));
+            let state = cx.update(|cx| fixture::state(cx, Some(rpc.client())));
+            let url = "https://github.com/a/b/pull/1";
+            cache.borrow_mut().put(
+                None,
+                url.into(),
+                DetailSnapshot {
+                    detail: ChangeRequestDetail::default(),
+                    body: crate::markdown::parse_full(""),
+                    activity: Vec::new(),
+                    fetched: Instant::now(),
+                    diff: None,
+                    diff_refresh_owed: false,
+                },
+            );
+            let open = |cx: &mut gpui::TestAppContext| {
+                cx.add_window(|window, cx| {
+                    PullRequestDetailPage::new(
+                        state.clone(),
+                        url.into(),
+                        None,
+                        cache.clone(),
+                        None,
+                        window,
+                        cx,
+                    )
+                })
+            };
+            let first = open(cx);
+            first
+                .update(cx, |page, _, cx| {
+                    page.comment_input
+                        .update(cx, |input, cx| input.set_text("Submitted A", cx));
+                    page.send_comment(cx);
+                })
+                .unwrap();
+            rpc.settle(cx, &runtime, |_| calls.load(Ordering::SeqCst) == 1);
+            first
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            cx.run_until_parked();
+            let reopened = open(cx);
+            reopened
+                .update(cx, |page, _, cx| {
+                    assert!(page.submission.is_some());
+                    assert_eq!(page.comment_input.read(cx).text(), "Submitted A");
+                    page.send_comment(cx);
+                    page.comment_input
+                        .update(cx, |input, cx| input.set_text("Newer B", cx));
+                    page.comment_event(&ComposerInputEvent::Edited, cx);
+                    page.send_comment(cx);
+                })
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            release.notify_one();
+            rpc.settle(cx, &runtime, |cx| {
+                reopened
+                    .update(cx, |page, _, _| page.submission.is_none())
+                    .unwrap()
+            });
+            reopened
+                .update(cx, |page, window, cx| {
+                    assert_eq!(page.comment_input.read(cx).text(), "Newer B");
+                    assert_eq!(
+                        page.detail.as_ref().unwrap().comments.len(),
+                        usize::from(succeeds)
+                    );
+                    assert_eq!(page.comment_error.is_some(), !succeeds);
+                    window.remove_window();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            assert!(cache.borrow().submissions.is_empty());
+            assert_eq!(cache.borrow().drafts[&(None, url.into())].0, "Newer B");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[gpui::test]

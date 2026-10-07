@@ -5495,6 +5495,20 @@ impl Shell {
 
     // ---- add-space flow ----
 
+    pub(super) fn open_add_space_on_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
+        let device = self
+            .state
+            .read(cx)
+            .devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .cloned();
+        self.open_add_space(cx);
+        if let Some(device) = device {
+            self.add_space_pick_device(device, cx);
+        }
+    }
+
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
         self.command_palette = None;
         self.project_crumb_menu = popover::Popup::default();

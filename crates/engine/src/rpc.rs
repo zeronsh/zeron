@@ -2629,27 +2629,29 @@ impl RpcService for EngineRpc {
             }
             methods::GET_CHANGE_REQUEST | methods::GET_CHANGE_REQUEST_DIFF => {
                 #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
                 struct P {
                     url: String,
                     #[serde(default)]
                     refresh: bool,
+                    #[serde(default)]
+                    head_ref_oid: Option<String>,
+                    #[serde(default)]
+                    base_ref_oid: Option<String>,
                 }
                 let p: P = parse_params(params)?;
-                if method == methods::GET_CHANGE_REQUEST_DIFF {
-                    let diff = self
-                        .github
-                        .diff(&p.url, p.refresh)
-                        .await
-                        .map_err(change_request_rpc_error)?;
-                    RpcReply::value(&diff)
-                } else {
-                    let detail = self
-                        .github
-                        .detail(&p.url, p.refresh)
-                        .await
-                        .map_err(change_request_rpc_error)?;
-                    RpcReply::value(&detail)
-                }
+                let value = self
+                    .github
+                    .detail_request(
+                        &p.url,
+                        method == methods::GET_CHANGE_REQUEST_DIFF,
+                        p.refresh,
+                        p.head_ref_oid.as_deref(),
+                        p.base_ref_oid.as_deref(),
+                    )
+                    .await
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&value)
             }
             // One-shot scoped capture for the Changes pane: `branch` diffs the
             // working tree against merge-base(baseRef, HEAD); `turn` diffs the

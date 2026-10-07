@@ -36,7 +36,16 @@ pub struct OpenPrImage(pub String);
 /// Open a new session with this prompt staged in the composer (not sent).
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
-pub struct StartPullRequestSession(pub String);
+pub struct StartPullRequestSession {
+    pub prompt: String,
+    pub project_id: String,
+    pub device: String,
+    pub repository: String,
+}
+
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct AddPullRequestProject(pub String);
 
 /// What went wrong and what to do, in words. Error codes and transport
 /// details never reach the reader.
@@ -263,6 +272,21 @@ pub(crate) struct PullRequestCache {
     entries: Vec<((Option<String>, String), DetailSnapshot)>,
     /// Unsent comments, with the reason the last send failed.
     drafts: std::collections::HashMap<(Option<String>, String), (String, Option<String>)>,
+    /// A post belongs to the window/profile, not to a particular detail view.
+    submissions: std::collections::HashMap<(Option<String>, String), Entity<CommentSubmission>>,
+}
+
+struct CommentSubmission {
+    body: String,
+    result: Option<
+        Result<
+            (
+                zeron_proto::ChangeRequestComment,
+                crate::markdown::BlockTree,
+            ),
+            String,
+        >,
+    >,
 }
 
 impl PullRequestCache {
@@ -372,9 +396,13 @@ pub struct PullRequestDetailPage {
     comment_input: Entity<crate::composer::ComposerInput>,
     comment_subscription: Option<Subscription>,
     /// A comment is being posted.
-    sending: bool,
+    submission: Option<Entity<CommentSubmission>>,
+    submission_subscription: Option<Subscription>,
     comment_error: Option<String>,
     verification_platform: handoff::VerificationPlatform,
+    handoff_task: Option<Task<()>>,
+    handoff_error: Option<String>,
+    handoff_device: Option<String>,
     mention_token: Option<crate::composer::MentionToken>,
     mention_choices: Vec<String>,
     mention_index: usize,
@@ -449,9 +477,13 @@ impl PullRequestDetailPage {
                 .with_tab_stop()
             }),
             comment_subscription: None,
-            sending: false,
+            submission: None,
+            submission_subscription: None,
             comment_error: None,
             verification_platform: handoff::VerificationPlatform::Relevant,
+            handoff_task: None,
+            handoff_error: None,
+            handoff_device: None,
             mention_token: None,
             mention_choices: Vec::new(),
             mention_index: 0,
@@ -497,7 +529,17 @@ impl PullRequestDetailPage {
                 page.comment_event(event, cx)
             }));
         let cached = page.cache.borrow_mut().get(&page.target, &page.url);
-        if let Some(snapshot) = cached {
+        let stale = cached.as_ref().is_some_and(|snapshot| {
+            page.preview.as_ref().is_some_and(|preview| {
+                !preview.head_ref_oid.is_empty()
+                    && preview.head_ref_oid != snapshot.detail.head_ref_oid
+            })
+        });
+        if stale {
+            page.cache.borrow_mut().evict(&page.target, &page.url);
+            page.diff_refresh_owed = true;
+        }
+        if let Some(snapshot) = cached.filter(|_| !stale) {
             page.fetched = Some(snapshot.fetched);
             page.detail = Some(snapshot.detail);
             page.body = Some(snapshot.body);
@@ -518,8 +560,17 @@ impl PullRequestDetailPage {
                 .update(cx, |input, cx| input.set_text(text, cx));
             page.comment_error = error;
         }
+        let pending = page
+            .cache
+            .borrow()
+            .submissions
+            .get(&(page.target.clone(), page.url.clone()))
+            .cloned();
+        if let Some(pending) = pending {
+            page.observe_submission(pending, cx);
+        }
         if page.detail.is_none() {
-            page.load(false, cx);
+            page.load(stale, cx);
         }
         page
     }
@@ -654,11 +705,28 @@ impl PullRequestDetailPage {
         if let Some(target) = &self.target {
             params["targetDeviceId"] = target.clone().into();
         }
+        if let Some(head) = self
+            .detail
+            .as_ref()
+            .map(|detail| &detail.head_ref_oid)
+            .or_else(|| self.preview.as_ref().map(|preview| &preview.head_ref_oid))
+            .filter(|head| zeron_proto::change_request_assessment::valid_head_oid(head))
+        {
+            params["headRefOid"] = head.clone().into();
+        }
+        if let Some(base) = self
+            .detail
+            .as_ref()
+            .map(|detail| &detail.base_ref_oid)
+            .filter(|base| zeron_proto::change_request_assessment::valid_head_oid(base))
+        {
+            params["baseRefOid"] = base.clone().into();
+        }
         params
     }
 
     fn load(&mut self, refresh: bool, cx: &mut Context<Self>) {
-        if self.sending {
+        if self.submission.is_some() && self.detail.is_some() {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -676,7 +744,7 @@ impl PullRequestDetailPage {
             let result = cx.background_executor().spawn(async move {
                 result.map(|detail| DetailSnapshot {
                     body: super::pull_request_media::parse_description(&detail.body),
-                    activity: detail.comments.iter().chain(&detail.reviews)
+                    activity: detail.activity_comments()
                         .map(|comment| super::pull_request_media::parse_description(&comment.body)).collect(),
                     detail, fetched: Instant::now(), diff: None, diff_refresh_owed: false,
                 })
@@ -699,6 +767,9 @@ impl PullRequestDetailPage {
                         page.activity_bodies = snapshot.activity.clone();
                         page.detail = Some(snapshot.detail.clone());
                         page.cache.borrow_mut().put(page.target.clone(), page.url.clone(), snapshot);
+                        if page.tab == Tab::Code && page.diff.is_none() {
+                            page.load_diff(false, cx);
+                        }
                     }
                     Err(error) => page.error = Some(error),
                 }
@@ -709,6 +780,10 @@ impl PullRequestDetailPage {
     }
 
     fn load_diff(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        // Wait for the detail's exact revisions before fetching its patch.
+        if self.loading || self.detail.is_none() {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.diff_error = Some("Connect to your device to load the diff.".into());
             return;
@@ -791,7 +866,7 @@ impl PullRequestDetailPage {
             [
                 None,
                 Some(detail.files.len()),
-                Some(detail.comments.len() + detail.reviews.len()),
+                Some(detail.activity_comments().count()),
             ]
         });
         let segments = TABS
@@ -993,6 +1068,20 @@ fn rich_text(
             body, &options, theme, window,
         ))
         .into_any_element()
+}
+
+fn inline_thread(
+    detail: &ChangeRequestDetail,
+    index: usize,
+) -> Option<&zeron_proto::ChangeRequestReviewThread> {
+    let mut index = index.checked_sub(detail.comments.len() + detail.reviews.len())?;
+    for thread in detail.review_threads.iter().flatten() {
+        if index < thread.comments.len() {
+            return Some(thread);
+        }
+        index -= thread.comments.len();
+    }
+    None
 }
 
 fn activity_time(raw: &str) -> String {
@@ -1344,7 +1433,7 @@ impl Render for PullRequestDetailPage {
             && self
                 .detail
                 .as_ref()
-                .is_some_and(|detail| detail.comments.is_empty() && detail.reviews.is_empty());
+                .is_some_and(|detail| detail.activity_comments().next().is_none());
         let content = {
             let mut column = widgets::page_column()
                 .id("pr-content-column")
@@ -1701,12 +1790,7 @@ impl Render for PullRequestDetailPage {
                         }
                     }
                     Tab::Activity => {
-                        let mut activity: Vec<_> = detail
-                            .comments
-                            .iter()
-                            .chain(detail.reviews.iter())
-                            .enumerate()
-                            .collect();
+                        let mut activity: Vec<_> = detail.activity_comments().enumerate().collect();
                         activity.sort_by_key(|(_, comment)| {
                             if comment.created_at.is_empty() {
                                 &comment.submitted_at
@@ -1724,7 +1808,10 @@ impl Render for PullRequestDetailPage {
                             // your own replies stay flush with the composer.
                             .pl(px(8.0))
                             .flex()
-                            .flex_col();
+                            .flex_col()
+                            .when(detail.review_threads.is_none() && !activity.is_empty(), |thread| thread.child(
+                                div().mb(px(16.0)).text_color(theme.text_muted)
+                                    .child("Inline review threads are unavailable. Refresh or open this pull request on GitHub to read them.")));
                         if activity.is_empty() {
                             thread = thread
                                 .pl_0()
@@ -1756,21 +1843,19 @@ impl Render for PullRequestDetailPage {
                                             .w_full()
                                             .text_size(crate::typography::ui_rems(15.0))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child("No activity yet"),
+                                            .child(if detail.review_threads.is_some() { "No activity yet" } else { "No conversation yet" }),
                                     )
                                     .child(
                                         div()
                                             .w_full()
                                             .mt(px(6.0))
                                             .text_color(theme.text_muted)
-                                            .child("Comments and reviews will appear here. Start the conversation below."),
+                                            .child(if detail.review_threads.is_some() { "Comments and reviews will appear here. Start the conversation below." } else { "Inline review threads are unavailable. Refresh or open this pull request on GitHub to read them." }),
                                     ),
                             );
                         }
                         let viewer_login = detail
-                            .comments
-                            .iter()
-                            .chain(detail.reviews.iter())
+                            .activity_comments()
                             .find(|comment| {
                                 comment.viewer_did_author && !comment.author.login.is_empty()
                             })
@@ -1846,6 +1931,74 @@ impl Render for PullRequestDetailPage {
                                                             )),
                                                     ),
                                             )
+                                            .children(inline_thread(detail, index).map(|review| {
+                                                let location = review
+                                                    .line
+                                                    .or(review.original_line)
+                                                    .map(|line| format!("{}:{line}", review.path))
+                                                    .unwrap_or_else(|| review.path.clone());
+                                                let status = if review.is_resolved {
+                                                    "Resolved"
+                                                } else {
+                                                    "Unresolved"
+                                                };
+                                                div()
+                                                    .debug_selector(move || {
+                                                        format!("pr-inline-thread-{index}")
+                                                    })
+                                                    .flex()
+                                                    .flex_wrap()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .text_color(theme.text_muted)
+                                                    .child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "pr-inline-location-{index}"
+                                                            )))
+                                                            .min_w_0()
+                                                            .max_w_full()
+                                                            .truncate()
+                                                            .tooltip(widgets::text_tooltip(
+                                                                location.clone(),
+                                                            ))
+                                                            .child(location),
+                                                    )
+                                                    .child(status)
+                                                    .when(review.is_outdated, |el| {
+                                                        el.child("Outdated")
+                                                    })
+                                                    .when(comment.reply_to.is_some(), |el| {
+                                                        el.child("Reply")
+                                                    })
+                                                    .children(
+                                                        url::Url::parse(&comment.url)
+                                                            .ok()
+                                                            .filter(|url| {
+                                                                url.scheme() == "https"
+                                                                    && url.host_str()
+                                                                        == Some("github.com")
+                                                            })
+                                                            .map(|url| {
+                                                                widgets::action_button(
+                                                                    &theme,
+                                                                    widgets::ActionTone::Filled,
+                                                                )
+                                                                .id(SharedString::from(format!(
+                                                                    "pr-inline-link-{index}"
+                                                                )))
+                                                                .role(gpui::Role::Link)
+                                                                .aria_label(
+                                                                    "Open review comment on GitHub",
+                                                                )
+                                                                .tab_index(0)
+                                                                .child("Open comment")
+                                                                .on_click(move |_, _, cx| {
+                                                                    cx.open_url(url.as_str())
+                                                                })
+                                                            }),
+                                                    )
+                                            }))
                                             .children(self.activity_bodies.get(index).map(
                                                 |body| {
                                                     div().child(rich_text(
@@ -2092,6 +2245,151 @@ mod tests {
             page
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn pull_request_activity_renders_inline_feedback_and_replies(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let rpc = ScriptedRpc::new(|method, _| async move {
+            assert_eq!(method, methods::GET_CHANGE_REQUEST);
+            zeron_rpc::RpcReply::value(&ChangeRequestDetail {
+                number: 1,
+                title: "Inline review".into(),
+                review_decision: "CHANGES_REQUESTED".into(),
+                review_threads: Some(vec![zeron_proto::ChangeRequestReviewThread {
+                    path: "src/lib.rs".into(),
+                    line: Some(12),
+                    comments: vec![
+                        zeron_proto::ChangeRequestComment {
+                            id: "first".into(),
+                            body: "Preserve newer drafts".into(),
+                            ..Default::default()
+                        },
+                        zeron_proto::ChangeRequestComment {
+                            id: "reply".into(),
+                            body: "Covered by the reopen test".into(),
+                            reply_to: Some(zeron_proto::ChangeRequestCommentReference {
+                                id: "first".into(),
+                            }),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            })
+        });
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            let state = fixture::state(cx, Some(rpc.client()));
+            PullRequestDetailPage::new(
+                state,
+                "https://github.com/a/b/pull/1".into(),
+                None,
+                Default::default(),
+                None,
+                window,
+                cx,
+            )
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| !page.loading)
+        });
+        page.update(cx, |page, cx| {
+            assert_eq!(page.activity_bodies.len(), 2);
+            assert_eq!(page.detail.as_ref().unwrap().activity_comments().count(), 2);
+            page.select_tab(Tab::Activity, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pr-inline-thread-0").is_some());
+        assert!(cx.debug_bounds("pr-inline-thread-1").is_some());
+        assert!(cx.debug_bounds("pr-activity-empty").is_none());
+    }
+
+    #[gpui::test]
+    fn pull_request_board_revision_invalidates_cached_detail_and_diff(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let head = "b".repeat(40);
+        let base = "c".repeat(40);
+        let rpc = ScriptedRpc::new(move |method, params| {
+            let head = head.clone();
+            let base = base.clone();
+            async move {
+                assert_eq!(params["headRefOid"], head);
+                assert_eq!(params["refresh"], true);
+                match method.as_str() {
+                    methods::GET_CHANGE_REQUEST => {
+                        zeron_rpc::RpcReply::value(&ChangeRequestDetail {
+                            head_ref_oid: head,
+                            base_ref_oid: base,
+                            ..Default::default()
+                        })
+                    }
+                    methods::GET_CHANGE_REQUEST_DIFF => {
+                        assert_eq!(params["baseRefOid"], base);
+                        zeron_rpc::RpcReply::value(&"new patch")
+                    }
+                    _ => panic!("unexpected method"),
+                }
+            }
+        });
+        let cache = Rc::new(RefCell::new(PullRequestCache::default()));
+        let url = "https://github.com/a/b/pull/1";
+        let mut cached = snapshot("Old");
+        cached.detail.head_ref_oid = "a".repeat(40);
+        cached.diff = Some(ParsedDiff::new("old patch".into()));
+        cache.borrow_mut().put(None, url.into(), cached);
+        let window = cx.add_window(|window, cx| {
+            let state = fixture::state(cx, Some(rpc.client()));
+            let page = PullRequestDetailPage::new(
+                state,
+                url.into(),
+                None,
+                cache.clone(),
+                Some(ChangeRequestListItem {
+                    head_ref_oid: "b".repeat(40),
+                    provider: "github".into(),
+                    repository: "a/b".into(),
+                    author: Default::default(),
+                    ci: Default::default(),
+                    viewer_did_author: None,
+                    viewer_review_requested: None,
+                    number: 1,
+                    title: "Updated".into(),
+                    url: url.into(),
+                    state: zeron_proto::ChangeRequestState::Open,
+                    is_draft: false,
+                    review_decision: Default::default(),
+                    additions: 1,
+                    deletions: 1,
+                    mergeability: zeron_proto::ChangeRequestMergeability::Unknown,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                }),
+                window,
+                cx,
+            );
+            assert!(page.detail.is_none() && page.diff.is_none());
+            page
+        });
+        window
+            .update(cx, |page, _, cx| page.select_tab(Tab::Code, cx))
+            .unwrap();
+        rpc.settle(cx, &runtime, |cx| {
+            window.update(cx, |page, _, _| page.diff.is_some()).unwrap()
+        });
+        window
+            .update(cx, |page, _, _| {
+                assert_eq!(page.detail.as_ref().unwrap().head_ref_oid, "b".repeat(40));
+                assert_eq!(page.diff.as_ref().unwrap().patch, "new patch");
+            })
+            .unwrap();
+        assert_eq!(rpc.completed(), 2);
     }
 
     #[gpui::test]

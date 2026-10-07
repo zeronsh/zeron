@@ -921,6 +921,7 @@ pub struct ChangeRequestDetail {
     pub number: u64,
     pub author: ChangeRequestActor,
     pub base_ref_name: String,
+    pub base_ref_oid: String,
     pub head_ref_name: String,
     pub head_ref_oid: String,
     pub ci: crate::change_request_assessment::ChangeRequestCi,
@@ -934,8 +935,37 @@ pub struct ChangeRequestDetail {
     pub deletions: u64,
     pub comments: Vec<ChangeRequestComment>,
     pub reviews: Vec<ChangeRequestComment>,
+    /// None means unavailable (including an older engine), not no feedback.
+    pub review_threads: Option<Vec<ChangeRequestReviewThread>>,
     pub files: Vec<ChangeRequestFile>,
     pub status_check_rollup: Vec<ChangeRequestCheck>,
+}
+
+impl ChangeRequestDetail {
+    pub fn activity_comments(&self) -> impl Iterator<Item = &ChangeRequestComment> {
+        self.comments.iter().chain(&self.reviews).chain(
+            self.review_threads
+                .iter()
+                .flatten()
+                .flat_map(|thread| &thread.comments),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestReviewThread {
+    pub id: String,
+    pub is_resolved: bool,
+    pub is_outdated: bool,
+    pub path: String,
+    pub line: Option<u64>,
+    pub start_line: Option<u64>,
+    pub original_line: Option<u64>,
+    pub original_start_line: Option<u64>,
+    pub diff_side: String,
+    pub start_diff_side: Option<String>,
+    pub comments: Vec<ChangeRequestComment>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -947,6 +977,9 @@ pub struct ChangeRequestActor {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ChangeRequestComment {
+    pub id: String,
+    pub url: String,
+    pub reply_to: Option<ChangeRequestCommentReference>,
     /// Provided by GitHub for the authenticated viewer, independent of PR authorship.
     pub viewer_did_author: bool,
     pub author: ChangeRequestActor,
@@ -954,6 +987,12 @@ pub struct ChangeRequestComment {
     pub state: String,
     pub created_at: String,
     pub submitted_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestCommentReference {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

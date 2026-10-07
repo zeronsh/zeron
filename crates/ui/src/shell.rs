@@ -13120,14 +13120,29 @@ impl Render for Shell {
                 },
             ))
             .on_action(cx.listener(
+                |this, action: &crate::pull_request_detail::AddPullRequestProject, _, cx| {
+                    this.open_add_space_on_device(&action.0, cx);
+                },
+            ))
+            .on_action(cx.listener(
                 |this, action: &crate::pull_request_detail::StartPullRequestSession, _, cx| {
-                    this.open_new_session(None, cx);
+                    // A handoff must never inherit the sidebar or canvas target.
+                    if !this
+                        .state
+                        .read(cx)
+                        .space_row(&action.project_id)
+                        .is_some_and(|space| space.device_id == action.device)
+                    {
+                        this.open_add_space_on_device(&action.device, cx);
+                        return;
+                    }
+                    this.open_new_session(Some(action.project_id.clone()), cx);
                     // Stage after the composer has swapped to the new
                     // session's draft, which runs on the state observation
                     // `open_new_session` just queued. A draft already waiting
                     // there stays, above the prompt.
                     let composer = this.composer.clone();
-                    let prompt = action.0.clone();
+                    let prompt = action.prompt.clone();
                     cx.defer(move |cx| {
                         composer.update(cx, |composer, cx| {
                             composer.input.update(cx, |input, cx| {
@@ -15991,6 +16006,26 @@ mod exit_regressions {
         });
         window
             .update(cx, |shell, _, cx| {
+                let space = |id: &str, device: &str| zeron_proto::Space {
+                    id: id.into(),
+                    device_id: device.into(),
+                    path: format!("/{id}"),
+                    name: None,
+                    git_detected: true,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    repository_id: None,
+                    created_at: Utc::now(),
+                };
+                shell.state.update(cx, |state, cx| {
+                    state.local_device_id = Some("local".into());
+                    state.apply_spaces(vec![
+                        space("unrelated", "local"),
+                        space("pr-project", "remote"),
+                    ]);
+                    state.select_space(Some("unrelated".into()), cx);
+                });
+                shell.settings.space_filter = Some("unrelated".into());
                 shell.composer.update(cx, |composer, cx| {
                     composer
                         .input
@@ -16002,9 +16037,12 @@ mod exit_regressions {
         window
             .update(cx, |_, window, cx| {
                 window.dispatch_action(
-                    Box::new(crate::pull_request_detail::StartPullRequestSession(
-                        "Review pull request #7".into(),
-                    )),
+                    Box::new(crate::pull_request_detail::StartPullRequestSession {
+                        prompt: "Review pull request #7".into(),
+                        project_id: "pr-project".into(),
+                        device: "remote".into(),
+                        repository: "a/b".into(),
+                    }),
                     cx,
                 )
             })
@@ -16015,6 +16053,14 @@ mod exit_regressions {
                 assert!(
                     shell.state.read(cx).selected_chat.is_none(),
                     "a new session opens"
+                );
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("pr-project")
+                );
+                assert_eq!(
+                    shell.state.read(cx).effective_device_id().as_deref(),
+                    Some("remote")
                 );
                 let composer = shell.composer.read(cx);
                 assert_eq!(

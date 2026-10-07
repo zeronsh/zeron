@@ -3,6 +3,9 @@
 //! Process execution and provider calls intentionally live outside this layer so
 //! remote parsing and head selector construction remain deterministic and testable.
 
+#[path = "source_control_review_threads.rs"]
+mod review_threads;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,6 +31,23 @@ const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName
 const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
 
 const GITHUB_PR_METADATA_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";
+
+fn remove_nulls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                remove_nulls(v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                remove_nulls(v);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// GitHub connection cursors are short opaque base64 tokens. Anything else is
 /// rejected before it reaches the provider.
@@ -329,25 +349,44 @@ impl GitHubCli {
         url: &str,
         refresh: bool,
     ) -> Result<zeron_proto::ChangeRequestDetail, ChangeRequestError> {
-        serde_json::from_value(self.detail_request(url, false, refresh).await?)
+        serde_json::from_value(self.detail_request(url, false, refresh, None, None).await?)
             .map_err(|_| ChangeRequestError::Decode)
     }
 
     pub async fn diff(&self, url: &str, refresh: bool) -> Result<String, ChangeRequestError> {
-        serde_json::from_value(self.detail_request(url, true, refresh).await?)
+        serde_json::from_value(self.detail_request(url, true, refresh, None, None).await?)
             .map_err(|_| ChangeRequestError::Decode)
     }
 
-    async fn detail_request(
+    pub(crate) async fn detail_request(
         &self,
         url: &str,
         diff: bool,
         refresh: bool,
+        head: Option<&str>,
+        base: Option<&str>,
     ) -> Result<serde_json::Value, ChangeRequestError> {
         let url = validated_pull_request_url(url)?;
+        for oid in [head, base].into_iter().flatten() {
+            if !zeron_proto::change_request_assessment::valid_head_oid(oid) {
+                return Err(ChangeRequestError::Decode);
+            }
+        }
         let github = self.clone();
-        let key = format!("{diff}:{url}");
+        // A board that observed a new revision must never join an older
+        // in-flight read or reuse its five-minute (or refresh) cache entry.
+        let key = format!(
+            "{diff}:{url}:{}:{}",
+            head.unwrap_or_default(),
+            base.unwrap_or_default()
+        );
+        let revisions = head
+            .zip(base)
+            .map(|(head, base)| (head.to_owned(), base.to_owned()));
         self.cached_pr_request(key, refresh, async move {
+            if diff && let Some((head, base)) = revisions {
+                return github.fetch_revision_diff(&url, &head, &base).await;
+            }
             github.fetch_detail(&url, diff).await
         })
         .await
@@ -395,10 +434,10 @@ impl GitHubCli {
         }
         // Evict after the server accepted the write, even if its reply cannot
         // be decoded. A read already in flight may predate it: keep it out too.
-        let key = format!("false:{url}");
+        let key = format!("false:{url}:");
         let mut cache = self.pr_cache.lock().await;
-        cache.entries.retain(|entry| entry.0 != key);
-        cache.in_flight.remove(&key);
+        cache.entries.retain(|entry| !entry.0.starts_with(&key));
+        cache.in_flight.retain(|entry, _| !entry.starts_with(&key));
         drop(cache);
         if output.stdout_truncated {
             return Err(ChangeRequestError::Decode);
@@ -406,6 +445,8 @@ impl GitHubCli {
         let value: serde_json::Value =
             serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
         Ok(zeron_proto::ChangeRequestComment {
+            id: value["node_id"].as_str().unwrap_or_default().into(),
+            url: value["html_url"].as_str().unwrap_or_default().into(),
             viewer_did_author: true,
             body: value["body"]
                 .as_str()
@@ -417,6 +458,33 @@ impl GitHubCli {
             created_at: value["created_at"].as_str().unwrap_or_default().into(),
             ..Default::default()
         })
+    }
+
+    async fn fetch_revision_diff(&self, url: &str, head: &str, base: &str) -> PrResult {
+        let parsed = reqwest::Url::parse(url).map_err(|_| ChangeRequestError::Decode)?;
+        let parts: Vec<_> = parsed.path().trim_matches('/').split('/').collect();
+        let output = self
+            .runner
+            .run(ProcessRequest {
+                args: vec![
+                    "api".into(),
+                    format!("repos/{}/{}/compare/{base}...{head}", parts[0], parts[1]),
+                    "-H".into(),
+                    "Accept: application/vnd.github.diff".into(),
+                ],
+                ..github_request()
+            })
+            .await
+            .map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        Ok(serde_json::Value::String(
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ))
     }
 
     /// Fetch one PR without requiring a local checkout or executing shell text.
@@ -434,7 +502,7 @@ impl GitHubCli {
         if diff {
             args.push("--color=never".into());
         } else {
-            args.extend(["--json".into(), "title,body,url,number,author,baseRefName,headRefName,headRefOid,state,isDraft,reviewDecision,mergeable,additions,deletions,comments,reviews,files,statusCheckRollup".into()]);
+            args.extend(["--json".into(), "title,body,url,number,author,baseRefName,headRefName,headRefOid,baseRefOid,state,isDraft,reviewDecision,mergeable,additions,deletions,comments,reviews,files,statusCheckRollup".into()]);
         }
         let output = self
             .runner
@@ -458,22 +526,6 @@ impl GitHubCli {
             let mut value: serde_json::Value =
                 serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
             // GitHub uses null for absent check/review data; the wire model uses defaults.
-            fn remove_nulls(value: &mut serde_json::Value) {
-                match value {
-                    serde_json::Value::Object(map) => {
-                        map.retain(|_, v| !v.is_null());
-                        for v in map.values_mut() {
-                            remove_nulls(v);
-                        }
-                    }
-                    serde_json::Value::Array(items) => {
-                        for v in items {
-                            remove_nulls(v);
-                        }
-                    }
-                    _ => {}
-                }
-            }
             let checks_reported = value.get("statusCheckRollup").is_some();
             remove_nulls(&mut value);
             let mut detail: zeron_proto::ChangeRequestDetail =
@@ -504,6 +556,7 @@ impl GitHubCli {
                     detail.status_check_rollup.clear();
                 }
             }
+            detail.review_threads = self.fetch_review_threads(&url).await.ok();
             serde_json::to_value(detail).map_err(|_| ChangeRequestError::Decode)
         }
     }
@@ -1952,17 +2005,35 @@ mod tests {
         let mut updated = detail.clone();
         updated["comments"] =
             json!([{"body": body, "author": {"login": "writer"}, "viewerDidAuthor": true}]);
+        let connection = |nodes: serde_json::Value, cursor: Option<&str>| {
+            json!({
+                "nodes": nodes, "pageInfo": {"hasNextPage": cursor.is_some(), "endCursor": cursor}
+            })
+        };
+        let inline = json!({"id":"thread-1","isResolved":false,"isOutdated":false,"path":"a.rs","line":12,
+            "comments":connection(json!([{"id":"comment-1","body":"Inline-only change request","author":{"login":"reviewer"},"url":"https://github.com/acme/zeron/pull/123#discussion_r1"}]),Some("comments-next"))});
+        let threads_first = json!({"data":{"repository":{"pullRequest":{"reviewThreads":connection(json!([inline]),Some("threads-next"))}}}});
+        let replies = json!({"data":{"node":{"comments":connection(json!([{"id":"comment-2","body":"A reply","author":null,"replyTo":{"id":"comment-1"}}]),None)}}});
+        let threads_last = json!({"data":{"repository":{"pullRequest":{"reviewThreads":connection(json!([{
+            "id":"thread-2","isResolved":true,"isOutdated":true,"path":"old.rs","originalLine":4,
+            "comments":connection(json!([]),None)
+        }]),None)}}}});
+        let threads_empty = json!({"data":{"repository":{"pullRequest":{"reviewThreads":connection(json!([]),None)}}}});
         let runner = FakeProcessRunner::with_responses([
             command_success(serde_json::to_vec(&page(123, Some("Y3Vyc29yOjE="))).unwrap()),
             command_success(serde_json::to_vec(&page(124, None)).unwrap()),
             command_success(serde_json::to_vec(&detail).unwrap()),
             command_success(serde_json::to_vec(&metadata_response).unwrap()),
+            command_success(serde_json::to_vec(&threads_first).unwrap()),
+            command_success(serde_json::to_vec(&replies).unwrap()),
+            command_success(serde_json::to_vec(&threads_last).unwrap()),
             command_success(patch),
             command_success(
                 serde_json::to_vec(&json!({"body": body, "user": {"login": "writer"}})).unwrap(),
             ),
             command_success(serde_json::to_vec(&updated).unwrap()),
             command_success(serde_json::to_vec(&moved_head).unwrap()),
+            command_success(serde_json::to_vec(&threads_empty).unwrap()),
             command_failure("authentication required: gh auth login; private-provider-diagnostic"),
         ]);
         let github = GitHubCli::with_runner(runner.clone());
@@ -2053,10 +2124,21 @@ mod tests {
                 "CI and rows use one snapshot even when a job changed on the same head"
             );
             assert_eq!(loaded.viewer_did_author, Some(true));
+            let threads = loaded.review_threads.as_ref().unwrap();
+            assert_eq!(threads.len(), 2);
+            assert_eq!(threads[0].comments.len(), 2);
+            assert_eq!(threads[0].comments[0].body, "Inline-only change request");
+            assert_eq!(
+                threads[0].comments[1].reply_to.as_ref().unwrap().id,
+                "comment-1"
+            );
+            assert!(threads[0].comments[1].author.login.is_empty());
+            assert!(!threads[0].is_resolved);
+            assert!(threads[1].is_resolved && threads[1].is_outdated);
         }
         assert_eq!(
             runner.requests().len(),
-            4,
+            7,
             "the second detail read uses the real provider cache"
         );
         let diff: String = client
@@ -2127,7 +2209,7 @@ mod tests {
         let requests = runner.requests();
         assert_eq!(
             requests.len(),
-            9,
+            13,
             "invalid input never reaches gh and writes are not retried"
         );
         for request in &requests {
@@ -2148,9 +2230,17 @@ mod tests {
         ));
         assert!(requests[1].args.contains(&"after=Y3Vyc29yOjE=".into()));
         assert_eq!(&requests[2].args[..3], ["pr", "view", url]);
-        assert_eq!(requests[4].args, ["pr", "diff", url, "--color=never"]);
+        let variables = |index: usize| {
+            serde_json::from_slice::<serde_json::Value>(requests[index].stdin.as_ref().unwrap())
+                .unwrap()["variables"]
+                .clone()
+        };
+        assert_eq!(variables(5)["after"], "comments-next");
+        assert_eq!(variables(5)["id"], "thread-1");
+        assert_eq!(variables(6)["after"], "threads-next");
+        assert_eq!(requests[7].args, ["pr", "diff", url, "--color=never"]);
         assert_eq!(
-            requests[5].args,
+            requests[8].args,
             [
                 "api",
                 "--method",
@@ -2161,11 +2251,66 @@ mod tests {
             ]
         );
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(requests[5].stdin.as_ref().unwrap())
+            serde_json::from_slice::<serde_json::Value>(requests[8].stdin.as_ref().unwrap())
                 .unwrap(),
             json!({"body": body})
         );
-        assert!(!requests[5].args.iter().any(|arg| arg.contains(body)));
+        assert!(!requests[8].args.iter().any(|arg| arg.contains(body)));
+    }
+
+    #[tokio::test]
+    async fn pr_known_revision_bypasses_recent_detail_cache_and_pins_diff() {
+        use serde_json::json;
+        let url = "https://github.com/a/b/pull/1";
+        let old = "a".repeat(40);
+        let head = "b".repeat(40);
+        let base = "c".repeat(40);
+        let runner = FakeProcessRunner::with_responses([
+            command_success(serde_json::to_vec(&json!({"headRefOid":head,"baseRefOid":base,"number":1})).unwrap()),
+            command_failure("metadata unavailable"),
+            command_success(br#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec()),
+            command_success("new patch"),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        for key in [
+            format!("false:{url}::"),
+            format!("false:{url}:{old}:"),
+            format!("true:{url}::"),
+        ] {
+            github.pr_cache.lock().await.entries.push((
+                key,
+                Instant::now(),
+                Ok(json!({"headRefOid":old})),
+            ));
+        }
+        let detail = github
+            .detail_request(url, false, true, Some(&head), None)
+            .await
+            .unwrap();
+        assert_eq!(detail["headRefOid"], head);
+        let diff = github
+            .detail_request(url, true, true, Some(&head), Some(&base))
+            .await
+            .unwrap();
+        assert_eq!(diff, "new patch");
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[3].args,
+            [
+                "api",
+                &format!("repos/a/b/compare/{base}...{head}"),
+                "-H",
+                "Accept: application/vnd.github.diff"
+            ]
+        );
+        assert!(
+            github
+                .detail_request(url, true, false, Some("--help"), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(runner.requests().len(), 4);
     }
 
     #[test]
@@ -2198,7 +2343,7 @@ mod tests {
         )]);
         let github = GitHubCli::with_runner(runner.clone());
         github.pr_cache.lock().await.entries.push((
-            "false:https://github.com/a/b/pull/1".into(),
+            "false:https://github.com/a/b/pull/1::".into(),
             Instant::now(),
             Ok(serde_json::json!({})),
         ));
@@ -2282,7 +2427,7 @@ mod tests {
 
     #[tokio::test]
     async fn pr_detail_normalizes_absent_github_fields_and_uses_bounded_process() {
-        let runner = FakeProcessRunner::with_responses([command_success(br#"{"number":12,"title":"A PR","body":"Description","author":null,"reviewDecision":null,"comments":[{"viewerDidAuthor":true,"author":{"login":"viewer"},"body":"Own comment"},{"author":{"login":"other"},"body":"Other comment"}],"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS","conclusion":null}]}"#.to_vec())]);
+        let runner = FakeProcessRunner::with_responses([command_success(br#"{"number":12,"title":"A PR","body":"Description","author":null,"reviewDecision":null,"comments":[{"viewerDidAuthor":true,"author":{"login":"viewer"},"body":"Own comment"},{"author":{"login":"other"},"body":"Other comment"}],"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS","conclusion":null}]}"#.to_vec()), command_failure("review threads unavailable")]);
         let detail = GitHubCli::with_runner(runner.clone())
             .detail("https://github.com/a/b/pull/12", false)
             .await
