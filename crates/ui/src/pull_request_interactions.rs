@@ -93,6 +93,7 @@ impl PullRequestDetailPage {
         self.loading = false;
         self.comment_error = None;
         self.sending = true;
+        self.save_draft(cx);
         let mut params = self.params(false);
         params["body"] = body.clone().into();
         let (cache, target, url) = (self.cache.clone(), self.target.clone(), self.url.clone());
@@ -148,6 +149,7 @@ impl PullRequestDetailPage {
                                 activity: page.activity_bodies.clone(),
                                 fetched: page.fetched.unwrap_or_else(Instant::now),
                                 diff: page.diff.clone(),
+                                diff_refresh_owed: page.diff_refresh_owed,
                             };
                             page.cache.borrow_mut().put(
                                 page.target.clone(),
@@ -167,15 +169,22 @@ impl PullRequestDetailPage {
                 cx.notify();
             });
             if shown.is_err() {
-                // The view is gone. A posted comment makes the cached thread
-                // stale; a failed one waits as a draft with the reason.
+                // The view is gone. A posted comment makes the thread stale,
+                // but only the submitted draft belongs to this completion.
+                // Later edits (including clearing the composer) must win.
                 let mut cache = cache.borrow_mut();
-                match failure {
-                    None => {
-                        cache.set_draft(&target, &url, "", None);
-                        cache.evict(&target, &url);
+                let matches_submission = cache
+                    .drafts
+                    .get(&(target.clone(), url.clone()))
+                    .is_some_and(|(text, _)| text == &body);
+                if failure.is_none() {
+                    cache.evict(&target, &url);
+                }
+                if matches_submission {
+                    match failure {
+                        None => cache.set_draft(&target, &url, "", None),
+                        Some(error) => cache.set_draft(&target, &url, &body, Some(error)),
                     }
-                    Some(error) => cache.set_draft(&target, &url, &body, Some(error)),
                 }
             }
         })
@@ -456,7 +465,7 @@ mod tests {
                 assert_eq!(method.as_str(), methods::POST_CHANGE_REQUEST_COMMENT);
                 assert_eq!(params["targetDeviceId"], "device");
                 let attempt = calls.fetch_add(1, Ordering::SeqCst);
-                if attempt > 0 {
+                if attempt % 2 == 1 {
                     return Err(zeron_rpc::RpcError::Failed("offline".into()));
                 }
                 zeron_rpc::RpcReply::value(&zeron_proto::ChangeRequestComment {
@@ -627,6 +636,7 @@ mod tests {
                     activity: Vec::new(),
                     fetched: Instant::now(),
                     diff: None,
+                    diff_refresh_owed: false,
                 },
             );
             cx.add_window(|window, cx| {
@@ -641,38 +651,40 @@ mod tests {
                 )
             })
         };
-        // Send, then leave before GitHub answers.
-        let send_and_leave = |cx: &mut gpui::TestAppContext, text: &str, expected_calls: usize| {
-            let window = open(cx);
-            window
-                .update(cx, |page, window, cx| {
-                    page.comment_input
-                        .update(cx, |input, cx| input.set_text(text, cx));
-                    page.send_comment(cx);
-                    window.remove_window();
-                })
-                .unwrap();
-            rpc.settle(cx, &runtime, |_| {
-                rpc.completed() == expected_calls
-                    && (cache.borrow().entries.is_empty() || !cache.borrow().drafts.is_empty())
-            });
-            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
-        };
-
-        send_and_leave(cx, "Posted after leaving", 1);
-        assert!(
-            cache.borrow_mut().get(&target, url).is_none(),
-            "the cached thread predates the comment"
-        );
-        assert!(cache.borrow().drafts.is_empty());
-
-        send_and_leave(cx, "Keep me", 2);
-        let window = open(cx);
-        window
-            .update(cx, |page, _, cx| {
-                assert_eq!(page.comment_input.read(cx).text(), "Keep me");
-                assert!(page.comment_error.is_some());
-            })
-            .unwrap();
+        // Each pair covers a successful and failed post. Closing happens
+        // before the transport is polled, so completion is always detached.
+        for newer in [None, Some("Newer draft"), Some("")] {
+            for succeeds in [true, false] {
+                let window = open(cx);
+                window
+                    .update(cx, |page, window, cx| {
+                        page.comment_input
+                            .update(cx, |input, cx| input.set_text("Submitted", cx));
+                        page.send_comment(cx);
+                        if let Some(newer) = newer {
+                            page.comment_input
+                                .update(cx, |input, cx| input.set_text(newer, cx));
+                            page.comment_event(&ComposerInputEvent::Edited, cx);
+                        }
+                        window.remove_window();
+                    })
+                    .unwrap();
+                // The detached task owns the only other cache reference.
+                // Wait for it to finish, including parsing and cache writes.
+                rpc.settle(cx, &runtime, |_| Rc::strong_count(&cache) == 1);
+                assert_eq!(cache.borrow().entries.is_empty(), succeeds);
+                let expected = newer.unwrap_or(if succeeds { "" } else { "Submitted" });
+                let window = open(cx);
+                window
+                    .update(cx, |page, window, cx| {
+                        assert_eq!(page.comment_input.read(cx).text(), expected);
+                        assert_eq!(page.comment_error.is_some(), !succeeds && newer.is_none());
+                        window.remove_window();
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
     }
 }

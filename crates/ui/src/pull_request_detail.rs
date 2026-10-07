@@ -253,6 +253,8 @@ struct DetailSnapshot {
     activity: Vec<crate::markdown::BlockTree>,
     fetched: Instant,
     diff: Option<Arc<ParsedDiff>>,
+    /// Keep the engine-cache invalidation alive across closing/reopening.
+    diff_refresh_owed: bool,
 }
 
 /// Window/profile scoped, bounded cache. Device remains part of the identity.
@@ -348,8 +350,8 @@ pub struct PullRequestDetailPage {
     diff: Option<Arc<ParsedDiff>>,
     review: CodeReview,
     diff_error: Option<String>,
-    /// Refresh ran away from the Code tab: its next diff load must bypass
-    /// the engine cache so it matches the refreshed details.
+    /// Refresh invalidated the patch. Keep bypassing the engine cache until
+    /// a diff load succeeds, including across errors and reopening.
     diff_refresh_owed: bool,
     tab: Tab,
     checks_expanded: bool,
@@ -500,6 +502,7 @@ impl PullRequestDetailPage {
             page.detail = Some(snapshot.detail);
             page.body = Some(snapshot.body);
             page.activity_bodies = snapshot.activity;
+            page.diff_refresh_owed = snapshot.diff_refresh_owed;
             if let Some(diff) = snapshot.diff {
                 page.install_diff(diff, cx);
             }
@@ -628,9 +631,11 @@ impl PullRequestDetailPage {
             return;
         }
         self.diff = None;
+        self.diff_refresh_owed = true;
         let cached = self.cache.borrow_mut().get(&self.target, &self.url);
         if let Some(mut snapshot) = cached {
             snapshot.diff = None;
+            snapshot.diff_refresh_owed = true;
             snapshot.fetched = Instant::now();
             self.cache
                 .borrow_mut()
@@ -641,7 +646,6 @@ impl PullRequestDetailPage {
             self.load_diff(true, cx);
         } else {
             self.diff_task = None;
-            self.diff_refresh_owed = true;
         }
     }
 
@@ -674,7 +678,7 @@ impl PullRequestDetailPage {
                     body: super::pull_request_media::parse_description(&detail.body),
                     activity: detail.comments.iter().chain(&detail.reviews)
                         .map(|comment| super::pull_request_media::parse_description(&comment.body)).collect(),
-                    detail, fetched: Instant::now(), diff: None,
+                    detail, fetched: Instant::now(), diff: None, diff_refresh_owed: false,
                 })
             }).await;
             let _ = this.update(cx, |page, cx| {
@@ -690,6 +694,7 @@ impl PullRequestDetailPage {
                         }
                         page.fetched = Some(snapshot.fetched);
                         snapshot.diff = page.diff.clone();
+                        snapshot.diff_refresh_owed = page.diff_refresh_owed;
                         page.body = Some(snapshot.body.clone());
                         page.activity_bodies = snapshot.activity.clone();
                         page.detail = Some(snapshot.detail.clone());
@@ -709,7 +714,7 @@ impl PullRequestDetailPage {
             return;
         };
         self.diff_error = None;
-        let refresh = refresh || std::mem::take(&mut self.diff_refresh_owed);
+        let refresh = refresh || self.diff_refresh_owed;
         let params = self.params(refresh);
         self.diff_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -729,9 +734,11 @@ impl PullRequestDetailPage {
                 page.diff_task = None;
                 match result {
                     Ok(diff) => {
+                        page.diff_refresh_owed = false;
                         let cached = page.cache.borrow_mut().get(&page.target, &page.url);
                         if let Some(mut snapshot) = cached {
                             snapshot.diff = Some(diff.clone());
+                            snapshot.diff_refresh_owed = false;
                             page.cache.borrow_mut().put(
                                 page.target.clone(),
                                 page.url.clone(),
@@ -2019,6 +2026,7 @@ mod tests {
             activity: vec![crate::markdown::parse_full("### Review\n\n- **important**")],
             fetched: Instant::now(),
             diff: None,
+            diff_refresh_owed: false,
         }
     }
 
@@ -2078,79 +2086,135 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// Records each diff request's `refresh` flag.
-    fn diff_rpc(calls: Arc<std::sync::Mutex<Vec<bool>>>) -> Arc<ScriptedRpc> {
-        ScriptedRpc::new(move |method, params| {
+    #[gpui::test]
+    fn pull_request_refresh_survives_reopening_and_a_failed_diff(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let diffs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = diffs.clone();
+        let rpc = ScriptedRpc::new(move |method, params| {
             let calls = calls.clone();
             async move {
                 match method.as_str() {
                     methods::GET_CHANGE_REQUEST => {
                         zeron_rpc::RpcReply::value(&ChangeRequestDetail {
                             title: "Fresh".into(),
+                            head_ref_oid: "new-head".into(),
                             ..Default::default()
                         })
                     }
                     methods::GET_CHANGE_REQUEST_DIFF => {
-                        calls.lock().unwrap().push(params["refresh"] == true);
-                        zeron_rpc::RpcReply::value(
-                            &"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                        )
+                        let mut calls = calls.lock().unwrap();
+                        let refresh = params["refresh"] == true;
+                        calls.push(refresh);
+                        if calls.len() == 1 {
+                            return Err(zeron_rpc::RpcError::Failed("offline".into()));
+                        }
+                        // A non-refresh request before a successful refresh
+                        // sees the engine's old cached patch.
+                        let patch = if refresh || calls.len() > 2 {
+                            "new patch"
+                        } else {
+                            "old patch"
+                        };
+                        zeron_rpc::RpcReply::value(&patch)
                     }
                     other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
                 }
             }
-        })
-    }
-
-    #[gpui::test]
-    fn pull_request_refresh_away_from_code_refreshes_the_next_diff(cx: &mut gpui::TestAppContext) {
-        let runtime = fixture::runtime();
-        let _guard = runtime.enter();
-        fixture::init(cx);
-        let diffs = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let rpc = diff_rpc(diffs.clone());
-        let (page, cx) = cx.add_window_view(|window, cx| {
-            let state = fixture::state(cx, None);
-            let cache = Rc::new(RefCell::new(PullRequestCache::default()));
-            let mut cached = snapshot("Cached");
-            cached.diff = Some(ParsedDiff::new(
-                "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n".into(),
-            ));
-            cache
-                .borrow_mut()
-                .put(None, "https://github.com/a/b/pull/1".into(), cached);
-            state.update(cx, |state, _| {
-                state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()))
-            });
-            PullRequestDetailPage::new(
-                state,
-                "https://github.com/a/b/pull/1".into(),
-                None,
-                cache,
-                None,
-                window,
-                cx,
-            )
         });
-        let settle = |cx: &mut gpui::VisualTestContext| {
-            rpc.settle(cx, &runtime, |cx| {
-                page.read_with(cx, |page, _| !page.loading && page.diff_task.is_none())
-            });
+        let url = "https://github.com/a/b/pull/1";
+        let cache = Rc::new(RefCell::new(PullRequestCache::default()));
+        let mut cached = snapshot("Cached");
+        cached.detail.head_ref_oid = "old-head".into();
+        cached.diff = Some(ParsedDiff::new("old patch".into()));
+        cache.borrow_mut().put(None, url.into(), cached);
+        let state = cx.update(|cx| fixture::state(cx, Some(rpc.client())));
+        let open = |cx: &mut gpui::TestAppContext| {
+            cx.add_window(|window, cx| {
+                PullRequestDetailPage::new(
+                    state.clone(),
+                    url.into(),
+                    None,
+                    cache.clone(),
+                    None,
+                    window,
+                    cx,
+                )
+            })
         };
-        page.update(cx, |page, cx| page.refresh(cx));
-        settle(cx);
-        page.update(cx, |page, cx| page.select_tab(Tab::Code, cx));
-        settle(cx);
-        page.update(cx, |page, cx| {
-            page.select_tab(Tab::Summary, cx);
-            page.diff = None;
-            page.select_tab(Tab::Code, cx);
+        let window = open(cx);
+        window
+            .update(cx, |page, _, cx| {
+                page.select_tab(Tab::Code, cx);
+                assert_eq!(page.diff.as_ref().unwrap().patch, "old patch");
+                page.select_tab(Tab::Summary, cx);
+                page.refresh(cx);
+            })
+            .unwrap();
+        rpc.settle(cx, &runtime, |cx| {
+            window.update(cx, |page, _, _| !page.loading).unwrap()
         });
-        settle(cx);
+        window
+            .update(cx, |page, window, _| {
+                assert_eq!(page.detail.as_ref().unwrap().head_ref_oid, "new-head");
+                window.remove_window();
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Reopen, fail to fetch the refreshed diff, then reopen and retry.
+        // Neither destroying the view nor an error may consume invalidation.
+        for succeeds in [false, true] {
+            let window = open(cx);
+            window
+                .update(cx, |page, _, cx| {
+                    assert_eq!(page.detail.as_ref().unwrap().head_ref_oid, "new-head");
+                    assert!(page.diff.is_none());
+                    page.select_tab(Tab::Code, cx);
+                })
+                .unwrap();
+            rpc.settle(cx, &runtime, |cx| {
+                window
+                    .update(cx, |page, _, _| page.diff_task.is_none())
+                    .unwrap()
+            });
+            window
+                .update(cx, |page, window, _| {
+                    if succeeds {
+                        assert_eq!(page.diff.as_ref().unwrap().patch, "new patch");
+                    } else {
+                        assert!(page.diff_error.is_some());
+                    }
+                    window.remove_window();
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+        let window = open(cx);
+        window
+            .update(cx, |page, _, cx| {
+                assert_eq!(page.diff.as_ref().unwrap().patch, "new patch");
+                page.select_tab(Tab::Code, cx);
+                assert!(
+                    page.diff_task.is_none(),
+                    "reopening reuses the fresh parsed patch"
+                );
+                page.select_tab(Tab::Summary, cx);
+                page.diff = None;
+                page.select_tab(Tab::Code, cx);
+            })
+            .unwrap();
+        rpc.settle(cx, &runtime, |cx| {
+            window
+                .update(cx, |page, _, _| page.diff_task.is_none())
+                .unwrap()
+        });
         assert_eq!(
             *diffs.lock().unwrap(),
-            [true, false],
-            "only the first diff load after a refresh bypasses the cache"
+            [true, true, false],
+            "invalidation persists until a successful diff load"
         );
     }
 
