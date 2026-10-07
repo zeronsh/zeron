@@ -32,6 +32,10 @@ pub const KIND_CHATS: &str = "chats";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
 
+/// Chat-row field marking the title as generated (`true`) rather than typed by
+/// a person (absent). Rides the row like any other field, so it syncs.
+const TITLE_AUTO_FIELD: &str = "titleAuto";
+
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
@@ -990,13 +994,56 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
+        // A person naming the chat owns the title from here on: clearing the
+        // auto marker (a clocked null write) beats any generator on any device.
         self.write(
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("title", json!(title))]),
+            fields([("title", json!(title)), (TITLE_AUTO_FIELD, Value::Null)]),
         );
         Ok(true)
+    }
+
+    /// Set a generated title and mark it as such, so later refreshes know it is
+    /// theirs to replace. `false` when no such row.
+    pub fn set_chat_auto_title(&mut self, chat_id: &str, title: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("title", json!(title)), (TITLE_AUTO_FIELD, json!(true))]),
+        );
+        Ok(true)
+    }
+
+    /// Whether the chat's current title was generated and never renamed by a
+    /// person. Titles without provenance (older chats, titles typed at
+    /// creation) are human-owned.
+    pub fn chat_title_is_auto(&self, chat_id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, chat_id)
+            .and_then(|row| row.fields.get(TITLE_AUTO_FIELD).and_then(Value::as_bool))
+            .unwrap_or(false)
+    }
+
+    /// Replace a generated title, but only if it is still auto-owned and still
+    /// `expected` — the state the new title was computed from. Checked and
+    /// written under one `&mut self`, so a rename that already reached this
+    /// replica can never be overwritten. `false` = nothing written.
+    pub fn refresh_chat_auto_title(
+        &mut self,
+        chat_id: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, DocError> {
+        let current = self.chat(chat_id)?.and_then(|chat| chat.title);
+        if !self.chat_title_is_auto(chat_id) || current.as_deref() != Some(expected) {
+            return Ok(false);
+        }
+        self.set_chat_auto_title(chat_id, title)
     }
 
     pub fn set_chat_archived(&mut self, chat_id: &str, archived: bool) -> Result<bool, DocError> {

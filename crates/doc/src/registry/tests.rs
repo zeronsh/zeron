@@ -1527,3 +1527,83 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
         Some("main")
     );
 }
+
+#[test]
+fn auto_titles_refresh_only_while_no_human_has_renamed() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+
+    // A title with no provenance (created by a person, or before provenance
+    // was tracked) is human-owned: it is never refreshed.
+    assert!(!doc.chat_title_is_auto("chat-1"));
+    assert!(
+        !doc.refresh_chat_auto_title("chat-1", "First chat", "Other")
+            .unwrap()
+    );
+
+    assert!(doc.set_chat_auto_title("chat-1", "Fix Login").unwrap());
+    assert!(doc.chat_title_is_auto("chat-1"));
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("Fix Login")
+    );
+
+    // A refresh only lands against the title it was computed from.
+    assert!(
+        !doc.refresh_chat_auto_title("chat-1", "Stale Title", "Nope")
+            .unwrap()
+    );
+    assert!(
+        doc.refresh_chat_auto_title("chat-1", "Fix Login", "Ship Dark Mode")
+            .unwrap()
+    );
+    assert!(doc.chat_title_is_auto("chat-1"));
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("Ship Dark Mode")
+    );
+
+    // A human rename takes ownership for good, even to identical text.
+    assert!(doc.rename_chat("chat-1", "Ship Dark Mode").unwrap());
+    assert!(!doc.chat_title_is_auto("chat-1"));
+    assert!(
+        !doc.refresh_chat_auto_title("chat-1", "Ship Dark Mode", "Overwritten")
+            .unwrap()
+    );
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("Ship Dark Mode")
+    );
+
+    // Unknown rows report false and are never invented.
+    assert!(!doc.set_chat_auto_title("nope", "x").unwrap());
+    assert!(!doc.refresh_chat_auto_title("nope", "x", "y").unwrap());
+    assert!(!doc.chat_title_is_auto("nope"));
+}
+
+#[test]
+fn a_human_rename_on_another_device_takes_ownership_everywhere() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    a.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    a.set_chat_auto_title("chat-1", "Auto Title").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.chat_title_is_auto("chat-1"));
+
+    // HLCs order by wall-clock ms first; a person renaming is never in the
+    // same millisecond as the generator that just wrote.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    b.rename_chat("chat-1", "Mine").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(!a.chat_title_is_auto("chat-1"));
+    assert!(
+        !a.refresh_chat_auto_title("chat-1", "Mine", "Overwritten")
+            .unwrap()
+    );
+    assert_eq!(
+        a.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("Mine")
+    );
+}
