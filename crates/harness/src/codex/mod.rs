@@ -1198,8 +1198,12 @@ async fn run_session(session: Session) {
     let mut pending_usage: Option<AgentEvent> = None;
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
-    let mut queued_steers: VecDeque<String> = VecDeque::new();
+    let mut queued_steers: VecDeque<(String, bool)> = VecDeque::new();
     let mut steering_open = true;
+    // Async-input answers (`request_user_input_async`): the request_input
+    // await must not stall this loop, so the spawn reports back here and the
+    // answer rides the same delivery path as a steer.
+    let (answer_tx, mut answer_rx) = futures::channel::mpsc::unbounded::<String>();
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // A Done has been emitted for the turn currently/last in flight.
@@ -1321,6 +1325,33 @@ async fn run_session(session: Session) {
                                 {
                                     break 'main;
                                 }
+                                // `request_user_input_async`: the completed
+                                // agentMessage carries questions the model
+                                // awaits as a USER message — route them through
+                                // the input bridge (the engine parks the chat
+                                // AwaitingInput, the task's delegator gets the
+                                // attention notice). The answer resolves back
+                                // into answer_tx → a steer into this turn (or
+                                // the next turn if this one already ended).
+                                let questions = async_input_questions(item);
+                                if !questions.is_empty() {
+                                    let request_input = Arc::clone(&request_input);
+                                    let answer_tx = answer_tx.clone();
+                                    tokio::spawn(async move {
+                                        // Dropped sender (turn over) = empty
+                                        // answers: nothing to inject.
+                                        let answers =
+                                            (request_input)(questions.clone())
+                                                .await
+                                                .unwrap_or_default();
+                                        if answers.is_empty() {
+                                            return;
+                                        }
+                                        let _ = answer_tx.unbounded_send(
+                                            async_answer_text(&questions, &answers),
+                                        );
+                                    });
+                                }
                             }
                         } else {
                             for ev in children.parent_item(phase, item) {
@@ -1394,7 +1425,7 @@ async fn run_session(session: Session) {
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
                         current_native = false;
-                        if let Some(text) = queued_steers.pop_front() {
+                        if let Some((text, internal)) = queued_steers.pop_front() {
                             current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                             if !steer_as_new_turn(
                                 &client,
@@ -1403,6 +1434,7 @@ async fn run_session(session: Session) {
                                 &event_tx,
                                 &mut assistant_message_id,
                                 &mut done_current,
+                                internal,
                             )
                             .await
                             {
@@ -1498,69 +1530,22 @@ async fn run_session(session: Session) {
                 Some(Incoming::Eof) | None => break 'main,
             },
 
+            answer = answer_rx.next(), if !interrupted => {
+                if let Some(text) = answer && !deliver_user_text(
+                    &client, text, &thread_id, &mut router,
+                    &mut queued_steers, &event_tx, &mut assistant_message_id,
+                    &mut done_current, &mut current_native, &turn_params,
+                    true,
+                ).await { break 'main; }
+            },
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
-                    let text = msg.prompt;
-                    // Native operations run at a turn boundary, never as text
-                    // injected into an already running model turn. Later messages
-                    // must stay behind queued commands: Steered acknowledgments
-                    // retire the engine's accepted-message ledger in FIFO order.
-                    if !done_current && (!queued_steers.is_empty() || current_native || !matches!(command_request(&text, &thread_id), Ok(None))) {
-                        queued_steers.push_back(text);
-                        continue 'main;
-                    }
-                    if let Some(expected) = router.active.clone() {
-                        let steer_params = json!({
-                            "threadId": thread_id,
-                            "expectedTurnId": expected,
-                            "input": prompt_input(&text),
-                        });
-                        match client.request("turn/steer", steer_params).await {
-                            Ok(_) => {
-                                let (prev, next) = rotate(&mut assistant_message_id);
-                                if !send(
-                                    &event_tx,
-                                    AgentEvent::Steered {
-                                        assistant_message_id: Some(prev),
-                                        next_assistant_message_id: Some(next),
-                                    },
-                                )
-                                .await
-                                {
-                                    break 'main;
-                                }
-                            }
-                            // A failed `turn/steer` does NOT mean the text is
-                            // bad: most commonly the active turn finished
-                            // between the UI send and this request. Queue it
-                            // for redelivery as the next `turn/start` when the
-                            // expected turn's end arrives (also the safe
-                            // fallback for older Codex without steering).
-                            Err(e) => {
-                                tracing::debug!(
-                                    target: "zeron_harness::codex",
-                                    "turn/steer rejected (queued as next turn): {e}"
-                                );
-                                if router.active.as_deref() == Some(expected.as_str())
-                                    && !router.is_completed(&expected)
-                                {
-                                    queued_steers.push_back(text);
-                                } else {
-                                    current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                                    if !steer_as_new_turn(
-                                        &client, turn_params(&text), &mut router, &event_tx,
-                                        &mut assistant_message_id, &mut done_current,
-                                    ).await { break 'main; }
-                                }
-                            }
-                        }
-                    } else {
-                        current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                        if !steer_as_new_turn(
-                            &client, turn_params(&text), &mut router, &event_tx,
-                            &mut assistant_message_id, &mut done_current,
-                        ).await { break 'main; }
-                    }
+                    if !deliver_user_text(
+                        &client, msg.prompt, &thread_id, &mut router,
+                        &mut queued_steers, &event_tx, &mut assistant_message_id,
+                        &mut done_current, &mut current_native, &turn_params,
+                        false,
+                    ).await { break 'main; }
                 }
                 None => {
                     // Mailbox closed (the caller's graceful idle-reap): finish
@@ -1649,6 +1634,147 @@ async fn run_session(session: Session) {
     }
 }
 
+/// Deliver user text to Codex the way a `send_message` steer does: inject it
+/// into the active turn via `turn/steer`, or — when the race is lost or no
+/// turn is active — queue it for (or start as) the next `turn/start` on the
+/// same thread. Returns false when the event channel is gone.
+#[allow(clippy::too_many_arguments)] // run-loop state, not a public API
+async fn deliver_user_text(
+    client: &RpcClient,
+    text: String,
+    thread_id: &str,
+    router: &mut TurnRouter,
+    queued_steers: &mut VecDeque<(String, bool)>,
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    assistant_message_id: &mut String,
+    done_current: &mut bool,
+    current_native: &mut bool,
+    turn_params: &(dyn Fn(&str) -> Value + Send + Sync),
+    internal: bool,
+) -> bool {
+    // Native operations run at a turn boundary, never as text injected into
+    // an already running model turn. Later messages must stay behind queued
+    // commands: Steered acknowledgments retire the engine's accepted-message
+    // ledger in FIFO order.
+    if !*done_current
+        && (!queued_steers.is_empty()
+            || *current_native
+            || !matches!(command_request(&text, thread_id), Ok(None)))
+    {
+        queued_steers.push_back((text, internal));
+        return true;
+    }
+    if let Some(expected) = router.active.clone() {
+        let steer_params = json!({
+            "threadId": thread_id,
+            "expectedTurnId": expected,
+            "input": prompt_input(&text),
+        });
+        match client.request("turn/steer", steer_params).await {
+            Ok(_) => {
+                let (prev, next) = rotate(assistant_message_id);
+                return send(
+                    event_tx,
+                    AgentEvent::Steered {
+                        assistant_message_id: Some(prev),
+                        next_assistant_message_id: Some(next),
+                        internal,
+                    },
+                )
+                .await;
+            }
+            // A failed `turn/steer` does NOT mean the text is bad: most
+            // commonly the active turn finished between the UI send and this
+            // request. Queue it for redelivery as the next `turn/start` when
+            // the expected turn's end arrives (also the safe fallback for
+            // older Codex without steering).
+            Err(e) => {
+                tracing::debug!(
+                    target: "zeron_harness::codex",
+                    "turn/steer rejected (queued as next turn): {e}"
+                );
+                if router.active.as_deref() == Some(expected.as_str())
+                    && !router.is_completed(&expected)
+                {
+                    queued_steers.push_back((text, internal));
+                    return true;
+                }
+            }
+        }
+    }
+    *current_native = command_request(&text, thread_id).ok().flatten().is_some();
+    steer_as_new_turn(
+        client,
+        turn_params(&text),
+        router,
+        event_tx,
+        assistant_message_id,
+        done_current,
+        internal,
+    )
+    .await
+}
+
+/// `request_user_input_async` questions on a completed agentMessage item —
+/// wire shape per the app-server schema (`codex app-server
+/// generate-json-schema`): `AgentMessageThreadItem.questions:
+/// AsyncUserInputQuestion[]` where a question is `{title, options: string[]}`.
+/// Synthesized ids are `{item_id}-q{ix}`.
+/// `[{title, options}]` — the model waits for a user message, unlike the
+/// blocking `item/tool/requestUserInput` server request. Ids are derived
+/// deterministically from the item id so the answer can be keyed back.
+fn async_input_questions(item: &Value) -> Vec<UserInputQuestion> {
+    let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
+    item.get("questions")
+        .and_then(Value::as_array)
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(ix, q)| {
+            let title = q
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            UserInputQuestion {
+                id: format!("{item_id}-q{ix}"),
+                header: title.clone(),
+                question: title,
+                // No listed options → an open (free-text) question.
+                options: q
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| o.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                prefill: None,
+                multiline: false,
+                multi_select: false,
+            }
+        })
+        .collect()
+}
+
+/// The answer text Codex expects as the follow-up user message.
+fn async_answer_text(questions: &[UserInputQuestion], answers: &[UserInputAnswer]) -> String {
+    questions
+        .iter()
+        .map(|q| {
+            let labels = answers
+                .iter()
+                .find(|a| a.question_id == q.id)
+                .map(|a| a.labels.join(", "))
+                .unwrap_or_default();
+            format!("Answer to \"{}\": {}", q.question, labels)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Deliver a steer as a fresh `turn/start` on the same thread (the fallback
 /// leg of the steer race, and the between-turns delivery path). Returns false
 /// when the loop should end (turn/start failed or the consumer hung up).
@@ -1659,6 +1785,7 @@ async fn steer_as_new_turn(
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
     assistant_message_id: &mut String,
     done_current: &mut bool,
+    internal: bool,
 ) -> bool {
     match start_turn(client, params).await {
         Ok(id) => {
@@ -1670,6 +1797,7 @@ async fn steer_as_new_turn(
                 AgentEvent::Steered {
                     assistant_message_id: Some(prev),
                     next_assistant_message_id: Some(next),
+                    internal,
                 },
             )
             .await
@@ -1910,6 +2038,44 @@ mod tests {
         assert!(!legacy_model_page(&page));
         assert!(legacy_model_page(&json!({"data":[{"model":"old"}]})));
         assert!(!legacy_model_page(&json!({"data":[]})));
+    }
+
+    #[test]
+    fn async_input_questions_map_the_wire_shape() {
+        let item = json!({
+            "type": "agentMessage", "id": "m9", "text": "Which?",
+            "questions": [
+                { "title": "mcp or harness?", "options": ["mcp", "harness"] },
+                { "title": "and a free one", "options": null }
+            ]
+        });
+        let qs = async_input_questions(&item);
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0].id, "m9-q0");
+        assert_eq!(qs[0].question, "mcp or harness?");
+        assert_eq!(qs[0].options, vec!["mcp", "harness"]);
+        // Null options → open (free-text) question.
+        assert_eq!(qs[1].id, "m9-q1");
+        assert!(qs[1].options.is_empty());
+
+        // Items without questions are unaffected.
+        assert!(
+            async_input_questions(&json!({"type": "agentMessage", "id": "m1", "text": "hi"}))
+                .is_empty()
+        );
+        assert!(async_input_questions(&json!({"type": "toolCall", "id": "t1"})).is_empty());
+
+        let text = async_answer_text(
+            &qs,
+            &[UserInputAnswer {
+                question_id: "m9-q0".into(),
+                labels: vec!["mcp".into()],
+            }],
+        );
+        assert_eq!(
+            text,
+            "Answer to \"mcp or harness?\": mcp\nAnswer to \"and a free one\": "
+        );
     }
 
     #[test]

@@ -14,3 +14,4 @@ thiserror.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 similar.workspace = true
+parking_lot = "0.12"

@@ -316,14 +316,30 @@ fn image_part(
 }
 
 /// A session doc handle: typed access over a LoroDoc with the schema above.
+///
+/// `ops` serializes multi-op writes against row-decoding reads: Loro ops
+/// update the live doc as they apply (there is no reader-visible
+/// transaction), so without the lock a `read_entries` between a row's
+/// scalar insert and its parts insert decodes a torn entry. `ops` is a
+/// ReentrantMutex because synchronous commit subscribers run on the
+/// committing thread — a subscriber that reads or exports would deadlock
+/// a plain mutex; subscribers still must not do typed reads or exports
+/// to satisfy OTHER threads' work — defer that (schedule it). Atomicity
+/// holds only for readers and writers sharing ONE SessionDoc — the
+/// engine's single `Arc<SessionDoc>` per chat; a `from_doc` wrapper over
+/// the same LoroDoc does not share the lock.
 pub struct SessionDoc {
     doc: LoroDoc,
+    ops: parking_lot::ReentrantMutex<()>,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        Self {
+            doc,
+            ops: parking_lot::ReentrantMutex::new(()),
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -333,7 +349,10 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self {
+            doc,
+            ops: parking_lot::ReentrantMutex::new(()),
+        })
     }
 
     pub fn doc(&self) -> &LoroDoc {
@@ -403,13 +422,22 @@ impl SessionDoc {
 
     /// Insert a complete message entry (user/system messages, command-side inserts).
     /// Streaming assistant entries go through [`SegmentWriter`].
+    ///
+    /// The row is written under `ops`, so a `read_entries`/`read_opening_tail`
+    /// on another thread sees either nothing or the complete entry — never
+    /// scalars without parts. `commit` runs after the guard drops: synchronous
+    /// commit subscribers may read, and a flush callback may export, without
+    /// deadlocking on `ops`.
     pub fn push_message(&self, entry: &SessionMessageEntry) -> Result<(), DocError> {
-        let messages = self.doc.get_list("messages");
-        let map = messages.push_container(LoroMap::new())?;
-        write_entry_scalar_fields(&map, entry)?;
-        let parts = map.insert_container("parts", LoroList::new())?;
-        for part in &entry.parts {
-            push_part(&parts, part)?;
+        {
+            let _ops = self.ops.lock();
+            let messages = self.doc.get_list("messages");
+            let map = messages.push_container(LoroMap::new())?;
+            write_entry_scalar_fields(&map, entry)?;
+            let parts = map.insert_container("parts", LoroList::new())?;
+            for part in &entry.parts {
+                push_part(&parts, part)?;
+            }
         }
         self.doc.commit();
         Ok(())
@@ -425,6 +453,8 @@ impl SessionDoc {
     pub fn read_entries(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
         // Materialize only the messages container — a whole-doc deep value
         // here also serialized the commands ledger on every 120ms commit tick.
+        // Under `ops`: a multi-op write mid-flight must not tear a row.
+        let _ops = self.ops.lock();
         let messages = self
             .doc
             .get_list("messages")
@@ -456,6 +486,7 @@ impl SessionDoc {
         max_parts: usize,
     ) -> Result<Vec<SessionMessageEntry>, DocError> {
         use loro::{Container, ValueOrContainer};
+        let _ops = self.ops.lock();
         let messages = self.doc.get_list("messages");
         let mut remaining = max_parts;
         let mut entries = Vec::new();
@@ -503,6 +534,7 @@ impl SessionDoc {
     pub fn read_commands(&self) -> Result<Vec<SessionCommandEntry>, DocError> {
         // Container-scoped for the same reason as `read_entries`: the drain
         // loop runs this per tick and must not pay for the transcript.
+        let _ops = self.ops.lock();
         let commands = self
             .doc
             .get_list("commands")
@@ -522,37 +554,42 @@ impl SessionDoc {
     }
 
     /// Append a command entry (rule 1: own entries only, append-only).
+    /// Written under `ops`, like `push_message` — and committed after the
+    /// guard drops, for the same reason.
     pub fn queue_command(&self, entry: &SessionCommandEntry) -> Result<(), DocError> {
-        let commands = self.doc.get_list("commands");
-        let map = commands.push_container(LoroMap::new())?;
-        map.insert("id", entry.id.as_str())?;
-        map.insert(
-            "kind",
-            serde_json::to_value(entry.kind())?
-                .as_str()
-                .ok_or_else(|| DocError::Schema("kind not a string".into()))?,
-        )?;
-        map.insert(
-            "payload",
-            loro_value_from_json(&serde_json::to_value(&entry.payload)?),
-        )?;
-        map.insert("issuedBy", entry.issued_by.as_str())?;
-        map.insert("issuedAt", entry.issued_at)?;
-        if let Some(based_on) = &entry.based_on {
+        {
+            let _ops = self.ops.lock();
+            let commands = self.doc.get_list("commands");
+            let map = commands.push_container(LoroMap::new())?;
+            map.insert("id", entry.id.as_str())?;
             map.insert(
-                "basedOn",
-                loro_value_from_json(&serde_json::to_value(based_on)?),
+                "kind",
+                serde_json::to_value(entry.kind())?
+                    .as_str()
+                    .ok_or_else(|| DocError::Schema("kind not a string".into()))?,
+            )?;
+            map.insert(
+                "payload",
+                loro_value_from_json(&serde_json::to_value(&entry.payload)?),
+            )?;
+            map.insert("issuedBy", entry.issued_by.as_str())?;
+            map.insert("issuedAt", entry.issued_at)?;
+            if let Some(based_on) = &entry.based_on {
+                map.insert(
+                    "basedOn",
+                    loro_value_from_json(&serde_json::to_value(based_on)?),
+                )?;
+            }
+            if let Some(expires_at) = entry.expires_at {
+                map.insert("expiresAt", expires_at)?;
+            }
+            map.insert(
+                "status",
+                serde_json::to_value(entry.status)?
+                    .as_str()
+                    .ok_or_else(|| DocError::Schema("status not a string".into()))?,
             )?;
         }
-        if let Some(expires_at) = entry.expires_at {
-            map.insert("expiresAt", expires_at)?;
-        }
-        map.insert(
-            "status",
-            serde_json::to_value(entry.status)?
-                .as_str()
-                .ok_or_else(|| DocError::Schema("status not a string".into()))?,
-        )?;
         self.doc.commit();
         Ok(())
     }
@@ -785,8 +822,10 @@ impl SessionDoc {
         Ok(false)
     }
 
-    /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
+    /// Export a snapshot (persistence) — `ExportMode::Snapshot`. Under `ops`:
+    /// a mid-write row must not leak a torn shape into the snapshot.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
+        let _ops = self.ops.lock();
         self.doc
             .export(ExportMode::Snapshot)
             .map_err(|e| DocError::Schema(e.to_string()))
@@ -826,6 +865,9 @@ fn status_str(status: MessageStatus) -> &'static str {
 }
 
 /// Append one part map to a parts list; text bodies become LoroText containers.
+/// SegmentWriter calls this outside `ops`: a reader may observe the part
+/// mid-write, which is harmless — the row's `status` is written last, so a
+/// `Complete` row is never missing parts.
 fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     let map = parts.push_container(LoroMap::new())?;
     let doc_part = to_doc_part(part)?;
@@ -1133,23 +1175,29 @@ impl<'a> SegmentWriter<'a> {
         device_id: &str,
         created_at: i64,
     ) -> Result<Self, DocError> {
-        let messages = doc.doc.get_list("messages");
-        let entry_index = messages.len();
-        let map = messages.push_container(LoroMap::new())?;
-        write_entry_scalar_fields(
-            &map,
-            &SessionMessageEntry {
-                id: entry_id.into(),
-                role: MessageRole::Assistant,
-                parts: vec![],
-                created_at,
-                device_id: device_id.into(),
-                status: Some(MessageStatus::Streaming),
-                continuation_of: None,
-                duration_ms: None,
-            },
-        )?;
-        map.insert_container("parts", LoroList::new())?;
+        // `ops` covers len() → append: a concurrent row insert between them
+        // would leave `entry_index` pointing at the wrong row.
+        let entry_index = {
+            let _ops = doc.ops.lock();
+            let messages = doc.doc.get_list("messages");
+            let index = messages.len();
+            let map = messages.push_container(LoroMap::new())?;
+            write_entry_scalar_fields(
+                &map,
+                &SessionMessageEntry {
+                    id: entry_id.into(),
+                    role: MessageRole::Assistant,
+                    parts: vec![],
+                    created_at,
+                    device_id: device_id.into(),
+                    status: Some(MessageStatus::Streaming),
+                    continuation_of: None,
+                    duration_ms: None,
+                },
+            )?;
+            map.insert_container("parts", LoroList::new())?;
+            index
+        };
         doc.doc.commit();
         Ok(Self {
             doc,
@@ -2057,6 +2105,290 @@ mod tests {
         );
         let entries = doc.read_entries().unwrap();
         assert_eq!(entries[0].status, Some(MessageStatus::Aborted));
+    }
+
+    /// A concurrent reader of the live doc must never decode a torn row:
+    /// writer and reader share the SessionDoc's `ops` lock, so the
+    /// reader sees nothing or the complete entry — never a Complete row
+    /// with zero parts, never a Text part with empty text.
+    #[test]
+    fn pushed_rows_are_atomic_to_concurrent_readers() {
+        // One Arc<SessionDoc> per chat is the production shape — the ops
+        // mutex lives on the handle every reader and writer shares.
+        let doc = std::sync::Arc::new(SessionDoc::init("atomic-readers").unwrap());
+        let writer = doc.clone();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let writer_thread = std::thread::spawn(move || {
+            for i in 0..1000 {
+                let text = format!("body-{i}-{}", "x".repeat(256));
+                writer
+                    .push_message(&SessionMessageEntry {
+                        id: format!("e-{i}"),
+                        role: MessageRole::Assistant,
+                        parts: vec![
+                            MessagePart::Text {
+                                id: format!("t-{i}"),
+                                text: text.clone(),
+                            },
+                            MessagePart::Reasoning {
+                                id: format!("r-{i}"),
+                                text: format!("reason-{i}"),
+                            },
+                        ],
+                        created_at: i as i64,
+                        device_id: "test".into(),
+                        status: Some(MessageStatus::Complete),
+                        continuation_of: None,
+                        duration_ms: None,
+                    })
+                    .unwrap();
+            }
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        while !done.load(std::sync::atomic::Ordering::Relaxed) {
+            for entry in doc.read_entries().unwrap() {
+                assert!(
+                    !entry.parts.is_empty(),
+                    "row {} read with no parts",
+                    entry.id
+                );
+                for part in &entry.parts {
+                    if let MessagePart::Text { id, text } = part {
+                        assert!(
+                            text.starts_with("body-"),
+                            "part {id} read with empty or partial text: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+        writer_thread.join().unwrap();
+    }
+
+    /// `commit` runs after the `ops` guard drops: a synchronous commit
+    /// subscriber that reads the doc inside its callback must not
+    /// deadlock on the lock the writer was holding.
+    #[test]
+    fn a_commit_subscriber_can_read_without_deadlocking() {
+        let doc = std::sync::Arc::new(SessionDoc::init("commit-reader").unwrap());
+        let reader = doc.clone();
+        let _sub = doc.doc().subscribe_local_update(Box::new(move |_diff| {
+            reader.read_entries().expect("subscriber read");
+            true
+        }));
+        let writer = doc.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            for i in 0..20 {
+                writer
+                    .push_message(&SessionMessageEntry {
+                        id: format!("e-{i}"),
+                        role: MessageRole::User,
+                        parts: vec![MessagePart::Text {
+                            id: format!("t-{i}"),
+                            text: format!("msg {i}"),
+                        }],
+                        created_at: i as i64,
+                        device_id: "test".into(),
+                        status: Some(MessageStatus::Complete),
+                        continuation_of: None,
+                        duration_ms: None,
+                    })
+                    .unwrap();
+            }
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "push_message deadlocked on a commit subscriber's read"
+        );
+        handle.join().unwrap();
+    }
+
+    /// A commit subscriber that exports inside its callback also
+    /// completes — export takes `ops`, and the committing thread reenters.
+    #[test]
+    fn a_commit_subscriber_can_export_without_deadlocking() {
+        let doc = std::sync::Arc::new(SessionDoc::init("commit-exporter").unwrap());
+        let exporter = doc.clone();
+        let _sub = doc.doc().subscribe_local_update(Box::new(move |_diff| {
+            exporter.export_snapshot().expect("subscriber export");
+            true
+        }));
+        let writer = doc.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            for i in 0..20 {
+                writer
+                    .push_message(&SessionMessageEntry {
+                        id: format!("e-{i}"),
+                        role: MessageRole::User,
+                        parts: vec![MessagePart::Text {
+                            id: format!("t-{i}"),
+                            text: format!("msg {i}"),
+                        }],
+                        created_at: i as i64,
+                        device_id: "test".into(),
+                        status: Some(MessageStatus::Complete),
+                        continuation_of: None,
+                        duration_ms: None,
+                    })
+                    .unwrap();
+            }
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "push_message deadlocked on a commit subscriber's export"
+        );
+        handle.join().unwrap();
+    }
+
+    /// Export during an in-flight (uncommitted) edit returns a coherent
+    /// snapshot: the edit lands either before or after the export, never
+    /// torn.
+    #[test]
+    fn export_with_a_pending_uncommitted_edit_is_coherent() {
+        let doc = std::sync::Arc::new(SessionDoc::init("pending-export").unwrap());
+        let reader = doc.clone();
+        let _sub = doc.doc().subscribe_local_update(Box::new(move |_diff| {
+            reader.read_entries().expect("subscriber read");
+            true
+        }));
+        // An uncommitted edit sits in the doc's pending txn while a
+        // subscriber reads and an export runs.
+        doc.doc().get_map("meta").insert("pending", "edit").unwrap();
+        let bytes = doc.export_snapshot().unwrap();
+        let imported = SessionDoc::from_doc({
+            let fresh = loro::LoroDoc::new();
+            fresh.import(&bytes).unwrap();
+            fresh
+        });
+        for entry in imported.read_entries().unwrap() {
+            assert!(!entry.id.is_empty(), "snapshot read a torn row");
+        }
+    }
+
+    /// `export_snapshot` takes `ops` — a snapshot must never capture a
+    /// row mid-write. Import each export into a fresh doc and assert no
+    /// Complete row ever reads with zero parts.
+    #[test]
+    fn snapshots_never_capture_a_torn_row() {
+        let doc = std::sync::Arc::new(SessionDoc::init("snap-atomic").unwrap());
+        let writer = doc.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let writer_thread = std::thread::spawn(move || {
+            for i in 0..300 {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                writer
+                    .push_message(&SessionMessageEntry {
+                        id: format!("e-{i}"),
+                        role: MessageRole::Assistant,
+                        parts: vec![MessagePart::Text {
+                            id: format!("t-{i}"),
+                            text: format!("body-{i}"),
+                        }],
+                        created_at: i as i64,
+                        device_id: "test".into(),
+                        status: Some(MessageStatus::Complete),
+                        continuation_of: None,
+                        duration_ms: None,
+                    })
+                    .unwrap();
+            }
+        });
+        let mut exports = 0usize;
+        while exports < 60 {
+            let bytes = doc.export_snapshot().unwrap();
+            let imported = SessionDoc::from_doc({
+                let fresh = loro::LoroDoc::new();
+                fresh.import(&bytes).unwrap();
+                fresh
+            });
+            for entry in imported.read_entries().unwrap() {
+                assert!(
+                    !entry.parts.is_empty() || entry.status != Some(MessageStatus::Complete),
+                    "snapshot captured torn row {}",
+                    entry.id
+                );
+            }
+            exports += 1;
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer_thread.join().unwrap();
+    }
+
+    /// `SegmentWriter::begin` holds `ops` from len() to append: a
+    /// concurrent `push_message` can never shift `entry_index` onto the
+    /// wrong row — the notice row must not gain the assistant's parts.
+    #[test]
+    fn segment_begin_and_row_pushes_never_cross_index() {
+        let doc = std::sync::Arc::new(SessionDoc::init("index-atomic").unwrap());
+        let writer = doc.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let writer_thread = std::thread::spawn(move || {
+            for i in 0..300 {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                writer
+                    .push_message(&SessionMessageEntry {
+                        id: format!("n-{i}"),
+                        role: MessageRole::User,
+                        parts: vec![MessagePart::Text {
+                            id: format!("nt-{i}"),
+                            text: format!("notice {i}"),
+                        }],
+                        created_at: i as i64,
+                        device_id: "test".into(),
+                        status: Some(MessageStatus::Complete),
+                        continuation_of: None,
+                        duration_ms: None,
+                    })
+                    .unwrap();
+            }
+        });
+        for i in 0..60 {
+            let w = SegmentWriter::begin(&doc, &format!("a-{i}"), "dev", i as i64).unwrap();
+            w.finish(
+                &[MessagePart::Text {
+                    id: format!("at-{i}"),
+                    text: format!("assistant {i}"),
+                }],
+                MessageStatus::Complete,
+            )
+            .unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer_thread.join().unwrap();
+        let entries = doc.read_entries().unwrap();
+        for entry in &entries {
+            if entry.role == MessageRole::Assistant && entry.id.starts_with("a-") {
+                assert_eq!(
+                    entry.parts.len(),
+                    1,
+                    "assistant row {} lost its part",
+                    entry.id
+                );
+            }
+            if entry.role == MessageRole::User {
+                assert_eq!(entry.parts.len(), 1, "notice row {} gained parts", entry.id);
+            }
+        }
+        assert_eq!(
+            entries.iter().filter(|e| e.id.starts_with("a-")).count(),
+            60,
+            "every assistant row kept its own id"
+        );
     }
 
     #[test]

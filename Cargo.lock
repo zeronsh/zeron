@@ -12847,6 +12847,7 @@ version = "0.2.104"
 dependencies = [
  "chrono",
  "loro",
+ "parking_lot",
  "serde",
  "serde_json",
  "similar",

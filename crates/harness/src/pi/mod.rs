@@ -703,6 +703,7 @@ impl Runner {
             self.emit(AgentEvent::Steered {
                 assistant_message_id: Some(old),
                 next_assistant_message_id: Some(self.assistant.clone()),
+                internal: false,
             })
             .await?;
         }

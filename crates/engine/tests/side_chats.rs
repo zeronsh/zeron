@@ -462,6 +462,7 @@ async fn native_commands_and_empty_side_chats_skip_the_history_wrapper() {
                 None,
                 Some("/tmp".into()),
                 parent.map(str::to_owned),
+                None,
             )
             .unwrap();
     }
@@ -567,6 +568,7 @@ impl Harness for Warm {
                 let mut events = vec![Ok(AgentEvent::Steered {
                     assistant_message_id: None,
                     next_assistant_message_id: Some(uuid::Uuid::new_v4().to_string()),
+                    internal: false,
                 })];
                 events.extend(turn("later answer"));
                 Some((futures::stream::iter(events), steering))

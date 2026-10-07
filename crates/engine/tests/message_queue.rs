@@ -142,7 +142,7 @@ impl Harness for HeldHarness {
                     steer = steering.recv() => match steer {
                         Some(message) => {
                             prompts.lock().unwrap().push(message.prompt);
-                            (AgentEvent::Steered { assistant_message_id: None, next_assistant_message_id: Some(uuid::Uuid::new_v4().to_string()) }, false)
+                            (AgentEvent::Steered { assistant_message_id: None, next_assistant_message_id: Some(uuid::Uuid::new_v4().to_string()), internal: false }, false)
                         }
                         None => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-queue".into()) }, true),
                     }

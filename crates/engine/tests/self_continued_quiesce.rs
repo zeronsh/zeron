@@ -140,6 +140,7 @@ impl Harness for FeedHarness {
                             let boundary = AgentEvent::Steered {
                                 assistant_message_id: None,
                                 next_assistant_message_id: None,
+                                internal: false,
                             };
                             if tx.send(Ok(boundary)).await.is_err() {
                                 return;

@@ -4008,6 +4008,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                internal: false,
                             },
                         )
                         .await
@@ -4131,6 +4132,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                internal: false,
                             },
                         )
                         .await
@@ -4403,6 +4405,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                internal: false,
                             },
                         )
                         .await
@@ -4444,6 +4447,7 @@ async fn run_session(session: Session) {
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
+                            internal: false,
                         },
                     )
                     .await
@@ -4494,6 +4498,7 @@ async fn run_session(session: Session) {
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
+                            internal: false,
                         },
                     )
                     .await
@@ -4567,6 +4572,7 @@ async fn run_session(session: Session) {
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
+                            internal: false,
                         },
                     )
                     .await
@@ -4631,6 +4637,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                internal: false,
                             },
                         )
                         .await

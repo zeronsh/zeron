@@ -114,6 +114,7 @@ impl Shell {
         let mut chat = parent.clone();
         chat.id = uuid::Uuid::new_v4().to_string();
         chat.parent_chat_id = Some(parent.id.clone());
+        chat.delegation = None;
         chat.title = None;
         chat.archived = false;
         chat.created_at = Utc::now();

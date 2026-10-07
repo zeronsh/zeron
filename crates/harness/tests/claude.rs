@@ -412,6 +412,7 @@ async fn steering_lines_are_written_to_stdin_mid_run() {
             AgentEvent::Steered {
                 assistant_message_id,
                 next_assistant_message_id,
+                ..
             } => Some((
                 assistant_message_id.clone(),
                 next_assistant_message_id.clone(),

@@ -272,6 +272,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         created_at: ts(2_000),
         harness_session_id: None,
         harness_session_cwd: None,
+        delegation: None,
         parent_chat_id: Some("parent-chat".into()),
         space_id: None,
         last_seen_at: None,
@@ -1526,4 +1527,53 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
             .as_deref(),
         Some("main")
     );
+}
+
+#[test]
+fn delegation_round_trips_through_the_registry() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut task = chat("chat-1", "dev-a");
+    task.delegation = Some(zeron_proto::Delegation {
+        by: "root".into(),
+        depth: 1,
+    });
+    doc.upsert_chat(&task).unwrap();
+    assert_eq!(doc.read_chats().unwrap(), vec![task]);
+}
+
+#[test]
+fn rows_without_delegation_read_as_none() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    assert_eq!(doc.chat("chat-1").unwrap().unwrap().delegation, None);
+    // A row that literally carries no `delegation` field (a pre-delegation
+    // writer) decodes the same way.
+    doc.write(
+        KIND_CHATS,
+        "chat-2",
+        OpKind::Upsert,
+        fields([
+            ("id", json!("chat-2")),
+            ("deviceId", json!("dev-a")),
+            ("createdAt", json!(2_000)),
+        ]),
+    );
+    assert_eq!(doc.chat("chat-2").unwrap().unwrap().delegation, None);
+}
+
+#[test]
+fn an_update_without_delegation_preserves_the_stored_value() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut task = chat("chat-1", "dev-a");
+    task.delegation = Some(zeron_proto::Delegation {
+        by: "root".into(),
+        depth: 2,
+    });
+    doc.upsert_chat(&task).unwrap();
+    // An older writer's update names other fields only — `delegation` has no
+    // clocked write, so the stored value survives.
+    doc.set_chat_seen("chat-1", ts(9_000)).unwrap();
+    let read = doc.chat("chat-1").unwrap().unwrap();
+    assert_eq!(read.delegation, task.delegation);
+    assert_eq!(read.last_seen_at, Some(ts(9_000)));
 }

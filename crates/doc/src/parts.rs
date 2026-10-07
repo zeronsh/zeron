@@ -1242,6 +1242,7 @@ mod tests {
                 event: Box::new(AgentEvent::Steered {
                     assistant_message_id: None,
                     next_assistant_message_id: None,
+                    internal: false,
                 }),
             },
         );

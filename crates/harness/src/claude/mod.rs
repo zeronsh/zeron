@@ -826,7 +826,7 @@ async fn run_session(session: Session) {
                                 pending_steers.pop_front();
                                 let (prev, next) = norm.rotate_for_steer();
                                 if event_tx.send(Ok(AgentEvent::Steered {
-                                    assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
+                                    assistant_message_id: Some(prev), next_assistant_message_id: Some(next), internal: false,
                                 })).await.is_err() { break 'main; }
                             }
                         }
@@ -916,7 +916,7 @@ async fn run_session(session: Session) {
                 while pending_steers.pop_front().is_some() {
                     let (prev, next) = norm.rotate_for_steer();
                     if event_tx.send(Ok(AgentEvent::Steered {
-                        assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
+                        assistant_message_id: Some(prev), next_assistant_message_id: Some(next), internal: false,
                     })).await.is_err() { break 'main; }
                 }
                 let (done, _) = held_done.take().expect("guarded by if");

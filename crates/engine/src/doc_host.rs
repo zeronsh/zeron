@@ -34,7 +34,9 @@ use zeron_doc::{
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
     evaluate_command, join_continuation_entries,
 };
-use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
+use zeron_proto::{
+    ConversationSourceContext, HarnessId, SessionStatus, UserInputAnswer, UserInputQuestion,
+};
 use zeron_sync::DocsStore;
 
 use crate::http_error::describe_http_error;
@@ -228,6 +230,28 @@ pub struct DocHostConfig {
 }
 
 struct DocHostInner {
+    /// Engine shutting down: queues are being frozen, so a notice delivered
+    /// now would sit in a paused queue past the restart. deliver_notice
+    /// fails instead; the obligation stays for the boot pass.
+    stopping: AtomicBool,
+    /// Shutdown/delivery quiescence: deliveries hold a read guard for their
+    /// whole duration; pause_all_queues writes after setting `stopping`,
+    /// so it cannot freeze a queue under an in-flight delivery, and a
+    /// delivery that passes the `stopping` check always finishes before
+    /// the freeze lands.
+    delivery_gate: tokio::sync::RwLock<()>,
+    /// Test hook: park `deliver_notice` before it takes `drain_lock` — no
+    /// hook mutex acquisition when unarmed.
+    deliver_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Test hook: signalled once `deliver_notice` parks on that gate.
+    deliver_parked: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Test hook: park `dispatch_queued` between take_queued and the
+    /// transcript write — the window a racing persistence check must not
+    /// observe unlocked. No hook mutex acquisition when unarmed.
+    queue_take_hook: AtomicBool,
+    queue_take_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    queue_take_parked: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    deliver_hook: AtomicBool,
     store: Arc<DocsStore>,
     config: DocHostConfig,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
@@ -316,6 +340,32 @@ fn command_transfers(entry: &SessionCommandEntry) -> Vec<crate::uploads::Attachm
             },
         )
         .collect()
+}
+
+/// The message id a command claims, when it claims a reserved `notice-*`
+/// one — `None` for non-message commands and ordinary ids. The namespace
+/// is engine-only: notices are written by `deliver_notice`, and a caller
+/// claiming one would poison the delegation engine's transcript scans.
+fn reserved_message_id(payload: &SessionCommandPayload) -> Option<&str> {
+    match payload {
+        SessionCommandPayload::Run { message_id, .. } => Some(message_id.as_str()),
+        SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+        _ => None,
+    }
+    .filter(|id| zeron_proto::entities::is_notice_id(id))
+}
+
+/// Holds a message id in the handle's in-flight set while it dispatches —
+/// cancellation's fence covers work that already left the doc.
+struct InFlightGuard<'a> {
+    ids: &'a Mutex<HashSet<String>>,
+    id: String,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        lock(self.ids).remove(&self.id);
+    }
 }
 
 /// Retires a transfer's progress entry on drop — the one exit point for
@@ -562,6 +612,10 @@ pub struct ChatDocHandle {
     /// Queue rows held as explicit steers for a turn-boundary agent. They
     /// lead ordinary queued rows, in the order they were steered.
     steered_rows: Mutex<Vec<String>>,
+    /// Message ids that left the doc but have not dispatched yet — a
+    /// cancellation fence must still cover them, so `track_in_flight`
+    /// guards every take→dispatch window.
+    in_flight_ids: Mutex<HashSet<String>>,
     /// An explicit user interrupt freezes automatic queue delivery. The next
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
@@ -726,12 +780,27 @@ impl ChatDocHandle {
         let mut steered = lock(&self.steered_rows);
         let queue = self.doc.read_queue()?;
         steered.retain(|row| queue.iter().any(|q| &q.id == row));
+        // Notice rows count as steered even without the in-memory record —
+        // a restarted engine must keep a new notice behind ones already
+        // parked.
         let slot = queue
             .iter()
-            .take_while(|row| steered.contains(&row.id))
+            .take_while(|row| {
+                steered.contains(&row.id) || zeron_proto::entities::is_notice_id(&row.id)
+            })
             .count();
         steered.push(id.to_string());
         Ok(slot)
+    }
+
+    /// Register a message id as in-flight for the take→dispatch window;
+    /// the guard releases it when the dispatch resolves.
+    fn track_in_flight(&self, id: &str) -> InFlightGuard<'_> {
+        lock(&self.in_flight_ids).insert(id.to_string());
+        InFlightGuard {
+            ids: &self.in_flight_ids,
+            id: id.to_string(),
+        }
     }
 
     fn publish_queue(&self) {
@@ -901,6 +970,14 @@ impl DocHost {
                 shutdown: CancellationToken::new(),
                 edge_disconnected: AtomicBool::new(false),
                 tasks: TaskTracker::new(),
+                stopping: AtomicBool::new(false),
+                delivery_gate: tokio::sync::RwLock::new(()),
+                deliver_gate: Mutex::new(None),
+                deliver_parked: Mutex::new(None),
+                queue_take_hook: AtomicBool::new(false),
+                queue_take_gate: Mutex::new(None),
+                queue_take_parked: Mutex::new(None),
+                deliver_hook: AtomicBool::new(false),
                 handles: Mutex::new(HashMap::new()),
                 document_loads: AtomicU64::new(0),
                 focus_clock: AtomicU64::new(0),
@@ -1040,8 +1117,14 @@ impl DocHost {
     /// Freeze every open queue before settling live runs during shutdown.
     /// Interrupting a run publishes Idle, which normally wakes the turn-end
     /// queue drainer; without this barrier quitting the host could promote a
-    /// queued row in the narrow window before workers are retired.
-    pub fn pause_all_queues(&self) {
+    /// queued row in the narrow window before workers are retired. The
+    /// `stopping` flag goes up first, then the write side of the delivery
+    /// gate: an in-flight notice delivery finishes its persist before any
+    /// queue freezes, and a delivery that starts behind the writer sees
+    /// `stopping` and refuses instead of parking the notice.
+    pub async fn pause_all_queues(&self) {
+        self.inner.stopping.store(true, Ordering::Release);
+        let _deliveries = self.inner.delivery_gate.write().await;
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
             handle.queue_paused.store(true, Ordering::Release);
@@ -1517,6 +1600,7 @@ impl DocHost {
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
+            in_flight_ids: Mutex::new(HashSet::new()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
@@ -3343,6 +3427,11 @@ impl DocHost {
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
+        if reserved_message_id(&payload).is_some() {
+            return Err(EngineError::Other(
+                "message ids in the notice-* namespace are reserved".into(),
+            ));
+        }
         let id = new_id();
         let now = now_ms();
         let based_on = handle.doc.read_entries()?.last().map(|m| CommandBasedOn {
@@ -3933,6 +4022,9 @@ impl DocHost {
             handle.publish_queue();
             return Ok(true);
         }
+        // In-flight BEFORE the row leaves the doc: a cancel landing between
+        // take and dispatch must still fence this id.
+        let _in_flight = handle.track_in_flight(id);
         let Some(item) = handle.doc.take_queued(id)? else {
             return Ok(false);
         };
@@ -3945,7 +4037,14 @@ impl DocHost {
             if was_paused {
                 handle.queue_paused.store(true, Ordering::Release);
             }
-            let _ = handle.doc.insert_queued(0, &item);
+            // A fenced id belongs to a cancelled task: it does not return
+            // to the queue.
+            if !self
+                .sessions()
+                .is_some_and(|sessions| sessions.message_fenced(chat_id, &item.id))
+            {
+                let _ = handle.doc.insert_queued(0, &item);
+            }
             handle.publish_queue();
             return Err(err);
         }
@@ -3960,16 +4059,23 @@ impl DocHost {
     ///
     /// One at a time by design: each send changes the status this reads.
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
-        let Some(sessions) = self.sessions() else {
-            return; // executor not wired yet; the set_sessions kick re-drains
-        };
-        if !self.is_host(&handle.chat_id) {
-            return;
-        }
         // One drain at a time per chat. Waiters are cheap: whoever takes the
         // lock next re-reads the queue and the status, so a drain that became
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
+        self.drain_queue_held(handle).await;
+    }
+
+    /// The drain body with `drain_lock` already held by the caller —
+    /// `deliver_notice` serializes notice delivery against Stop and must not
+    /// wait for the lock it owns.
+    async fn drain_queue_held(&self, handle: &Arc<ChatDocHandle>) {
+        let Some(sessions) = self.sessions() else {
+            return;
+        };
+        if !self.is_host(&handle.chat_id) {
+            return;
+        }
         if handle.queue_paused.load(Ordering::Acquire) {
             return;
         }
@@ -4027,6 +4133,7 @@ impl DocHost {
             let send = QueueSend::NextTurn;
             // Take it only once we know it is going out — a row that stays in
             // the queue on a failed send is recoverable; a vanished one is not.
+            let _in_flight = handle.track_in_flight(&head.id);
             let Ok(Some(item)) = handle.doc.take_queued(&head.id) else {
                 return;
             };
@@ -4035,7 +4142,10 @@ impl DocHost {
             if let Err(err) = self.dispatch_queued(handle, &item, send).await {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "queued send failed");
                 handle.queue_paused.store(true, Ordering::Release);
-                let _ = handle.doc.insert_queued(0, &item);
+                // A fenced id belongs to a cancelled task: no re-queue.
+                if !sessions.message_fenced(&handle.chat_id, &item.id) {
+                    let _ = handle.doc.insert_queued(0, &item);
+                }
                 handle.publish_queue();
                 return;
             }
@@ -4075,6 +4185,16 @@ impl DocHost {
         item: &QueuedMessage,
         send: QueueSend,
     ) -> Result<(), EngineError> {
+        if self.inner.queue_take_hook.load(Ordering::Relaxed) {
+            let parked = lock(&self.inner.queue_take_parked).take();
+            let gate = lock(&self.inner.queue_take_gate).take();
+            if let Some(parked) = parked {
+                let _ = parked.send(());
+            }
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+        }
         let Some(sessions) = self.sessions() else {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
@@ -5135,10 +5255,7 @@ impl DocHost {
         status: SessionCommandStatus,
         resolution: Option<&str>,
     ) {
-        if let Err(err) = handle
-            .doc
-            .set_command_status(command_id, status, resolution)
-        {
+        if let Err(err) = self.try_resolve_command(handle, command_id, status, resolution) {
             tracing::warn!(
                 chat = %handle.chat_id,
                 command = %command_id,
@@ -5148,6 +5265,21 @@ impl DocHost {
         }
     }
 
+    /// The status write, result-carrying — `resolve_command` wraps it with
+    /// the warning callers used to get.
+    fn try_resolve_command(
+        &self,
+        handle: &ChatDocHandle,
+        command_id: &str,
+        status: SessionCommandStatus,
+        resolution: Option<&str>,
+    ) -> Result<(), EngineError> {
+        handle
+            .doc
+            .set_command_status(command_id, status, resolution)
+            .map_err(|e| EngineError::Other(e.to_string()))
+    }
+
     async fn execute(
         &self,
         sessions: &SessionsEngine,
@@ -5155,6 +5287,25 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        // In-flight BEFORE the command resolves: the Run/Steer's message id
+        // must be fenceable through the whole dispatch window.
+        let _in_flight = match &entry.payload {
+            SessionCommandPayload::Run { message_id, .. } => {
+                Some(handle.track_in_flight(message_id))
+            }
+            SessionCommandPayload::Steer { message_id, .. } => {
+                message_id.as_deref().map(|id| handle.track_in_flight(id))
+            }
+            _ => None,
+        };
+        // The notice-* namespace is reserved wherever a command arrives —
+        // locally queued or ingested from a synced/relayed doc.
+        if reserved_message_id(&entry.payload).is_some() {
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some("message ids in the notice-* namespace are reserved".into()),
+            ));
+        }
         match &entry.payload {
             SessionCommandPayload::Run {
                 request,
@@ -5276,6 +5427,7 @@ impl DocHost {
                     prompt,
                     message_id.clone(),
                     entry.issued_at,
+                    false,
                 )
                 .await
             }
@@ -5353,6 +5505,262 @@ impl DocHost {
         }
     }
 
+    /// Stop `chat_id`'s in-flight turn and freeze its queue (`task_cancel`'s
+    /// stop path — the same interrupt a Stop command runs).
+    pub async fn interrupt_and_pause(&self, chat_id: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        let sessions = self
+            .sessions()
+            .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
+        self.interrupt_and_pause_queue(&sessions, &handle).await
+    }
+
+    /// Test hook: is the chat's prompt-drain lock free right now — false
+    /// while a dispatch is parked inside it.
+    #[doc(hidden)]
+    pub fn command_drain_free(&self, chat_id: &str) -> bool {
+        self.open(chat_id)
+            .is_ok_and(|h| h.command_drain_lock.try_lock().is_ok())
+    }
+
+    /// Test hook: is the chat's queue-drain lock free right now — false
+    /// while a queued-row promotion is parked inside it.
+    #[doc(hidden)]
+    pub fn queue_drain_free(&self, chat_id: &str) -> bool {
+        self.open(chat_id)
+            .is_ok_and(|h| h.drain_lock.try_lock().is_ok())
+    }
+
+    /// Test hook: is the chat's queue frozen by `queue_paused`.
+    #[doc(hidden)]
+    pub fn queue_is_paused(&self, chat_id: &str) -> bool {
+        self.open(chat_id)
+            .is_ok_and(|h| h.queue_paused.load(Ordering::Acquire))
+    }
+
+    /// task_cancel's queue freeze: unconditionally set `queue_paused`
+    /// under the drain lock — a cancelled chat keeps its queue frozen
+    /// whether or not a turn was in flight, so a row arriving later can
+    /// never dispatch on a dead task. The general Stop path is unchanged.
+    pub async fn pause_queue_for_cancel(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        handle.queue_paused.store(true, Ordering::Release);
+        handle.publish_queue();
+        Ok(())
+    }
+
+    /// task_cancel's pending-work cleanup for a chat: reject every
+    /// pending Run/Steer command and drop every queued row, then flush the
+    /// doc so the rejections are durable before returning — returns the
+    /// number of distinct affected message ids. Control commands
+    /// (Interrupt, RespondInput, …) are untouched. The prompt-drain lock
+    /// keeps this from racing a dispatch already claimed; a dispatch
+    /// parked inside the lock only unwinds once its run dies, so the
+    /// acquisition retries after re-interrupting the chat — bounded, so
+    /// task_cancel never hangs on a wedged drain.
+    pub async fn cancel_pending_work(&self, chat_id: &str) -> Result<usize, EngineError> {
+        let handle = self.open(chat_id)?;
+        let mut prompt = None;
+        for _ in 0..3 {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                handle.command_drain_lock.lock(),
+            )
+            .await
+            {
+                Ok(guard) => {
+                    prompt = Some(guard);
+                    break;
+                }
+                Err(_) => {
+                    // The park usually lives inside a dispatch waiting on
+                    // this lock — a direct runtime kill needs no doc lock
+                    // and unwinds it.
+                    if let Some(sessions) = self.sessions() {
+                        let _ = sessions.interrupt(chat_id).await;
+                    }
+                }
+            }
+        }
+        let _prompt = prompt.ok_or_else(|| {
+            EngineError::Other(format!(
+                "could not clear pending work for chat {chat_id}; retry"
+            ))
+        })?;
+        let mut ids = std::collections::HashSet::new();
+        for entry in handle.doc.read_commands()?.into_iter().filter(|c| {
+            c.status == zeron_doc::SessionCommandStatus::Pending
+                && matches!(
+                    c.payload,
+                    SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+                )
+        }) {
+            let message_id = match &entry.payload {
+                SessionCommandPayload::Run { message_id, .. } => Some(message_id.clone()),
+                SessionCommandPayload::Steer { message_id, .. } => message_id.clone(),
+                _ => None,
+            };
+            self.try_resolve_command(
+                &handle,
+                &entry.id,
+                zeron_doc::SessionCommandStatus::Rejected,
+                Some("delegated task cancelled"),
+            )?;
+            if let Some(message_id) = message_id {
+                ids.insert(message_id);
+            }
+        }
+        for row in handle.doc.read_queue()? {
+            if handle.doc.remove_queued(&row.id)? {
+                ids.insert(row.id.clone());
+            }
+        }
+        if !ids.is_empty() {
+            handle.publish_queue();
+        }
+        // The rejections must be durable before the cancel is reported —
+        // a crash with only the in-memory state would let them dispatch.
+        self.save_snapshot_result(&handle)?;
+        Ok(ids.len())
+    }
+
+    /// Deliver a delegated-task notice to its delegator
+    /// (docs/design/delegated-tasks.md). Wraps `deliver_prompt` and the queue
+    /// path with the rules notices live by: never revives an archived chat,
+    /// never thaws a queue the user stopped, never interrupts a turn — a
+    /// stopped or question-blocked delegator finds the notice waiting at the
+    /// queue's steer slot.
+    pub async fn deliver_notice(
+        &self,
+        delegator: &str,
+        notice_id: &str,
+        text: &str,
+    ) -> Result<(), EngineError> {
+        // The shutdown/delivery barrier: an in-flight delivery holds the
+        // read guard so pause_all_queues waits for its persist before
+        // freezing queues; one starting behind the freeze's writer sees
+        // `stopping` below and refuses.
+        let _delivery = self.inner.delivery_gate.read().await;
+        if self.inner.stopping.load(Ordering::Acquire) {
+            // The engine is shutting down: a notice now lands in a frozen
+            // queue and would not drain even after restart. Fail so the
+            // obligation stays and the boot pass re-delivers.
+            return Err(EngineError::Other("engine stopping".into()));
+        }
+        // A registry read error is transient, not "deleted" — surface it so
+        // the caller retries instead of dropping the notice.
+        let row = self
+            .workspace()
+            .map(|ws| ws.chat(delegator))
+            .transpose()?
+            .flatten();
+        match row {
+            // Deleted or archived: drop the notice. The result stays readable
+            // through the task's transcript.
+            None => return Ok(()),
+            Some(chat) if chat.archived => return Ok(()),
+            _ => {}
+        }
+        let Some(sessions) = self.sessions() else {
+            return Err(EngineError::Other("sessions engine not wired".into()));
+        };
+        let handle = self.open(delegator)?;
+        if self.inner.deliver_hook.load(Ordering::Relaxed) {
+            let parked = lock(&self.inner.deliver_parked).take();
+            let gate = lock(&self.inner.deliver_gate).take();
+            if let Some(parked) = parked {
+                let _ = parked.send(());
+            }
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+        }
+        // Serialize against Stop's queue freeze + interrupt: a Stop that
+        // lands before this lock is seen by `frozen`; one after it rightly
+        // interrupts the notice's own run.
+        let _drain = handle.drain_lock.lock().await;
+        if self.inner.stopping.load(Ordering::Acquire) {
+            // Shutdown set the flag while this delivery waited on the lock:
+            // parking the notice in a frozen queue would keep it from the
+            // boot pass's redelivery.
+            return Err(EngineError::Other("engine stopping".into()));
+        }
+        let frozen = handle.queue_paused.load(Ordering::Acquire);
+        let awaiting_input = sessions
+            .session_status(delegator)
+            .is_some_and(|s| s.status == SessionStatus::AwaitingInput);
+        if frozen || awaiting_input {
+            let item = QueuedMessage {
+                id: notice_id.to_string(),
+                text: text.to_string(),
+                attachments: Vec::new(),
+                hold_for_turn_end: false,
+                issued_by: self.inner.config.device_id.clone(),
+                issued_at: now_ms(),
+                edited_at: None,
+                delivery_gate: None,
+            };
+            if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
+                // A retry of an insert that landed in memory: still make it
+                // durable before reporting delivery.
+                return self.save_snapshot_result(&handle);
+            }
+            handle
+                .doc
+                .insert_queued(handle.steer_slot(&item.id)?, &item)?;
+            handle.publish_queue();
+        } else {
+            // Attempt the persistence even when the dispatch errored: a
+            // notice that landed in the transcript or queue is in memory —
+            // flush it before the caller may retire the obligation on a
+            // `notice_present` hit, and surface flush failure as a delivery
+            // failure so the next pass retries.
+            let outcome = self
+                .deliver_prompt(
+                    &sessions,
+                    &handle,
+                    text,
+                    Some(notice_id.to_string()),
+                    now_ms(),
+                    true,
+                )
+                .await;
+            match outcome {
+                Ok(_) => {
+                    self.save_snapshot_result(&handle)?;
+                }
+                Err(err) => {
+                    // The notice text may have landed before the failure;
+                    // memory presence alone is NOT delivery — persist it,
+                    // and only then can the caller retire the obligation.
+                    // A flush error keeps the obligation.
+                    let present = handle
+                        .doc
+                        .read_entries()
+                        .map(|entries| entries.iter().any(|e| e.id == notice_id))
+                        .unwrap_or(false)
+                        || handle
+                            .doc
+                            .read_queue()
+                            .map(|q| q.iter().any(|r| r.id == notice_id))
+                            .unwrap_or(false);
+                    if present {
+                        self.save_snapshot_result(&handle)?;
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        // The notice must be durable before the delegation ledger retires
+        // the obligation — snapshots are debounced (~1s), too late for a
+        // crash in between. A failed flush surfaces as a delivery failure
+        // so the next pass retries.
+        self.save_snapshot_result(&handle)?;
+        Ok(())
+    }
+
     /// Park a prompt for a turn-boundary agent in the visible queue instead
     /// of its mailbox, keeping the message id so the transcript entry written
     /// at delivery is the same message. Steers lead ordinary rows.
@@ -5398,6 +5806,9 @@ impl DocHost {
     /// resume then reattaches the prior harness conversation.
     ///
     /// Turn-boundary drivers retain explicit steers until their next boundary.
+    /// `drain_held`: the caller already owns `drain_lock` (deliver_notice's
+    /// Stop serialization) — the DeferredByUpdate arm then re-drains without
+    /// waiting for it.
     async fn deliver_prompt(
         &self,
         sessions: &SessionsEngine,
@@ -5405,6 +5816,7 @@ impl DocHost {
         prompt: &str,
         message_id: Option<String>,
         issued_at: i64,
+        drain_held: bool,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
         // Explicit steering uses the run mailbox when the agent reads it
@@ -5477,7 +5889,11 @@ impl DocHost {
                 self.hold_until_turn_end(handle, &id, &prompt, issued_at, true)?;
                 // The completed turn's status publication normally re-drains
                 // this queue. Also cover completion racing the enqueue itself.
-                self.drain_queue(handle).await;
+                if drain_held {
+                    self.drain_queue_held(handle).await;
+                } else {
+                    self.drain_queue(handle).await;
+                }
                 Ok((
                     SessionCommandStatus::Applied,
                     Some("held until the agent update finishes".into()),
@@ -5682,7 +6098,49 @@ impl DocHost {
         })
     }
 
+    /// Presence is not durability: a notice in the doc's memory image that
+    /// has not been persisted must be saved before its obligation retires.
+    /// Ok(true) = present and durably persisted; Ok(false) = absent.
+    #[doc(hidden)]
+    pub async fn ensure_notice_persisted(
+        &self,
+        delegator: &str,
+        notice_id: &str,
+    ) -> Result<bool, EngineError> {
+        let Ok(handle) = self.open_local(delegator) else {
+            return Ok(false);
+        };
+        // A queue row a drain is mid-promotion on must not be read here: the
+        // take removes the row before dispatch writes its transcript entry,
+        // so an unlocked check could see neither and persist that gap. The
+        // drain lock makes the observed row and the persisted snapshot the
+        // same state.
+        let _drain = handle.drain_lock.lock().await;
+        let in_transcript = handle
+            .doc()
+            .read_entries()
+            .map(|entries| entries.iter().any(|e| e.id == notice_id))
+            .unwrap_or(false);
+        let in_queue = handle
+            .doc()
+            .read_queue()
+            .map(|queue| queue.iter().any(|row| row.id == notice_id))
+            .unwrap_or(false);
+        if !in_transcript && !in_queue {
+            return Ok(false);
+        }
+        self.save_snapshot_result(&handle).map(|_| true)
+    }
+
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        if let Err(err) = self.save_snapshot_result(handle) {
+            tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
+        }
+    }
+
+    /// `save_snapshot` with the failure surfaced: notice delivery needs to
+    /// know the write landed before the caller may retire its obligation.
+    pub(crate) fn save_snapshot_result(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -5695,24 +6153,18 @@ impl DocHost {
                 Ok(Some((_, _, epoch))) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH
             );
             if thin_on_disk {
-                return;
+                return Ok(());
             }
         }
         if let Some(persistence) = &handle.persistence {
-            persistence.flush_sync();
-            return;
+            return persistence.flush_sync();
         }
-        match handle.doc.export_snapshot() {
-            Ok(bytes) => {
-                handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
-                if let Err(err) = self.inner.store.save_snapshot(&handle.chat_id, &bytes) {
-                    tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot export failed");
-            }
-        }
+        let bytes = handle.doc.export_snapshot()?;
+        handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+        self.inner
+            .store
+            .save_snapshot(&handle.chat_id, &bytes)
+            .map_err(|e| e.into())
     }
 
     /// A fork must be durable before publishing its discoverable registry row.
@@ -5721,6 +6173,92 @@ impl DocHost {
         self.inner.store.save_snapshot(&handle.chat_id, &bytes)?;
         handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Test hook: park `deliver_notice` before it takes `drain_lock`
+    /// (`deliver_parked` fires once it waits).
+    #[doc(hidden)]
+    pub fn pause_deliver(
+        &self,
+        rx: tokio::sync::oneshot::Receiver<()>,
+        parked: tokio::sync::oneshot::Sender<()>,
+    ) {
+        *lock(&self.inner.deliver_gate) = Some(rx);
+        *lock(&self.inner.deliver_parked) = Some(parked);
+        self.inner.deliver_hook.store(true, Ordering::Release);
+    }
+
+    /// Test hook: park `dispatch_queued` between the queue take and the
+    /// transcript write (`queue_take_parked` fires once it waits).
+    #[doc(hidden)]
+    pub fn pause_dispatch_queued(
+        &self,
+        rx: tokio::sync::oneshot::Receiver<()>,
+        parked: tokio::sync::oneshot::Sender<()>,
+    ) {
+        *lock(&self.inner.queue_take_gate) = Some(rx);
+        *lock(&self.inner.queue_take_parked) = Some(parked);
+        self.inner.queue_take_hook.store(true, Ordering::Release);
+    }
+
+    /// Cancellation's stop fence: every message id that could still reach a
+    /// dispatch for this chat — Run/Steer command ids in any status, queued
+    /// rows, the transcript's user entries, and the in-flight take→dispatch
+    /// window — is fenced so a taken-but-not-yet-started command can never
+    /// start a run. Takes no drain or queue lock: it must work exactly when
+    /// those are wedged. Returns the number of ids fenced.
+    pub fn fence_cancelled_chat(&self, chat_id: &str) -> Result<usize, EngineError> {
+        let handle = self.open(chat_id)?;
+        let mut ids: HashSet<String> = lock(&handle.in_flight_ids).clone();
+        for entry in handle.doc.read_commands()? {
+            match &entry.payload {
+                SessionCommandPayload::Run { message_id, .. } => {
+                    ids.insert(message_id.clone());
+                }
+                SessionCommandPayload::Steer {
+                    message_id: Some(id),
+                    ..
+                } => {
+                    ids.insert(id.clone());
+                }
+                _ => {}
+            }
+        }
+        for row in handle.doc.read_queue()? {
+            ids.insert(row.id);
+        }
+        for entry in handle.doc.read_entries()? {
+            if entry.role == MessageRole::User {
+                ids.insert(entry.id.clone());
+            }
+        }
+        let count = ids.len();
+        if let Some(sessions) = self.sessions() {
+            sessions.fence_messages(chat_id, ids);
+        }
+        Ok(count)
+    }
+
+    /// Test hook: `chat_id`'s snapshot flushes fail until `on` is cleared —
+    /// notice deliveries prove persistence-gated retirement.
+    #[doc(hidden)]
+    pub fn inject_snapshot_failure(&self, chat_id: &str, on: bool) -> bool {
+        let Ok(handle) = self.open(chat_id) else {
+            return false;
+        };
+        let Some(persistence) = &handle.persistence else {
+            return false;
+        };
+        persistence.inject_flush_failure(on);
+        true
+    }
+
+    /// Test hook: persist one chat's doc now.
+    #[doc(hidden)]
+    pub fn flush_doc(&self, chat_id: &str) {
+        if let Ok(handle) = self.open(chat_id) {
+            self.save_snapshot(&handle);
+        }
     }
 
     /// Persist every open doc now (shutdown path; bypasses the debounce).

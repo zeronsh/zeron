@@ -27,7 +27,9 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
-use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
+use zeron_proto::{
+    Chat, ChatConfig, Delegation, Device, SandboxLevel, Session, SidebarPreferencesState, Space,
+};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
@@ -893,11 +895,14 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
-        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None)
+        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None, None)
     }
 
-    /// [`create_chat`](Self::create_chat) recording the creating chat
-    /// (`parentChatId`) — the Zeron MCP's orchestration link.
+    /// [`create_chat`](Self::create_chat) recording the creating chat —
+    /// either an explicit `parentChatId` (a top-level chat) or `delegatedBy`,
+    /// which marks the row as a delegated task and derives `parentChatId` and
+    /// `delegation.depth` from the delegator's row.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_chat_with_parent(
         &self,
         chat_id: &str,
@@ -906,9 +911,51 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
         parent_chat_id: Option<String>,
+        delegated_by: Option<String>,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
+        }
+        let mut parent_chat_id = parent_chat_id.filter(|p| !p.trim().is_empty());
+        let mut delegation = None;
+        if let Some(by) = delegated_by.filter(|b| !b.trim().is_empty()) {
+            let delegator = self
+                .read(|doc| doc.chat(&by))?
+                .ok_or_else(|| EngineError::Other(format!("no such chat: {by}")))?;
+            let asked = SandboxLevel::for_row(config.as_ref());
+            if let Some(err) = delegator.delegation_create_error(asked) {
+                return Err(EngineError::Other(err));
+            }
+            let depth = delegator
+                .delegation
+                .as_ref()
+                .map(|d| d.depth)
+                .unwrap_or(0)
+                .saturating_add(1);
+            // Nested tasks list under the root, not under their delegator.
+            let root = delegator
+                .parent_chat_id
+                .clone()
+                .unwrap_or_else(|| delegator.id.clone());
+            if let Some(explicit) = parent_chat_id.as_deref()
+                && explicit != root
+            {
+                return Err(EngineError::Other(format!(
+                    "parentChatId conflicts with delegatedBy: a delegated task lists under its root chat {root}."
+                )));
+            }
+            parent_chat_id = Some(root);
+            delegation = Some(Delegation {
+                by: delegator.id,
+                depth,
+            });
+        } else if let Some(parent_id) = parent_chat_id.as_deref()
+            && let Some(parent) = self.read(|doc| doc.chat(parent_id))?
+            && parent.parent_chat_id.is_some()
+        {
+            return Err(EngineError::Other(
+                "Cannot create a child of a side chat. Choose a top-level parent chat.".into(),
+            ));
         }
         let space = match space_id {
             Some(space_id) => match self.read(|doc| doc.space(space_id))? {
@@ -953,7 +1000,8 @@ impl WorkspaceHost {
                 harness_session_cwd: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
-                parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                parent_chat_id,
+                delegation,
             })
         })?;
         Ok(())

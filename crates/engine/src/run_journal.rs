@@ -193,6 +193,71 @@ impl RunJournal {
         Ok(stale)
     }
 
+    /// Quit-fence scan: chats whose journal's last event is
+    /// `Done{interrupted}`. A graceful quit can write the `Done` while losing
+    /// the doc's entry stamp — those chats aren't `stale` (nothing to
+    /// revive), but their trailing assistant entry stays `streaming`. Only
+    /// the last line is read: journals are never compacted.
+    pub fn quit_raced_sessions(&self) -> Result<Vec<String>, JournalError> {
+        let mut raced = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let last = match read_last_line(&path) {
+                Ok(last) => last.and_then(|line| {
+                    serde_json::from_str::<JournalLine>(&line)
+                        .ok()
+                        .map(|row| (row.seq, row.event))
+                }),
+                // One unreadable journal must not skip the whole scan.
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "journal last-line read failed");
+                    continue;
+                }
+            };
+            if let Some((
+                _,
+                AgentEvent::Done {
+                    status: zeron_proto::DoneStatus::Interrupted,
+                    ..
+                },
+            )) = last
+            {
+                raced.push(chat_id.to_string());
+            }
+        }
+        raced.sort();
+        Ok(raced)
+    }
+
+    /// The chat's terminal `Done` status, when the journal's last line is
+    /// one — the most recent run's verdict. Last-line read only: journals
+    /// are never compacted, and this feeds per-chat state lookups.
+    pub fn last_done_status(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<zeron_proto::DoneStatus>, JournalError> {
+        let path = self.path_for(chat_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let last = read_last_line(&path)?.and_then(|line| {
+            serde_json::from_str::<JournalLine>(&line)
+                .ok()
+                .map(|row| row.event)
+        });
+        Ok(match last {
+            Some(AgentEvent::Done { status, .. }) => Some(status),
+            _ => None,
+        })
+    }
+
     /// Remove a chat's journal file entirely (tests / future compaction).
     pub fn discard(&self, chat_id: &str) -> Result<(), JournalError> {
         self.lock().remove(chat_id);
@@ -225,6 +290,51 @@ fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
         }
     }
     Ok(out)
+}
+
+/// The file's last non-empty line, read by seeking from the end — journals
+/// grow unbounded, so full reads have no place on the boot path.
+fn read_last_line(path: &Path) -> Result<Option<String>, JournalError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut pos = file.seek(SeekFrom::End(0))?;
+    let mut tail = Vec::new();
+    const WINDOW: u64 = 64 * 1024;
+    loop {
+        let take = pos.min(WINDOW);
+        pos -= take;
+        file.seek(SeekFrom::Start(pos))?;
+        let mut buf = vec![0u8; take as usize];
+        file.read_exact(&mut buf)?;
+        buf.extend_from_slice(&tail);
+        tail = buf;
+        let mut end = tail.len();
+        while end > 0 && tail[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if tail[..end].contains(&b'\n') || pos == 0 {
+            let start = tail[..end]
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            return if start < end {
+                Ok(Some(
+                    String::from_utf8_lossy(&tail[start..end]).into_owned(),
+                ))
+            } else if pos == 0 {
+                Ok(None)
+            } else {
+                // Whole buffer was newlines only — keep reading back.
+                tail.clear();
+                continue;
+            };
+        }
+    }
 }
 
 /// Next seq (last valid seq + 1, starting at 1) and whether the file ends mid-line.

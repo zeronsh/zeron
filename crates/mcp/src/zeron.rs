@@ -344,18 +344,55 @@ impl Zeron {
         chat_id: &str,
         payload: &SessionCommandPayload,
     ) -> anyhow::Result<String> {
+        self.queue_command_notify(chat_id, payload, None).await
+    }
+
+    /// `queue_command` plus a `notify: { batch, seal }` arm on the host
+    /// engine's delegation ledger (docs/design/delegated-tasks.md). `seal`
+    /// marks the batch complete: only sealed batches release a notice, so
+    /// multi-call batches seal once via `seal_delegation_batch` after their
+    /// last arm lands.
+    pub async fn queue_command_notify(
+        &self,
+        chat_id: &str,
+        payload: &SessionCommandPayload,
+        notify: Option<(&str, bool)>,
+    ) -> anyhow::Result<String> {
         let command = serde_json::to_value(payload).context("serialize command")?;
-        let reply = self
-            .call(
-                methods::QUEUE_COMMAND,
-                json!({ "chatId": chat_id, "command": command }),
-            )
-            .await?;
+        let mut params = json!({ "chatId": chat_id, "command": command });
+        if let Some((batch, seal)) = notify {
+            params["notify"] = json!({ "batch": batch, "seal": seal });
+        }
+        let reply = self.call(methods::QUEUE_COMMAND, params).await?;
         Ok(reply
             .get("commandId")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned())
+    }
+
+    /// The host engine's delegation ledger (armed/settled task entries and
+    /// retained outcomes).
+    pub async fn list_delegations(&self) -> anyhow::Result<zeron_proto::entities::DelegationList> {
+        let reply = self.call(methods::LIST_DELEGATIONS, json!({})).await?;
+        Ok(serde_json::from_value(reply)?)
+    }
+
+    /// Mark a delegation batch complete: every member that will arm has
+    /// armed, so the engine may release its notice when they settle.
+    pub async fn seal_delegation_batch(&self, delegator: &str, batch: &str) -> anyhow::Result<()> {
+        self.call(
+            methods::SEAL_DELEGATION_BATCH,
+            json!({ "delegator": delegator, "batch": batch }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Stop a task and its subtree; no notices are sent for any of them.
+    pub async fn cancel_delegated_task(&self, chat_id: &str) -> anyhow::Result<Value> {
+        self.call(methods::CANCEL_DELEGATED_TASK, json!({ "chatId": chat_id }))
+            .await
     }
 
     /// Queue-row send for a busy chat whose harness cannot steer mid-turn:
@@ -734,6 +771,7 @@ mod tests {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
+            delegation: None,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,

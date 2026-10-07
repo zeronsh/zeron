@@ -354,6 +354,103 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
 }
 
 #[tokio::test]
+async fn async_user_input_routes_through_request_input_and_steers_the_answer() {
+    let asked_questions = Arc::new(Mutex::new(Vec::<UserInputQuestion>::new()));
+    let (_steer_tx, steer_rx) = mpsc::channel(8);
+    let token = CancellationToken::new();
+    let asked = asked_questions.clone();
+    let controls = RunControls {
+        execution_lease: None,
+        request_input: Box::new(move |questions| {
+            asked.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let answers: Vec<UserInputAnswer> = questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec!["mcp".into()],
+                })
+                .collect();
+            let _ = tx.send(answers);
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: token.clone(),
+    };
+    let events = run_to_end(&harness(), request("scenario:async-input"), controls).await;
+    {
+        let asked = asked_questions.lock().unwrap();
+        let asked = asked
+            .first()
+            .expect("the async question reached request_input");
+        assert_eq!(asked.question, "mcp or harness?");
+        assert_eq!(asked.options, vec!["mcp", "harness"]);
+        assert_eq!(asked.id, "m9-q0");
+    }
+    // The answer went back as an INTERNAL steer — the engine must not
+    // acknowledge a routed message on its boundary.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Steered { internal: true, .. })),
+        "the answer was delivered as an internal steer: {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("chose mcp"), "{text}");
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn async_input_answer_after_turn_end_is_still_internal() {
+    let (_steer_tx, steer_rx) = mpsc::channel(8);
+    let token = CancellationToken::new();
+    let controls = RunControls {
+        execution_lease: None,
+        request_input: Box::new(|questions| {
+            let (tx, rx) = oneshot::channel();
+            let answers: Vec<UserInputAnswer> = questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec!["mcp".into()],
+                })
+                .collect();
+            let _ = tx.send(answers);
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: token.clone(),
+    };
+    let events = run_to_end(&harness(), request("scenario:async-input-late"), controls).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Steered { internal: true, .. })),
+        "the late answer started an internal turn: {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("late mcp"), "{text}");
+}
+
+#[tokio::test]
 async fn steering_uses_turn_steer_with_expected_turn_id() {
     let (controls, steer, _token) = controls("Yes");
     steer
@@ -371,6 +468,7 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
             AgentEvent::Steered {
                 assistant_message_id,
                 next_assistant_message_id,
+                ..
             } => Some((
                 assistant_message_id.clone(),
                 next_assistant_message_id.clone(),

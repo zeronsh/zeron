@@ -535,6 +535,7 @@ async fn steering_burst_reaches_one_model_step_and_confirms_each_message_on_cons
                     AgentEvent::Steered {
                         assistant_message_id,
                         next_assistant_message_id,
+                        ..
                     } => {
                         assert_eq!(assistant_message_id, assistant);
                         assert!(next_assistant_message_id.is_some());

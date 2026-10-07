@@ -312,6 +312,47 @@ case "$turnline" in
   fi
   ;;
 
+*scenario:async-input-late*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  # The question item completes, then the TURN completes before the answer
+  # arrives — the answer must ride steer_as_new_turn, still internal.
+  emit '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"m9","text":"Which one?","questions":[{"title":"mcp or harness?","options":["mcp","harness"]}]}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  read -r answerline || exit 1
+  aid=$(rid "$answerline")
+  if has "$answerline" '"method":"turn/start"' &&
+    has "$answerline" 'Answer to \"mcp or harness?\": mcp'; then
+    emit "{\"id\":$aid,\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+    emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'
+    emit '{"method":"item/agentMessage/delta","params":{"itemId":"m2","delta":"late mcp"}}'
+    emit '{"method":"turn/completed","params":{"turn":{"id":"t-2"}}}'
+  else
+    emit "{\"id\":$aid,\"error\":{\"code\":-32600,\"message\":\"late answer should be turn/start\"}}"
+    emit '{"method":"turn/failed","params":{"turn":{"id":"t-2","error":{"message":"late answer not turn/start"}}}}'
+  fi
+  ;;
+
+
+*scenario:async-input*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  # request_user_input_async: the question rides a completed agentMessage and
+  # the answer arrives as a user message (turn/steer), never a server request.
+  emit '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"m9","text":"Which one?","questions":[{"title":"mcp or harness?","options":["mcp","harness"]}]}}}'
+  read -r answerline || exit 1
+  aid=$(rid "$answerline")
+  if has "$answerline" '"method":"turn/steer"' &&
+    has "$answerline" 'Answer to \"mcp or harness?\": mcp'; then
+    emit "{\"id\":$aid,\"result\":{}}"
+    emit '{"method":"item/agentMessage/delta","params":{"itemId":"m2","delta":"chose mcp"}}'
+    emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  else
+    emit "{\"id\":$aid,\"error\":{\"code\":-32600,\"message\":\"bad answer steer\"}}"
+    emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"async answer missing or wrong"}}}}'
+  fi
+  ;;
+
 *scenario:steer*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'

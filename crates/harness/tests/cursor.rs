@@ -416,6 +416,7 @@ async fn steering_spam_preserves_every_turn_in_order_and_closes_cleanly() {
                     AgentEvent::Steered {
                         assistant_message_id,
                         next_assistant_message_id,
+                        ..
                     } => {
                         assert_eq!(assistant_message_id, current);
                         let next = next_assistant_message_id.unwrap();

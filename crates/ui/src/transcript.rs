@@ -8058,22 +8058,59 @@ impl Transcript {
 /// Keep routing instructions in the stored prompt for agents, but show a
 /// concise attribution in the human transcript (including existing messages).
 fn agent_message_display(text: &str) -> String {
+    // A task's first prompt shows as its attribution; the long engine
+    // instructions stay in the stored message.
+    if let Some(rest) = text.strip_prefix("[Delegated task from Zeron chat ")
+        && let Some((header, body)) = rest.split_once("]\n\n")
+    {
+        let name = header
+            .rsplit_once(". Zeron delivers")
+            .map(|(label, _)| label)
+            .unwrap_or(header);
+        // Like "Message from" below: strip a trailing " (id)".
+        let name = name
+            .rsplit_once(" (")
+            .filter(|(_, rest)| rest.ends_with(')'))
+            .map(|(label, _)| label)
+            .unwrap_or(name);
+        return format!("Task from {name}\n\n{body}");
+    }
+    // Any task notice (result, attention, later result) shows as one line
+    // plus the quoted result.
+    if let Some(body) = text
+        .strip_prefix("[Zeron task notice.")
+        .and_then(|rest| rest.split_once("]\n\n").map(|(_, body)| body))
+    {
+        return format!("Task notice\n\n{body}");
+    }
     let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
         return text.to_owned();
     };
     let Some((header, body)) = rest.split_once("]\n\n") else {
         return text.to_owned();
     };
-    let Some((label, id)) =
+    // Two wire variants: plain agent messages end ". Reply to it with the
+    // Zeron `send_message` tool, chat <id>."; notify-armed ones end " (<id>).
+    // Zeron delivers the final message of your turn to that chat
+    // automatically — do not reply with send_message."
+    if let Some((label, id)) =
         header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")
-    else {
+    {
+        let Some(id) = id.strip_suffix('.') else {
+            return text.to_owned();
+        };
+        let name = label.strip_suffix(&format!(" ({id})")).unwrap_or(label);
+        return format!("Message from {name}\n\n{body}");
+    }
+    let Some(label) = header.strip_suffix(
+        ". Zeron delivers the final message of your turn to that chat automatically — do not reply with send_message.",
+    ) else {
         return text.to_owned();
     };
-    let Some(id) = id.strip_suffix('.') else {
-        return text.to_owned();
-    };
-    let suffix = format!(" ({id})");
-    let name = label.strip_suffix(&suffix).unwrap_or(label);
+    let name = label
+        .rsplit_once(" (")
+        .filter(|(name, _)| !name.is_empty() && label.ends_with(')'))
+        .map_or(label, |(name, _)| name);
     format!("Message from {name}\n\n{body}")
 }
 
@@ -9698,6 +9735,61 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_message_display_handles_both_header_variants() {
+        let plain = "[Message from Zeron chat Alpha (chat-al). Reply to it with the Zeron `send_message` tool, chat chat-al.]
+
+body";
+        assert_eq!(
+            agent_message_display(plain),
+            "Message from Alpha
+
+body"
+        );
+        let notify = "[Message from Zeron chat Alpha (chat-al). Zeron delivers the final message of your turn to that chat automatically — do not reply with send_message.]
+
+body";
+        assert_eq!(
+            agent_message_display(notify),
+            "Message from Alpha
+
+body"
+        );
+        let notify_untitled = "[Message from Zeron chat chat-al. Zeron delivers the final message of your turn to that chat automatically — do not reply with send_message.]
+
+body";
+        assert_eq!(
+            agent_message_display(notify_untitled),
+            "Message from chat-al
+
+body"
+        );
+        let task = "[Delegated task from Zeron chat Alpha (chat-al). Zeron delivers the final message of your turn to that chat automatically, and reports the task as finished when your turn ends. Do not send the result with send_message.]
+
+do the work";
+        assert_eq!(
+            agent_message_display(task),
+            "Task from Alpha\n\ndo the work"
+        );
+        let notice = "[Zeron task notice. Zeron sent this message automatically because tasks you delegated have settled. The user did not type it.]
+
+Task \"T\" (chat abc123, claude-code): completed
+<task_result_x chat=\"abc123\">
+done
+</task_result_x>";
+        assert!(agent_message_display(notice).starts_with("Task notice\n\n"));
+        let later = "[Zeron task notice. Task \"T\" (chat abc123, claude-code) posted a later result on its own after its earlier result. Zeron sent this message automatically; the user did not type it.]
+
+<task_result_x chat=\"abc123\">
+done later
+</task_result_x>";
+        assert!(
+            agent_message_display(later).starts_with("Task notice\n\n"),
+            "later-result notices render like any task notice"
+        );
+        assert_eq!(agent_message_display("typed text"), "typed text");
+    }
 
     #[test]
     fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {

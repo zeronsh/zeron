@@ -90,6 +90,13 @@ struct ChatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SealParams {
+    delegator: String,
+    batch: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
@@ -140,11 +147,25 @@ struct SetHarnessUpdatePolicyParams {
 struct QueueCommandParams {
     chat_id: String,
     command: SessionCommandPayload,
+    /// Delegated-task arming: `notify: { batch }` records that this command's
+    /// turn owes the chat's delegator a notice; `seal: true` marks the batch
+    /// complete (single-call paths — batch tools seal separately).
+    #[serde(default)]
+    notify: Option<NotifyParams>,
     /// Queued attachments (bytes already committed locally as `pending://`
     /// refs) the engine delivers to a remote host AFTER the command is
     /// durably queued — never as a gate in front of it.
     #[serde(default)]
     transfers: Vec<crate::uploads::AttachmentTransfer>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotifyParams {
+    batch: String,
+    /// This arm is the batch's last member: release as soon as it settles.
+    #[serde(default)]
+    seal: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -530,6 +551,11 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// Marks the row as a delegated task: the engine resolves the
+        /// delegator, derives `delegation.depth` and the root `parentChatId`,
+        /// and applies the depth and sandbox caps.
+        #[serde(default)]
+        delegated_by: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -609,6 +635,7 @@ enum MutateParams {
 
 pub struct EngineRpc {
     sessions: SessionsEngine,
+    delegation: Option<crate::delegation::DelegationEngine>,
     doc_host: DocHost,
     workspace: WorkspaceHost,
     registry: std::sync::Arc<HarnessRegistry>,
@@ -654,6 +681,7 @@ impl EngineRpc {
         };
         Self {
             sessions,
+            delegation: None,
             doc_host,
             workspace,
             registry,
@@ -677,6 +705,13 @@ impl EngineRpc {
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
         self.previews = Some(previews);
+        self
+    }
+
+    /// Attach the delegation engine (`QueueCommand.notify` arming + settle
+    /// watcher backing it).
+    pub fn with_delegation(mut self, delegation: crate::delegation::DelegationEngine) -> Self {
+        self.delegation = Some(delegation);
         self
     }
 
@@ -1099,6 +1134,7 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                delegated_by,
             } => {
                 self.workspace
                     .create_chat_with_parent(
@@ -1108,6 +1144,7 @@ impl EngineRpc {
                         config,
                         cwd,
                         parent_chat_id,
+                        delegated_by,
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -1818,11 +1855,110 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
-                let command_id = self
+                let mut undo = None;
+                let mut armed_message_id: Option<String> = None;
+                // Serialize the whole install — arm, queue, disarm on
+                // failure — per chat, so two notify sends cannot
+                // interleave an arm between another's arm and rollback.
+                let _install = if p.notify.is_some() {
+                    Some(
+                        self.delegation
+                            .as_ref()
+                            .ok_or_else(|| RpcError::Failed("delegation engine not wired".into()))?
+                            .install_guard(&p.chat_id)
+                            .await,
+                    )
+                } else {
+                    None
+                };
+                if let Some(notify) = &p.notify {
+                    // Arm BEFORE the command lands so a fast turn cannot
+                    // settle before the engine knows a notice is owed.
+                    let message_id = match &p.command {
+                        SessionCommandPayload::Run { message_id, .. } => Some(message_id.clone()),
+                        SessionCommandPayload::Steer { message_id, .. } => message_id.clone(),
+                        _ => None,
+                    };
+                    let message_id =
+                        message_id
+                            .filter(|id| !id.trim().is_empty())
+                            .ok_or_else(|| {
+                                RpcError::Failed(
+                                    "notify requires a Run or Steer command with a message id"
+                                        .into(),
+                                )
+                            })?;
+                    if zeron_proto::entities::is_notice_id(&message_id) {
+                        return Err(RpcError::Failed(format!(
+                            "message id {message_id} is reserved for engine notices"
+                        )));
+                    }
+                    armed_message_id = Some(message_id.clone());
+                    undo = Some(
+                        self.delegation
+                            .as_ref()
+                            .ok_or_else(|| RpcError::Failed("delegation engine not wired".into()))?
+                            .arm(&p.chat_id, &notify.batch, &message_id)
+                            .map_err(|e| RpcError::Failed(e.to_string()))?,
+                    );
+                }
+                match self
                     .doc_host
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
+                {
+                    Ok(command_id) => {
+                        if let Some(delegation) = self.delegation.as_ref()
+                            && let Some(message_id) = armed_message_id
+                        {
+                            delegation.note_command_queued(&p.chat_id, &message_id);
+                        }
+                        if let Some(notify) = &p.notify
+                            && notify.seal
+                            && let Some(delegation) = self.delegation.as_ref()
+                            && let Ok(Some(chat)) = self.workspace.chat(&p.chat_id)
+                            && let Some(by) = chat.delegation.map(|d| d.by)
+                        {
+                            delegation.seal_batch(&by, &notify.batch).await;
+                        }
+                        RpcReply::value(&serde_json::json!({ "commandId": command_id }))
+                    }
+                    Err(err) => {
+                        // The command never queued — the armed entry would
+                        // wait on a turn that never runs and block the batch.
+                        if let (Some(delegation), Some(undo)) = (self.delegation.as_ref(), undo) {
+                            delegation.disarm(&p.chat_id, undo);
+                        }
+                        return Err(RpcError::Failed(err.to_string()));
+                    }
+                }
+            }
+            methods::SEAL_DELEGATION_BATCH => {
+                let p: SealParams = parse_params(params)?;
+                self.delegation
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("delegation engine not wired".into()))?
+                    .seal_batch(&p.delegator, &p.batch)
+                    .await;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::CANCEL_DELEGATED_TASK => {
+                let p: ChatParams = parse_params(params)?;
+                let result = self
+                    .delegation
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("delegation engine not wired".into()))?
+                    .cancel(&p.chat_id)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "commandId": command_id }))
+                RpcReply::value(&result)
+            }
+            methods::LIST_DELEGATIONS => {
+                let list = self
+                    .delegation
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("delegation engine not wired".into()))?
+                    .list();
+                RpcReply::value(&list)
             }
             methods::TAKE_PROJECT_ACTION_SETUP => {
                 let p: TakeProjectActionSetupParams = parse_params(params)?;
@@ -1916,6 +2052,7 @@ impl RpcService for EngineRpc {
                 chat.last_seen_at = None;
                 chat.harness_session_id = None;
                 chat.harness_session_cwd = None;
+                chat.delegation = None;
                 chat.room_gen = Some(2);
                 // Missing rows open on chat2. Persist history before publishing
                 // the registry row so a crash cannot leave a discoverable empty fork.

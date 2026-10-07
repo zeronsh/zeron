@@ -137,6 +137,19 @@ impl Harness for RecordingHarness {
 fn assemble(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness));
+    let core = EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    // Crash-revival dispatch waits for the IPC port — without one the wait
+    // stalls and revived runs carry no MCP server.
+    core.sessions.set_ipc_port(27656);
+    core
+}
+
+/// Assemble without the IPC port: the one test that exercises the wait
+/// itself supplies it late.
+fn assemble_no_ipc(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness));
     EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles")
 }
@@ -500,6 +513,7 @@ impl Harness for PersistentHarness {
                 let boundary = AgentEvent::Steered {
                     assistant_message_id: None,
                     next_assistant_message_id: steer.message_id.map(|id| format!("a-{id}")),
+                    internal: false,
                 };
                 if tx.send(Ok(boundary)).await.is_err() {
                     return;
@@ -979,5 +993,201 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
             "steer-turned-run must resume the stored harness session"
         );
     }
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_done_journal_recovers_the_unstamped_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-quit").unwrap();
+
+    // Manufacture the on-disk state a graceful quit can leave: the journal
+    // got its Done{interrupted}, but the app exited before the doc's
+    // assistant entry was stamped — so the entry reads `streaming` forever.
+    // A Done-ended journal is not "stale", so nothing else visits this chat.
+    {
+        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+        let doc = SessionDoc::init(CHAT).unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "msg-user-1".into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "long task".into(),
+            }],
+            created_at: 1,
+            device_id: "dev-quit".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "msg-assistant-1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "partial…".into(),
+            }],
+            created_at: 2,
+            device_id: "dev-quit".into(),
+            status: Some(MessageStatus::Streaming),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        store
+            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+            .unwrap();
+
+        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "mock-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-quit".into(),
+                    assistant_message_id: "msg-assistant-1".into(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: Some("This operation was aborted".into()),
+                    session_id: None,
+                },
+            )
+            .unwrap();
+    }
+
+    let core = assemble(
+        &dir,
+        RecordingHarness {
+            requests: Default::default(),
+            session_id: "hs-after-quit".into(),
+            fail_starts: Default::default(),
+        },
+    );
+    // Boot reconciliation stamped the quit-raced entry aborted, as the run's
+    // own Done would have.
+    let entries = entries_now(&core);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries[1].status,
+        Some(MessageStatus::Aborted),
+        "a done journal's trailing streaming entry must be stamped at boot"
+    );
+    core.shutdown().await;
+}
+
+/// A crash-revival re-dispatch fires during `EngineCore::assemble` — before
+/// the embedder records its IPC port — and must wait for it, or the revived
+/// run starts without the zeron MCP server.
+#[tokio::test]
+async fn a_crash_revived_run_waits_for_ipc_and_carries_zeron_mcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-mcp").unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // A fresh crashed turn: streaming doc entry, journal without Done — the
+    // revival path re-dispatches it during assembly.
+    {
+        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+        let doc = SessionDoc::init(CHAT).unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "msg-user-1".into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "long task".into(),
+            }],
+            created_at: now - 1000,
+            device_id: "dev-mcp".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "msg-assistant-1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "partial…".into(),
+            }],
+            created_at: now - 900,
+            device_id: "dev-mcp".into(),
+            status: Some(MessageStatus::Streaming),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        store
+            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+            .unwrap();
+
+        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "mock-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-crash".into(),
+                    assistant_message_id: "msg-assistant-1".into(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::TextDelta {
+                    text: "partial…".into(),
+                },
+            )
+            .unwrap();
+    }
+
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble_no_ipc(
+        &dir,
+        RecordingHarness {
+            requests: requests.clone(),
+            session_id: "hs-revived".into(),
+            fail_starts: Default::default(),
+        },
+    );
+    // The revival dispatch is spawned inside assemble; the embedder binds
+    // its IPC listener only now — the dispatch must wait for this. The
+    // delay is what makes the ordering bug reproducible: without the wait
+    // the spawn has already dispatched with no port.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    core.sessions.set_ipc_port(27656);
+    wait_for(|| !requests.lock().unwrap().is_empty(), "revived run").await;
+    let mcp = requests.lock().unwrap()[0]
+        .mcp
+        .clone()
+        .expect("the revived run carries the zeron MCP server");
+    assert_eq!(mcp.name, "zeron");
+    assert!(
+        mcp.env
+            .iter()
+            .any(|(k, v)| k == "ZERON_CHAT_ID" && v == CHAT),
+        "mcp env: {:?}",
+        mcp.env
+    );
     core.shutdown().await;
 }

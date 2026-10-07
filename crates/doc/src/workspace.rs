@@ -722,6 +722,8 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     parent_chat_id: Option<String>,
+    #[serde(default)]
+    delegation: Option<zeron_proto::Delegation>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -763,6 +765,7 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            delegation: raw.delegation,
         }
     }
 }
@@ -868,6 +871,7 @@ mod tests {
             created_at: ts(2_000),
             harness_session_id: None,
             harness_session_cwd: None,
+            delegation: None,
             parent_chat_id: Some("parent-chat".into()),
             space_id: None,
             last_seen_at: None,

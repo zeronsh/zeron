@@ -4108,7 +4108,11 @@ fn remove_if_exists(file: &Path) -> Result<(), EngineError> {
 /// is fsynced, then renamed over `file` — replacing a symlink there rather
 /// than writing through it. A crash leaves at worst an owner-only temp file
 /// and never a torn target.
-fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), EngineError> {
+pub(crate) fn write_file_atomic(
+    file: &Path,
+    bytes: &[u8],
+    secret: bool,
+) -> Result<(), EngineError> {
     stage_file_atomic(file, bytes, secret)?
         .persist(file)
         .map_err(|e| EngineError::from(e.error))?;

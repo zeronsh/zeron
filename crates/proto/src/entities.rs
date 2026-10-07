@@ -240,6 +240,134 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// Set when another chat's agent created this chat through the Zeron MCP
+    /// server. Absent on user chats and on forks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Delegation>,
+}
+
+/// Deepest delegation chain: a root's tasks (depth 1) may delegate once
+/// more (depth 2). Shared with the MCP layer, which surfaces it as
+/// `canDelegate`/`maxDepth`; the engine stays the authority.
+pub const MAX_DELEGATION_DEPTH: u8 = 2;
+
+/// The engine's task notices are written with `notice-*` ids (settle,
+/// progress, attention, later-result). A reserved namespace: callers may
+/// never claim one, and a scan for a chat's last real user turn must skip
+/// them.
+pub fn is_notice_id(id: &str) -> bool {
+    id.starts_with("notice-")
+}
+
+/// A `ListDelegations` row — the shared shape MCP surfaces in
+/// `task_status`/`task_cancel` replies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationEntry {
+    pub chat_id: String,
+    pub delegator: String,
+    pub batch: String,
+    /// `armed` while the task owes a notice, `settled` once it has one.
+    pub notice: String,
+    /// The delegator's message this row tracks — turn identity for the
+    /// outcome: a later user message means a different turn.
+    #[serde(default)]
+    pub message_id: String,
+    /// The settled outcome's label ("completed" | "errored" | "interrupted").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
+/// The last terminal outcome a chat settled — retained by the ledger after
+/// the armed row retires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationOutcome {
+    pub message_id: String,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub at_ms: i64,
+}
+
+/// `ListDelegations`: armed rows plus the retained outcomes map.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationList {
+    pub tasks: Vec<DelegationEntry>,
+    #[serde(default)]
+    pub outcomes: std::collections::BTreeMap<String, DelegationOutcome>,
+}
+
+/// Title/request-id text that lands inside a notice header or a delegated
+/// task's prompt line: no line breaks or markup metacharacters, 80 chars.
+/// Shared by the engine (notice headers) and the MCP layer (delegated-task
+/// prompt metadata).
+pub fn sanitize_label(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !matches!(c, '\n' | '\r' | '<' | '>' | '[' | ']' | '"'))
+        .take(80)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Delegation {
+    /// The chat whose agent delegated this task. Notices go here.
+    pub by: String,
+    /// 1 for a task delegated by a top-level chat, 2 for a task delegated by
+    /// that task, and so on.
+    pub depth: u8,
+}
+
+impl Chat {
+    /// The rule `createChat {delegatedBy}` enforces, with `self` as the
+    /// delegator: a plain side chat can't create, depth caps at
+    /// [`MAX_DELEGATION_DEPTH`], and a task may not delegate above its own
+    /// sandbox level. The engine is the authority; the MCP layer pre-checks
+    /// through this same fn so its tests and previews can't drift.
+    /// Returns the rejection text, `None` when the create is allowed.
+    pub fn delegation_create_error(
+        &self,
+        asked_sandbox: crate::agent::SandboxLevel,
+    ) -> Option<String> {
+        delegation_create_error(
+            self.parent_chat_id.is_some(),
+            self.delegation.as_ref(),
+            crate::agent::SandboxLevel::for_row(self.config.as_ref()),
+            asked_sandbox,
+        )
+    }
+}
+
+/// [`Chat::delegation_create_error`] without a row — for callers (test
+/// fakes, previews) that hold the facts but not a decoded `Chat`.
+pub fn delegation_create_error(
+    has_parent: bool,
+    delegation: Option<&Delegation>,
+    own_sandbox: crate::agent::SandboxLevel,
+    asked_sandbox: crate::agent::SandboxLevel,
+) -> Option<String> {
+    if has_parent && delegation.is_none() {
+        return Some(
+            "Side chats cannot create chats. Ask your parent chat to create another side chat."
+                .into(),
+        );
+    }
+    let depth = delegation.map(|d| d.depth).unwrap_or(0).saturating_add(1);
+    if depth > MAX_DELEGATION_DEPTH {
+        return Some(format!(
+            "Delegation depth limit reached ({MAX_DELEGATION_DEPTH}). Do this work yourself, or return the subtasks to your delegator in your final message."
+        ));
+    }
+    if delegation.is_some() && asked_sandbox > own_sandbox {
+        return Some(format!(
+            "A delegated task cannot create a task with a higher sandbox level than its own. This task is {} and the request asked for {}.",
+            own_sandbox.label(),
+            asked_sandbox.label(),
+        ));
+    }
+    None
 }
 
 impl Chat {
