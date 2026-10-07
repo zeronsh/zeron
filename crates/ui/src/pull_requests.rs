@@ -293,6 +293,7 @@ pub struct PullRequestsPage {
     device_menu: popover::Popup<()>,
     sort_menu: popover::Popup<()>,
     repository_menu: popover::Popup<()>,
+    repository_scroll: widgets::PageScroll,
     /// Menu triggers, so a menu closed from the keyboard hands focus back.
     repository_focus: gpui::FocusHandle,
     sort_focus: gpui::FocusHandle,
@@ -412,6 +413,7 @@ impl PullRequestsPage {
             device_menu: popover::Popup::default(),
             sort_menu: popover::Popup::default(),
             repository_menu: popover::Popup::default(),
+            repository_scroll: widgets::PageScroll::default(),
             repository_focus: cx.focus_handle().tab_stop(true),
             sort_focus: cx.focus_handle().tab_stop(true),
             device_focus: cx.focus_handle().tab_stop(true),
@@ -907,7 +909,7 @@ impl PullRequestsPage {
     }
 
     fn render_repository_menu(
-        &self,
+        &mut self,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
@@ -1027,6 +1029,7 @@ impl PullRequestsPage {
                         page.close_repository_menu(cx);
                     } else {
                         page.repository_error = None;
+                        page.repository_scroll.reset();
                         page.repository_menu.open(());
                         window.focus(&page.repository_input.read(cx).focus_handle(cx), cx);
                     }
@@ -1174,15 +1177,19 @@ impl PullRequestsPage {
                                     .flex()
                                     .flex_col()
                                     .gap(px(2.0))
-                                    .child(div().min_w_0().truncate().child(primary))
-                                    .child(
+                                    .child(crate::shell::sidebar_faded_label(
+                                        format!("pr-project-name-{}", space.id).into(),
+                                        false,
+                                        primary,
+                                    ))
+                                    .child(crate::shell::sidebar_faded_label(
+                                        format!("pr-project-path-{}", space.id).into(),
+                                        false,
                                         div()
-                                            .min_w_0()
-                                            .truncate()
                                             .text_size(crate::typography::ui_rems(11.0))
                                             .text_color(theme.text_muted)
                                             .child(secondary),
-                                    ),
+                                    )),
                             )
                             .child(
                                 div()
@@ -1247,7 +1254,11 @@ impl PullRequestsPage {
                                     .flex_none()
                                     .text_color(theme.text_muted),
                             )
-                            .child(div().flex_1().min_w_0().truncate().child(repo.clone()))
+                            .child(crate::shell::sidebar_faded_label(
+                                format!("pr-recent-label-{repo}").into(),
+                                true,
+                                repo.clone(),
+                            ))
                             .child(div().size(px(16.0)).flex_none().when(selected, |el| {
                                 el.child(
                                     icon(icons::CHECK)
@@ -1266,6 +1277,13 @@ impl PullRequestsPage {
                 }
                 options.push(group.into_any_element());
             }
+            let scrollbar = widgets::rail(
+                &mut self.repository_scroll,
+                "pr-repository-scrollbar",
+                theme,
+                cx,
+                |page| &mut page.repository_scroll,
+            );
             let menu = popover::popover_card(theme)
                 .id("pr-repository-card")
                 .debug_selector(|| "pr-repository-card".into())
@@ -1281,7 +1299,6 @@ impl PullRequestsPage {
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
-                        .child(repository_menu_label(theme, "Open repository"))
                         .child(
                             div()
                                 .flex()
@@ -1315,16 +1332,28 @@ impl PullRequestsPage {
                 )
                 .when(!options.is_empty(), |el| {
                     el.child(
-                        div()
-                            .id("pr-repository-options")
-                            .min_w_0()
-                            .max_h(px((f32::from(window.viewport_size().height) - 240.0)
-                                .clamp(96.0, 360.0)))
-                            .overflow_y_scroll()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.0))
-                            .children(options),
+                        popover::menu_scroll_host("pr-repository-list-host")
+                            .on_hover(cx.listener(|page, hovered: &bool, _, cx| {
+                                if page.repository_scroll.set_list_hovered(*hovered) {
+                                    cx.notify();
+                                }
+                            }))
+                            .child(popover::faded_menu_list(
+                                &self.repository_scroll.scroll,
+                                popover::menu_scroll_list(
+                                    "pr-repository-options",
+                                    &self.repository_scroll.scroll,
+                                )
+                                .debug_selector(|| "pr-repository-options".into())
+                                .min_w_0()
+                                .max_h(px((f32::from(window.viewport_size().height) - 240.0)
+                                    .clamp(96.0, 360.0)))
+                                .flex()
+                                .flex_col()
+                                .gap(px(12.0))
+                                .children(options),
+                            ))
+                            .children(scrollbar),
                     )
                 });
             trigger = trigger.child(popover::anchored_menu_below_end(
@@ -3961,6 +3990,35 @@ mod tests {
                 .update(cx, |input, cx| input.set_text("owner/typed", cx))
         });
         page.read_with(cx, |page, _| assert!(page.repository_error.is_none()));
+        // The production menu tracks overflow independently of the board.
+        page.update(cx, |page, cx| {
+            page.state.update(cx, |state, cx| {
+                state.spaces = (0..30)
+                    .map(|index| space(&format!("overflow-{index:02}"), "local", true, 1))
+                    .collect();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let scroll = page.read_with(cx, |page, _| page.repository_scroll.scroll.clone());
+        assert!(scroll.max_offset().y > px(0.0));
+        let input = cx.debug_bounds("pr-repository-load").unwrap();
+        scroll.set_offset(gpui::point(px(0.0), -scroll.max_offset().y));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert_eq!(
+            cx.debug_bounds("pr-repository-load").unwrap(),
+            input,
+            "the input stays above the scroll region"
+        );
+        page.update(cx, |page, cx| {
+            page.state.update(cx, |state, cx| {
+                state.spaces = vec![space("next", "local", true, 1)];
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(scroll.max_offset().y, px(0.0));
+        assert_eq!(scroll.offset().y, px(0.0));
     }
 
     #[gpui::test]
