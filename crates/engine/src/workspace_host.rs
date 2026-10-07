@@ -157,6 +157,7 @@ struct WorkspaceHostInner {
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
     chats_tx: watch::Sender<Vec<Chat>>,
+    chat_deletions_tx: watch::Sender<Vec<String>>,
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
@@ -277,6 +278,7 @@ impl WorkspaceHost {
 
         let state = doc.read_all()?;
         let (chats_tx, _) = watch::channel(state.chats);
+        let (chat_deletions_tx, _) = watch::channel(doc.deleted_chat_ids());
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
@@ -301,6 +303,7 @@ impl WorkspaceHost {
                 config,
                 reg: Arc::new(Mutex::new(doc)),
                 chats_tx,
+                chat_deletions_tx,
                 devices_tx,
                 sessions_tx,
                 spaces_tx,
@@ -636,6 +639,14 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.chat(chat_id))?)
     }
 
+    pub(crate) fn watch_chat_deletions(&self) -> watch::Receiver<Vec<String>> {
+        self.inner.chat_deletions_tx.subscribe()
+    }
+
+    pub(crate) fn chat_deleted(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.chat_deleted(chat_id))
+    }
+
     /// The space row as currently known (overlay view).
     pub fn space(&self, space_id: &str) -> Result<Option<Space>, EngineError> {
         Ok(self.read(|doc| doc.space(space_id))?)
@@ -743,7 +754,7 @@ impl WorkspaceHost {
     pub fn is_host(&self, chat_id: &str) -> bool {
         match self.read(|doc| doc.chat(chat_id)) {
             Ok(Some(chat)) => chat.device_id == self.inner.config.device_id,
-            Ok(None) => true,
+            Ok(None) => !self.chat_deleted(chat_id),
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "registry chat read failed");
                 true
@@ -764,6 +775,9 @@ impl WorkspaceHost {
     /// is the composer's projectless target; preserve it without minting a
     /// project when the run outruns createChat on the registry channel.
     pub fn claim_chat(&self, chat_id: &str, cwd: Option<&str>) -> Result<(), EngineError> {
+        if self.chat_deleted(chat_id) {
+            return Err(EngineError::Other("chat has been deleted".into()));
+        }
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(());
         }
@@ -772,8 +786,13 @@ impl WorkspaceHost {
             Some(cwd) => Some(self.space_for_path(cwd)?),
             None => None,
         };
-        self.mutate(|doc| doc.claim_chat(chat_id, cwd, space_id.as_deref(), Utc::now()));
-        Ok(())
+        self.mutate(|doc| {
+            if doc.chat_deleted(chat_id) {
+                return Err(EngineError::Other("chat has been deleted".into()));
+            }
+            doc.claim_chat(chat_id, cwd, space_id.as_deref(), Utc::now());
+            Ok(())
+        })
     }
 
     /// An own-device space whose path matches, else one at the path's parent
@@ -874,7 +893,13 @@ impl WorkspaceHost {
     /// Session-status row upsert (sessions engine transitions land here too, in
     /// addition to the local watch channel).
     pub fn record_session(&self, session: &Session) {
-        if let Err(err) = self.mutate(|doc| doc.upsert_session(session)) {
+        if let Err(err) = self.mutate(|doc| {
+            // Settlement can race a local or imported registry tombstone.
+            if doc.chat_deleted(&session.chat_id) {
+                return Ok(());
+            }
+            doc.upsert_session(session)
+        }) {
             tracing::warn!(chat = %session.chat_id, error = %err, "registry session write failed");
         }
     }
@@ -1196,6 +1221,9 @@ impl WorkspaceHostInner {
                 Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
             }
             self.publish_sidebar_preferences(&doc, registry_synced);
+            // Publish under the registry lock so a concurrent writer cannot
+            // restore an older tombstone set after a newer publication.
+            publish_if_changed(&self.chat_deletions_tx, doc.deleted_chat_ids());
             doc.read_all()
         };
         match snapshot {
@@ -1735,12 +1763,14 @@ mod tests {
         )
         .unwrap();
         let chats = host.watch_chats();
+        let mut deletions = host.watch_chat_deletions();
         let sessions = host.watch_session_rows();
         let mut spaces = host.watch_spaces();
         let devices = host.watch_devices();
 
         host.inner.publish();
         assert!(!chats.has_changed().unwrap());
+        assert!(!deletions.has_changed().unwrap());
         assert!(!sessions.has_changed().unwrap());
         assert!(!spaces.has_changed().unwrap());
         assert!(!devices.has_changed().unwrap());
@@ -1752,6 +1782,21 @@ mod tests {
         assert!(!chats.has_changed().unwrap());
         assert!(!sessions.has_changed().unwrap());
         assert!(!spaces.has_changed().unwrap());
+
+        assert!(!deletions.has_changed().unwrap());
+        host.delete_chat("unseen").unwrap();
+        host.inner.publish();
+        assert!(
+            !chats.has_changed().unwrap(),
+            "an unseen delete leaves the live list unchanged"
+        );
+        assert!(deletions.has_changed().unwrap());
+        assert_eq!(*deletions.borrow_and_update(), vec!["unseen"]);
+        host.inner.publish();
+        assert!(
+            !deletions.has_changed().unwrap(),
+            "unchanged tombstones stay quiet"
+        );
 
         host.create_space("space", "test-device", "/project", None, false)
             .unwrap();

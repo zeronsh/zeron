@@ -16,6 +16,7 @@
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; the daily alarm does the nightly R2 backup only.
  */
+import chat2Limits from "../../crates/proto/chat2-limits.json";
 import { createBlobStore, type BlobStore } from "./blobs";
 import {
   appendRow,
@@ -40,7 +41,8 @@ const MAX_FRAME_BYTES = MAX_ROW_BYTES + 8192;
 const MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
 /** Existing long-running sessions exceed 16 MiB. Keep uploads bounded,
  * but allow their checkpoints to advance instead of stranding the row log. */
-export const MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024;
+// Same source generates zeron_proto::chat2_limits for Rust clients.
+export const MAX_CHECKPOINT_BYTES = chat2Limits.maxCheckpointBytes;
 /** Presence beats older than this are swept before relay/stats. */
 const PRESENCE_TTL_MS = 30_000;
 /** Per-device push quota, rolling window (in-memory; resets on hibernation —

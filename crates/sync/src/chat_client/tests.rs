@@ -1672,7 +1672,91 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
 }
 
 struct JournalSink(crate::DocsStore, RecordingSink);
+#[tokio::test(start_paused = true)]
+async fn reopened_disk_backlog_has_a_bounded_window_and_drains_all_http_pages() {
+    struct ImmediateHttp(Arc<Mutex<Vec<String>>>, Arc<tokio::sync::Semaphore>);
+    impl ChatTransport for ImmediateHttp {
+        fn push(&self, id: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            let attempts = self.0.clone();
+            let gate = self.1.clone();
+            Box::pin(async move {
+                gate.acquire()
+                    .await
+                    .map_err(|_| SyncError::Closed)?
+                    .forget();
+                lock(&attempts).push(id.clone());
+                Ok(serde_json::json!({"batchId":id,"seq":0}).to_string())
+            })
+        }
+        fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            Box::pin(async { Err(SyncError::Closed) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = crate::DocsStore::open(dir.path()).unwrap();
+        for i in 0..100 {
+            store
+                .enqueue_chat_update("impaired", &format!("batch-{i}"), &vec![b'x'; 64 * 1024])
+                .unwrap();
+        }
+    }
+    let sink = Arc::new(JournalSink(
+        crate::DocsStore::open(dir.path()).unwrap(),
+        RecordingSink::default(),
+    ));
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        connector(vec![]),
+        sink.clone(),
+        fetch,
+        "local",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(ImmediateHttp(attempts.clone(), gate.clone()))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.stats().pending_pushes, 100);
+    assert!(
+        lock(&client.shared)
+            .pending
+            .iter()
+            .map(|p| p.bytes.len())
+            .sum::<usize>()
+            <= PENDING_WINDOW_BYTES
+    );
+    gate.add_permits(100);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while client.stats().pending_pushes != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        *lock(&attempts),
+        (0..100).map(|i| format!("batch-{i}")).collect::<Vec<_>>()
+    );
+    assert!(!sink.0.has_pending_chat_updates("impaired").unwrap());
+    client.shutdown().await;
+}
+
 impl ChatDocSink for JournalSink {
+    fn pending_window(&self) -> Result<Option<Vec<(String, Vec<u8>)>>, String> {
+        self.0
+            .pending_chat_updates_window("impaired", PENDING_WINDOW_BATCHES, PENDING_WINDOW_BYTES)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+    fn pending_update_count(&self) -> Result<Option<u64>, String> {
+        self.0
+            .pending_chat_update_count("impaired")
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
     fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         self.0
             .pending_chat_updates("impaired")
@@ -2443,5 +2527,131 @@ async fn http_repairs_socket_gap_without_clearing_a_newer_gap() {
     assert!(client.catch_up_completed(ticket));
     assert!(client.delivery_live(), "HTTP alone must restore delivery");
     assert_eq!(client.stats().cursor, 4);
+    client.shutdown().await;
+}
+
+struct CountedJournalSink {
+    journal: JournalSink,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl ChatDocSink for CountedJournalSink {
+    fn pending_window(&self) -> Result<Option<Vec<(String, Vec<u8>)>>, String> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.journal.pending_window()
+    }
+    fn persist_update(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.journal.persist_update(id, bytes)
+    }
+    fn acknowledge_update(&self, id: &str) -> Result<(), String> {
+        self.journal.acknowledge_update(id)
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.journal.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.journal.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, bytes: &[u8]) -> bool {
+        self.journal.contains_frontier(bytes)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.journal.advance_cursor(cursor)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unrelated_frames_do_not_reload_empty_or_partial_durable_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(CountedJournalSink {
+        journal: JournalSink(
+            crate::DocsStore::open(dir.path()).unwrap(),
+            RecordingSink::default(),
+        ),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (pipe, mut end) = pipe_pair();
+    let server = tokio::spawn(async move {
+        serve_join(&mut end, serde_json::json!({"headSeq":0,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}), &[], vec![], false).await;
+        end
+    });
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let mut end = server.await.unwrap();
+    for seq in [1, 2] {
+        if seq == 2 {
+            client.enqueue_batch("local".into(), b"local bytes".to_vec());
+            let push = expect_kind(&mut end, frame_type::PUSH).await;
+            assert_eq!(push.header["batchId"], "local");
+        }
+        let before = sink.reads.load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..100 {
+            send(
+                &end,
+                frame_type::PRESENCE,
+                serde_json::json!({"device":"other","at":1}),
+                &[],
+            )
+            .await;
+        }
+        send(
+            &end,
+            frame_type::ROW,
+            serde_json::json!({"seq":seq,"device":"other","batchId":format!("remote-{seq}")}),
+            b"remote",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.stats().cursor < seq {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sink.reads.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "incoming rows/presence must not refill an unchanged outbox"
+        );
+    }
+    send(
+        &end,
+        frame_type::ACK,
+        serde_json::json!({"batchId":"local","seq":3}),
+        &[],
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while client.stats().cursor < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        sink.journal
+            .0
+            .pending_chat_updates("impaired")
+            .unwrap()
+            .is_empty()
+    );
+    sink.journal
+        .0
+        .enqueue_chat_update("impaired", "external", b"outside actor")
+        .unwrap();
+    client.flush_pending();
+    assert_eq!(
+        expect_kind(&mut end, frame_type::PUSH).await.header["batchId"],
+        "external"
+    );
     client.shutdown().await;
 }

@@ -653,7 +653,7 @@ impl RegistryDoc {
     // ── overlay reads ───────────────────────────────────────────────────────
 
     /// The row as this device should display it: authoritative + pending ops.
-    fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+    fn overlay_row_including_deleted(&self, kind: &str, id: &str) -> Option<RegistryRow> {
         let mut row = self
             .authoritative
             .get(kind)
@@ -669,7 +669,12 @@ impl RegistryDoc {
                 }
             }
         }
-        row.filter(|r| !r.deleted)
+        row
+    }
+
+    fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+        self.overlay_row_including_deleted(kind, id)
+            .filter(|r| !r.deleted)
     }
 
     /// All live rows of `kind`, overlay applied.
@@ -936,6 +941,11 @@ impl RegistryDoc {
         space_id: Option<&str>,
         created_at: DateTime<Utc>,
     ) {
+        // Host activity is not a user request to recreate a deleted chat.
+        // This check runs under the registry mutation lock, after any racing delete.
+        if self.chat_deleted(chat_id) {
+            return;
+        }
         let mut set = fields([
             ("id", json!(chat_id)),
             ("deviceId", json!(self.device_id())),
@@ -967,6 +977,37 @@ impl RegistryDoc {
             fields([("lastSeenAt", json!(at.timestamp_millis()))]),
         );
         Ok(true)
+    }
+
+    /// An explicit tombstone, distinct from a row not yet received on this device.
+    pub fn chat_deleted(&self, chat_id: &str) -> bool {
+        self.overlay_row_including_deleted(KIND_CHATS, chat_id)
+            .is_some_and(|row| row.deleted)
+    }
+
+    /// Sorted explicit tombstones, including pending deletes of unseen rows.
+    pub fn deleted_chat_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .authoritative
+            .get(KIND_CHATS)
+            .into_iter()
+            .flat_map(|rows| rows.iter())
+            .filter(|(_, row)| row.deleted)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for batch in &self.pending {
+            ids.extend(
+                batch
+                    .ops
+                    .iter()
+                    .filter(|op| op.kind == KIND_CHATS && op.op == OpKind::Delete)
+                    .map(|op| op.id.clone()),
+            );
+        }
+        ids.sort();
+        ids.dedup();
+        ids.retain(|id| self.chat_deleted(id));
+        ids
     }
 
     pub fn chat(&self, chat_id: &str) -> Result<Option<Chat>, DocError> {

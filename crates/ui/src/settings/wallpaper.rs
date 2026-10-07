@@ -67,6 +67,7 @@ fn choose(
 }
 
 const LOOKAHEAD: usize = 3;
+const PRELOAD_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 struct QueueKey {
@@ -190,10 +191,22 @@ fn synchronize(cx: &mut App) {
 /// Called on render as well as after a switch: warms on launch and invalidates
 /// when the folder, manual background, effect, or light/dark appearance changes.
 pub fn preload(cx: &mut App) {
+    preload_with_request(cx, false);
+}
+
+fn preload_with_request(cx: &mut App, requested: bool) {
     synchronize(cx);
     let queue = cx.global_mut::<PreloadQueue>();
     let key = queue.key.as_ref().unwrap().clone();
+    let bytes: usize = queue
+        .ready
+        .iter()
+        .map(|candidate| candidate.artwork.retained_bytes())
+        .sum();
     if key.folder.is_none()
+        || (!requested && key.background.is_none())
+        || (!queue.ready.is_empty()
+            && bytes + crate::new_thread_background_effects::MAX_PRELOADED_BYTES > PRELOAD_BYTES)
         || queue.loading
         || queue.error.is_some()
         || queue.ready.len() >= LOOKAHEAD
@@ -222,7 +235,7 @@ pub fn preload(cx: &mut App) {
                 Ok(candidate) => queue.ready.push_back(candidate),
                 Err(error) => queue.error = Some(error),
             }
-            preload(cx);
+            preload_with_request(cx, requested);
         });
     })
     .detach();
@@ -250,7 +263,7 @@ pub fn randomize(cx: &mut App) -> Task<Result<(), String>> {
     // A user request retries a failed speculative preload (e.g. a folder that
     // has since been restored), but background rendering never spins on errors.
     cx.global_mut::<PreloadQueue>().error = None;
-    preload(cx);
+    preload_with_request(cx, true);
     let folder = super::current(cx).wallpaper_folder;
     let generation = cx.global::<PreloadQueue>().generation;
     if let Some(result) = take_ready(cx) {
@@ -265,7 +278,7 @@ pub fn randomize(cx: &mut App) -> Task<Result<(), String>> {
                 if super::current(cx).wallpaper_folder != folder {
                     return Some(Ok(()));
                 }
-                preload(cx);
+                preload_with_request(cx, true);
                 if cx.global::<PreloadQueue>().generation != generation {
                     return Some(Ok(()));
                 }
@@ -310,7 +323,7 @@ mod tests {
                 ..Default::default()
             };
             super::super::init(settings, dir.path().join("data"), cx);
-            preload(cx);
+            preload_with_request(cx, true);
         });
         cx.run_until_parked();
         cx.update(|cx| {
@@ -359,6 +372,43 @@ mod tests {
             }
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn removing_background_releases_preloads_without_restarting_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = wallpaper_folder(dir.path());
+        cx.update(|cx| {
+            super::super::init(
+                super::super::UiSettings {
+                    wallpaper_folder: Some(folder.clone()),
+                    ..Default::default()
+                },
+                dir.path().join("data"),
+                cx,
+            );
+            preload(cx);
+            assert!(!cx.global::<PreloadQueue>().loading);
+            // Explicit shuffle remains available even with no installed image.
+            preload_with_request(cx, true);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(cx.global::<PreloadQueue>().ready.len(), LOOKAHEAD);
+            randomize(cx).detach();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            super::super::remove_new_thread_composer_background(cx).unwrap();
+            preload(cx);
+            assert!(cx.global::<PreloadQueue>().ready.is_empty());
+            assert!(!cx.global::<PreloadQueue>().loading);
+            assert!(super::super::current(cx).wallpaper_folder.is_some());
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert!(cx.global::<PreloadQueue>().ready.is_empty()));
     }
 
     #[gpui::test]
@@ -464,12 +514,12 @@ mod tests {
                 &data,
                 cx,
             );
-            preload(cx);
+            preload_with_request(cx, true);
             // Invalidate before the first background job can publish.
             super::super::update(super::super::SavePolicy::Immediate, cx, |settings| {
                 settings.wallpaper_folder = None
             });
-            preload(cx);
+            preload_with_request(cx, true);
         });
         cx.run_until_parked();
         cx.update(|cx| {
@@ -477,7 +527,7 @@ mod tests {
             super::super::update(super::super::SavePolicy::Immediate, cx, |settings| {
                 settings.wallpaper_folder = Some(folder)
             });
-            preload(cx);
+            preload_with_request(cx, true);
         });
         cx.run_until_parked();
         cx.update(|cx| {

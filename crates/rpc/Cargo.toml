@@ -9,6 +9,7 @@ publish.workspace = true
 zeron-proto.workspace = true
 zeron-sync.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tokio-tungstenite.workspace = true
 futures.workspace = true
 serde.workspace = true

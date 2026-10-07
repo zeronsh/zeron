@@ -3,6 +3,11 @@
 //! Ported from zeron's `packages/control/src/wire.ts` + `packages/harness/src/types.ts`.
 //! Context occupancy is replicated per chat; billing `Usage` remains a harness passthrough.
 
+/// Generated from chat2-limits.json, also consumed directly by the edge.
+pub mod chat2_limits {
+    include!(concat!(env!("OUT_DIR"), "/chat2_limits.rs"));
+}
+
 pub mod agent;
 pub mod attachment_mentions;
 pub mod entities;

@@ -1,7 +1,7 @@
 //! Safe resolution of agent-authored Markdown links into workspace files.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 
 const FILE_MENTION_SCHEME: &str = "zeron-file:";
@@ -109,14 +109,27 @@ pub(crate) enum PathKind {
     Missing,
 }
 
-/// Memoized path probes behind inline-code file links: one `metadata` call
-/// per path per link-roots revision, however many spans and frames ask.
+const PROBE_ENTRIES: usize = 4096;
+const PROBE_BYTES: usize = 1024 * 1024;
+
+/// Bounded memoized metadata. Old probes may be repeated after eviction;
+/// evicting a memo never changes the filesystem resolution contract.
 #[derive(Default)]
 pub(crate) struct PathProbes {
     kinds: HashMap<PathBuf, PathKind>,
+    order: VecDeque<PathBuf>,
+    bytes: usize,
 }
 
 impl PathProbes {
+    fn entry_bytes(path: &Path) -> usize {
+        // The map and FIFO each own a path. Include fixed entry storage as
+        // well as OS-string bytes (not Unicode character counts).
+        2 * path.as_os_str().as_encoded_bytes().len()
+            + std::mem::size_of::<(PathBuf, PathKind)>()
+            + std::mem::size_of::<PathBuf>()
+    }
+
     pub(crate) fn kind(&mut self, path: &Path) -> PathKind {
         if let Some(kind) = self.kinds.get(path) {
             return *kind;
@@ -126,6 +139,19 @@ impl PathProbes {
             Ok(metadata) if metadata.is_dir() => PathKind::Directory,
             _ => PathKind::Missing,
         };
+        let bytes = Self::entry_bytes(path);
+        if bytes > PROBE_BYTES {
+            return kind;
+        }
+        while self.kinds.len() >= PROBE_ENTRIES || self.bytes + bytes > PROBE_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.bytes -= Self::entry_bytes(&oldest);
+            self.kinds.remove(&oldest);
+        }
+        self.bytes += bytes;
+        self.order.push_back(path.to_path_buf());
         self.kinds.insert(path.to_path_buf(), kind);
         kind
     }
@@ -194,9 +220,8 @@ pub(crate) fn resolve_inline_code_path(
         // target the link grammar rejects, turning the span into a dead link,
         // so it keeps its inline-code look instead.
         let path = path.to_string_lossy();
-        path.starts_with('/').then(|| {
-            InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path)))
-        })
+        path.starts_with('/')
+            .then(|| InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path))))
     };
     if let Some(rest) = decoded.strip_prefix("~/") {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
@@ -652,6 +677,25 @@ fn percent_encode_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_probe_entries_and_bytes_are_bounded_and_evicted_paths_are_rechecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("was-missing");
+        let mut probes = PathProbes::default();
+        assert_eq!(probes.kind(&first), PathKind::Missing);
+        for i in 0..PROBE_ENTRIES * 2 {
+            probes.kind(&dir.path().join(format!("{i}-{}", "x".repeat(200))));
+            assert!(probes.bytes <= PROBE_BYTES);
+            assert!(probes.kinds.len() <= PROBE_ENTRIES);
+        }
+        assert!(!probes.kinds.contains_key(&first));
+        std::fs::write(&first, b"now exists").unwrap();
+        assert_eq!(probes.kind(&first), PathKind::File);
+        let huge = PathBuf::from("x".repeat(PROBE_BYTES));
+        assert_eq!(probes.kind(&huge), PathKind::Missing);
+        assert!(!probes.kinds.contains_key(&huge));
+    }
 
     fn link(path: &str, line: Option<u32>, column: Option<u32>) -> WorkspaceFileLink {
         WorkspaceFileLink {

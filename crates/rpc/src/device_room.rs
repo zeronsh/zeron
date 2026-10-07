@@ -433,10 +433,8 @@ fn jitter() -> Duration {
 /// One per-client virtual connection: `in_tx` feeds the ndjson dispatch loop
 /// ([`serve_connection`]); its replies are pumped back as `{to: connId}` frames.
 ///
-/// Teardown is by channel closure, NOT task abort: dropping `in_tx` ends the dispatch
-/// loop, which aborts its in-flight request tasks (streams included); their reply senders
-/// drop and the pump task drains out. Aborting the dispatch loop directly would strand
-/// the request tasks it spawned.
+/// Dropping `in_tx` ends the dispatch loop; its RAII task leases abort all
+/// in-flight requests (streams included), closing their reply channels.
 struct VirtualConn {
     in_tx: mpsc::Sender<String>,
 }
@@ -446,8 +444,8 @@ fn make_virtual_conn(
     conn_id: String,
     host_out: mpsc::Sender<Vec<u8>>,
 ) -> VirtualConn {
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
-    let (srv_out_tx, mut srv_out_rx) = mpsc::channel::<String>(256);
+    let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+    let (srv_out_tx, mut srv_out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
     tokio::spawn(serve_connection(service, srv_out_tx, in_rx));
     tokio::spawn(async move {
         while let Some(text) = srv_out_rx.recv().await {
@@ -475,7 +473,7 @@ async fn host_session(
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(crate::FRAME_QUEUE_CAP);
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(1);
     let transport = zeron_sync::socket::pump_with_timing(
         ws,
@@ -615,8 +613,8 @@ impl DeviceLink {
     {
         let (wire_tx, wire_rx) = mpsc::channel::<Vec<u8>>(1);
         let (wire_in, mut wire_out) = mpsc::channel::<Vec<u8>>(1);
-        let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-        let (in_tx, in_rx) = mpsc::channel::<String>(256);
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+        let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
 
         let pump = tokio::spawn(async move {
@@ -629,93 +627,78 @@ impl DeviceLink {
                 client_ping_interval(),
                 SILENCE_LEASE,
             );
-            let protocol = async {
+            // The relay protocol must preserve the transport's independent
+            // directions: a queued upload/credit cannot block a reply or lease.
+            let writer = async {
                 let mut ping = tokio::time::interval(client_ping_interval());
                 ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                ping.tick().await; // consume the immediate first tick
-                // End-to-end liveness (see ECHO_DEADLINE): armed only once the
-                // host has echoed at least once, so old hosts keep working.
-                let mut last_echo = tokio::time::Instant::now();
-                let mut echo_seen = false;
                 let echo_frame =
                     encode_device_frame(&DeviceFrameHeader::new(ECHO_KIND, ECHO_KIND), &[])
-                        .unwrap_or_default();
-                // First echo right away: fast feature detection + instant proof
-                // the host leg is alive (the dial's readiness probe proves it
-                // too; this seeds the ongoing cadence).
-                if !echo_frame.is_empty() {
-                    let _ = wire_tx.send(echo_frame.clone()).await;
+                        .expect("echo frame serializes");
+                loop {
+                    let frame = tokio::select! {
+                        frame = out_rx.recv() => match frame {
+                            Some(text) => match encode_device_frame(
+                                &DeviceFrameHeader::new(RPC_KIND, RPC_KIND), text.as_bytes()
+                            ) {
+                                Ok(frame) => frame,
+                                Err(err) => {
+                                    tracing::error!(error = %err, "device-room: frame encode failed");
+                                    continue;
+                                }
+                            },
+                            None => return "closed".to_string(),
+                        },
+                        // Immediate first tick detects host echo support;
+                        // later ticks retain the existing keepalive cadence.
+                        _ = ping.tick() => echo_frame.clone(),
+                    };
+                    if wire_tx.send(frame).await.is_err() {
+                        return "connection lost".to_string();
+                    }
                 }
+            };
+            let reader = async {
+                let mut last_echo = tokio::time::Instant::now();
+                let mut echo_seen = false;
                 loop {
                     tokio::select! {
-                        frame = out_rx.recv() => match frame {
-                            Some(text) => {
-                                let header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND);
-                                let encoded = match encode_device_frame(&header, text.as_bytes()) {
-                                    Ok(bytes) => bytes,
-                                    Err(err) => {
-                                        tracing::error!(error = %err, "device-room: frame encode failed");
-                                        continue;
-                                    }
-                                };
-                                if wire_tx.send(encoded).await.is_err() {
-                                    break "connection lost".to_string();
-                                }
-                            }
-                            None => {
-                                break "closed".to_string();
-                            }
-                        },
+                        _ = in_tx.closed() => return "client dropped".to_string(),
                         message = wire_out.recv() => match message {
-                            Some(bytes) => {
-                                match decode_device_frame(&bytes) {
-                                    Ok((header, payload)) if header.k == RELAY_KIND => {
-                                        // host_offline / host_closed: surface as link-down.
-                                        let code = relay_error_code(&payload)
-                                            .unwrap_or_else(|| "relay error".into());
-                                        tracing::info!(%code, "device-room: link down");
-                                        break code;
-                                    }
-                                    Ok((header, payload)) if header.k == RPC_KIND => {
-                                        // An RPC frame from the host proves the
-                                        // whole path just as well as an echo.
-                                        last_echo = tokio::time::Instant::now();
-                                        let text = String::from_utf8_lossy(&payload).into_owned();
-                                        if in_tx.send(text).await.is_err() {
-                                            break "client dropped".to_string();
-                                        }
-                                    }
-                                    Ok((header, _)) if header.k == ECHO_KIND => {
-                                        last_echo = tokio::time::Instant::now();
-                                        echo_seen = true;
-                                    }
-                                    Ok(_) => {}
-                                    Err(err) => {
-                                        tracing::warn!(error = %err, "device-room: malformed frame");
+                            Some(bytes) => match decode_device_frame(&bytes) {
+                                Ok((header, payload)) if header.k == RELAY_KIND => {
+                                    let code = relay_error_code(&payload)
+                                        .unwrap_or_else(|| "relay error".into());
+                                    tracing::info!(%code, "device-room: link down");
+                                    return code;
+                                }
+                                Ok((header, payload)) if header.k == RPC_KIND => {
+                                    last_echo = tokio::time::Instant::now();
+                                    let text = String::from_utf8_lossy(&payload).into_owned();
+                                    if in_tx.send(text).await.is_err() {
+                                        return "client dropped".to_string();
                                     }
                                 }
-                            }
-                            None => {
-                                break "connection lost".to_string();
-                            }
+                                Ok((header, _)) if header.k == ECHO_KIND => {
+                                    last_echo = tokio::time::Instant::now();
+                                    echo_seen = true;
+                                }
+                                Ok(_) => {},
+                                Err(err) => tracing::warn!(error = %err, "device-room: malformed frame"),
+                            },
+                            None => return "connection lost".to_string(),
                         },
-                        _ = ping.tick() => {
-                            if !echo_frame.is_empty()
-                                && wire_tx.send(echo_frame.clone()).await.is_err()
-                            {
-                                break "connection lost".to_string();
-                            }
-                        }
                         _ = tokio::time::sleep_until(last_echo + client_echo_deadline()), if echo_seen => {
                             tracing::warn!("device-room: host echo silent past deadline; link suspect");
-                            break "host echo silent".to_string();
+                            return "host echo silent".to_string();
                         }
                     }
                 }
             };
             let reason = tokio::select! {
                 _ = transport => "connection lost".to_string(),
-                reason = protocol => reason,
+                reason = reader => reason,
+                reason = writer => reason,
             };
             // Dropping in_tx ends the RpcClient reader → pending calls fail Closed.
             let _ = closed_tx.send(Some(reason));
@@ -1108,6 +1091,52 @@ impl LinkCache {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn stalled_relay_upload_does_not_block_incoming_rpc_results() {
+        use futures::SinkExt;
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+        let (a, b) = tokio::io::duplex(64);
+        let (a, progress) = zeron_sync::socket::ProgressIo::new(a);
+        let socket = zeron_sync::socket::Connection {
+            socket: WebSocketStream::from_raw_socket(a, Role::Client, None).await,
+            progress,
+        };
+        let link = DeviceLink::from_socket(socket);
+        let mut peer = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let client = link.client();
+            tasks.push(tokio::spawn(async move {
+                client
+                    .call("upload", serde_json::json!({"bytes":"x".repeat(4096)}))
+                    .await
+            }));
+        }
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        // The peer deliberately never drains uploads, but can still reply on
+        // the opposite TCP direction. Reading must remain independently live.
+        let frame = encode_device_frame(
+            &DeviceFrameHeader::new(RPC_KIND, RPC_KIND),
+            br#"{"id":1,"ok":true}"#,
+        )
+        .unwrap();
+        peer.send(WsMessage::Binary(frame)).await.unwrap();
+        let first = tasks.remove(0);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            serde_json::json!(true)
+        );
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};

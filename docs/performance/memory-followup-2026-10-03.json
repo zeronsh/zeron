@@ -1,0 +1,503 @@
+{
+  "date": "2026-10-03",
+  "basePrHead": "dd35d26f580249ae76705ec0f25ba7f7b916bd1d",
+  "provenance": {
+    "suppliedReport": "memory-performance-findings.md",
+    "reportSha256": "d9a7b7798be54f8a3bac0256fec8adb7a2bd8c1d731d2053327a33ae48ae372c"
+  },
+  "environment": {
+    "os": "Linux-7.2.5-4-omarchy-x86_64-with-glibc2.44",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01) (Arch Linux rust 1:1.98.1-1)",
+    "profile": "debug",
+    "command": "target/debug/examples/memory-audit message-lookup",
+    "runs": 3,
+    "binarySha256": "185bd4be3e5808d10d285f876392e3fac2650034a0076ddb255dbd547aef7a23"
+  },
+  "metric": "requested Rust allocations above an already-constructed document baseline; elapsed time for eight lookups",
+  "excludes": [
+    "process RSS",
+    "allocator metadata",
+    "native allocations",
+    "GPU allocations",
+    "child process allocations",
+    "document construction"
+  ],
+  "comparison": "same document and binary: previous read_entries().any(id) expression versus SessionDoc::has_message(id); target id absent to exercise full scan",
+  "samples": [
+    {
+      "detail": {
+        "elapsedNs": 11547603,
+        "entries": 8,
+        "iterations": 8,
+        "textBytes": 2048000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 4114616,
+      "scenario": "message-lookup-full-history",
+      "run": 1
+    },
+    {
+      "detail": {
+        "elapsedNs": 31652,
+        "entries": 8,
+        "iterations": 8,
+        "textBytes": 2048000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 1
+    },
+    {
+      "detail": {
+        "elapsedNs": 66774712,
+        "entries": 32,
+        "iterations": 8,
+        "textBytes": 8192000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 16458366,
+      "scenario": "message-lookup-full-history",
+      "run": 1
+    },
+    {
+      "detail": {
+        "elapsedNs": 95434,
+        "entries": 32,
+        "iterations": 8,
+        "textBytes": 8192000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 1
+    },
+    {
+      "detail": {
+        "elapsedNs": 144963140,
+        "entries": 128,
+        "iterations": 8,
+        "textBytes": 32768000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 65833402,
+      "scenario": "message-lookup-full-history",
+      "run": 1
+    },
+    {
+      "detail": {
+        "elapsedNs": 342403,
+        "entries": 128,
+        "iterations": 8,
+        "textBytes": 32768000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 1
+    },
+    {
+      "detail": {
+        "elapsedNs": 7325592,
+        "entries": 8,
+        "iterations": 8,
+        "textBytes": 2048000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 4114616,
+      "scenario": "message-lookup-full-history",
+      "run": 2
+    },
+    {
+      "detail": {
+        "elapsedNs": 17941,
+        "entries": 8,
+        "iterations": 8,
+        "textBytes": 2048000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 2
+    },
+    {
+      "detail": {
+        "elapsedNs": 49593008,
+        "entries": 32,
+        "iterations": 8,
+        "textBytes": 8192000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 16458366,
+      "scenario": "message-lookup-full-history",
+      "run": 2
+    },
+    {
+      "detail": {
+        "elapsedNs": 58713,
+        "entries": 32,
+        "iterations": 8,
+        "textBytes": 8192000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 2
+    },
+    {
+      "detail": {
+        "elapsedNs": 64926544,
+        "entries": 128,
+        "iterations": 8,
+        "textBytes": 32768000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 65833402,
+      "scenario": "message-lookup-full-history",
+      "run": 2
+    },
+    {
+      "detail": {
+        "elapsedNs": 222519,
+        "entries": 128,
+        "iterations": 8,
+        "textBytes": 32768000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 2
+    },
+    {
+      "detail": {
+        "elapsedNs": 7212958,
+        "entries": 8,
+        "iterations": 8,
+        "textBytes": 2048000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 4114616,
+      "scenario": "message-lookup-full-history",
+      "run": 3
+    },
+    {
+      "detail": {
+        "elapsedNs": 17801,
+        "entries": 8,
+        "iterations": 8,
+        "textBytes": 2048000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 3
+    },
+    {
+      "detail": {
+        "elapsedNs": 47499600,
+        "entries": 32,
+        "iterations": 8,
+        "textBytes": 8192000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 16458366,
+      "scenario": "message-lookup-full-history",
+      "run": 3
+    },
+    {
+      "detail": {
+        "elapsedNs": 55373,
+        "entries": 32,
+        "iterations": 8,
+        "textBytes": 8192000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 3
+    },
+    {
+      "detail": {
+        "elapsedNs": 56332996,
+        "entries": 128,
+        "iterations": 8,
+        "textBytes": 32768000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 65833402,
+      "scenario": "message-lookup-full-history",
+      "run": 3
+    },
+    {
+      "detail": {
+        "elapsedNs": 210559,
+        "entries": 128,
+        "iterations": 8,
+        "textBytes": 32768000
+      },
+      "liveRustBytesAboveBaseline": 667,
+      "peakRustBytesAboveBaseline": 667,
+      "scenario": "message-lookup-scalar",
+      "run": 3
+    }
+  ],
+  "baselineRegression": {
+    "revision": "dd35d26f580249ae76705ec0f25ba7f7b916bd1d",
+    "test": "deleting_eight_parked_chats_reaps_providers_and_children",
+    "fixtureSha256": "23526b3b5d1263d9d8bbef5399d22acf8a2e596feaf59bc5a16a3643a81b3f78",
+    "fixtureVersion": "initial five-test fixture before internal-subagent-document and restart assertions",
+    "outcome": "expected failure: deletion lifecycle did not converge within ten seconds",
+    "logSha256": "b859b2668c90a9cd08cbfc838457933b85fbbf9eef0f21eed2aa9f6146be68f3"
+  },
+  "validation": {
+    "passed": 2113,
+    "ignored": 6,
+    "suites": [
+      {
+        "suite": "zeron-doc lib",
+        "passed": 132,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-engine lib",
+        "passed": 385,
+        "ignored": 2
+      },
+      {
+        "suite": "zeron-ui lib",
+        "passed": 1527,
+        "ignored": 0
+      },
+      {
+        "suite": "engine integrations: chat_deletion, message_queue, restart_resume, session_publication, workspace_sync, subagent_idle_reap, turn_quiesce, side_chats",
+        "passed": 69,
+        "ignored": 4
+      }
+    ],
+    "commands": [
+      "cargo test --locked -p zeron-doc -p zeron-engine --lib -j 6 -- --test-threads=1",
+      "cargo test --locked -p zeron-engine --test chat_deletion --test message_queue --test restart_resume --test session_publication --test workspace_sync --test subagent_idle_reap --test turn_quiesce --test side_chats -j 6 -- --test-threads=1",
+      "cargo test --locked -p zeron-ui --lib -j 6 -- --test-threads=1",
+      "cargo test --locked -p zeron-engine --test chat_deletion -j 6 -- --test-threads=1"
+    ],
+    "notes": "The final isolated deletion run contains seven tests, replacing the six-test deletion result in the broader integration run. Counts do not include reruns or the engine test subprocess. Two integration ignores require live edge/provider fixtures; side-chat ignores require external provider setup. No new local native/GPU or Windows/macOS run.",
+    "logs": [
+      {
+        "name": "zeron-memory-core-tests-final.log",
+        "sha256": "190c1b2eabf409858d6c0906c839b6635f7021af1d36b9318f113b8bcc107970"
+      },
+      {
+        "name": "zeron-memory-integration-tests-verified.log",
+        "sha256": "3b2a527b631d9766b8b142761f6a0e21e4404374c136a20ded1b4a5a28b6d87f"
+      },
+      {
+        "name": "zeron-memory-ui-tests-isolated.log",
+        "sha256": "38ac7cc5dd6c16b703f0c8d3e93b472ca3d106a95dc0ccd0d61beb79c47d0b5b"
+      },
+      {
+        "name": "zeron-memory-deletion-tests-isolated.log",
+        "sha256": "be34bb71384b1e6fa671bec2b9eca38ec2f99f7293d6570d2454c0b2321c6270"
+      }
+    ]
+  },
+  "contributorReview": {
+    "baseHead": "bddf36a46158eefb3c855c7ebcd904302d4dbd9a",
+    "comment": "https://github.com/zeronsh/zeron/pull/762#issuecomment-5975369095",
+    "expectedFailuresBeforeRespectiveFix": [
+      {
+        "test": "unread_subscription_does_not_block_calls_or_other_streams",
+        "log": {
+          "name": "zeron-review-rpc-before.log",
+          "sha256": "c648337cbe669054aa1a1a8f3d9f12b2f27412e462259f99ada0f7b2429d21a7"
+        }
+      },
+      {
+        "test": "unrelated_frames_do_not_reload_empty_or_partial_durable_windows",
+        "log": {
+          "name": "zeron-review-outbox-before.log",
+          "sha256": "84eee45219cbdeb02f3b4658918ca6d173a1dd60a8bd9ff26abb8160118e6eca"
+        }
+      },
+      {
+        "test": "output_gap_preserves_alternate_screen_contents_and_modes",
+        "log": {
+          "name": "zeron-review-terminal-before.log",
+          "sha256": "1b76d812ff8f7eb6b7782a3264cb9bcb5420b38c011839ceb1ee92ca0bf78309"
+        }
+      },
+      {
+        "test": "stalled_relay_upload_does_not_block_incoming_rpc_results",
+        "log": {
+          "name": "zeron-review-relay-before.log",
+          "sha256": "fdca8466b13890ead5d039004702dde1b43d62666ebd8c6db87d4500234c9d42"
+        }
+      },
+      {
+        "test": "closing_response_receiver_releases_silent_request_tasks",
+        "log": {
+          "name": "zeron-review-response-close-before.log",
+          "sha256": "b21e5ef7ecb9ea61d2f153d299b5679c4fa8ed0f562fd87a4eccdf5c2bdac015"
+        }
+      }
+    ],
+    "protocol": {
+      "streamWindow": 8,
+      "maxDistinctQueuedControls": 1024,
+      "legacyBehavior": "no credits sent without acknowledgement; affected stream fails explicitly on overflow; unary connection remains usable"
+    },
+    "outboxExperiment": {
+      "unrelatedFrames": 101,
+      "extraWindowReadsBefore": 101,
+      "extraWindowReadsAfter": 0,
+      "casesAfter": [
+        "empty durable window",
+        "partial durable window"
+      ],
+      "readOnlyWindowsVerified": true
+    },
+    "rustPassed": 2626,
+    "rustIgnored": 6,
+    "suites": [
+      {
+        "suite": "zeron-client lib",
+        "passed": 21,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-doc lib",
+        "passed": 132,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-engine lib",
+        "passed": 387,
+        "ignored": 2
+      },
+      {
+        "suite": "zeron-harness lib",
+        "passed": 315,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-proto lib",
+        "passed": 54,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-rpc lib",
+        "passed": 29,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-sync lib",
+        "passed": 69,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-text lib",
+        "passed": 16,
+        "ignored": 0
+      },
+      {
+        "suite": "zeron-ui lib",
+        "passed": 1529,
+        "ignored": 0
+      },
+      {
+        "suite": "live integration",
+        "passed": 5,
+        "ignored": 0
+      },
+      {
+        "suite": "chat_deletion integration",
+        "passed": 7,
+        "ignored": 0
+      },
+      {
+        "suite": "message_queue integration",
+        "passed": 30,
+        "ignored": 0
+      },
+      {
+        "suite": "restart_resume integration",
+        "passed": 8,
+        "ignored": 1
+      },
+      {
+        "suite": "session_publication integration",
+        "passed": 4,
+        "ignored": 2
+      },
+      {
+        "suite": "side_chats integration",
+        "passed": 6,
+        "ignored": 0
+      },
+      {
+        "suite": "subagent_idle_reap integration",
+        "passed": 2,
+        "ignored": 0
+      },
+      {
+        "suite": "turn_quiesce integration",
+        "passed": 4,
+        "ignored": 0
+      },
+      {
+        "suite": "workspace_sync integration",
+        "passed": 8,
+        "ignored": 1
+      }
+    ],
+    "edge": {
+      "unitPassed": 58,
+      "workerdPassed": 25,
+      "typecheck": "passed",
+      "wranglerDryRun": "passed"
+    },
+    "commands": [
+      "cargo test --locked -p zeron-doc -p zeron-engine -p zeron-rpc -p zeron-sync -p zeron-proto -p zeron-harness -p zeron-text -p zeron-client -p zeron-ui --lib -j 6 -- --test-threads=1",
+      "cargo test --locked -p zeron-engine --test chat_deletion --test message_queue --test restart_resume --test session_publication --test workspace_sync --test subagent_idle_reap --test turn_quiesce --test side_chats -p zeron-client --test live -j 6 -- --test-threads=1",
+      "cargo clippy --locked -p zeron-rpc -p zeron-sync -p zeron-proto -p zeron-engine -p zeron-ui --lib -j 6",
+      "npm run typecheck",
+      "npm run test:unit",
+      "npm run test:workerd",
+      "npx wrangler deploy --dry-run --outdir /tmp/zeron-review-edge-bundle"
+    ],
+    "logs": [
+      {
+        "name": "zeron-review-libraries-verified.log",
+        "sha256": "5ca529cf32e7d925ad3981fff3350fd600d09ee6a17a9e563a113a3c7ecaed34"
+      },
+      {
+        "name": "zeron-review-integrations-final.log",
+        "sha256": "32c3bb147a1df8278d9f58a3c23cc48a6c615231fde00ad79bd0e506a92f852d"
+      },
+      {
+        "name": "zeron-review-rpc-verified.log",
+        "sha256": "2ba039369829e571e7e0ed9e696a52e7e4cf29f08dac1e17a8e16fd22696af71"
+      },
+      {
+        "name": "zeron-review-clippy-shipped.log",
+        "sha256": "6492c2bd8d3d7f6fd9bb317882347f9a15dab455f346dba1f92f5b66df0eb753"
+      },
+      {
+        "name": "zeron-review-edge-typecheck.log",
+        "sha256": "e0599c68e0c5d27ba3863a9e5a4345759c385ec327e42943e6ed7cdcd5a46578"
+      },
+      {
+        "name": "zeron-review-edge-tests.log",
+        "sha256": "3b8264318f4292a2cf9967e02e823cc01205d569244b968a3f6764d721e40992"
+      },
+      {
+        "name": "zeron-review-edge-workerd.log",
+        "sha256": "fdb035491bace22131d7a94d9f4ba8ed8e118f243c7a9221b1094f7209df2d8d"
+      },
+      {
+        "name": "zeron-review-edge-bundle.log",
+        "sha256": "8bdcbce63e22d286622f1d9d79646e84d572136ba9f29ed96c74bc3064e63baa"
+      }
+    ],
+    "notes": "Locked Linux debug tests, isolated target, serial test execution. Counts exclude reruns and child test subprocesses. Six existing ignores require private snapshots, authenticated external providers, live edge or npm download. Clippy succeeds with existing repository/dependency warnings. No new native Windows/macOS, GPU residency or Memcheck result. The initial validation and allocation samples above remain the evidence from the earlier follow-up."
+  }
+}

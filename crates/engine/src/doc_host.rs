@@ -57,7 +57,9 @@ pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;
 /// beyond this (and beyond [`zeron_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
 /// oldest-access-first — reopening from the SQLite snapshot measured within
 /// ~11ms of a warm doc, so the cap trades no perceptible open latency.
-const WARM_DOC_CAP: usize = 12;
+// Keep a small navigation cache. Live views/writers and unsaved publication
+// remain pinned independently; compressed snapshots can hide large heaps.
+const WARM_DOC_CAP: usize = 4;
 
 /// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
 /// columnar+compressed; the in-memory doc plus mirror runs well above the blob
@@ -409,9 +411,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -594,6 +594,8 @@ pub struct ChatDocHandle {
     /// thin lineage exists on disk at all; `save_snapshot` double-checks, so
     /// a doc that was never seeded can't lose its only copy).
     retired: AtomicBool,
+    deleted: AtomicBool,
+    snapshot_write: Mutex<()>,
     /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<zeron_sync::ChatClient>>,
@@ -768,7 +770,7 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
-        if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
+        if self.doc.has_message(message_id) {
             return Ok(());
         }
         self.doc.push_message(&SessionMessageEntry {
@@ -875,6 +877,21 @@ impl ChatDocHandle {
             *lock(&self.transcript_history) = Default::default();
         } else {
             self.publish_messages_locked();
+        }
+    }
+
+    fn release_unwatched_mirror(&self) {
+        let _import = lock(&self.transcript_import);
+        if self.messages_tx.receiver_count() == 0 {
+            self.mirror_dirty.store(true, Ordering::Release);
+            self.messages_tx.send_if_modified(|snapshot| {
+                if snapshot.entries.is_empty() {
+                    return false;
+                }
+                *snapshot = TranscriptSnapshot::default();
+                true
+            });
+            *lock(&self.transcript_history) = Default::default();
         }
     }
 
@@ -1104,10 +1121,31 @@ impl DocHost {
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
+        let changes = workspace.watch_chat_deletions();
         if self.inner.workspace.set(workspace).is_ok() {
+            self.spawn_deletion_watcher(changes);
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
         }
+    }
+
+    /// Tombstones include unseen rows and publish independently of the visible
+    /// chat list. Ordinary streaming metadata does not wake this teardown worker.
+    fn spawn_deletion_watcher(&self, mut changes: watch::Receiver<Vec<String>>) {
+        let host = self.clone();
+        self.spawn_worker(async move {
+            loop {
+                let ids = changes.borrow_and_update().clone();
+                for id in ids {
+                    if host.chat_deleted(&id) {
+                        host.purge_chat(&id);
+                    }
+                }
+                if changes.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     /// Host migration sweep: proactively seed this device's own s2 chats
@@ -1255,6 +1293,20 @@ impl DocHost {
         });
     }
 
+    fn chat_deleted(&self, chat_id: &str) -> bool {
+        let Some(workspace) = self.workspace() else {
+            return false;
+        };
+        if workspace.chat_deleted(chat_id) {
+            return true;
+        }
+        // Subagent transcripts are internal docs, not registry chats. Their
+        // reserved ids inherit the parent's deletion, including late opens.
+        chat_id.split_once("--sub--").is_some_and(|(parent, _)| {
+            workspace.chat_deleted(parent) && workspace.chat(chat_id).ok().flatten().is_none()
+        })
+    }
+
     /// The workspace host, once wired (tests may assemble a DocHost without one).
     pub fn workspace(&self) -> Option<&WorkspaceHost> {
         self.inner.workspace.get()
@@ -1285,15 +1337,15 @@ impl DocHost {
     /// Materialize one authoritative local document without acquiring a network
     /// connection. Durable publication is installed before exposing any writer.
     pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        if self.chat_deleted(chat_id) {
+            return Err(EngineError::Other("chat has been deleted".into()));
+        }
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another
         // device has since cut over to chat2 would otherwise serve its frozen
         // fat lineage forever (the host writes only to the chat2 room now;
         // this device's s2 room has gone permanently silent).
-        let chat_row = self
-            .workspace()
-            .and_then(|w| w.chat(chat_id).ok().flatten());
         // A row that EXISTS without `roomGen` is a pre-cutover legacy chat
         // (gen 1). A MISSING row is a chat being born right now: its
         // CreateChat mint (which stamps roomGen 2) is racing this open —
@@ -1304,8 +1356,14 @@ impl DocHost {
         // follow the row's gen 2 to an empty chat2 room), the run's live doc
         // ref blocked every heal, and the transcript never synced anywhere
         // (2026-08-11).
-        let registry_gen = match chat_row.as_ref() {
-            Some(row) => row.room_gen.unwrap_or(1),
+        // Retain only the routing scalar, releasing the row's strings/config
+        // before loading a potentially large document. The explicit workspace
+        // branch also avoids constructing a large absent Chat on that path.
+        let registry_gen = match self.workspace() {
+            Some(workspace) => match workspace.chat(chat_id).ok().flatten() {
+                Some(row) => row.room_gen.unwrap_or(1),
+                None => 2,
+            },
             None => 2,
         };
         {
@@ -1454,10 +1512,21 @@ impl DocHost {
         // Recover committed outgoing operations even when the snapshot debounce
         // did not run before a crash. Imported updates do not echo as local writes.
         if room_gen >= 2 {
-            for (_, bytes) in self.inner.store.pending_chat_updates(chat_id)? {
-                doc.doc()
-                    .import(&bytes)
-                    .map_err(|e| EngineError::Other(e.to_string()))?;
+            let mut after = 0;
+            loop {
+                let page = self
+                    .inner
+                    .store
+                    .chat_updates_after(chat_id, after, 256 * 1024)?;
+                if page.is_empty() {
+                    break;
+                }
+                for (ordinal, bytes) in page {
+                    doc.doc()
+                        .import(&bytes)
+                        .map_err(|e| EngineError::Other(e.to_string()))?;
+                    after = ordinal;
+                }
             }
         }
         let doc = Arc::new(doc);
@@ -1525,6 +1594,8 @@ impl DocHost {
             snapshot_bytes: AtomicUsize::new(snapshot_len),
             room_gen,
             retired: AtomicBool::new(false),
+            deleted: AtomicBool::new(false),
+            snapshot_write: Mutex::new(()),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
             sync_started: AtomicBool::new(false),
@@ -1609,7 +1680,19 @@ impl DocHost {
             }
         }
         // Publish only after the durable subscription and bootstrap are installed.
-        lock(&self.inner.handles).insert(chat_id.to_string(), handle.clone());
+        {
+            let mut handles = lock(&self.inner.handles);
+            if self.chat_deleted(chat_id) {
+                handle.deleted.store(true, Ordering::Release);
+                if let Some(persistence) = &handle.persistence {
+                    persistence.delete_snapshot()?;
+                } else {
+                    self.inner.store.delete_snapshot(chat_id)?;
+                }
+                return Err(EngineError::Other("chat has been deleted".into()));
+            }
+            handles.insert(chat_id.to_string(), handle.clone());
+        }
         drop(opening);
         self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
         self.evict_over_budget();
@@ -2204,9 +2287,7 @@ impl DocHost {
                             // Include commits made after the sink's initial
                             // load but before installation. The same lock is
                             // held by the local-update subscription.
-                            for (id, bytes) in host.inner.store.pending_chat_updates(&chat).unwrap_or_default() {
-                                client.enqueue_batch(id, bytes);
-                            }
+                            client.flush_pending();
                             let pending: Vec<(String, Vec<u8>)> =
                                 lock(&handle.chat2_pending_local).clone();
                             for (batch_id, update) in pending {
@@ -2226,7 +2307,7 @@ impl DocHost {
                                 let Some(handle) = checkpoint_weak.upgrade() else { return };
                                 if checkpoint_host.inner.edge_disconnected.load(Ordering::Acquire) { return; }
                                 let known = lock(&handle.chat2).as_ref().is_some_and(|c|c.stats().server_known);
-                                if known && checkpoint_host.inner.store.rejected_chat_updates(&handle.chat_id).is_ok_and(|v| !v.is_empty()) {
+                                if known && checkpoint_host.inner.store.has_rejected_chat_updates(&handle.chat_id).unwrap_or(false) {
                                     checkpoint_host.spawn_chat2_checkpoint(&handle, "durable-rejection");
                                 }
                             }
@@ -2650,13 +2731,20 @@ impl DocHost {
             if *epoch >= crate::chat2_host::CHAT2_DOC_EPOCH || self.inner.config.edge.is_none() {
                 let raw = loro::LoroDoc::new();
                 raw.import(bytes).map_err(|e| e.to_string())?;
-                for (_, update) in self
-                    .inner
-                    .store
-                    .pending_chat_updates(chat_id)
-                    .map_err(|e| e.to_string())?
-                {
-                    raw.import(&update).map_err(|e| e.to_string())?;
+                let mut after = 0;
+                loop {
+                    let page = self
+                        .inner
+                        .store
+                        .chat_updates_after(chat_id, after, 256 * 1024)
+                        .map_err(|e| e.to_string())?;
+                    if page.is_empty() {
+                        break;
+                    }
+                    for (ordinal, update) in page {
+                        raw.import(&update).map_err(|e| e.to_string())?;
+                        after = ordinal;
+                    }
                 }
                 if !SessionDoc::from_doc(raw)
                     .read_entries()
@@ -2924,6 +3012,11 @@ impl DocHost {
         let _opening = lock(&self.inner.opening);
         let mut by_age: Vec<(i64, String)> = {
             let handles = lock(&self.inner.handles);
+            // Last-receiver drop produces no document commit. Reclaim its
+            // materialized transcript on the idle sweep as well as on writes.
+            for handle in handles.values() {
+                handle.release_unwatched_mirror();
+            }
             handles
                 .values()
                 .map(|h| (h.last_access.load(Ordering::Relaxed), h.chat_id.clone()))
@@ -3308,13 +3401,52 @@ impl DocHost {
         rows
     }
 
-    /// Drop a chat's doc unconditionally and delete its local snapshot — the
-    /// chat is gone (DeleteChat / DeleteSpace cascade). Watchers see the
-    /// stream end; a racing writer keeps its orphaned doc until the run ends.
+    /// Retire a deleted chat, its providers, transports, and local snapshot.
+    /// Late writer commits may settle the orphan, but cannot persist or re-run it.
     pub fn purge_chat(&self, chat_id: &str) {
+        if let Some(sessions) = self.sessions() {
+            sessions.retire_deleted_chat(chat_id);
+        }
+        let prefix = format!("{chat_id}--sub--");
+        let children: Vec<_> = lock(&self.inner.handles)
+            .keys()
+            .filter(|id| {
+                id.starts_with(&prefix)
+                    && self
+                        .workspace()
+                        .is_none_or(|ws| ws.chat(id).ok().flatten().is_none())
+            })
+            .cloned()
+            .collect();
+        for child in children {
+            self.purge_document(&child);
+        }
+        self.purge_document(chat_id);
+    }
+
+    fn purge_document(&self, chat_id: &str) {
         let removed = lock(&self.inner.handles).remove(chat_id);
-        drop(removed);
-        if let Err(err) = self.inner.store.delete_snapshot(chat_id) {
+        let result = if let Some(handle) = removed {
+            let _write = lock(&handle.snapshot_write);
+            handle.deleted.store(true, Ordering::Release);
+            handle.retired.store(true, Ordering::Release);
+            handle.queue_paused.store(true, Ordering::Release);
+            lock(&handle.sync_cancel).cancel();
+            lock(&handle.chat2_local_sub).take();
+            let client = lock(&handle.chat2).take();
+            if let Some(client) = client {
+                self.spawn_worker(async move {
+                    client.shutdown().await;
+                });
+            }
+            match &handle.persistence {
+                Some(persistence) => persistence.delete_snapshot(),
+                None => self.inner.store.delete_snapshot(chat_id),
+            }
+        } else {
+            self.inner.store.delete_snapshot(chat_id)
+        };
+        if let Err(err) = result {
             tracing::warn!(chat = %chat_id, error = %err, "snapshot delete failed");
         }
     }
@@ -3960,6 +4092,9 @@ impl DocHost {
     ///
     /// One at a time by design: each send changes the status this reads.
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
+        if handle.deleted.load(Ordering::Acquire) {
+            return;
+        }
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet; the set_sessions kick re-drains
         };
@@ -4846,6 +4981,9 @@ impl DocHost {
     }
 
     async fn drain_command_kind(&self, handle: &Arc<ChatDocHandle>, controls_only: bool) {
+        if handle.deleted.load(Ordering::Acquire) {
+            return;
+        }
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
@@ -5683,6 +5821,10 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        let _write = lock(&handle.snapshot_write);
+        if handle.deleted.load(Ordering::Acquire) {
+            return;
+        }
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -6201,6 +6343,37 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
 #[cfg(test)]
 mod publication_eviction_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn purged_legacy_handle_cannot_recreate_its_snapshot_and_doc_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open_local("deleted").unwrap();
+        let weak = Arc::downgrade(&handle.doc);
+        host.save_snapshot(&handle);
+        assert!(store.load_snapshot("deleted").unwrap().is_some());
+        host.purge_chat("deleted");
+        handle
+            .doc
+            .doc()
+            .get_map("late")
+            .insert("write", true)
+            .unwrap();
+        handle.doc.doc().commit();
+        host.save_snapshot(&handle);
+        assert!(store.load_snapshot("deleted").unwrap().is_none());
+        drop(handle);
+        host.shutdown_workers().await;
+        assert!(weak.upgrade().is_none(), "deleted doc retained by a worker");
+    }
 
     #[tokio::test]
     async fn wakeup_handoff_waits_for_snapshot_persistence() {

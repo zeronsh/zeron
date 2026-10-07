@@ -6,6 +6,50 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+const SOURCE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const SOURCE_CACHE_ENTRIES: usize = 4;
+const EFFECT_CACHE_ENTRIES: usize = 2;
+// A proxy contains luma, RGBA source, and one BGRA effect.
+pub(crate) const MAX_PRELOADED_BYTES: usize = 2048 * 2048 * 9;
+
+/// The renderer atlas owns tiles independently of the Arc. Keep one retirement
+/// reference until cache, preload, crossfade, and every window release theirs.
+#[derive(Default)]
+struct ArtworkImages(Vec<Arc<gpui::RenderImage>>);
+impl ArtworkImages {
+    fn track(&mut self, image: &Arc<gpui::RenderImage>) {
+        self.0.push(image.clone());
+    }
+    fn take_unused(&mut self) -> Vec<Arc<gpui::RenderImage>> {
+        let mut unused = Vec::new();
+        self.0.retain(|image| {
+            if Arc::strong_count(image) == 1 {
+                unused.push(image.clone());
+                false
+            } else {
+                true
+            }
+        });
+        unused
+    }
+}
+static ARTWORK_IMAGES: OnceLock<Mutex<ArtworkImages>> = OnceLock::new();
+
+/// Must include the currently updating window, which is absent from App::windows.
+pub(crate) fn flush_unused(window: &mut gpui::Window, enabled: bool, cx: &mut gpui::App) {
+    if !enabled && let Some(cache) = CACHE.get() {
+        cache.lock().unwrap().clear();
+    }
+    let unused = ARTWORK_IMAGES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .take_unused();
+    for image in unused {
+        cx.drop_image(image, Some(window));
+    }
+}
+
 /// Hold the displayed artwork during loading, then crossfade to the ready image.
 /// Finish each blend before adopting another image to keep rapid changes smooth.
 #[derive(Default)]
@@ -100,6 +144,19 @@ struct BackgroundLuminance {
     effects: Mutex<Vec<EffectEntry>>,
 }
 impl BackgroundLuminance {
+    fn retained_bytes(&self) -> usize {
+        self.pixels.len()
+            + self.colors.len() * 4
+            + self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(_, image)| image.as_ref())
+                .map(|image| image.as_bytes(0).map_or(0, <[u8]>::len))
+                .sum::<usize>()
+    }
+
     fn raster_image(
         self: &Arc<Self>,
         effect: NewThreadBackgroundEffect,
@@ -119,6 +176,9 @@ impl BackgroundLuminance {
             return image.clone();
         }
         // None marks the single pending job for this source/effect, not a viewport.
+        if effects.len() >= EFFECT_CACHE_ENTRIES {
+            effects.remove(0);
+        }
         effects.push((key, None));
         drop(effects);
         let source = self.clone();
@@ -138,6 +198,7 @@ impl BackgroundLuminance {
                 {
                     *ready = Some(image);
                 }
+                trim_source_cache(&mut CACHE.get_or_init(Default::default).lock().unwrap());
                 cx.refresh_windows();
             });
         })
@@ -163,7 +224,13 @@ impl BackgroundLuminance {
             NewThreadBackgroundEffect::Ascii => self.ascii_pixels(light),
             _ => self.scanline_pixels(light),
         };
-        Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)]))
+        let image = Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)]));
+        ARTWORK_IMAGES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .track(&image);
+        image
     }
     fn scanline_pixels(&self, light: bool) -> image::RgbaImage {
         image::RgbaImage::from_fn(self.width, self.height, |x, y| {
@@ -303,6 +370,20 @@ type Source = Arc<Mutex<Option<Arc<BackgroundLuminance>>>>;
 type Cache = Vec<(PathBuf, Source)>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
+fn cached_source_bytes(cache: &Cache) -> usize {
+    cache
+        .iter()
+        .filter_map(|(_, source)| source.lock().unwrap().clone())
+        .map(|source| source.retained_bytes())
+        .sum()
+}
+
+fn trim_source_cache(cache: &mut Cache) {
+    while cache.len() > SOURCE_CACHE_ENTRIES || cached_source_bytes(cache) > SOURCE_CACHE_BYTES {
+        cache.remove(0);
+    }
+}
+
 fn decode_source(bytes: &[u8]) -> Option<Arc<BackgroundLuminance>> {
     Some(source_from_image(
         &crate::new_thread_background_image::decode(bytes).ok()?,
@@ -310,7 +391,13 @@ fn decode_source(bytes: &[u8]) -> Option<Arc<BackgroundLuminance>> {
 }
 
 fn source_from_image(image: &image::DynamicImage) -> Arc<BackgroundLuminance> {
-    let proxy = image.thumbnail(2048, 2048);
+    // thumbnail() also enlarges small inputs. A 4x4 wallpaper must not
+    // become 36 MiB of cached luma/source/effect pixels.
+    let proxy = if image.width() <= 2048 && image.height() <= 2048 {
+        image.clone()
+    } else {
+        image.thumbnail(2048, 2048)
+    };
     let gray = proxy.to_luma8();
     Arc::new(BackgroundLuminance {
         width: gray.width(),
@@ -347,6 +434,10 @@ impl PreloadedArtwork {
         Self(source)
     }
 
+    pub fn retained_bytes(&self) -> usize {
+        self.0.retained_bytes()
+    }
+
     pub fn color(&self) -> Option<zeron_theme::Color> {
         let stride = (self.0.colors.len() / 4096).max(1);
         crate::settings::wallpaper_colors::extract(self.0.colors.iter().step_by(stride).copied())
@@ -356,29 +447,26 @@ impl PreloadedArtwork {
         let mut cache = CACHE.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
         cache.retain(|(key, _)| key != path);
         cache.push((path.to_path_buf(), Arc::new(Mutex::new(Some(self.0)))));
-        if cache.len() > 4 {
-            cache.remove(0);
-        }
+        trim_source_cache(&mut cache);
     }
 }
 
 fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<BackgroundLuminance>> {
     let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    if let Some(source) = cache
-        .lock()
-        .ok()?
-        .iter()
-        .find_map(|(key, source)| (key == path).then(|| source.clone()))
     {
-        return source.lock().ok()?.clone();
+        let mut cache = cache.lock().ok()?;
+        if let Some(index) = cache.iter().position(|(key, _)| key == path) {
+            let entry = cache.remove(index);
+            let source = entry.1.lock().ok()?.clone();
+            cache.push(entry);
+            return source;
+        }
     }
     let pending = Arc::new(Mutex::new(None));
     {
         let mut cache = cache.lock().ok()?;
         cache.push((path.to_path_buf(), pending.clone()));
-        if cache.len() > 4 {
-            cache.remove(0);
-        }
+        trim_source_cache(&mut cache);
     }
     let path = path.to_path_buf();
     cx.spawn(async move |cx| {
@@ -391,6 +479,7 @@ fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<Backgroun
             .await;
         cx.update(|cx| {
             *pending.lock().unwrap() = source;
+            trim_source_cache(&mut CACHE.get_or_init(Default::default).lock().unwrap());
             cx.refresh_windows();
         });
     })
@@ -424,6 +513,71 @@ fn dither_color([r, g, b, a]: [u8; 4], threshold: u8) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_wallpapers_keep_native_dimensions_and_preload_bytes() {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4));
+        let artwork = PreloadedArtwork::load(&image, NewThreadBackgroundEffect::None, false);
+        assert_eq!((artwork.0.width, artwork.0.height), (4, 4));
+        assert_eq!(artwork.retained_bytes(), 4 * 4 * 9);
+    }
+
+    #[test]
+    fn hundred_wallpaper_changes_stay_budgeted_and_retire_only_unconsumed_images() {
+        let mut cache = Cache::new();
+        let mut images = ArtworkImages::default();
+        let mut ready = Readiness::default();
+        let mut weak = Vec::new();
+        for i in 0..100 {
+            let source = Arc::new(BackgroundLuminance {
+                width: 1536,
+                height: 1536,
+                pixels: vec![0; 1536 * 1536].into_boxed_slice(),
+                colors: vec![[0; 4]; 1536 * 1536].into_boxed_slice(),
+                effects: Mutex::new(Vec::new()),
+            });
+            let image = Arc::new(gpui::RenderImage::new([image::Frame::new(
+                image::RgbaImage::new(1536, 1536),
+            )]));
+            weak.push(Arc::downgrade(&image));
+            images.track(&image);
+            source.effects.lock().unwrap().push((
+                (NewThreadBackgroundEffect::None, false),
+                Some(image.clone()),
+            ));
+            let path = PathBuf::from(format!("{i}.png"));
+            cache.push((path.clone(), Arc::new(Mutex::new(Some(source)))));
+            trim_source_cache(&mut cache);
+            let frame = ready.frame(
+                Some(image),
+                Some(&path),
+                NewThreadBackgroundAdjustment::default(),
+                true,
+                false,
+                Instant::now() + std::time::Duration::from_secs(i),
+            );
+            drop(frame);
+            drop(images.take_unused());
+            assert!(cached_source_bytes(&cache) <= SOURCE_CACHE_BYTES);
+            assert!(
+                cache.len() < SOURCE_CACHE_ENTRIES,
+                "byte budget must bind before the count limit"
+            );
+            assert!(images.0.len() <= cache.len() + 2);
+        }
+        // Simulate a second window retaining a departing image: its atlas tiles
+        // cannot be retired until that last consumer releases it.
+        let other_window = ready.current.clone().unwrap();
+        cache.clear();
+        drop(ready);
+        drop(images.take_unused());
+        assert_eq!(images.0.len(), 1);
+        assert_eq!(images.0[0].id, other_window.id);
+        drop(other_window);
+        drop(images.take_unused());
+        assert!(images.0.is_empty());
+        assert!(weak.iter().all(|image| image.upgrade().is_none()));
+    }
 
     fn artwork() -> Arc<gpui::RenderImage> {
         Arc::new(gpui::RenderImage::new([image::Frame::new(
@@ -683,7 +837,7 @@ mod tests {
                 }
             });
         }
-        assert_eq!(source.effects.lock().unwrap().len(), 7);
+        assert_eq!(source.effects.lock().unwrap().len(), EFFECT_CACHE_ENTRIES);
     }
 
     #[test]

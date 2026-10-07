@@ -1875,7 +1875,7 @@ impl Changes {
                 }
                 let subscribed = engine
                     .client()
-                    .subscribe(
+                    .subscribe_scoped(
                         methods::WATCH_CHECKOUT_DIFFS,
                         serde_json::Value::Object(params),
                     )

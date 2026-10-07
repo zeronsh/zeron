@@ -212,6 +212,14 @@ impl Emulator {
         self.term.resize(GridSize::new(cols, rows));
     }
 
+    /// Lost bytes can leave the parser inside OSC/CSI. Reset parser and SGR,
+    /// preserving grids, alternate-screen selection, cursor and application modes.
+    /// The panel owns the gap banner and asks the PTY application to redraw.
+    pub fn output_gap(&mut self, _skipped: u64) {
+        self.parser = Processor::new();
+        self.feed(b"\x1b[0m");
+    }
+
     pub fn cols(&self) -> usize {
         self.term.columns()
     }
@@ -419,6 +427,47 @@ impl std::fmt::Debug for Emulator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_gap_preserves_alternate_screen_contents_and_modes() {
+        let mut emulator = super::Emulator::new(80, 8);
+        emulator.feed(b"main screen\x1b[?1049h\x1b[?1hfullscreen application");
+        assert!(
+            emulator
+                .term
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        );
+        let before = (0..8).map(|row| emulator.row_text(row)).collect::<Vec<_>>();
+        emulator.output_gap(12);
+        assert!(
+            emulator
+                .term
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        );
+        assert!(emulator.app_cursor_mode());
+        assert_eq!(
+            (0..8).map(|row| emulator.row_text(row)).collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    #[test]
+    fn output_gap_recovers_from_an_unterminated_escape_sequence() {
+        let mut emulator = super::Emulator::new(120, 10);
+        emulator.feed(b"\x1b]0;unfinished title");
+        emulator.output_gap(68);
+        emulator.feed(b"next output");
+        let text = (0..10)
+            .map(|row| emulator.row_text(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("chunks skipped"),
+            "gap notices belong outside the grid"
+        );
+        assert!(text.contains("next output"));
+    }
     use super::*;
 
     fn emu(cols: u16, rows: u16) -> Emulator {

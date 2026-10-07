@@ -266,6 +266,8 @@ struct TerminalTab {
     scroll_remainder: f32,
     exited: Option<i32>,
     last_seq: u64,
+    gap_notice: Option<u64>,
+    redraw_requested: bool,
     coalescer: InputCoalescer,
     flush_task: Option<Task<()>>,
     resize_task: Option<Task<()>>,
@@ -495,6 +497,8 @@ impl TerminalPanel {
             scroll_remainder: 0.0,
             exited: None,
             last_seq: 0,
+            gap_notice: None,
+            redraw_requested: false,
             coalescer: InputCoalescer::default(),
             flush_task: None,
             resize_task: None,
@@ -573,6 +577,40 @@ impl TerminalPanel {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        // Wait for an authoritative chat list: reconnect initially has no
+        // rows. Navigation/archive keeps tabs; deletion releases their tasks
+        // and emulators and closes otherwise-inaccessible PTYs.
+        let deleted: Vec<_> = {
+            let state = self.state.read(cx);
+            self.chats
+                .keys()
+                .filter(|id| {
+                    state.chats_synced
+                        && !id.starts_with(CANVAS_PANEL_PREFIX)
+                        && !state.chats.iter().any(|chat| &chat.id == *id)
+                })
+                .cloned()
+                .collect()
+        };
+        for chat_id in deleted {
+            if let Some(tabs) = self.chats.remove(&chat_id) {
+                for tab in tabs.tabs {
+                    if let (Some(engine), Some(id)) = (self.engine(cx), tab.terminal_id.clone()) {
+                        let target = tab.target_device_id.clone();
+                        cx.spawn(async move |_, _| {
+                            let _ = engine
+                                .client()
+                                .call(
+                                    methods::CLOSE_TERMINAL,
+                                    with_target(serde_json::json!({ "terminalId": id }), &target),
+                                )
+                                .await;
+                        })
+                        .detach();
+                    }
+                }
+            }
+        }
         let selected_key = self.selected_chat(cx);
         let prev = self.last_selected.clone();
         let switched = Some(selected_key.clone()) != prev;
@@ -770,7 +808,7 @@ impl TerminalPanel {
 
                 let subscribed = engine
                     .client()
-                    .subscribe(
+                    .subscribe_scoped(
                         methods::SUBSCRIBE_TERMINAL,
                         with_target(
                             serde_json::json!({ "terminalId": terminal_id, "afterSeq": after_seq }),
@@ -839,6 +877,15 @@ impl TerminalPanel {
         };
         let target = tab.target_device_id.clone();
         match event {
+            TerminalEvent::Gap { seq, skipped } => {
+                tab.last_seq = seq;
+                tab.emulator.output_gap(skipped);
+                tab.gap_notice = Some(tab.gap_notice.unwrap_or(0).saturating_add(skipped));
+                tab.redraw_requested = true;
+                self.schedule_native_resize(chat, key, engine.clone(), cx);
+                cx.notify();
+                StreamDisposition::Continue
+            }
             TerminalEvent::Data { seq, data } => {
                 tab.last_seq = seq;
                 let responses = tab.emulator.feed(&decode_base64(&data));
@@ -1011,40 +1058,93 @@ impl TerminalPanel {
         }
         tab.emulator.resize(cols, rows);
         let key = tab.key;
-        let target = tab.target_device_id.clone();
-        if let (Some(engine), Some(tab)) = (engine, self.tab_mut(&chat, key)) {
-            let id = tab.terminal_id.clone();
-            tab.resize_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(RESIZE_DEBOUNCE_MS))
-                    .await;
-                // Re-read the *current* size — later prepaints may have
-                // resized again inside the debounce window.
-                let Ok(current) = this.update(cx, |panel, _| {
-                    panel
-                        .tab_mut(&chat, key)
-                        .map(|t| (t.terminal_id.clone(), t.emulator.cols(), t.emulator.rows()))
-                }) else {
-                    return;
-                };
-                let Some((stored_id, cols, rows)) = current else {
-                    return;
-                };
-                let Some(id) = stored_id.or(id) else { return };
-                let _ = engine
-                    .client()
-                    .call(
-                        methods::RESIZE_TERMINAL,
-                        with_target(
-                            serde_json::json!({ "terminalId": id, "cols": cols, "rows": rows }),
-                            &target,
-                        ),
-                    )
-                    .await;
-            }));
+        if let Some(engine) = engine {
+            self.schedule_native_resize(&chat, key, engine, cx);
         }
         // Deliberately no cx.notify(): this runs during prepaint of the
         // current frame, which already paints the resized grid.
+    }
+
+    /// One per-tab resize task serializes layout and gap redraws. The redraw
+    /// flag survives replacement during the temporary resize, so a newer task
+    /// always restores the latest intended size rather than leaving cols - 1.
+    fn schedule_native_resize(
+        &mut self,
+        chat: &str,
+        key: u64,
+        engine: EngineHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tab_mut(chat, key) else {
+            return;
+        };
+        let target = tab.target_device_id.clone();
+        let chat = chat.to_owned();
+        tab.resize_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(RESIZE_DEBOUNCE_MS))
+                .await;
+            let Ok(Some((Some(id), cols, rows, redraw))) = this.update(cx, |panel, _| {
+                panel.tab_mut(&chat, key).map(|t| {
+                    (
+                        t.terminal_id.clone(),
+                        t.emulator.cols(),
+                        t.emulator.rows(),
+                        t.redraw_requested,
+                    )
+                })
+            }) else {
+                return;
+            };
+            if redraw {
+                let temporary_cols = if cols > 2 { cols - 1 } else { cols + 1 };
+                // Even a lost/late temporary-resize response must be followed
+                // by a restore attempt. Keep both calls finite.
+                let call = engine.client().call(
+                    methods::RESIZE_TERMINAL,
+                    with_target(
+                        serde_json::json!({"terminalId":id,"cols":temporary_cols,"rows":rows}),
+                        &target,
+                    ),
+                );
+                let timeout = cx.background_executor().timer(Duration::from_secs(2));
+                let _ = futures::future::select(Box::pin(call), Box::pin(timeout)).await;
+            }
+            let Ok(Some((Some(current_id), cols, rows, _))) = this.update(cx, |panel, _| {
+                panel.tab_mut(&chat, key).map(|t| {
+                    (
+                        t.terminal_id.clone(),
+                        t.emulator.cols(),
+                        t.emulator.rows(),
+                        t.redraw_requested,
+                    )
+                })
+            }) else {
+                return;
+            };
+            if current_id != id {
+                return;
+            }
+            let params = with_target(
+                serde_json::json!({"terminalId":id,"cols":cols,"rows":rows}),
+                &target,
+            );
+            let call = engine.client().call(methods::RESIZE_TERMINAL, params);
+            let timeout = cx.background_executor().timer(Duration::from_secs(2));
+            if let futures::future::Either::Left((Ok(_), _)) =
+                futures::future::select(Box::pin(call), Box::pin(timeout)).await
+            {
+                let _ = this.update(cx, |panel, _| {
+                    if let Some(tab) = panel.tab_mut(&chat, key)
+                        && tab.terminal_id.as_deref() == Some(&id)
+                        && tab.emulator.cols() == cols
+                        && tab.emulator.rows() == rows
+                    {
+                        tab.redraw_requested = false;
+                    }
+                });
+            }
+        }));
     }
 
     /// Snapshot for the paint element.
@@ -1753,6 +1853,21 @@ impl Render for TerminalPanel {
         // replace the internal bar.
         let tab_bar: Option<gpui::AnyElement> =
             (!self.embedded).then(|| self.render_tab_bar(&chat, cx).into_any_element());
+        let gap_notice = self
+            .active_tab(cx)
+            .and_then(|tab| tab.gap_notice)
+            .map(|skipped| {
+                div()
+                    .id("terminal-output-gap")
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(theme.surface_raised)
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(format!(
+                        "Terminal output skipped ({skipped} chunks). Redraw requested."
+                    ))
+            });
         div()
             .size_full()
             .flex()
@@ -1764,6 +1879,7 @@ impl Render for TerminalPanel {
             .when(corner_bl, |el| el.rounded_bl(corner))
             .when(corner_br, |el| el.rounded_br(corner))
             .children(tab_bar)
+            .children(gap_notice)
             .child(
                 div()
                     .id("terminal-body")
@@ -1822,6 +1938,86 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn gap_redraw_restores_latest_size_after_a_replaced_resize(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine = EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("chat".into());
+            state
+        });
+        let panel = cx.new(|cx| TerminalPanel::new(state, cx));
+        let key = panel.update(cx, |panel, cx| {
+            let key = panel.reserve_tab_for_chat("chat".into(), "Terminal", cx);
+            let tab = panel.tab_mut("chat", key).unwrap();
+            tab.terminal_id = Some("pty".into());
+            tab.target_device_id = Some("remote".into());
+            tab.emulator.resize(80, 24);
+            tab.emulator.feed(b"\x1b[?1049hfull-screen");
+            panel.apply_stream_event(
+                "chat",
+                key,
+                &engine,
+                TerminalEvent::Gap { seq: 9, skipped: 3 },
+                cx,
+            );
+            key
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(Duration::from_millis(RESIZE_DEBOUNCE_MS));
+        cx.run_until_parked();
+        let first: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(first["method"], methods::RESIZE_TERMINAL);
+        assert_eq!(first["params"]["cols"], 79);
+        assert_eq!(first["params"]["targetDeviceId"], "remote");
+        // A layout update replaces the task while the temporary RPC is pending.
+        panel.update(cx, |panel, cx| {
+            let tab = panel.tab_mut("chat", key).unwrap();
+            assert_eq!(tab.gap_notice, Some(3));
+            assert!(tab.emulator.row_text(0).contains("full-screen"));
+            tab.emulator.resize(100, 30);
+            panel.schedule_native_resize("chat", key, engine.clone(), cx);
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(Duration::from_millis(RESIZE_DEBOUNCE_MS));
+        cx.run_until_parked();
+        let temporary: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(temporary["params"]["cols"], 99);
+        assert_eq!(temporary["params"]["rows"], 30);
+        // Let the temporary resize time out: the restore is still mandatory.
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        let restore: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(restore["params"]["cols"], 100);
+        assert_eq!(restore["params"]["rows"], 30);
+        assert_eq!(restore["params"]["terminalId"], "pty");
+        runtime.block_on(async {
+            replies
+                .send(serde_json::json!({"id":restore["id"],"ok":{}}).to_string())
+                .await
+                .unwrap();
+            while replies.capacity() < replies.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, _| {
+            assert!(!panel.tab_mut("chat", key).unwrap().redraw_requested);
+        });
+    }
 
     #[gpui::test]
     fn slow_trackpad_scroll_accumulates_per_terminal(cx: &mut gpui::TestAppContext) {

@@ -1,0 +1,326 @@
+{
+    "auditDate":  "2026-10-02",
+    "mainCommit":  "1c83cda221bd18a3b55ea49e5b25ec2c148955bc",
+    "version":  "0.2.102",
+    "platform":  "Windows x86-64",
+    "rustVersion":  "1.99.0",
+    "profile":  "release",
+    "allocator":  "CountingAllocator(System), requested Rust allocation bytes",
+    "exclusions":  [
+                       "allocator overhead",
+                       "native/C allocations",
+                       "RSS",
+                       "GPU allocations",
+                       "subprocess memory"
+                   ],
+    "binarySha256":  "1ff548f8b1f7369740620cb1a4c6228d8ac2455d8f439558b63e4e45910778cc",
+    "exampleSha256":  "d97db51f17546d8df030a80dba52c588e9246883c3f0466ab38753300b90a80c",
+    "samples":  [
+                    {
+                        "detail":  {
+                                       "compressedSnapshotBytes":  210301,
+                                       "estimateUsingCurrentFormulaBytes":  6291456,
+                                       "rawTextBytes":  25165824,
+                                       "resources":  {
+                                                         "activeClientLimit":  28,
+                                                         "budget":  {
+                                                                        "dialLimit":  4,
+                                                                        "dials":  0,
+                                                                        "http":  0,
+                                                                        "httpLimit":  8,
+                                                                        "resourcePaused":  false,
+                                                                        "socketLimit":  32,
+                                                                        "socketWaiting":  0,
+                                                                        "sockets":  0,
+                                                                        "waiting":  0
+                                                                    },
+                                                         "documentLoads":  12,
+                                                         "durable":  {
+                                                                         "pendingBatches":  0,
+                                                                         "pendingJobs":  0
+                                                                     },
+                                                         "fileDescriptorLimit":  null,
+                                                         "oldestWaitingAccessAgeMs":  0,
+                                                         "openDocuments":  12,
+                                                         "openFileDescriptors":  null,
+                                                         "retainedBy":  {
+                                                                            "connections":  0,
+                                                                            "storageFailures":  0,
+                                                                            "views":  0,
+                                                                            "writers":  0
+                                                                        },
+                                                         "waitingDocuments":  0
+                                                     }
+                                   },
+                        "liveRustBytesAboveBaseline":  131562822,
+                        "peakRustBytesAboveBaseline":  142329844,
+                        "scenario":  "docs"
+                    },
+                    {
+                        "detail":  {
+                                       "activeClientLimit":  28,
+                                       "budget":  {
+                                                      "dialLimit":  4,
+                                                      "dials":  0,
+                                                      "http":  0,
+                                                      "httpLimit":  8,
+                                                      "resourcePaused":  false,
+                                                      "socketLimit":  32,
+                                                      "socketWaiting":  0,
+                                                      "sockets":  0,
+                                                      "waiting":  0
+                                                  },
+                                       "documentLoads":  12,
+                                       "durable":  {
+                                                       "pendingBatches":  0,
+                                                       "pendingJobs":  0
+                                                   },
+                                       "fileDescriptorLimit":  null,
+                                       "oldestWaitingAccessAgeMs":  0,
+                                       "openDocuments":  12,
+                                       "openFileDescriptors":  null,
+                                       "retainedBy":  {
+                                                          "connections":  0,
+                                                          "storageFailures":  0,
+                                                          "views":  0,
+                                                          "writers":  0
+                                                      },
+                                       "waitingDocuments":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  156738634,
+                        "peakRustBytesAboveBaseline":  158835546,
+                        "scenario":  "docs-after-quiet-watches"
+                    },
+                    {
+                        "detail":  {
+                                       "activeClientLimit":  28,
+                                       "budget":  {
+                                                      "dialLimit":  4,
+                                                      "dials":  0,
+                                                      "http":  0,
+                                                      "httpLimit":  8,
+                                                      "resourcePaused":  false,
+                                                      "socketLimit":  32,
+                                                      "socketWaiting":  0,
+                                                      "sockets":  0,
+                                                      "waiting":  0
+                                                  },
+                                       "documentLoads":  20,
+                                       "durable":  {
+                                                       "pendingBatches":  0,
+                                                       "pendingJobs":  0
+                                                   },
+                                       "fileDescriptorLimit":  null,
+                                       "oldestWaitingAccessAgeMs":  0,
+                                       "openDocuments":  12,
+                                       "openFileDescriptors":  null,
+                                       "retainedBy":  {
+                                                          "connections":  0,
+                                                          "storageFailures":  0,
+                                                          "views":  0,
+                                                          "writers":  0
+                                                      },
+                                       "waitingDocuments":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  52650022,
+                        "peakRustBytesAboveBaseline":  158835546,
+                        "scenario":  "docs-after-count-eviction"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  -26215,
+                        "peakRustBytesAboveBaseline":  158835546,
+                        "scenario":  "docs-after-drop"
+                    },
+                    {
+                        "detail":  {
+                                       "returnedEvents":  0,
+                                       "textOnDiskBytes":  16777216
+                                   },
+                        "liveRustBytesAboveBaseline":  35477,
+                        "peakRustBytesAboveBaseline":  16914002,
+                        "scenario":  "journal-empty-tail-replay"
+                    },
+                    {
+                        "detail":  {
+                                       "returnedEvents":  1
+                                   },
+                        "liveRustBytesAboveBaseline":  66182,
+                        "peakRustBytesAboveBaseline":  16914002,
+                        "scenario":  "journal-last-event"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  217,
+                        "peakRustBytesAboveBaseline":  33704170,
+                        "scenario":  "journal-reopen-append"
+                    },
+                    {
+                        "detail":  {
+                                       "durablePayloadBytes":  16777216
+                                   },
+                        "liveRustBytesAboveBaseline":  651,
+                        "peakRustBytesAboveBaseline":  651,
+                        "scenario":  "outbox-disk-only"
+                    },
+                    {
+                        "detail":  {
+                                       "batches":  64,
+                                       "payloadBytes":  16777216
+                                   },
+                        "liveRustBytesAboveBaseline":  16782465,
+                        "peakRustBytesAboveBaseline":  16782465,
+                        "scenario":  "outbox-load"
+                    },
+                    {
+                        "detail":  {
+                                       "copiedBatches":  64
+                                   },
+                        "liveRustBytesAboveBaseline":  33563249,
+                        "peakRustBytesAboveBaseline":  33563249,
+                        "scenario":  "outbox-with-send-copy"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  1024,
+                        "peakRustBytesAboveBaseline":  33564613,
+                        "scenario":  "outbox-after-drop"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  64
+                                   },
+                        "liveRustBytesAboveBaseline":  79724,
+                        "peakRustBytesAboveBaseline":  79724,
+                        "scenario":  "rpc-cancelled-calls"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  96
+                                   },
+                        "liveRustBytesAboveBaseline":  160716,
+                        "peakRustBytesAboveBaseline":  160716,
+                        "scenario":  "rpc-dropped-legacy-streams"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  96
+                                   },
+                        "liveRustBytesAboveBaseline":  160716,
+                        "peakRustBytesAboveBaseline":  180219,
+                        "scenario":  "rpc-dropped-scoped-streams"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  -1140,
+                        "peakRustBytesAboveBaseline":  180219,
+                        "scenario":  "rpc-after-connection-drop"
+                    },
+                    {
+                        "detail":  {
+                                       "queuedEvents":  140
+                                   },
+                        "liveRustBytesAboveBaseline":  25634196,
+                        "peakRustBytesAboveBaseline":  25890240,
+                        "scenario":  "terminal-stalled-subscriber"
+                    },
+                    {
+                        "detail":  {
+                                       "queuedEncodedBytes":  24607280,
+                                       "receivedExit":  true
+                                   },
+                        "liveRustBytesAboveBaseline":  1026646,
+                        "peakRustBytesAboveBaseline":  25890240,
+                        "scenario":  "terminal-after-drain"
+                    },
+                    {
+                        "detail":  {
+                                       "fullSnapshotBytes":  8455009,
+                                       "shallowSnapshotBytes":  131447,
+                                       "visibleFieldBytes":  65536,
+                                       "writtenBytes":  8388608
+                                   },
+                        "liveRustBytesAboveBaseline":  50764009,
+                        "peakRustBytesAboveBaseline":  59023030,
+                        "scenario":  "history-replacement"
+                    },
+                    {
+                        "detail":  {
+                                       "pendingBatches":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  646,
+                        "peakRustBytesAboveBaseline":  646,
+                        "scenario":  "sync-disabled"
+                    },
+                    {
+                        "detail":  {
+                                       "emittedBytes":  16777216,
+                                       "pendingBatches":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  60739,
+                        "peakRustBytesAboveBaseline":  1370304,
+                        "scenario":  "sync-healthy"
+                    },
+                    {
+                        "detail":  {
+                                       "pendingBatches":  64,
+                                       "pendingPayloadBytes":  16777216
+                                   },
+                        "liveRustBytesAboveBaseline":  16846386,
+                        "peakRustBytesAboveBaseline":  19471981,
+                        "scenario":  "sync-stalled-acks"
+                    },
+                    {
+                        "detail":  {
+                                       "pendingBatches":  128,
+                                       "pendingPayloadBytes":  33554432
+                                   },
+                        "liveRustBytesAboveBaseline":  33584762,
+                        "peakRustBytesAboveBaseline":  33600138,
+                        "scenario":  "sync-offline"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  3536,
+                        "peakRustBytesAboveBaseline":  33600138,
+                        "scenario":  "sync-after-client-shutdown"
+                    },
+                    {
+                        "detail":  {
+                                       "rowPayloadBytes":  16777216,
+                                       "sentRows":  64
+                                   },
+                        "liveRustBytesAboveBaseline":  17923742,
+                        "peakRustBytesAboveBaseline":  18180566,
+                        "scenario":  "sync-catchup-waiting-checkpoint"
+                    },
+                    {
+                        "detail":  {
+                                       "cursor":  64
+                                   },
+                        "liveRustBytesAboveBaseline":  1103763,
+                        "peakRustBytesAboveBaseline":  18180566,
+                        "scenario":  "sync-catchup-complete"
+                    }
+                ],
+    "validation":  {
+                       "ignored":  1,
+                       "command":  "cargo test --release --locked -p zeron-engine -p zeron-doc -p zeron-rpc -p zeron-sync --lib",
+                       "ignoredTest":  "chat_persistence::tests::real_whale_replay_keeps_146_heartbeats_running_on_two_workers (requires privately supplied ZERON_WHALE_SNAPSHOT)",
+                       "failed":  0,
+                       "passed":  553,
+                       "commit":  "69e64ef56075ce87c83710060b4d86b4f71b6ac9"
+                   },
+    "measurementCommit":  "69e64ef56075ce87c83710060b4d86b4f71b6ac9",
+    "revisionNote":  "Final audit branch fast-forwarded to upstream main after UI-only inline-rename merge; measured engine/document/RPC/sync sources and Cargo manifests/lock are unchanged."
+}

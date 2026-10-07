@@ -1,7 +1,8 @@
 name: deploy
 
 # Autodeploy the edge Worker + Durable Objects (session/device rooms, R2,
-# WorkOS auth routes) on every push to main that touches edge/. Skips
+# WorkOS auth routes) on every push to main that touches edge/ or its shared
+# protocol limits. Skips
 # gracefully until the CLOUDFLARE_API_TOKEN secret is configured (until then:
 # `npm -C edge run deploy` from a wrangler-authenticated machine).
 #
@@ -38,7 +39,7 @@ jobs:
             || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(edge/|\.github/workflows/deploy\.yml)"; then
+          if ! git diff --quiet "$before" "$GITHUB_SHA" -- edge/ crates/proto/chat2-limits.json .github/workflows/deploy.yml; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"

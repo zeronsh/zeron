@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use super::parser::{Block, BlockTree, InlineRun, TopBlock};
 use crate::workspace_links::{
@@ -29,6 +29,7 @@ use crate::workspace_links::{
 /// re-parses into a new tree on every commit, so stale streamed trees age out
 /// while every part on screen stays cached across frames.
 const CACHED_PARTS: usize = 32;
+const CACHED_BYTES: usize = 8 * 1024 * 1024;
 
 /// Text parts already rewritten, keyed by their source tree and reset when
 /// the file-link roots change.
@@ -37,6 +38,8 @@ pub(crate) struct InlineCodeLinkCache {
     revision: u64,
     probes: PathProbes,
     parts: Vec<LinkedPart>,
+    bytes: usize,
+    oversized: Vec<(Weak<BlockTree>, Weak<BlockTree>)>,
 }
 
 struct LinkedPart {
@@ -44,6 +47,7 @@ struct LinkedPart {
     /// different part while this entry is cached.
     source: Arc<BlockTree>,
     linked: Arc<BlockTree>,
+    bytes: usize,
 }
 
 impl InlineCodeLinkCache {
@@ -58,6 +62,8 @@ impl InlineCodeLinkCache {
         self.revision = revision;
         self.probes = PathProbes::default();
         self.parts.clear();
+        self.oversized.clear();
+        self.bytes = 0;
         true
     }
 
@@ -85,15 +91,101 @@ impl InlineCodeLinkCache {
             self.parts.push(part);
             return linked;
         }
-        let linked = Arc::new(link_tree(tree, roots, &mut self.probes));
-        if self.parts.len() >= CACHED_PARTS {
-            self.parts.remove(0);
+        self.oversized
+            .retain(|(source, linked)| source.strong_count() > 0 && linked.strong_count() > 0);
+        if let Some(linked) = self.oversized.iter().find_map(|(source, linked)| {
+            (source.as_ptr() == Arc::as_ptr(tree))
+                .then(|| linked.upgrade())
+                .flatten()
+        }) {
+            return linked;
         }
+        let linked = Arc::new(link_tree(tree, roots, &mut self.probes));
+        // Charge both trees conservatively, even when completed blocks share
+        // Arcs. A single oversized visible part is returned without retaining
+        // another full history in this navigation cache.
+        let bytes = tree_bytes(tree) + tree_bytes(&linked);
+        if bytes > CACHED_BYTES {
+            if self.oversized.len() >= CACHED_PARTS {
+                self.oversized.remove(0);
+            }
+            self.oversized
+                .push((Arc::downgrade(tree), Arc::downgrade(&linked)));
+            return linked;
+        }
+        while self.parts.len() >= CACHED_PARTS || self.bytes + bytes > CACHED_BYTES {
+            let old = self.parts.remove(0);
+            self.bytes -= old.bytes;
+        }
+        self.bytes += bytes;
         self.parts.push(LinkedPart {
             source: tree.clone(),
             linked: linked.clone(),
+            bytes,
         });
         linked
+    }
+}
+
+fn tree_bytes(tree: &BlockTree) -> usize {
+    std::mem::size_of::<BlockTree>()
+        + tree.blocks.capacity() * std::mem::size_of::<Arc<TopBlock>>()
+        + tree
+            .blocks
+            .iter()
+            .map(|top| std::mem::size_of::<TopBlock>() + block_bytes(&top.block))
+            .sum::<usize>()
+}
+
+fn runs_bytes(runs: &Vec<InlineRun>) -> usize {
+    runs.capacity() * std::mem::size_of::<InlineRun>()
+        + runs
+            .iter()
+            .map(|run| {
+                let style = &run.style;
+                run.text.capacity()
+                    + style.link.as_ref().map_or(0, String::capacity)
+                    + style.file_label.as_ref().map_or(0, String::capacity)
+                    + style.image.as_ref().map_or(0, |image| {
+                        image.source.capacity()
+                            + image.alt.capacity()
+                            + image.title.capacity()
+                            + image.link.as_ref().map_or(0, String::capacity)
+                    })
+            })
+            .sum::<usize>()
+}
+
+fn blocks_bytes(blocks: &Vec<Block>) -> usize {
+    blocks.capacity() * std::mem::size_of::<Block>() + blocks.iter().map(block_bytes).sum::<usize>()
+}
+
+fn block_bytes(block: &Block) -> usize {
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => runs_bytes(runs),
+        Block::CodeBlock { language, code } => {
+            code.capacity() + language.as_ref().map_or(0, String::capacity)
+        }
+        Block::BlockQuote { children } => blocks_bytes(children),
+        Block::List { items, .. } => {
+            items.capacity() * std::mem::size_of::<Vec<Block>>()
+                + items.iter().map(blocks_bytes).sum::<usize>()
+        }
+        Block::Table {
+            header,
+            rows,
+            align,
+        } => {
+            let row_bytes = |row: &Vec<Vec<InlineRun>>| {
+                row.capacity() * std::mem::size_of::<Vec<InlineRun>>()
+                    + row.iter().map(runs_bytes).sum::<usize>()
+            };
+            row_bytes(header)
+                + rows.capacity() * std::mem::size_of::<Vec<Vec<InlineRun>>>()
+                + rows.iter().map(row_bytes).sum::<usize>()
+                + align.capacity() * std::mem::size_of::<super::parser::TableAlign>()
+        }
+        Block::Rule => 0,
     }
 }
 
@@ -349,6 +441,41 @@ mod tests {
     use super::*;
     use crate::markdown::parser::parse_full;
     use crate::workspace_links::FileLinkRoot;
+
+    #[test]
+    fn linked_history_is_byte_budgeted_including_large_code_and_media_fields() {
+        let mut cache = InlineCodeLinkCache::default();
+        for i in 0..20 {
+            let text = format!("```\n{i} {}\n```", "x".repeat(512 * 1024));
+            let tree = Arc::new(parse_full(&text));
+            let linked = cache.linked_tree(&tree, &[], true);
+            assert_eq!(linked.as_ref(), tree.as_ref());
+            assert!(cache.bytes <= CACHED_BYTES);
+        }
+        assert!(cache.parts.len() < CACHED_PARTS);
+        let huge = Arc::new(parse_full(&format!(
+            "```\n{}\n```",
+            "x".repeat(CACHED_BYTES)
+        )));
+        let count = cache.parts.len();
+        let linked = cache.linked_tree(&huge, &[], true);
+        assert_eq!(linked.as_ref(), huge.as_ref());
+        assert!(Arc::ptr_eq(&linked, &cache.linked_tree(&huge, &[], true)));
+        let weak = Arc::downgrade(&linked);
+        drop(linked);
+        assert!(
+            weak.upgrade().is_none(),
+            "oversized memo must not keep history alive"
+        );
+        assert_eq!(
+            cache.parts.len(),
+            count,
+            "oversized histories must not be cached"
+        );
+        cache.set_revision(1);
+        assert_eq!(cache.bytes, 0);
+        assert!(cache.parts.is_empty());
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,

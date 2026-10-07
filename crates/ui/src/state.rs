@@ -2786,7 +2786,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
         loop {
             let mut rx = match handle
                 .client()
-                .subscribe(methods::WATCH_CHATS, serde_json::json!({}))
+                .subscribe_scoped(methods::WATCH_CHATS, serde_json::json!({}))
                 .await
             {
                 Ok(rx) => rx,
@@ -2933,7 +2933,7 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
         loop {
             let mut rx = match handle
                 .client()
-                .subscribe(method, serde_json::json!({}))
+                .subscribe_scoped(method, serde_json::json!({}))
                 .await
             {
                 Ok(rx) => rx,

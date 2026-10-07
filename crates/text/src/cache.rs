@@ -507,7 +507,7 @@ impl WidthCache {
         let script = buf.script();
         let script = (script != rustybuzz::script::UNKNOWN).then_some(script);
         let plan = self.plan(sd, face, direction, script);
-        rustybuzz::shape_with_plan(&face.hb, &self.plans[plan].plan, buf)
+        rustybuzz::shape_with_plan(face.hb(), &self.plans[plan].plan, buf)
     }
 
     fn insert(
@@ -639,7 +639,7 @@ impl WidthCache {
         let script = buf.script();
         let script = (script != rustybuzz::script::UNKNOWN).then_some(script);
         let plan = self.plan(sd, face, direction, script);
-        let glyphs = rustybuzz::shape_with_plan(&face.hb, &self.plans[plan].plan, buf);
+        let glyphs = rustybuzz::shape_with_plan(face.hb(), &self.plans[plan].plan, buf);
         let positions = glyphs.glyph_positions();
         let total: i64 = positions.iter().map(|p| p.x_advance as i64).sum();
         let width = total as f32 * sd.scale;
@@ -674,7 +674,7 @@ impl WidthCache {
         }) {
             return i;
         }
-        let plan = ShapePlan::new(&face.hb, direction, script, None, &sd.features);
+        let plan = ShapePlan::new(face.hb(), direction, script, None, &sd.features);
         self.plans.push(Plan {
             face: face_id,
             ligatures,

@@ -18,6 +18,7 @@ pub(crate) struct ChatPersistence {
     saved: AtomicU64,
     snapshot_bytes: AtomicUsize,
     urgent: AtomicBool,
+    deleted: AtomicBool,
     write: Mutex<()>,
     wake: Option<mpsc::Sender<()>>,
     pub(crate) initial_cursor_verified: bool,
@@ -48,6 +49,7 @@ impl ChatPersistence {
             saved: AtomicU64::new(0),
             snapshot_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
+            deleted: AtomicBool::new(false),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
             initial_cursor_verified: verified,
@@ -86,6 +88,9 @@ impl ChatPersistence {
     }
 
     pub(crate) fn dirty(&self, immediate: bool) {
+        if self.deleted.load(Ordering::Acquire) {
+            return;
+        }
         self.generation.fetch_add(1, Ordering::Release);
         if immediate {
             self.urgent.store(true, Ordering::Release);
@@ -103,6 +108,9 @@ impl ChatPersistence {
             let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
             loop {
                 let Some(this) = weak.upgrade() else { return };
+                if this.deleted.load(Ordering::Acquire) {
+                    return;
+                }
                 let urgent = this.urgent.swap(false, Ordering::AcqRel);
                 drop(this);
                 if urgent {
@@ -139,9 +147,22 @@ impl ChatPersistence {
         }
     }
 
+    /// Serialize the tombstone with any export already writing to SQLite.
+    pub(crate) fn delete_snapshot(&self) -> Result<(), zeron_sync::StoreError> {
+        let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        self.deleted.store(true, Ordering::Release);
+        if let Some(wake) = &self.wake {
+            let _ = wake.try_send(());
+        }
+        self.store.delete_snapshot(&self.chat_id)
+    }
+
     pub(crate) fn flush_sync(&self) {
         let flush = || {
             let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+            if self.deleted.load(Ordering::Acquire) {
+                return;
+            }
             let generation = self.generation.load(Ordering::Acquire);
             if generation == self.saved.load(Ordering::Acquire) {
                 return;
@@ -276,6 +297,46 @@ mod tests {
         let doc = Arc::new(SessionDoc::init("whale").unwrap());
         let persistence = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0);
         (dir, doc, store, persistence)
+    }
+
+    #[tokio::test]
+    async fn deleted_snapshot_is_not_recreated_by_a_late_commit_or_flush() {
+        let (_dir, doc, store, persistence) = fixture();
+        persistence.dirty(true);
+        persistence.flush_sync();
+        assert!(store.load_snapshot("whale").unwrap().is_some());
+        persistence.delete_snapshot().unwrap();
+        doc.doc().get_map("test").insert("late", true).unwrap();
+        doc.doc().commit();
+        persistence.applied(2, true);
+        persistence.flush_sync();
+        tokio::time::sleep(SAVE_INTERVAL + Duration::from_millis(50)).await;
+        assert!(store.load_snapshot("whale").unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deletion_waits_for_an_inflight_export_then_removes_its_snapshot() {
+        let (_dir, _doc, store, persistence) = fixture();
+        persistence.dirty(false);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *persistence.before_export.lock().unwrap() = Some(Box::new(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let p = persistence.clone();
+        let export = tokio::task::spawn_blocking(move || p.flush_sync());
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let p = persistence.clone();
+        let delete = tokio::task::spawn_blocking(move || p.delete_snapshot().unwrap());
+        release_tx.send(()).unwrap();
+        export.await.unwrap();
+        delete.await.unwrap();
+        persistence.dirty(true);
+        persistence.flush_sync();
+        assert!(store.load_snapshot("whale").unwrap().is_none());
     }
 
     #[tokio::test]

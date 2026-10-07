@@ -44,6 +44,17 @@ type StdoutObserver = Box<dyn Fn(&str) + Send>;
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+struct PendingRequest {
+    pending: Pending,
+    id: i64,
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.pending.lock().expect("pending lock").remove(&self.id);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RpcClient {
     next_id: Arc<AtomicI64>,
@@ -129,7 +140,14 @@ impl RpcClient {
                 )))
             });
         }
+        // Capture the guard in the future itself: request_now queues eagerly,
+        // so even a future dropped without being polled must release its entry.
+        let guard = PendingRequest {
+            pending: self.pending.clone(),
+            id,
+        };
         Box::pin(async move {
+            let _guard = guard;
             match rx.await {
                 Ok(Ok(result)) => Ok(result),
                 Ok(Err(message)) => Err(HarnessError::Protocol(format!("{method}: {message}"))),
@@ -312,6 +330,25 @@ async fn read_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_an_unpolled_eager_request_removes_its_pending_entry() {
+        let (writer, mut receiver) = mpsc::unbounded_channel();
+        let client = RpcClient {
+            next_id: Arc::new(AtomicI64::new(0)),
+            pending: Arc::default(),
+            writer,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let request = client.request_now("session/prompt", json!({}));
+        assert_eq!(client.pending.lock().unwrap().len(), 1);
+        assert!(
+            receiver.try_recv().is_ok(),
+            "request_now must still queue eagerly"
+        );
+        drop(request);
+        assert!(client.pending.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn cancel_notification_wire_has_no_id() {

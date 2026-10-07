@@ -5489,7 +5489,11 @@ impl Transcript {
     fn protected_attachment_keys(&self, cx: &Context<Self>) -> HashSet<(String, String)> {
         let devices = self.attachment_device_ids(cx);
         let mut keys = std::collections::HashSet::new();
-        for row in &self.rows {
+        for row in self
+            .rows
+            .iter()
+            .filter(|row| self.rendered_rows.contains(&row.id))
+        {
             // Generated images use bounded LRU retention, not history-wide protection.
             if let RowKind::User {
                 attachments,
@@ -9449,6 +9453,7 @@ impl Render for Transcript {
         self.render_cache
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
+        self.refresh_protected_attachments(cx);
         self.rendered_rows.clear();
         let compact_mode = crate::settings::transcript_compact_mode(cx);
         if self.compact_mode != compact_mode {

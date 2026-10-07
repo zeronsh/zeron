@@ -11,3 +11,6 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 pulldown-cmark.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true

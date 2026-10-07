@@ -415,6 +415,40 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Idempotency lookup without copying every historical text/tool payload.
+    /// Torn entries without an id retain read_entries' synthesized-id behavior.
+    pub fn has_message(&self, message_id: &str) -> bool {
+        let messages = self.doc.get_list("messages");
+        for i in 0..messages.len() {
+            let Some(entry) = messages.get(i) else {
+                continue;
+            };
+            let id = match &entry {
+                loro::ValueOrContainer::Container(loro::Container::Map(map)) => {
+                    match map.get("id") {
+                        Some(loro::ValueOrContainer::Value(LoroValue::String(id))) => Some(id),
+                        _ => None,
+                    }
+                }
+                loro::ValueOrContainer::Value(LoroValue::Map(map)) => match map.get("id") {
+                    Some(LoroValue::String(id)) => Some(id.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(id) = id {
+                if id.as_str() == message_id {
+                    return true;
+                }
+            } else if entry_from_json(entry.get_deep_value().to_json_value())
+                .is_ok_and(|entry| entry.id == message_id)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Read all entries (continuations NOT joined — see `join_continuation_entries`).
     ///
     /// Malformed entries are SKIPPED, not fatal: a torn intermediate state
@@ -1550,6 +1584,29 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn message_lookup_matches_materialization_for_torn_and_legacy_entries() {
+        let doc = SessionDoc::init("lookup").unwrap();
+        let messages = doc.doc().get_list("messages");
+        let torn = messages.push_container(LoroMap::new()).unwrap();
+        torn.insert("id", "torn").unwrap();
+        let recovered = messages.push_container(LoroMap::new()).unwrap();
+        recovered.insert("unknown", true).unwrap();
+        messages
+            .push(LoroValue::from(serde_json::json!({
+                "id": "legacy", "role": "user", "parts": [], "createdAt": 0, "deviceId": "host"
+            })))
+            .unwrap();
+        messages.push("invalid scalar").unwrap();
+        doc.doc().commit();
+        for entry in doc.read_entries().unwrap() {
+            assert!(doc.has_message(&entry.id));
+        }
+        assert!(doc.has_message("torn"));
+        assert!(doc.has_message("legacy"));
+        assert!(!doc.has_message("missing"));
     }
 
     #[test]

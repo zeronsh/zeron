@@ -269,7 +269,7 @@ mod tests {
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, zeron_rpc::RpcError> {
+        ) -> Result<super::super::client::WorkspaceFilesWatch, zeron_rpc::RpcError> {
             unreachable!()
         }
     }
@@ -383,7 +383,7 @@ mod tests {
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, zeron_rpc::RpcError> {
+        ) -> Result<super::super::client::WorkspaceFilesWatch, zeron_rpc::RpcError> {
             unreachable!()
         }
     }

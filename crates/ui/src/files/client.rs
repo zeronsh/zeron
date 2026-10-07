@@ -3,13 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+#[cfg(test)]
 use tokio::sync::mpsc;
 use zeron_proto::{
     ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceFilesRequest,
     WatchWorkspaceFilesRequest, WorkspaceDirectoryPage, WorkspaceFileSearchMatch,
     WorkspaceFileText, WorkspaceTarget, WriteWorkspaceFileOutcome, WriteWorkspaceFileRequest,
 };
-use zeron_rpc::{RpcError, methods};
+use zeron_rpc::{RpcError, RpcSubscription, methods};
 
 use crate::state::{AppState, EngineHandle};
 
@@ -79,14 +80,29 @@ pub struct WorkspaceFilesClient {
     context: FilesRequestContext,
 }
 
+pub struct WorkspaceFilesWatch(WatchReceiver);
+
+enum WatchReceiver {
+    Rpc(RpcSubscription),
+    #[cfg(test)]
+    Fixture(mpsc::Receiver<Value>),
+}
+
+impl WorkspaceFilesWatch {
+    pub async fn recv(&mut self) -> Option<Value> {
+        match &mut self.0 {
+            WatchReceiver::Rpc(subscription) => subscription.recv().await,
+            #[cfg(test)]
+            WatchReceiver::Fixture(receiver) => receiver.recv().await,
+        }
+    }
+}
+
 #[async_trait]
 pub(super) trait WorkspaceFilesTransport: Send + Sync {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError>;
-    async fn subscribe(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<mpsc::Receiver<Value>, RpcError>;
+    async fn subscribe(&self, method: &str, params: Value)
+    -> Result<WorkspaceFilesWatch, RpcError>;
 }
 
 struct EngineFilesTransport(EngineHandle);
@@ -101,8 +117,12 @@ impl WorkspaceFilesTransport for EngineFilesTransport {
         &self,
         method: &str,
         params: Value,
-    ) -> Result<mpsc::Receiver<Value>, RpcError> {
-        self.0.client().subscribe(method, params).await
+    ) -> Result<WorkspaceFilesWatch, RpcError> {
+        self.0
+            .client()
+            .subscribe_scoped(method, params)
+            .await
+            .map(|subscription| WorkspaceFilesWatch(WatchReceiver::Rpc(subscription)))
     }
 }
 
@@ -275,7 +295,7 @@ impl WorkspaceFilesClient {
         self.call(methods::DELETE_WORKSPACE_ENTRY, &request).await
     }
 
-    pub async fn watch(&self) -> Result<mpsc::Receiver<serde_json::Value>, FilesClientError> {
+    pub async fn watch(&self) -> Result<WorkspaceFilesWatch, FilesClientError> {
         let request = WatchWorkspaceFilesRequest {
             target: self.context.target.clone(),
         };
@@ -348,13 +368,13 @@ mod tests {
             &self,
             method: &str,
             params: Value,
-        ) -> Result<mpsc::Receiver<Value>, RpcError> {
+        ) -> Result<WorkspaceFilesWatch, RpcError> {
             self.calls.lock().unwrap().push((method.into(), params));
             let (sender, receiver) = mpsc::channel(self.watch_values.len().max(1));
             for value in &self.watch_values {
                 sender.try_send(value.clone()).unwrap();
             }
-            Ok(receiver)
+            Ok(WorkspaceFilesWatch(WatchReceiver::Fixture(receiver)))
         }
     }
 
@@ -798,7 +818,7 @@ mod tests {
                 .pop_front()
                 .expect("unexpected extra request")
         }
-        async fn subscribe(&self, _: &str, _: Value) -> Result<mpsc::Receiver<Value>, RpcError> {
+        async fn subscribe(&self, _: &str, _: Value) -> Result<WorkspaceFilesWatch, RpcError> {
             unreachable!()
         }
     }

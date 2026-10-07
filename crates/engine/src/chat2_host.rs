@@ -114,6 +114,23 @@ impl EngineChatSink {
 }
 
 impl ChatDocSink for EngineChatSink {
+    fn pending_window(&self) -> Result<Option<Vec<(String, Vec<u8>)>>, String> {
+        self.store
+            .pending_chat_updates_window(
+                &self.chat_id,
+                zeron_sync::chat_client::PENDING_WINDOW_BATCHES,
+                zeron_sync::chat_client::PENDING_WINDOW_BYTES,
+            )
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    fn pending_update_count(&self) -> Result<Option<u64>, String> {
+        self.store
+            .pending_chat_update_count(&self.chat_id)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
     fn cursor_is_verified(&self) -> bool {
         self.persistence.initial_cursor_verified
     }
@@ -326,7 +343,15 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
                 let mut stream = res;
                 loop {
                     match stream.chunk().await {
-                        Ok(Some(chunk)) => got.extend_from_slice(&chunk),
+                        Ok(Some(chunk)) => {
+                            use zeron_proto::chat2_limits::MAX_CHECKPOINT_BYTES;
+                            if got.len().saturating_add(chunk.len()) > MAX_CHECKPOINT_BYTES {
+                                return Err(SyncError::Protocol(format!(
+                                    "checkpoint exceeds {MAX_CHECKPOINT_BYTES} bytes"
+                                )));
+                            }
+                            got.extend_from_slice(&chunk);
+                        }
                         Ok(None) => return Ok(got),
                         Err(err) => {
                             // Mid-body drop: keep the bytes, resume via Range.

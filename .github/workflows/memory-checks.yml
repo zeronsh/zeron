@@ -1,0 +1,61 @@
+name: Memory checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'scripts/ci/check-memory.sh'
+      - '.github/workflows/memory-checks.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/doc/**'
+      - 'crates/engine/**'
+      - 'crates/harness/**'
+      - 'crates/proto/**'
+      - 'crates/rpc/**'
+      - 'crates/sync/**'
+      - 'crates/text/**'
+      - 'scripts/ci/check-memory.sh'
+      - '.github/workflows/memory-checks.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  valgrind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: 1
+      CARGO_PROFILE_RELEASE_STRIP: none
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: memory
+          save-rust-cache: 'true'
+          apt-cache: valgrind
+          apt-packages: valgrind
+      - name: Core regression tests
+        run: cargo test --locked --release -p zeron-doc -p zeron-engine -p zeron-rpc -p zeron-sync -p zeron-harness -p zeron-text --lib
+      - name: Deleted-chat provider and restart regressions
+        run: cargo test --locked --release -p zeron-engine --test chat_deletion -- --test-threads=1
+      - name: Valgrind Memcheck and Massif
+        run: bash scripts/ci/check-memory.sh
+      - name: Upload memory evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: memory-evidence-linux
+          path: target/memory-evidence
+          if-no-files-found: warn

@@ -74,6 +74,10 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // One-time classification for rows written before insert-time classification.
+    // 1044480 is the protocol maxPushBytes when this migration was introduced.
+    "UPDATE chat_outbox SET needs_checkpoint=1 WHERE length(bytes)>1044480;
+     CREATE INDEX chat_outbox_pending ON chat_outbox(doc_id,needs_checkpoint,ordinal);",
 ];
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
@@ -122,8 +126,8 @@ impl DocsStore {
         bytes: &[u8],
     ) -> Result<(), StoreError> {
         let result = self.conn().execute(
-            "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
-            params![doc_id, batch_id, bytes],
+            "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes,needs_checkpoint) VALUES (?1,?2,?3,?4)",
+            params![doc_id, batch_id, bytes, bytes.len() > zeron_proto::chat2_limits::MAX_PUSH_BYTES],
         );
         if result.is_err() {
             self.failed_publications
@@ -137,6 +141,83 @@ impl DocsStore {
 
     pub fn pending_chat_updates(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
         store_blocking(|| self.pending_chat_updates_blocking(doc_id))
+    }
+
+    /// Recovery also needs checkpoint-only rows. Page by immutable ordinal so
+    /// importing an offline history never materializes its whole outbox.
+    pub fn chat_updates_after(
+        &self,
+        doc_id: &str,
+        after: i64,
+        max_bytes: usize,
+    ) -> Result<Vec<(i64, Vec<u8>)>, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut statement = conn.prepare(
+                "SELECT ordinal,bytes,length(bytes) FROM chat_outbox WHERE doc_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 32",
+            )?;
+            let mut rows = statement.query(params![doc_id, after])?;
+            let mut page = Vec::new();
+            let mut bytes = 0usize;
+            while let Some(row) = rows.next()? {
+                let size: usize = row.get(2)?;
+                if !page.is_empty() && bytes.saturating_add(size) > max_bytes {
+                    break;
+                }
+                page.push((row.get(0)?, row.get(1)?));
+                bytes = bytes.saturating_add(size);
+            }
+            Ok(page)
+        })
+    }
+
+    pub fn has_rejected_chat_updates(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| {
+            Ok(self.conn().query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=1)",
+                params![doc_id],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
+    /// A bounded transport window over the durable outbox. Inspect lengths
+    /// before copying BLOBs; one legal large row may exceed the window target.
+    /// Rejected rows stay on disk for checkpoint coverage.
+    pub fn pending_chat_updates_window(
+        &self,
+        doc_id: &str,
+        max_batches: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut statement = conn.prepare(
+                "SELECT batch_id,bytes,length(bytes) FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=0 ORDER BY ordinal LIMIT ?2",
+            )?;
+            let mut rows = statement.query(params![doc_id, max_batches as i64])?;
+            let mut window = Vec::new();
+            let mut bytes = 0usize;
+            while let Some(row) = rows.next()? {
+                let size: usize = row.get(2)?;
+                if !window.is_empty() && bytes.saturating_add(size) > max_bytes {
+                    break;
+                }
+                window.push((row.get(0)?, row.get(1)?));
+                bytes = bytes.saturating_add(size);
+            }
+            Ok(window)
+        })
+    }
+
+    pub fn pending_chat_update_count(&self, doc_id: &str) -> Result<u64, StoreError> {
+        store_blocking(|| {
+            Ok(self.conn().query_row(
+                "SELECT count(*) FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=0",
+                params![doc_id],
+                |row| row.get(0),
+            )?)
+        })
     }
 
     /// Admission/lifetime checks must not copy the pending payloads.
@@ -248,8 +329,8 @@ impl DocsStore {
         {
             for bytes in updates {
                 tx.execute(
-                    "INSERT INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
-                    params![doc_id, uuid::Uuid::new_v4().to_string(), bytes],
+                    "INSERT INTO chat_outbox(doc_id,batch_id,bytes,needs_checkpoint) VALUES (?1,?2,?3,?4)",
+                    params![doc_id, uuid::Uuid::new_v4().to_string(), bytes, bytes.len() > zeron_proto::chat2_limits::MAX_PUSH_BYTES],
                 )?;
             }
         }
@@ -815,6 +896,106 @@ mod publication_tests {
 #[cfg(test)]
 mod publication_failure_tests {
     use super::*;
+    #[test]
+    fn bounded_windows_preserve_order_and_keep_rejected_rows_for_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        for (id, size) in [
+            ("first", 4),
+            ("large", zeron_proto::chat2_limits::MAX_PUSH_BYTES + 1),
+            ("third", 4),
+            ("fourth", 4),
+        ] {
+            store
+                .enqueue_chat_update("chat", id, &vec![b'x'; size])
+                .unwrap();
+        }
+        let window = store.pending_chat_updates_window("chat", 32, 8).unwrap();
+        assert_eq!(
+            window.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["first", "third"]
+        );
+        assert_eq!(store.pending_chat_update_count("chat").unwrap(), 3);
+        assert!(store.has_rejected_chat_updates("chat").unwrap());
+        let mut after = 0;
+        let mut sizes = Vec::new();
+        loop {
+            let page = store.chat_updates_after("chat", after, 8).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() == 1 || page.iter().map(|(_, b)| b.len()).sum::<usize>() <= 8);
+            for (ordinal, bytes) in page {
+                after = ordinal;
+                sizes.push(bytes.len());
+            }
+        }
+        assert_eq!(
+            sizes,
+            [4, zeron_proto::chat2_limits::MAX_PUSH_BYTES + 1, 4, 4]
+        );
+        store.acknowledge_chat_update("chat", "first").unwrap();
+        assert_eq!(
+            store.pending_chat_updates_window("chat", 1, 8).unwrap()[0].0,
+            "third"
+        );
+        assert_eq!(store.rejected_chat_updates("chat").unwrap()[0].0, "large");
+    }
+
+    #[test]
+    fn legacy_oversized_rows_are_classified_once_and_window_reads_never_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let max = zeron_proto::chat2_limits::MAX_PUSH_BYTES;
+        {
+            let conn = store.conn();
+            conn.execute(
+                "INSERT INTO chat_outbox(doc_id,batch_id,bytes) VALUES ('legacy','oversized',?1)",
+                params![vec![0u8; max + 1]],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_outbox(doc_id,batch_id,bytes) VALUES ('legacy','legal',?1)",
+                params![vec![0u8; max]],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                params![MIGRATIONS.len() as i64],
+            )
+            .unwrap();
+            conn.execute_batch("DROP INDEX chat_outbox_pending")
+                .unwrap();
+        }
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store.rejected_chat_updates("legacy").unwrap()[0].0,
+            "oversized"
+        );
+        // query_only rejects UPDATE statements even when no rows match.
+        // Window reads must remain valid without any SQLite write permission.
+        store.conn().execute_batch("PRAGMA query_only=ON").unwrap();
+        for _ in 0..3 {
+            let window = store
+                .pending_chat_updates_window("legacy", 32, 256 * 1024)
+                .unwrap();
+            assert_eq!(window.len(), 1);
+            assert_eq!(window[0].0, "legal");
+        }
+        store.conn().execute_batch("PRAGMA query_only=OFF").unwrap();
+        store
+            .initialize_chat_outbox("seed", &[vec![0; max + 1]])
+            .unwrap();
+        assert!(
+            store
+                .pending_chat_updates_window("seed", 32, 256 * 1024)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.has_rejected_chat_updates("seed").unwrap());
+    }
+
     #[test]
     fn cursor_save_after_failed_outbox_write_keeps_a_durable_replay_obligation() {
         for cursor_save in [false, true] {

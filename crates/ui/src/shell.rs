@@ -5886,7 +5886,7 @@ impl Shell {
         let stream = Tokio::spawn(cx, async move {
             let mut items = engine
                 .client()
-                .subscribe(methods::IMPORT_LOCAL_WORKSPACE, serde_json::json!({}))
+                .subscribe_scoped(methods::IMPORT_LOCAL_WORKSPACE, serde_json::json!({}))
                 .await
                 .map_err(|error| error.to_string())?;
             while let Some(item) = items.recv().await {
@@ -10185,6 +10185,9 @@ impl Shell {
             self.reduced_motion,
             frame_time,
         );
+        crate::new_thread_background_effects::flush_unused(
+            window, new_thread_background_setting.is_some(), cx,
+        );
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
@@ -12449,6 +12452,11 @@ impl Render for Shell {
         for files in hidden_explorers {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
+        crate::new_thread_background_effects::flush_unused(
+            window,
+            settings::current(cx).new_thread_composer_background.is_some(),
+            cx,
+        );
         settings::wallpaper::preload(cx);
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -155,10 +155,9 @@ impl RunJournal {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let all = read_lines(&path)?;
-        let last_seq = all.last().map(|(seq, _)| *seq).unwrap_or(0);
+        let last_seq = last_line(&path)?.map(|line| line.seq).unwrap_or(0);
         let from = if after_seq > last_seq { 0 } else { after_seq };
-        Ok(all.into_iter().filter(|(seq, _)| *seq > from).collect())
+        read_lines_after(&path, from)
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -167,7 +166,7 @@ impl RunJournal {
         if !path.exists() {
             return Ok(None);
         }
-        Ok(read_lines(&path)?.into_iter().next_back())
+        Ok(last_line(&path)?.map(|line| (line.seq, line.event)))
     }
 
     /// Crash-recovery scan: chat ids whose journal's last event is NOT a `Done` — their
@@ -183,7 +182,7 @@ impl RunJournal {
             let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let last = read_lines(&path)?.into_iter().next_back();
+            let last = last_line(&path)?.map(|line| (line.seq, line.event));
             match last {
                 Some((_, AgentEvent::Done { .. })) | None => {}
                 Some(_) => stale.push(chat_id.to_string()),
@@ -205,16 +204,32 @@ impl RunJournal {
 }
 
 /// Parse every valid line; malformed lines (torn tail writes) are skipped.
-fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
+fn read_lines_after(path: &Path, after_seq: u64) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
     let mut out = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    #[derive(Deserialize)]
+    struct Sequence {
+        seq: u64,
+    }
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
         if line.trim().is_empty() {
+            continue;
+        }
+        // Skipping an old event must not deserialize its potentially huge
+        // tool result. Serde skips unknown fields without owning their text.
+        if let Ok(sequence) = serde_json::from_str::<Sequence>(&line)
+            && sequence.seq <= after_seq
+        {
             continue;
         }
         match serde_json::from_str::<JournalLine>(&line) {
@@ -227,18 +242,58 @@ fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
     Ok(out)
 }
 
+/// Read backwards in fixed-size blocks, retaining at most one line. A small
+/// tail request/reopen must not own the complete historical journal.
+fn last_line(path: &Path) -> Result<Option<JournalLine>, JournalError> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut position = file.metadata()?.len();
+    let mut block = [0u8; 8192];
+    let mut reversed = Vec::new();
+    while position > 0 {
+        let count = position.min(block.len() as u64) as usize;
+        position -= count as u64;
+        file.seek(SeekFrom::Start(position))?;
+        file.read_exact(&mut block[..count])?;
+        for &byte in block[..count].iter().rev() {
+            if byte != b'\n' {
+                reversed.push(byte);
+                continue;
+            }
+            if let Some(line) = parse_reversed_line(&mut reversed) {
+                return Ok(Some(line));
+            }
+        }
+    }
+    Ok(parse_reversed_line(&mut reversed))
+}
+
+fn parse_reversed_line(reversed: &mut Vec<u8>) -> Option<JournalLine> {
+    reversed.reverse();
+    let parsed = serde_json::from_slice(reversed).ok();
+    reversed.clear();
+    parsed
+}
+
 /// Next seq (last valid seq + 1, starting at 1) and whether the file ends mid-line.
 fn scan_tail(path: &Path) -> Result<(u64, bool), JournalError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let mut file = match File::open(path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, false)),
         Err(e) => return Err(e.into()),
     };
-    let needs_newline = bytes.last().is_some_and(|b| *b != b'\n');
-    let next_seq = read_lines(path)?
-        .last()
-        .map(|(seq, _)| seq + 1)
-        .unwrap_or(1);
+    let needs_newline = if file.metadata()?.len() == 0 {
+        false
+    } else {
+        file.seek(SeekFrom::End(-1))?;
+        let mut byte = [0];
+        file.read_exact(&mut byte)?;
+        byte[0] != b'\n'
+    };
+    let next_seq = last_line(path)?.map(|line| line.seq + 1).unwrap_or(1);
     Ok((next_seq, needs_newline))
 }
 
@@ -284,6 +339,32 @@ mod tests {
             error: None,
             session_id: None,
         }
+    }
+
+    #[test]
+    fn backward_scan_handles_large_unicode_lines_and_invalid_tail_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal
+            .append("large", &text(&"世🌍".repeat(10_000)))
+            .unwrap();
+        journal.append("large", &done()).unwrap();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("large.jsonl"))
+            .unwrap();
+        file.write_all(b"\ninvalid\n{\"seq\":3").unwrap();
+        drop(file);
+        assert!(matches!(
+            journal.last_event("large").unwrap(),
+            Some((2, AgentEvent::Done { .. }))
+        ));
+        assert!(journal.stale_sessions().unwrap().is_empty());
+        assert!(journal.replay("large", 2).unwrap().is_empty());
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(journal.append("large", &text("next")).unwrap(), 3);
+        assert_eq!(journal.replay("large", 2).unwrap().len(), 1);
     }
 
     #[test]

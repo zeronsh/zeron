@@ -1,0 +1,408 @@
+{
+    "auditDate":  "2026-10-02",
+    "measurementCommit":  "8204d3a8a7baf4144a3e284841ffc81e9c730e49",
+    "mainCommit":  "1c83cda221bd18a3b55ea49e5b25ec2c148955bc",
+    "platform":  "Windows x86-64",
+    "rustVersion":  "1.99.0",
+    "profile":  "release",
+    "command":  "cargo build --release --locked -p zeron-engine --example memory-audit",
+    "allocator":  "CountingAllocator(System), requested Rust allocation bytes",
+    "exclusions":  [
+                       "allocator overhead",
+                       "native/C allocations",
+                       "RSS",
+                       "GPU allocations",
+                       "subprocess memory"
+                   ],
+    "binarySha256":  "4a0df60920ad8e29dc21266489d4ea2b102c8acead27aa4c76394d2a6193d493",
+    "exampleSha256":  "04c6f6053077929f4632c1d1c67dc150996fceb5a369419d806b4ad73074d299",
+    "samples":  [
+                    {
+                        "detail":  {
+                                       "compressedSnapshotBytes":  210324,
+                                       "estimateUsingCurrentFormulaBytes":  6291456,
+                                       "rawTextBytes":  25165824,
+                                       "resources":  {
+                                                         "activeClientLimit":  28,
+                                                         "budget":  {
+                                                                        "dialLimit":  4,
+                                                                        "dials":  0,
+                                                                        "http":  0,
+                                                                        "httpLimit":  8,
+                                                                        "resourcePaused":  false,
+                                                                        "socketLimit":  32,
+                                                                        "socketWaiting":  0,
+                                                                        "sockets":  0,
+                                                                        "waiting":  0
+                                                                    },
+                                                         "documentLoads":  12,
+                                                         "durable":  {
+                                                                         "pendingBatches":  0,
+                                                                         "pendingJobs":  0
+                                                                     },
+                                                         "fileDescriptorLimit":  null,
+                                                         "oldestWaitingAccessAgeMs":  0,
+                                                         "openDocuments":  4,
+                                                         "openFileDescriptors":  null,
+                                                         "retainedBy":  {
+                                                                            "connections":  0,
+                                                                            "storageFailures":  0,
+                                                                            "views":  0,
+                                                                            "writers":  0
+                                                                        },
+                                                         "waitingDocuments":  0
+                                                     }
+                                   },
+                        "liveRustBytesAboveBaseline":  43859274,
+                        "peakRustBytesAboveBaseline":  54595027,
+                        "scenario":  "docs"
+                    },
+                    {
+                        "detail":  {
+                                       "activeClientLimit":  28,
+                                       "budget":  {
+                                                      "dialLimit":  4,
+                                                      "dials":  0,
+                                                      "http":  0,
+                                                      "httpLimit":  8,
+                                                      "resourcePaused":  false,
+                                                      "socketLimit":  32,
+                                                      "socketWaiting":  0,
+                                                      "sockets":  0,
+                                                      "waiting":  0
+                                                  },
+                                       "documentLoads":  24,
+                                       "durable":  {
+                                                       "pendingBatches":  0,
+                                                       "pendingJobs":  0
+                                                   },
+                                       "fileDescriptorLimit":  null,
+                                       "oldestWaitingAccessAgeMs":  0,
+                                       "openDocuments":  4,
+                                       "openFileDescriptors":  null,
+                                       "retainedBy":  {
+                                                          "connections":  0,
+                                                          "storageFailures":  0,
+                                                          "views":  0,
+                                                          "writers":  0
+                                                      },
+                                       "waitingDocuments":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  17850337,
+                        "peakRustBytesAboveBaseline":  58793323,
+                        "scenario":  "docs-after-quiet-watches"
+                    },
+                    {
+                        "detail":  {
+                                       "activeClientLimit":  28,
+                                       "budget":  {
+                                                      "dialLimit":  4,
+                                                      "dials":  0,
+                                                      "http":  0,
+                                                      "httpLimit":  8,
+                                                      "resourcePaused":  false,
+                                                      "socketLimit":  32,
+                                                      "socketWaiting":  0,
+                                                      "sockets":  0,
+                                                      "waiting":  0
+                                                  },
+                                       "documentLoads":  32,
+                                       "durable":  {
+                                                       "pendingBatches":  0,
+                                                       "pendingJobs":  0
+                                                   },
+                                       "fileDescriptorLimit":  null,
+                                       "oldestWaitingAccessAgeMs":  0,
+                                       "openDocuments":  4,
+                                       "openFileDescriptors":  null,
+                                       "retainedBy":  {
+                                                          "connections":  0,
+                                                          "storageFailures":  0,
+                                                          "views":  0,
+                                                          "writers":  0
+                                                      },
+                                       "waitingDocuments":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  206921,
+                        "peakRustBytesAboveBaseline":  58793323,
+                        "scenario":  "docs-after-count-eviction"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  -26215,
+                        "peakRustBytesAboveBaseline":  58793323,
+                        "scenario":  "docs-after-drop"
+                    },
+                    {
+                        "detail":  {
+                                       "returnedEvents":  0,
+                                       "textOnDiskBytes":  16777216
+                                   },
+                        "liveRustBytesAboveBaseline":  661,
+                        "peakRustBytesAboveBaseline":  196954,
+                        "scenario":  "journal-empty-tail-replay"
+                    },
+                    {
+                        "detail":  {
+                                       "returnedEvents":  1
+                                   },
+                        "liveRustBytesAboveBaseline":  66182,
+                        "peakRustBytesAboveBaseline":  196954,
+                        "scenario":  "journal-last-event"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  217,
+                        "peakRustBytesAboveBaseline":  196958,
+                        "scenario":  "journal-reopen-append"
+                    },
+                    {
+                        "detail":  {
+                                       "durablePayloadBytes":  16777216
+                                   },
+                        "liveRustBytesAboveBaseline":  651,
+                        "peakRustBytesAboveBaseline":  651,
+                        "scenario":  "outbox-disk-only"
+                    },
+                    {
+                        "detail":  {
+                                       "batches":  1,
+                                       "payloadBytes":  262144
+                                   },
+                        "liveRustBytesAboveBaseline":  264002,
+                        "peakRustBytesAboveBaseline":  525527,
+                        "scenario":  "outbox-load"
+                    },
+                    {
+                        "detail":  {
+                                       "copiedBatches":  1
+                                   },
+                        "liveRustBytesAboveBaseline":  264043,
+                        "peakRustBytesAboveBaseline":  525527,
+                        "scenario":  "outbox-with-send-copy"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  1024,
+                        "peakRustBytesAboveBaseline":  525527,
+                        "scenario":  "outbox-after-drop"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  2740,
+                        "peakRustBytesAboveBaseline":  4228,
+                        "scenario":  "rpc-cancelled-calls"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  32
+                                   },
+                        "liveRustBytesAboveBaseline":  86732,
+                        "peakRustBytesAboveBaseline":  86732,
+                        "scenario":  "rpc-dropped-legacy-streams"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  32
+                                   },
+                        "liveRustBytesAboveBaseline":  86732,
+                        "peakRustBytesAboveBaseline":  103045,
+                        "scenario":  "rpc-dropped-scoped-streams"
+                    },
+                    {
+                        "detail":  {
+                                       "activeServerRequests":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  -1140,
+                        "peakRustBytesAboveBaseline":  103045,
+                        "scenario":  "rpc-after-connection-drop"
+                    },
+                    {
+                        "detail":  {
+                                       "queuedEvents":  32
+                                   },
+                        "liveRustBytesAboveBaseline":  1036188,
+                        "peakRustBytesAboveBaseline":  1097044,
+                        "scenario":  "terminal-stalled-subscriber"
+                    },
+                    {
+                        "detail":  {
+                                       "queuedEncodedBytes":  680476,
+                                       "receivedExit":  true
+                                   },
+                        "liveRustBytesAboveBaseline":  1037230,
+                        "peakRustBytesAboveBaseline":  1097044,
+                        "scenario":  "terminal-after-drain"
+                    },
+                    {
+                        "detail":  {
+                                       "fullSnapshotBytes":  8455009,
+                                       "shallowSnapshotBytes":  131447,
+                                       "visibleFieldBytes":  65536,
+                                       "writtenBytes":  8388608
+                                   },
+                        "liveRustBytesAboveBaseline":  50764009,
+                        "peakRustBytesAboveBaseline":  59023030,
+                        "scenario":  "history-replacement"
+                    },
+                    {
+                        "detail":  {
+                                       "pendingBatches":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  646,
+                        "peakRustBytesAboveBaseline":  646,
+                        "scenario":  "sync-disabled"
+                    },
+                    {
+                        "detail":  {
+                                       "emittedBytes":  16777216,
+                                       "pendingBatches":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  60825,
+                        "peakRustBytesAboveBaseline":  1370029,
+                        "scenario":  "sync-healthy"
+                    },
+                    {
+                        "detail":  {
+                                       "pendingBatches":  64,
+                                       "pendingPayloadBytes":  16777216
+                                   },
+                        "liveRustBytesAboveBaseline":  323074,
+                        "peakRustBytesAboveBaseline":  1371649,
+                        "scenario":  "sync-stalled-acks"
+                    },
+                    {
+                        "detail":  {
+                                       "pendingBatches":  128,
+                                       "pendingPayloadBytes":  33554432
+                                   },
+                        "liveRustBytesAboveBaseline":  283347,
+                        "peakRustBytesAboveBaseline":  1371649,
+                        "scenario":  "sync-offline"
+                    },
+                    {
+                        "detail":  {
+
+                                   },
+                        "liveRustBytesAboveBaseline":  3280,
+                        "peakRustBytesAboveBaseline":  1371649,
+                        "scenario":  "sync-after-client-shutdown"
+                    },
+                    {
+                        "detail":  {
+                                       "plannedRows":  64,
+                                       "rowPayloadBytes":  16777216,
+                                       "sentRows":  7
+                                   },
+                        "liveRustBytesAboveBaseline":  2145460,
+                        "peakRustBytesAboveBaseline":  2669966,
+                        "scenario":  "sync-catchup-waiting-checkpoint"
+                    },
+                    {
+                        "detail":  {
+                                       "cursor":  64
+                                   },
+                        "liveRustBytesAboveBaseline":  1096387,
+                        "peakRustBytesAboveBaseline":  2670999,
+                        "scenario":  "sync-catchup-complete"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  248809,
+                        "peakRustBytesAboveBaseline":  276077,
+                        "scenario":  "engine-live"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  0
+                                   },
+                        "liveRustBytesAboveBaseline":  5870,
+                        "peakRustBytesAboveBaseline":  276077,
+                        "scenario":  "engine-after-shutdown"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  1
+                                   },
+                        "liveRustBytesAboveBaseline":  250145,
+                        "peakRustBytesAboveBaseline":  279829,
+                        "scenario":  "engine-live"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  1
+                                   },
+                        "liveRustBytesAboveBaseline":  6310,
+                        "peakRustBytesAboveBaseline":  279829,
+                        "scenario":  "engine-after-shutdown"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  2
+                                   },
+                        "liveRustBytesAboveBaseline":  250585,
+                        "peakRustBytesAboveBaseline":  280269,
+                        "scenario":  "engine-live"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  2
+                                   },
+                        "liveRustBytesAboveBaseline":  6750,
+                        "peakRustBytesAboveBaseline":  280269,
+                        "scenario":  "engine-after-shutdown"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  3
+                                   },
+                        "liveRustBytesAboveBaseline":  251025,
+                        "peakRustBytesAboveBaseline":  280709,
+                        "scenario":  "engine-live"
+                    },
+                    {
+                        "detail":  {
+                                       "cycle":  3
+                                   },
+                        "liveRustBytesAboveBaseline":  7190,
+                        "peakRustBytesAboveBaseline":  280709,
+                        "scenario":  "engine-after-shutdown"
+                    }
+                ],
+    "validation":  {
+                       "harness":  {
+                                       "ignored":  0,
+                                       "passed":  299
+                                   },
+                       "ui":  {
+                                  "ignored":  5,
+                                  "passed":  1461
+                              },
+                       "sync":  {
+                                    "ignored":  0,
+                                    "passed":  66
+                                },
+                       "rpc":  {
+                                   "ignored":  0,
+                                   "passed":  18
+                               },
+                       "text":  {
+                                    "ignored":  0,
+                                    "passed":  16
+                                },
+                       "engine":  {
+                                      "ignored":  1,
+                                      "passed":  346
+                                  }
+                   }
+}

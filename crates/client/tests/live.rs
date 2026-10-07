@@ -348,12 +348,23 @@ async fn session_send_round_trips_through_the_chat_room() {
         let session = session.clone();
         let message_id = message_id.clone();
         move || {
-            wait_for("echo adopted + reply", Duration::from_secs(10), || {
-                let snap = session.snapshot();
-                snap.pending.is_empty()
-                    && snap.entry(&message_id).is_some_and(|e| e.echo.is_none())
-                    && snap.entry("reply-1").is_some()
-            })
+            // Transcript, composer, and workspace-derived status publish
+            // separately. Seeing the reply does not yet mean the composer
+            // has cleared its optimistic Working indicator.
+            wait_for(
+                "echo adopted + reply + idle composer",
+                Duration::from_secs(10),
+                || {
+                    let snap = session.snapshot();
+                    let composer = session.composer();
+                    snap.pending.is_empty()
+                        && snap.entry(&message_id).is_some_and(|e| e.echo.is_none())
+                        && snap.entry("reply-1").is_some()
+                        && composer.send_state.is_none()
+                        && composer.room.connected
+                        && composer.live.indicator == ChatIndicator::Idle
+                },
+            )
         }
     })
     .await

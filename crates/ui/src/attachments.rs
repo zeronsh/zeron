@@ -739,8 +739,17 @@ pub async fn read_attachment_image(
             })
             .await?
     } else {
-        let format = ImageFormat::from_mime_type(&mime).unwrap_or(ImageFormat::Png);
-        Arc::new(Image::from_bytes(format, bytes))
+        executor
+            .spawn(async move {
+                crate::image_media::decode_attachment_image(
+                    bytes,
+                    &mime,
+                    MAX_ATTACHMENT_BYTES as usize,
+                )
+                .ok()
+                .map(|media| media.image)
+            })
+            .await?
     };
     Some(LoadedAttachmentImage {
         name: if name.is_empty() {
@@ -851,10 +860,28 @@ struct ImageCache {
 
 impl ImageCache {
     fn insert_loaded(&mut self, key: AttachmentKey, image: CachedAttachmentImage) {
-        // Generated rasters are normalized to PNG; account for their decoded
-        // CPU/GPU copies as well as encoded bytes in the existing cache budget.
+        // Read only raster headers: locally seeded JPEG/WebP/GIF originals
+        // must count pixels too, without decoding them on the UI thread.
         let pixels = crate::appshots::png_dimensions(&image.image.bytes)
-            .map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize));
+            .or_else(|| {
+                image::ImageReader::new(std::io::Cursor::new(&image.image.bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+            })
+            .map_or_else(
+                // SVG read-back previews rasterize within a 512-pixel square.
+                // Raster header readers cannot measure them; reserve that
+                // pixel budget so small vectors cannot bypass the cache cap.
+                || {
+                    if image.image.format == ImageFormat::Svg {
+                        512 * 512
+                    } else {
+                        0
+                    }
+                },
+                |(w, h)| (w as usize).saturating_mul(h as usize),
+            );
         let bytes = image
             .image
             .bytes
@@ -880,6 +907,10 @@ impl ImageCache {
         if generated {
             self.generated_bytes = self.generated_bytes.saturating_add(bytes);
         }
+        self.trim(generated, Some(&key));
+    }
+
+    fn trim(&mut self, generated: bool, keep: Option<&AttachmentKey>) {
         let shielded = protected().lock().unwrap().clone();
         // Separate budgets prevent protected legacy attachments from repeatedly
         // evicting visible generated previews, or vice versa.
@@ -893,7 +924,7 @@ impl ImageCache {
                 .map
                 .iter()
                 .filter(|(k, _)| {
-                    **k != key
+                    keep != Some(*k)
                         && k.raster_mime.is_some() == generated
                         && (k.raster_mime.is_some()
                             || !shielded.contains(&(k.device.clone(), k.path.clone())))
@@ -934,7 +965,16 @@ fn protected() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
 
 /// Replace the eviction shield with the given keys (see [`protected`]).
 pub fn protect_attachments(keys: std::collections::HashSet<(String, String)>) {
-    *protected().lock().unwrap() = keys;
+    {
+        let mut shielded = protected().lock().unwrap();
+        if *shielded == keys {
+            return;
+        }
+        *shielded = keys;
+    }
+    // Retiring a viewport/chat must release pressure even when no new image
+    // is subsequently loaded. Drop the shield lock before taking the cache.
+    cache().lock().unwrap().trim(false, None);
 }
 
 fn key(device_id: &str, path: &str) -> AttachmentKey {

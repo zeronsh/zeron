@@ -1134,20 +1134,9 @@ impl EngineRpc {
                 .map(drop),
             MutateParams::DeleteSpace { space_id } => {
                 let deleted = self.workspace.delete_space(&space_id).map_err(failed)?;
-                // Best-effort teardown of live runs we host for the deleted chats
-                // (the doc rows are already tombstoned; a straggler run would only
-                // write into an orphaned session doc).
-                let sessions = self.sessions.clone();
-                let doc_host = self.doc_host.clone();
-                let chat_ids = deleted.chat_ids;
-                tokio::spawn(async move {
-                    for chat_id in chat_ids {
-                        if let Err(err) = sessions.interrupt(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
-                        }
-                        doc_host.purge_chat(&chat_id);
-                    }
-                });
+                for chat_id in deleted.chat_ids {
+                    self.doc_host.purge_chat(&chat_id);
+                }
                 Ok(())
             }
             MutateParams::RenameChat { chat_id, title } => self

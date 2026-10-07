@@ -550,6 +550,33 @@ fn delete_chat_tombstones_row_and_session() {
 }
 
 #[test]
+fn a_late_host_claim_cannot_revive_a_deleted_chat() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.claim_chat("new", None, None, ts(1_000));
+    assert!(ws.chat("new").unwrap().is_some());
+    ws.delete_chat("new").unwrap();
+    ws.claim_chat("new", Some("/repo"), None, ts(9_000));
+    assert!(ws.chat_deleted("new"));
+    assert!(ws.chat("new").unwrap().is_none());
+}
+
+#[test]
+fn chat_deleted_distinguishes_tombstones_from_unseen_and_revived_rows() {
+    let mut ws = RegistryDoc::new("dev-a");
+    assert!(!ws.chat_deleted("unseen"));
+    assert!(ws.deleted_chat_ids().is_empty());
+    ws.delete_chat("unseen").unwrap();
+    assert!(ws.chat_deleted("unseen"));
+    assert_eq!(ws.deleted_chat_ids(), vec!["unseen"]);
+    ws.upsert_chat(&chat("unseen", "dev-a")).unwrap();
+    assert!(!ws.chat_deleted("unseen"));
+    assert!(ws.deleted_chat_ids().is_empty());
+    ws.delete_chat("unseen").unwrap();
+    assert!(ws.chat_deleted("unseen"));
+    assert_eq!(ws.deleted_chat_ids(), vec!["unseen"]);
+}
+
+#[test]
 fn spaces_round_trip_and_mutate() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_space(&space("sp-1", "dev-a", "/home/u/project"))

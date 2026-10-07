@@ -419,6 +419,13 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        if self
+            .inner
+            .workspace()
+            .is_some_and(|ws| ws.chat_deleted(chat_id))
+        {
+            return Err(EngineError::Other("chat has been deleted".into()));
+        }
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
@@ -542,7 +549,6 @@ impl SessionsEngine {
             request.resume = self.inner.resume_for(chat_id, &request.cwd);
             resume_injected = request.resume.is_some();
         }
-        lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
         let run_id = new_id();
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
@@ -588,7 +594,16 @@ impl SessionsEngine {
             interrupt: interrupt_token.clone(),
         };
 
-        lock(&self.inner.runs).insert(
+        let mut runs = lock(&self.inner.runs);
+        if self
+            .inner
+            .workspace()
+            .is_some_and(|ws| ws.chat_deleted(chat_id))
+        {
+            return Err(EngineError::Other("chat has been deleted".into()));
+        }
+        lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
+        runs.insert(
             chat_id.to_string(),
             RunHandle {
                 run_id: run_id.clone(),
@@ -603,6 +618,7 @@ impl SessionsEngine {
                 fork_history_sent: fork_history_sent.clone(),
             },
         );
+        drop(runs);
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -801,6 +817,27 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Deletion is permanent cancellation, including parked providers and children.
+    /// Signal synchronously so a burst of deletes never waits serially for settlement.
+    pub(crate) fn retire_deleted_chat(&self, chat_id: &str) {
+        let target = lock(&self.inner.runs).get(chat_id).map(|h| {
+            (
+                h.cancel.clone(),
+                h.interrupt_token.clone(),
+                h.pending_inputs.clone(),
+            )
+        });
+        if let Some((cancel, token, pending)) = target {
+            let _ = cancel.send(true);
+            let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+            for tx in parked {
+                let _ = tx.send(Vec::new());
+            }
+            token.cancel();
+        }
+        self.inner.forget_chat(chat_id);
+    }
+
     /// Resolve a pending `request_input` question set. Returns `false` when no such
     /// request is pending (unknown id, or the run already settled).
     pub fn respond_input(
@@ -841,6 +878,26 @@ impl SessionsEngine {
         for chat_id in stale {
             if lock(&self.inner.runs).contains_key(&chat_id) {
                 continue; // a live run owns this journal
+            }
+            if self
+                .inner
+                .workspace()
+                .is_some_and(|ws| ws.chat_deleted(&chat_id))
+            {
+                // Deletion must survive restart without reopening its snapshot
+                // or preventing recovery of unrelated stale journals.
+                self.inner.journal.append(
+                    &chat_id,
+                    &AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: Some("Chat deleted".into()),
+                        session_id: None,
+                    },
+                )?;
+                self.retire_deleted_chat(&chat_id);
+                recovered += 1;
+                continue;
             }
             let handle = self.doc_handle(&chat_id)?;
             // Harness continuity first: the crashed run's session id may only
@@ -1089,6 +1146,9 @@ impl Inner {
     /// workspace-doc mirror per delta would be far too chatty.
     fn touch_session(&self, chat_id: &str) {
         const TOUCH_THROTTLE_MS: i64 = 10_000;
+        if self.workspace().is_some_and(|ws| ws.chat_deleted(chat_id)) {
+            return;
+        }
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -1136,6 +1196,9 @@ impl Inner {
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
+            if self.workspace().is_some_and(|ws| ws.chat_deleted(chat_id)) {
+                return;
+            }
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
@@ -1235,13 +1298,18 @@ impl Inner {
         if session_id.is_empty() {
             return;
         }
-        lock(&self.harness_sessions).insert(
+        let mut sessions = lock(&self.harness_sessions);
+        if self.workspace().is_some_and(|ws| ws.chat_deleted(chat_id)) {
+            return;
+        }
+        sessions.insert(
             chat_id.to_string(),
             HarnessSessionRef {
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string(),
             },
         );
+        drop(sessions);
         if let Some(ws) = self.workspace() {
             ws.set_chat_harness_session(chat_id, session_id, cwd);
         }
@@ -1313,6 +1381,17 @@ impl Inner {
             }
         }
         found
+    }
+
+    fn forget_chat(&self, chat_id: &str) {
+        lock(&self.last_requests).remove(chat_id);
+        lock(&self.harness_sessions).remove(chat_id);
+        lock(&self.hubs).remove(chat_id);
+        let mut statuses = lock(&self.statuses);
+        statuses.remove(chat_id);
+        let mut list: Vec<_> = statuses.values().cloned().collect();
+        list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        self.sessions_tx.send_replace(list);
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
@@ -2280,6 +2359,12 @@ async fn drive_run(
             event: sub_event,
         } = &event
         {
+            if inner
+                .workspace()
+                .is_some_and(|ws| ws.chat_deleted(&chat_id))
+            {
+                continue; // a late child frame must not reopen an orphaned document
+            }
             inner.publish(&chat_id, &event);
             last_subagent_activity = Some(tokio::time::Instant::now());
             let is_steer = matches!(
@@ -2850,7 +2935,13 @@ async fn drive_run(
 
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
+    let deleted = inner
+        .workspace()
+        .is_some_and(|ws| ws.chat_deleted(&chat_id));
     for (parent_id, sink) in subagents.drain() {
+        if deleted {
+            continue;
+        }
         let doc_id = sink.doc_id.clone();
         let _ = doc_ref.update_subagent_chip(&parent_id, None, Some("failed"), None);
         if let Some(json) = sink.finish(&device_id, MessageStatus::Aborted)
@@ -2876,6 +2967,14 @@ async fn drive_run(
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
+    if inner
+        .workspace()
+        .is_some_and(|ws| ws.chat_deleted(&chat_id))
+    {
+        // Late events must not revive session metadata or accepted mailbox work.
+        inner.forget_chat(&chat_id);
+        return;
+    }
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
     if !interrupted && !orphans.is_empty() {
         // The dying run accepted these into its mailbox but never confirmed a
