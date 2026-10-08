@@ -402,6 +402,26 @@ impl Normalizer {
                         .insert(tool.to_owned(), spawn.clone());
                     return Vec::new();
                 }
+                // `/compact` (or auto-compaction) produces no assistant frame:
+                // without this the turn ends silently and the ring keeps the
+                // pre-compaction size until the next reply (#801). Mirrors
+                // Codex's note and Pi's post-compaction usage.
+                if f.subtype == "compact_boundary" {
+                    let mut out = vec![AgentEvent::TextDelta {
+                        text: "Context compacted.".into(),
+                    }];
+                    let (prev, _next) = self.rotate_for_steer();
+                    out.push(AgentEvent::AssistantMessageCompleted {
+                        assistant_message_id: prev,
+                    });
+                    if let Some(tokens) = f.compact_metadata.and_then(|m| m.post_tokens) {
+                        out.push(AgentEvent::ContextUsage {
+                            tokens: Some(tokens),
+                            window: None,
+                        });
+                    }
+                    return out;
+                }
                 if f.subtype != "init" || self.saw_init {
                     return Vec::new();
                 }
@@ -1448,5 +1468,37 @@ mod context_tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn compact_boundary_shows_a_note_and_resets_context() {
+        // Live 2.1.289 `/compact`: no assistant frame, only these system frames.
+        let mut normalizer = Normalizer::new();
+        let status = normalizer.normalize(
+            super::super::wire::parse_frame(
+                r#"{"type":"system","subtype":"status","status":"compacting"}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        assert!(status.is_empty());
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":20544,"post_tokens":1995,"cumulative_dropped_tokens":18549,"duration_ms":10996}}"#).unwrap(), false);
+        assert!(
+            matches!(&events[0], AgentEvent::TextDelta { text } if text == "Context compacted.")
+        );
+        assert!(matches!(
+            &events[1],
+            AgentEvent::AssistantMessageCompleted { .. }
+        ));
+        assert_eq!(
+            events[2],
+            AgentEvent::ContextUsage {
+                tokens: Some(1995),
+                window: None
+            }
+        );
+        // Older CLIs omit post_tokens: still show the note, leave the ring.
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":20544}}"#).unwrap(), false);
+        assert_eq!(events.len(), 2);
     }
 }

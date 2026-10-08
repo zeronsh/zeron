@@ -48,6 +48,16 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `compact_boundary`: sizes around a `/compact` or auto-compaction.
+    #[serde(default)]
+    pub compact_metadata: Option<CompactMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct CompactMetadata {
+    /// Context tokens left after compaction (absent on older CLIs).
+    #[serde(default)]
+    pub post_tokens: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
