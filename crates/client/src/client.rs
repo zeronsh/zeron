@@ -146,11 +146,11 @@ impl ClientInner {
         }
     }
 
-    /// After any local registry write: settle (demo) / push (live), re-derive.
+    /// After any local registry write: push (live), re-derive. Demo's
+    /// local-only replica already holds the write.
     pub(crate) fn after_registry_write(self: &Arc<Self>) {
-        match self.backend() {
-            Backend::Demo(demo) => demo.settle_registry(&self.workspace),
-            Backend::Live(live) => live.registry_written(),
+        if let Backend::Live(live) = self.backend() {
+            live.registry_written();
         }
         self.recompute_workspace();
     }
@@ -556,6 +556,21 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    /// Dedicated ephemeral call handle; never uses durable commands or RPC retries.
+    pub async fn voice_transport(
+        &self,
+        device_id: &str,
+    ) -> Result<Arc<zeron_voice_session::RpcTransport>> {
+        let live = self.inner.live().ok_or_else(|| {
+            ClientError::Unsupported("remote voice requires a connected account".into())
+        })?;
+        live.relay.voice_transport(device_id).await
+    }
+    /// Sign-out/shutdown closes every call created by this client.
+    pub fn voice_cancellation(&self) -> CancellationToken {
+        self.inner.cancel.child_token()
+    }
+
     /// Build and start. Never blocks on the network: live mode hydrates from
     /// `data_dir` and connects in the background; Demo seeds its dataset.
     pub fn new(
@@ -571,7 +586,12 @@ impl Client {
         // Live: restore the registry replica + open the docs store first, so
         // the very first snapshot renders the cached workspace (instant).
         let (registry, store) = if credentials.is_demo() {
-            (RegistryDoc::new(config.device_id.clone()), None)
+            // Demo has no edge: nothing would ever ack a queued write, so the
+            // replica folds writes straight into its rows (as the engine does
+            // for edge-less profiles).
+            let mut registry = RegistryDoc::new(config.device_id.clone());
+            registry.set_local_only(true);
+            (registry, None)
         } else {
             let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
             (registry, Some(store))
@@ -1502,4 +1522,44 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_replica_is_local_only_and_never_queues() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = ClientConfig::new("https://edge.invalid", dir.path());
+        config.device_id = "ios-test".into();
+        let client = Client::new(
+            config,
+            Credentials::Demo(Default::default()),
+            Arc::new(crate::events::NullListener),
+        )
+        .unwrap();
+        let chat_id = client
+            .inner
+            .workspace
+            .mutate(|doc| doc.read_chats())
+            .unwrap()
+            .into_iter()
+            .find(|c| c.parent_chat_id.is_none())
+            .expect("seeded chat")
+            .id;
+        for i in 0..20 {
+            client
+                .rename_session(&chat_id, &format!("title {i}"))
+                .unwrap();
+        }
+        let (pending, title) = client.inner.workspace.mutate(|doc| {
+            (
+                doc.pending_len(),
+                doc.chat(&chat_id).unwrap().unwrap().title,
+            )
+        });
+        assert_eq!(pending, 0);
+        assert_eq!(title.as_deref(), Some("title 19"));
+    }
 }

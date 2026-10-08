@@ -13,3 +13,4 @@ edge/dist/
 .agents
 .claude
 CLAUDE.md
+/scripts/**/__pycache__/

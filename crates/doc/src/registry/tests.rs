@@ -1527,3 +1527,622 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
         Some("main")
     );
 }
+
+// ── bounded pending: local-only folding and tail coalescing ─────────────────
+
+/// Deterministic xorshift — random op shapes without a rand dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+
+    fn hlc(&mut self) -> String {
+        let device = if self.next(2) == 0 { "dev-a" } else { "dev-b" };
+        encode_hlc(1 + self.next(12) as i64, 0, device)
+    }
+
+    /// An op on `chats/chat-1` with a random kind, field subset (nulls
+    /// included), revival clock and per-field clock overrides.
+    fn op(&mut self) -> RowOp {
+        let kind = match self.next(5) {
+            0 => OpKind::Delete,
+            1 | 2 => OpKind::Update,
+            _ => OpKind::Upsert,
+        };
+        let mut set = BTreeMap::new();
+        let mut clocks = BTreeMap::new();
+        for field in ["a", "b", "c"] {
+            if self.next(3) == 0 {
+                continue;
+            }
+            let value = match self.next(4) {
+                0 => Value::Null,
+                v => json!(v),
+            };
+            set.insert(field.to_string(), value);
+            if self.next(3) == 0 {
+                clocks.insert(field.to_string(), self.hlc());
+            }
+        }
+        RowOp {
+            kind: "chats".into(),
+            id: "chat-1".into(),
+            op: kind,
+            set: (kind != OpKind::Delete).then_some(set),
+            hlc: self.hlc(),
+            clocks: (kind != OpKind::Delete && !clocks.is_empty()).then_some(clocks),
+        }
+    }
+}
+
+/// Overlay-style sequential replay (tombstones kept, so they compare too).
+fn replay(base: Option<RegistryRow>, ops: &[&RowOp]) -> Option<RegistryRow> {
+    let mut row = base;
+    for op in ops {
+        if let Some(next) = apply_op(row.as_ref(), op).0 {
+            row = Some(next);
+        }
+    }
+    row
+}
+
+#[test]
+fn coalesced_ops_are_exact_on_every_row_state() {
+    let mut rng = Rng(0x5eed_cafe_f00d);
+    let mut merged = 0;
+    for _ in 0..50_000 {
+        // Bases: missing, live, tombstoned and revived rows with mixed clocks.
+        let history: Vec<RowOp> = (0..rng.next(4)).map(|_| rng.op()).collect();
+        let base = replay(None, &history.iter().collect::<Vec<_>>());
+        let (a, b) = (rng.op(), rng.op());
+        let Some(c) = coalesce_ops(&a, &b) else {
+            continue;
+        };
+        merged += 1;
+        assert_eq!(
+            replay(base.clone(), &[&c]),
+            replay(base.clone(), &[&a, &b]),
+            "a={a:?}\nb={b:?}\nc={c:?}\nbase={base:?}"
+        );
+    }
+    assert!(merged > 10_000, "only {merged} pairs coalesced");
+}
+
+#[test]
+fn steady_state_writers_coalesce_to_a_bounded_queue() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    for i in 0..500 {
+        let mut touch = session("chat-1", "dev-a", SessionStatus::Working);
+        touch.updated_at = ts(10_000 + i * 10_000);
+        doc.upsert_session(&touch).unwrap();
+        doc.set_chat_last_message("chat-1", &format!("msg {i}"), ts(10_000 + i))
+            .unwrap();
+    }
+    doc.rename_chat("chat-1", "Renamed").unwrap();
+    // chat: the creating upsert (it gates notifications, so it never moves
+    // past the session touches) + every later update folded into one;
+    // sessions: the run head + one op for the other 499 keepalives.
+    assert_eq!(doc.pending_ops_len(), 4);
+    let chat = doc.chat("chat-1").unwrap().unwrap();
+    assert_eq!(chat.title.as_deref(), Some("Renamed"));
+    assert_eq!(chat.last_message_preview.as_deref(), Some("msg 499"));
+    assert_eq!(
+        doc.read_sessions().unwrap()[0].updated_at,
+        ts(10_000 + 499 * 10_000)
+    );
+}
+
+/// Session statuses of the queued `sessions` ops, in push order.
+fn queued_statuses(doc: &RegistryDoc) -> Vec<String> {
+    doc.pending_ops()
+        .filter(|op| op.kind == KIND_SESSIONS)
+        .map(|op| op.set.as_ref().unwrap()["status"].as_str().unwrap().into())
+        .collect()
+}
+
+#[test]
+fn status_changes_never_coalesce_but_keepalives_do() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut at = 10_000;
+    let mut touch = |doc: &mut RegistryDoc, status| {
+        at += 10_000;
+        let mut row = session("chat-1", "dev-a", status);
+        row.updated_at = ts(at);
+        doc.upsert_session(&row).unwrap();
+    };
+    touch(&mut doc, SessionStatus::Working);
+    touch(&mut doc, SessionStatus::AwaitingInput);
+    touch(&mut doc, SessionStatus::Working);
+    // working → needs input → working: each transition can raise a push.
+    assert_eq!(
+        queued_statuses(&doc),
+        ["working", "awaitingInput", "working"]
+    );
+    for _ in 0..50 {
+        touch(&mut doc, SessionStatus::Working);
+    }
+    // The keepalives fold into one op behind the run head.
+    assert_eq!(
+        queued_statuses(&doc),
+        ["working", "awaitingInput", "working", "working"]
+    );
+}
+
+/// Mirror of `notificationFor` (edge/src/push-notify.ts).
+fn notification(
+    before: Option<&RegistryRow>,
+    after: &RegistryRow,
+    now: i64,
+) -> Option<&'static str> {
+    let before = before.filter(|r| !r.deleted)?;
+    if after.deleted {
+        return None;
+    }
+    let indicator = |row: &RegistryRow| {
+        let updated = row
+            .fields
+            .get("updatedAt")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        match row.fields.get("status").and_then(Value::as_str) {
+            Some("errored") => "errored",
+            Some("working") if now - updated <= 45_000 => "working",
+            Some("awaitingInput") if now - updated <= 45_000 => "awaiting",
+            _ => "none",
+        }
+    };
+    let (prev, next) = (indicator(before), indicator(after));
+    if next == "errored" && prev != "errored" {
+        return Some("failed");
+    }
+    if next == "awaiting" && prev != "awaiting" {
+        return Some("input");
+    }
+    let turn = |row: &RegistryRow| {
+        row.fields
+            .get("lastCompletedTurn")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let updated = after
+        .fields
+        .get("updatedAt")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let fresh = now - updated <= 45_000;
+    (fresh && turn(after).is_some() && turn(after) != turn(before)).then_some("done")
+}
+
+/// Push `batches` the way the room does: apply each atomically, then derive
+/// one notification per touched session from its before/after rows.
+fn pushed_notifications(
+    base: &HashMap<(String, String), RegistryRow>,
+    batches: &[Vec<RowOp>],
+    now: i64,
+) -> Vec<&'static str> {
+    let mut rows = base.clone();
+    let mut out = Vec::new();
+    for batch in batches {
+        let mut before: HashMap<String, Option<RegistryRow>> = HashMap::new();
+        for op in batch {
+            let key = (op.kind.clone(), op.id.clone());
+            if op.kind == KIND_SESSIONS {
+                before
+                    .entry(op.id.clone())
+                    .or_insert_with(|| rows.get(&key).cloned());
+            }
+            if let (Some(next), true) = apply_op(rows.get(&key), op) {
+                rows.insert(key, next);
+            }
+        }
+        for (id, prev) in before {
+            if let Some(after) = rows.get(&(KIND_SESSIONS.to_string(), id)) {
+                out.extend(notification(prev.as_ref(), after, now));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn coalescing_preserves_every_push_notification() {
+    let mut rng = Rng(0xa1e7_5eed);
+    let statuses = ["working", "awaitingInput", "errored", "idle"];
+    let mut notified = 0;
+    for _ in 0..300 {
+        let mut doc = RegistryDoc::new("dev-a");
+        let mut base = HashMap::new();
+        let mut at = 100_000 + rng.next(100_000) as i64;
+        let mut turn = 0;
+        let row_for = |rng: &mut Rng, at: &mut i64, turn: &mut i32, ms: i64| {
+            *at += 1 + rng.next(30_000) as i64;
+            if rng.next(4) == 0 {
+                *turn += 1;
+            }
+            let set: BTreeMap<String, Value> = [
+                ("chatId".to_string(), json!("chat-1")),
+                ("status".to_string(), json!(statuses[rng.next(4) as usize])),
+                ("lastCompletedTurn".to_string(), json!(format!("t{turn}"))),
+                ("updatedAt".to_string(), json!(*at)),
+            ]
+            .into();
+            RowOp {
+                kind: KIND_SESSIONS.into(),
+                id: "chat-1".into(),
+                op: OpKind::Upsert,
+                set: Some(set),
+                hlc: encode_hlc(ms, 0, "dev-a"),
+                clocks: None,
+            }
+        };
+        // The room already holds an older version of the row.
+        let seed = row_for(&mut rng, &mut at, &mut turn, 1);
+        base.insert(
+            (KIND_SESSIONS.to_string(), "chat-1".to_string()),
+            apply_op(None, &seed).0.unwrap(),
+        );
+        // Long status runs (keepalives) with occasional transitions.
+        let mut ops = Vec::new();
+        let mut current = row_for(&mut rng, &mut at, &mut turn, 2);
+        for i in 0..20 + rng.next(40) as i64 {
+            if rng.next(6) == 0 {
+                current = row_for(&mut rng, &mut at, &mut turn, 3 + i);
+            } else {
+                at += 1 + rng.next(30_000) as i64;
+                let set = current.set.as_mut().unwrap();
+                set.insert("updatedAt".into(), json!(at));
+                current.hlc = encode_hlc(3 + i, 0, "dev-a");
+            }
+            ops.push(current.clone());
+            doc.enqueue_ops(vec![current.clone()]);
+        }
+        let original: Vec<Vec<RowOp>> = ops.iter().map(|op| vec![op.clone()]).collect();
+        let coalesced: Vec<Vec<RowOp>> = doc.pending.iter().map(|b| b.ops.clone()).collect();
+        assert!(coalesced.len() <= original.len());
+        // Any push time: before, during and after the queued window.
+        for _ in 0..8 {
+            let now = 100_000 + rng.next((at - 50_000).max(1) as u64 + 200_000) as i64;
+            let expected = pushed_notifications(&base, &original, now);
+            assert_eq!(
+                pushed_notifications(&base, &coalesced, now),
+                expected,
+                "now={now}"
+            );
+            notified += expected.len();
+        }
+    }
+    assert!(notified > 500, "only {notified} notifications exercised");
+}
+
+#[test]
+fn a_session_op_never_moves_past_a_notification_gating_chat_op() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let touch = |doc: &mut RegistryDoc, ms| {
+        let mut row = session("chat-1", "dev-a", SessionStatus::Working);
+        row.updated_at = ts(ms);
+        doc.upsert_session(&row).unwrap();
+    };
+    touch(&mut doc, 10_000);
+    touch(&mut doc, 20_000);
+    // Archiving silences the chat's pushes: the follower touch before it
+    // must not be carried past it (nor the archive past the next touch).
+    doc.set_chat_archived("chat-1", true).unwrap();
+    touch(&mut doc, 30_000);
+    let order: Vec<(String, bool)> = doc
+        .pending_ops()
+        .map(|op| {
+            (
+                op.kind.clone(),
+                op.set
+                    .as_ref()
+                    .is_some_and(|s| s.contains_key("archived") && op.op == OpKind::Update),
+            )
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("chats".to_string(), false),
+            ("sessions".to_string(), false),
+            ("sessions".to_string(), false),
+            ("chats".to_string(), true),
+            ("sessions".to_string(), false),
+        ]
+    );
+    // Freshness writes gate nothing and still fold across session touches.
+    let before = doc.pending_ops_len();
+    for i in 0..20 {
+        doc.set_chat_last_message("chat-1", &format!("m{i}"), ts(40_000 + i))
+            .unwrap();
+        touch(&mut doc, 40_000 + i * 1_000);
+    }
+    assert!(
+        doc.pending_ops_len() <= before + 2,
+        "{}",
+        doc.pending_ops_len()
+    );
+}
+
+#[test]
+fn merges_that_would_exceed_the_op_budget_stay_separate() {
+    let big = |field: &str, at: i64| {
+        let mut op = update(&[(field, json!("x".repeat(9 * 1024)))], hlc(at));
+        op.kind = KIND_SPACES.into();
+        op
+    };
+    let (a, b) = (big("name", 1), big("path", 2));
+    assert!(fits_op_budget(&a) && fits_op_budget(&b));
+    assert_eq!(coalesce_ops(&a, &b), None);
+    // Same field: the merge is no larger than `b`, so it folds.
+    assert!(coalesce_ops(&a, &big("name", 2)).is_some());
+
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.enqueue_ops(vec![a.clone()]);
+    doc.enqueue_ops(vec![b.clone()]);
+    assert_eq!(doc.pending_ops_len(), 2);
+    for batch in doc.take_pushable() {
+        assert!(batch.ops.iter().all(fits_op_budget));
+    }
+}
+
+#[test]
+fn multi_op_batches_keep_their_ops_in_place() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let state = WorkspaceState {
+        devices: vec![device("dev-a", "laptop")],
+        spaces: vec![space("space-1", "dev-a", "/p")],
+        chats: vec![chat("chat-1", "dev-a")],
+        sessions: vec![],
+    };
+    doc.seed_from_workspace(&state).unwrap();
+    let seed = doc.pending[0].clone();
+    assert_eq!(seed.ops.len(), 3);
+    for i in 0..5 {
+        doc.rename_chat("chat-1", &format!("t{i}")).unwrap();
+    }
+    // The migration batch is untouched (id and every op); the renames fold
+    // among themselves.
+    assert_eq!(doc.pending[0].batch, seed.batch);
+    assert_eq!(doc.pending[0].ops, seed.ops);
+    assert_eq!(doc.pending_ops_len(), 4);
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("t4")
+    );
+}
+
+#[test]
+fn tail_coalescing_preserves_the_overlay_and_the_server_outcome() {
+    let mut rng = Rng(0x0dd_ba11);
+    for _ in 0..300 {
+        let mut doc = RegistryDoc::new("dev-a");
+        let history: Vec<RowOp> = (0..rng.next(4)).map(|_| rng.op()).collect();
+        let base = replay(None, &history.iter().collect::<Vec<_>>());
+        if let Some(row) = base.clone() {
+            doc.put_authoritative(row);
+        }
+        let ops: Vec<RowOp> = (0..1 + rng.next(30)).map(|_| rng.op()).collect();
+        for op in &ops {
+            doc.enqueue_ops(vec![op.clone()]);
+        }
+        let expected = replay(base.clone(), &ops.iter().collect::<Vec<_>>());
+        assert!(doc.pending_ops_len() <= ops.len());
+        // The local overlay…
+        assert_eq!(
+            doc.overlay_row("chats", "chat-1"),
+            expected.clone().filter(|r| !r.deleted)
+        );
+        // …and a server holding the same base row applying the pushed queue.
+        let pushed: Vec<RowOp> = doc
+            .take_pushable()
+            .into_iter()
+            .flat_map(|b| b.ops)
+            .collect();
+        assert_eq!(replay(base, &pushed.iter().collect::<Vec<_>>()), expected);
+    }
+}
+
+#[test]
+fn in_flight_batches_are_never_coalesced_and_still_ack() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let sent = doc.take_pushable();
+    assert_eq!(sent.len(), 1);
+    for i in 0..10 {
+        doc.rename_chat("chat-1", &format!("title {i}")).unwrap();
+    }
+    // The in-flight upsert keeps its id and ops; the ten renames are one op.
+    assert_eq!(doc.pending_len(), 2);
+    assert_eq!(doc.pending[0].batch, sent[0].batch);
+    assert_eq!(doc.pending[0].ops, sent[0].ops);
+    assert_eq!(doc.pending[1].ops.len(), 1);
+    // The room broadcasts merged rows before the ack.
+    assert!(doc.apply_rows(1, vec![applied(None, &sent[0].ops[0])]));
+    assert!(doc.ack_batch(&sent[0].batch, 1));
+    assert_eq!(doc.pending_len(), 1);
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("title 9")
+    );
+    let renames = doc.take_pushable();
+    assert!(doc.ack_batch(&renames[0].batch, 2));
+    assert_eq!(doc.pending_len(), 0);
+}
+
+#[test]
+fn a_late_ack_for_a_coalesced_away_batch_cannot_drop_newer_writes() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    // Pushed over HTTPS, then the socket drops before the ack lands.
+    let raced = doc.take_pushable().pop().unwrap();
+    doc.mark_disconnected();
+    doc.rename_chat("chat-1", "after the drop").unwrap();
+    // The upsert folded forward into a batch under a FRESH id…
+    assert_eq!(doc.pending_len(), 1);
+    assert_ne!(doc.pending[0].batch, raced.batch);
+    // …so the stale ack retires nothing and the rename still pushes.
+    assert!(!doc.ack_batch(&raced.batch, 1));
+    assert_eq!(doc.pending_ops_len(), 1);
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("after the drop")
+    );
+}
+
+#[test]
+fn local_only_writes_fold_and_keep_pending_empty() {
+    let mut local = RegistryDoc::new("dev-a");
+    local.set_local_only(true);
+    let mut queued = RegistryDoc::new("dev-a");
+    for doc in [&mut local, &mut queued] {
+        doc.upsert_device(&device("dev-a", "laptop")).unwrap();
+        doc.upsert_space(&space("space-1", "dev-a", "/p")).unwrap();
+        doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+        doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+        for _ in 0..50 {
+            doc.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
+                .unwrap();
+        }
+        doc.rename_chat("chat-1", "renamed").unwrap();
+        doc.delete_chat("chat-2").unwrap();
+        pin_sessions(doc, &["chat-1"]);
+    }
+    assert_eq!(local.pending_len(), 0);
+    assert!(queued.pending_len() > 0);
+    assert_eq!(local.read_all().unwrap(), queued.read_all().unwrap());
+    assert_eq!(local.sidebar_preferences(), queued.sidebar_preferences());
+    assert_eq!(local.read_chats().unwrap().len(), 1);
+}
+
+/// A pre-fix snapshot: every write its own batch, none ever acked. Marking
+/// each batch in flight as it is written keeps the doc from coalescing,
+/// and `in_flight` is not persisted, so the snapshot reloads all-unsent.
+fn bloated_snapshot() -> (Vec<u8>, Vec<RowOp>) {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut ops = Vec::new();
+    let mut write = |doc: &mut RegistryDoc, f: &dyn Fn(&mut RegistryDoc)| {
+        f(doc);
+        ops.extend(doc.take_pushable().into_iter().flat_map(|b| b.ops));
+    };
+    write(&mut doc, &|d| {
+        d.upsert_device(&device("dev-a", "laptop")).unwrap()
+    });
+    write(&mut doc, &|d| {
+        d.upsert_chat(&chat("chat-1", "dev-a")).unwrap()
+    });
+    write(&mut doc, &|d| {
+        d.upsert_chat(&chat("chat-2", "dev-a")).unwrap()
+    });
+    for i in 0..2_000 {
+        write(&mut doc, &|d| {
+            d.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
+                .unwrap()
+        });
+        if i % 10 == 0 {
+            write(&mut doc, &|d| {
+                d.set_chat_seen("chat-1", ts(5_000 + i)).unwrap();
+            });
+        }
+    }
+    write(&mut doc, &|d| {
+        d.delete_chat("chat-2").unwrap();
+    });
+    assert_eq!(doc.pending_ops_len(), ops.len());
+    (doc.to_bytes().unwrap(), ops)
+}
+
+#[test]
+fn loading_a_bloated_snapshot_coalesces_it() {
+    let (bytes, ops) = bloated_snapshot();
+    assert!(ops.len() > 2_000);
+    let doc = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    // device; chat-1's creating upsert + its folded seen-markers; session-1's
+    // run head + folded keepalives; chat-2's upsert and its two-op delete
+    // batch (deletes never fold, multi-op batches stay whole) — 8, not 2k.
+    assert_eq!(doc.pending_ops_len(), 8);
+    let expected = {
+        let mut server = HashMap::new();
+        for op in &ops {
+            let key = (op.kind.clone(), op.id.clone());
+            if let Some(next) = apply_op(server.get(&key), op).0 {
+                server.insert(key, next);
+            }
+        }
+        server
+    };
+    // Pushing the compacted queue lands the server on the same rows.
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut doc = doc;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    assert_eq!(server.len(), expected.len());
+    for (key, row) in &expected {
+        let got = &server[key];
+        assert_eq!(
+            (&got.fields, &got.clocks, got.deleted),
+            (&row.fields, &row.clocks, row.deleted)
+        );
+    }
+    assert!(doc.to_bytes().unwrap().len() * 50 < bytes.len());
+}
+
+#[test]
+fn loading_a_bloated_snapshot_local_only_folds_it() {
+    let (bytes, _) = bloated_snapshot();
+    let queued = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    let mut doc = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    doc.set_local_only(true);
+    assert_eq!(doc.pending_len(), 0);
+    assert_eq!(doc.read_all().unwrap(), queued.read_all().unwrap());
+    // The compacted snapshot round-trips with nothing queued.
+    let compact = doc.to_bytes().unwrap();
+    assert!(compact.len() * 50 < bytes.len());
+    let restored = RegistryDoc::from_bytes(&compact, "dev-a").unwrap();
+    assert_eq!(restored.pending_len(), 0);
+    assert_eq!(restored.read_all().unwrap(), queued.read_all().unwrap());
+}
+
+#[test]
+fn attaching_an_edge_after_local_only_writes_reseeds_them() {
+    // Synced once, then edited with no edge (e.g. a dev profile run
+    // without a token), then attached again.
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    let mut doc = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    doc.set_local_only(true);
+    doc.rename_chat("chat-1", "offline edit").unwrap();
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    assert_eq!(doc.pending_len(), 0);
+
+    // The flag survives a restart; leaving local-only queues a re-seed.
+    let mut doc = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    doc.set_local_only(false);
+    assert!(doc.pending_len() > 0);
+    // A full state carrying the server's OLDER chat-1 must not erase the
+    // offline rename: the re-seed overlays it and wins LWW on push.
+    let rows: Vec<RegistryRow> = server.values().cloned().collect();
+    doc.apply_state(seq, true, 0, rows);
+    let title = |d: &RegistryDoc| d.chat("chat-1").unwrap().unwrap().title;
+    assert_eq!(title(&doc).as_deref(), Some("offline edit"));
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    assert_eq!(doc.pending_len(), 0);
+    assert_eq!(title(&doc).as_deref(), Some("offline edit"));
+    assert_eq!(doc.read_chats().unwrap().len(), 2);
+    let key = ("chats".to_string(), "chat-1".to_string());
+    assert_eq!(server[&key].fields["title"], json!("offline edit"));
+
+    // Re-seeding is one-shot: the next attach queues nothing.
+    let mut doc = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    doc.set_local_only(false);
+    assert_eq!(doc.pending_len(), 0);
+}

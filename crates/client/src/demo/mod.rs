@@ -2,8 +2,8 @@
 //! simulated host.
 //!
 //! Nothing here short-circuits the client: the dataset lives in a real
-//! [`RegistryDoc`] (local writes settle through [`DemoServer`], a stand-in for
-//! the registry room) and real [`SessionDoc`]s. The viewer side writes
+//! [`RegistryDoc`] (local-only, like an edge-less engine: writes fold straight
+//! into its rows, with no room to ack them) and real [`SessionDoc`]s. The viewer side writes
 //! commands and queue rows exactly as in live mode; [`DemoHost`] plays the
 //! engine — adopting commands (writing the user entry under the client-minted
 //! id), streaming replies through `SegmentWriter`, flipping session status
@@ -21,8 +21,8 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::{
-    MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, RegistryDoc, RegistryRow, RowOp,
-    SegmentWriter, SessionCommandPayload, SessionCommandStatus, SessionDoc, apply_op,
+    MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, SegmentWriter,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc,
 };
 use zeron_proto::{FolderEntry, FolderListing, RepoRef, Session, SessionStatus};
 
@@ -32,7 +32,6 @@ use crate::config::{DemoOptions, StreamSpeed};
 use crate::error::{ClientError, Result};
 use crate::rpc::ProgressFn;
 use crate::session::SessionCore;
-use crate::workspace::WorkspaceStore;
 use crate::{lock, now_ms};
 
 use transcripts::Step;
@@ -42,46 +41,6 @@ const ADOPT_DELAY: Duration = Duration::from_millis(180);
 /// Engines heartbeat live session rows well inside the 45s staleness gate.
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const LEASE_MS: i64 = 60_000;
-
-/// In-process registry room: merges pushed op batches into server rows and
-/// broadcasts them back (the mock server's merge, minus the socket).
-#[derive(Default)]
-pub(crate) struct DemoServer {
-    rows: HashMap<(String, String), RegistryRow>,
-    seq: u64,
-}
-
-impl DemoServer {
-    fn settle(&mut self, doc: &mut RegistryDoc) {
-        loop {
-            let batches = doc.take_pushable();
-            if batches.is_empty() {
-                return;
-            }
-            for batch in batches {
-                let mut touched = Vec::new();
-                for op in &batch.ops {
-                    self.apply(op, &mut touched);
-                }
-                self.seq = self.seq.max(doc.cursor()) + 1;
-                let _ = doc.apply_rows(self.seq, touched);
-                doc.ack_batch(&batch.batch, self.seq);
-            }
-        }
-    }
-
-    fn apply(&mut self, op: &RowOp, touched: &mut Vec<RegistryRow>) {
-        let key = (op.kind.clone(), op.id.clone());
-        let (next, changed) = apply_op(self.rows.get(&key), op);
-        if let Some(mut row) = next
-            && changed
-        {
-            row.seq = self.seq + 1;
-            self.rows.insert(key, row.clone());
-            touched.push(row);
-        }
-    }
-}
 
 /// A tiny deterministic PRNG (xorshift64*): demo cadence is reproducible.
 struct Rng(u64);
@@ -109,7 +68,6 @@ struct Lease {
 pub(crate) struct DemoHost {
     options: DemoOptions,
     client: Weak<ClientInner>,
-    server: Mutex<DemoServer>,
     refs: Mutex<HashMap<String, Vec<RepoRef>>>,
     /// Running turn per chat: (turn id, cancel token).
     turns: Mutex<HashMap<String, (u64, CancellationToken)>>,
@@ -132,7 +90,6 @@ impl DemoHost {
         Arc::new(Self {
             options,
             client: Arc::downgrade(client),
-            server: Mutex::new(DemoServer::default()),
             refs: Mutex::new(HashMap::new()),
             turns: Mutex::new(HashMap::new()),
             turn_seq: AtomicU64::new(1),
@@ -164,14 +121,8 @@ impl DemoHost {
         for status in seeded.change_requests {
             client.workspace.put_change_request(status);
         }
-        self.settle_registry(&client.workspace);
         self.beat_presence(client);
         Ok(())
-    }
-
-    pub(crate) fn settle_registry(&self, workspace: &WorkspaceStore) {
-        let mut server = lock(&self.server);
-        workspace.mutate(|doc| server.settle(doc));
     }
 
     fn beat_presence(&self, client: &ClientInner) {

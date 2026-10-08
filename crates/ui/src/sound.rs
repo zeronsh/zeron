@@ -1,7 +1,8 @@
 //! Session notification sounds — the herdr approach (state-transition chimes
 //! played through the platform's own audio CLI, zero Rust audio deps):
 //!
-//! - embedded completion, input-request, attention and Appshot chimes;
+//! - embedded completion, input-request, attention and Appshot chimes, and
+//!   the start and end of a voice call;
 //! - macOS Appshots use a preloaded native player; other cues write to a
 //!   temp file and use the system player on a
 //!   background thread: `afplay` (macOS), PowerShell `Media.SoundPlayer`
@@ -25,6 +26,8 @@ static SOUND_APPSHOT: &[u8] = include_bytes!("../assets/sounds/appshot.wav");
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.wav");
 static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.wav");
 static SOUND_ATTENTION: &[u8] = include_bytes!("../assets/sounds/attention.wav");
+static SOUND_VOICE_START: &[u8] = include_bytes!("../assets/sounds/voice-start.wav");
+static SOUND_VOICE_END: &[u8] = include_bytes!("../assets/sounds/voice-end.wav");
 
 /// Which notification chime to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,16 @@ pub fn play(sound: Sound) {
         Sound::Attention => SOUND_ATTENTION,
     };
     play_in_background(data);
+}
+
+/// A voice call starting (`true`) or ending. Only its two ends sound: the
+/// caller plays each once per call, never in between.
+pub fn play_voice(start: bool) {
+    play_in_background(if start {
+        SOUND_VOICE_START
+    } else {
+        SOUND_VOICE_END
+    });
 }
 
 /// Confirm captured pixels with a soft shutter and clear chime.

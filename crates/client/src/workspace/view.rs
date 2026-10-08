@@ -567,7 +567,7 @@ pub(crate) fn derive(
     let mut active: Vec<&Chat> = state
         .chats
         .iter()
-        .filter(|c| !c.archived && c.parent_chat_id.is_none())
+        .filter(|c| !c.archived && c.is_top_level())
         .filter(|c| {
             c.space_id
                 .as_deref()
@@ -674,7 +674,7 @@ pub(crate) fn derive(
     let mut archived_chats: Vec<&Chat> = state
         .chats
         .iter()
-        .filter(|c| c.archived && c.parent_chat_id.is_none())
+        .filter(|c| c.archived && c.is_top_level())
         .collect();
     sort_recency(&mut archived_chats);
     let archived: Vec<Arc<SessionRow>> = archived_chats.iter().map(|c| row(c)).collect();

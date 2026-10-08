@@ -30,6 +30,14 @@ pub(crate) fn init(root: PathBuf, cx: &mut App) {
         error: None,
         inputs: Inputs::default(),
         input_select: widgets::SelectState::default(),
+        voice_select: widgets::SelectState::default(),
+        host_select: widgets::SelectState::default(),
+        hosts: Vec::new(),
+        call_live: false,
+        voices: zeron_proto::voice::DEFAULT_VOICES
+            .iter()
+            .map(|voice| (*voice).to_owned())
+            .collect(),
         shortcut: None,
     });
     cx.set_global(VoiceGlobal { card, directory });
@@ -60,6 +68,12 @@ pub(crate) struct VoiceCard {
     error: Option<String>,
     inputs: Inputs,
     input_select: widgets::SelectState,
+    voice_select: widgets::SelectState,
+    host_select: widgets::SelectState,
+    hosts: Vec<(Option<String>, String, bool, String)>,
+    call_live: bool,
+    /// Native voice styles, refreshed with the live session's reported catalog.
+    voices: Vec<String>,
     /// Created on first render (it needs this card's context).
     shortcut: Option<Entity<settings::shortcuts::ShortcutField>>,
 }
@@ -74,6 +88,26 @@ struct Inputs {
 }
 const INPUT_REFRESH: Duration = Duration::from_secs(3);
 impl VoiceCard {
+    pub(crate) fn set_hosts(
+        &mut self,
+        hosts: Vec<(Option<String>, String, bool, String)>,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hosts != hosts || self.call_live != live {
+            self.hosts = hosts;
+            self.call_live = live;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_voices(&mut self, voices: &[String], cx: &mut Context<Self>) {
+        if !voices.is_empty() && self.voices != voices {
+            self.voices = voices.to_vec();
+            cx.notify();
+        }
+    }
+
     fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         settings::update(settings::SavePolicy::Immediate, cx, |s| {
             s.dictation_enabled = enabled
@@ -270,6 +304,125 @@ impl VoiceCard {
 impl Render for VoiceCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
+        let saved_voice = settings::current(cx).codex_voice;
+        let mut voice_ids: Vec<Option<String>> = std::iter::once(None)
+            .chain(self.voices.iter().cloned().map(Some))
+            .collect();
+        if saved_voice.is_some() && !voice_ids.contains(&saved_voice) {
+            voice_ids.push(saved_voice.clone());
+        }
+        let selected_voice = voice_ids
+            .iter()
+            .position(|v| *v == saved_voice)
+            .unwrap_or(0);
+        let voice_options: Vec<_> = voice_ids
+            .iter()
+            .map(|voice| {
+                let label = voice.as_deref().map_or_else(
+                    || "Codex default".to_owned(),
+                    |voice| {
+                        let mut chars = voice.chars();
+                        chars
+                            .next()
+                            .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                            .unwrap_or_default()
+                    },
+                );
+                widgets::SelectOption::new(label)
+            })
+            .collect();
+        let voice_control = widgets::select(
+            "voice-style",
+            "Codex voice style",
+            &theme,
+            |card: &mut Self| &mut card.voice_select,
+        )
+        .options(voice_options, selected_voice)
+        .width(200.0)
+        .on_select(move |_, ix, _, cx| {
+            let voice = voice_ids.get(ix).cloned().flatten();
+            settings::update(settings::SavePolicy::Immediate, cx, |s| {
+                s.codex_voice = voice
+            });
+            cx.refresh_windows();
+            cx.notify();
+        })
+        .render(&self.voice_select, cx);
+        let host_row = {
+            let selected = settings::current(cx).codex_voice_device;
+            let mut hosts = self.hosts.clone();
+            if selected.is_some() && !hosts.iter().any(|h| h.0 == selected) {
+                hosts.push((
+                    selected.clone(),
+                    "Unavailable device".into(),
+                    false,
+                    "Choose another device".into(),
+                ));
+            }
+            let index = hosts.iter().position(|h| h.0 == selected).unwrap_or(0);
+            let options = hosts
+                .iter()
+                .map(|h| widgets::SelectOption::new(h.1.clone()).detail(h.3.clone()))
+                .collect::<Vec<_>>();
+            let control = widgets::select(
+                "codex-voice-device",
+                "Codex voice device",
+                &theme,
+                |card: &mut Self| &mut card.host_select,
+            )
+            .options(options, index)
+            .width(200.0)
+            .on_select(move |card, ix, _, cx| {
+                if card.call_live {
+                    return;
+                }
+                if let Some((id, _, true, _)) = hosts.get(ix) {
+                    let id = id.clone();
+                    settings::update(settings::SavePolicy::Immediate, cx, |s| {
+                        s.codex_voice_device = id
+                    });
+                    cx.refresh_windows();
+                    cx.notify();
+                }
+            })
+            .render(&self.host_select, cx);
+            widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(&theme, "Codex voice device"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                if self.call_live {
+                                    "End the call to change devices"
+                                } else {
+                                    "Runs Codex; audio stays on this device"
+                                }
+                                .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(control)
+        };
+        let conversation_card = widgets::section_card(&theme).child(host_row).child(
+            widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(&theme, "Codex voice style"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec!["Applies to your next voice session".into_any_element()],
+                        )),
+                )
+                .child(voice_control),
+        );
         let enabled = settings::current(cx).dictation_enabled;
         let downloading = self.cancel.is_some();
         let on = downloading || (enabled && self.ready);
@@ -475,10 +628,7 @@ impl Render for VoiceCard {
                         .child(
                             widgets::page_column()
                                 .child(widgets::page_header(&theme, "Voice", None))
-                                .child(widgets::page_subtitle(
-                                    &theme,
-                                    "Transcribed on this device. Audio is never saved.",
-                                ))
+                                .child(conversation_card)
                                 .child(
                                     widgets::section_card(&theme)
                                         .child(dictation_row)

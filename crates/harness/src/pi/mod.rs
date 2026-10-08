@@ -374,6 +374,7 @@ impl Harness for PiHarness {
             };
             // The lease lives through shutdown even if the consumer drops its stream.
             let RunControls {
+                realtime: _,
                 execution_lease: _lease,
                 request_input,
                 mut steering,

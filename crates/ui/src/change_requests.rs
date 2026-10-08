@@ -242,10 +242,33 @@ impl ChangeRequestClientState {
         true
     }
 
-    pub fn store(&mut self, key: ChangeRequestWatchKey, snapshot: CheckoutChangeRequestStatus) {
+    /// Returns whether the frame changes what any row can render. Snapshots
+    /// only surface through their `change_request` (re-validated against the
+    /// identity fields), so a first "no PR" frame or a bare `updated_at` bump
+    /// stores silently.
+    pub fn store(
+        &mut self,
+        key: ChangeRequestWatchKey,
+        snapshot: CheckoutChangeRequestStatus,
+    ) -> bool {
+        fn visible(
+            snapshot: &CheckoutChangeRequestStatus,
+        ) -> Option<(&str, &str, &str, &str, &ChangeRequestSummary)> {
+            snapshot.change_request.as_ref().map(|summary| {
+                (
+                    snapshot.device_id.as_str(),
+                    snapshot.cwd.as_str(),
+                    snapshot.branch.as_str(),
+                    snapshot.checkout_id.as_str(),
+                    summary,
+                )
+            })
+        }
+        let changed = self.snapshots.get(&key).and_then(visible) != visible(&snapshot);
         // A new frame replaces the old branch/checkout context for this path.
         // Rendering validates the complete identity again before exposing it.
         self.snapshots.insert(key, snapshot);
+        changed
     }
 
     pub fn retain_targets(&mut self, targets: &HashSet<ChangeRequestWatchKey>) {
@@ -594,6 +617,30 @@ mod tests {
         none.change_request = None;
         state.store(key, none);
         assert!(state.change_request_for_chat(&chat, &[]).is_none());
+    }
+
+    #[test]
+    fn store_reports_only_visible_changes() {
+        let key = ChangeRequestWatchKey {
+            device_id: "local".into(),
+            cwd: "/repo".into(),
+            branch: "feature/pr".into(),
+            checkout_id: Some("checkout".into()),
+        };
+        let mut none = snapshot("local", "/repo", "checkout");
+        none.change_request = None;
+        let mut state = ChangeRequestClientState::default();
+        // A first "no PR" frame renders nothing new.
+        assert!(!state.store(key.clone(), none.clone()));
+        assert!(state.store(key.clone(), snapshot("local", "/repo", "checkout")));
+        // The host re-polls: identical PR, fresher timestamp.
+        let mut refreshed = snapshot("local", "/repo", "checkout");
+        refreshed.updated_at = Utc.timestamp_opt(60, 0).unwrap();
+        assert!(!state.store(key.clone(), refreshed.clone()));
+        let mut merged = refreshed;
+        merged.change_request.as_mut().unwrap().state = ChangeRequestState::Merged;
+        assert!(state.store(key.clone(), merged));
+        assert!(state.store(key, none));
     }
 
     #[test]

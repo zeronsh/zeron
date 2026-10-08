@@ -21,6 +21,12 @@ required-features = ["bindgen"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
+zeron-voice-session.workspace = true
+zeron-orb.workspace = true
+zeron-veil.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
 uniffi = "0.32"
 zeron-markdown.workspace = true
 zeron-text.workspace = true

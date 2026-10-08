@@ -1,0 +1,123 @@
+name: Native Codex voice
+on:
+  pull_request:
+    paths:
+      - 'crates/audio/**'
+      - 'crates/voice-media/**'
+      - 'crates/voice-session/**'
+      - 'crates/orb/**'
+      - 'crates/proto/src/voice/**'
+      - 'crates/rpc/**'
+      - 'crates/client/**'
+      - 'crates/mobile/**'
+      - 'apps/ios/Zeron/Voice/**'
+      - 'apps/ios/ZeronTests/RemoteVoiceLifecycleTests.swift'
+      - 'dist/voice/**'
+      - 'scripts/package-voice-runtime.py'
+      - 'crates/proto/src/voice.rs'
+      - 'crates/harness/**'
+      - 'crates/engine/**'
+      - 'crates/ui/**'
+      - 'crates/mcp/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/codex-voice-remote-smoke.py'
+      - 'scripts/tests/*voice_remote*'
+      - 'scripts/tests/test_voice_packaging.py'
+      - '.github/workflows/voice-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime-packaging:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Development runtime projection fixtures (no downloads or audio devices)
+        run: python -m unittest discover -s scripts/tests -p 'test_voice_packaging.py' -v
+
+  split-host-probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Split-host diagnostic fixtures (no Codex, microphone or provider)
+        run: python3 -m unittest discover -s scripts/tests -p 'test_voice_remote*.py' -v
+
+  offline-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Native audio and GPUI build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev clang libclang-dev pkg-config meson ninja-build libwayland-dev libxkbcommon-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-xcb-dev libxrandr-dev libxi-dev libxcursor-dev libx11-dev libxinerama-dev libegl1-mesa-dev libvulkan-dev libfontconfig1-dev libfreetype6-dev libssl-dev libdbus-1-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Protocol, transport and idle runtime (no provider access)
+        run: |
+          cargo test --locked -p zeron-voice-media --lib
+          cargo test --locked -p zeron-orb
+          cargo test --locked -p zeron-voice-session --lib
+          cargo test --locked -p zeron-mobile --lib voice
+          cargo test --locked -p zeron-mobile --lib orb
+          cargo test --locked -p zeron-proto voice --lib
+          cargo test --locked -p zeron-harness --lib
+          cargo test --locked -p zeron-harness --test codex --test acp
+          cargo test --locked -p zeron-doc voice --lib
+          cargo test --locked -p zeron-engine --lib voice
+          cargo test --locked -p zeron-engine --test voice_runtime
+          cargo test --locked -p zeron-engine --test device_routing
+          cargo test --locked -p zeron-rpc --test device_room
+          cargo test --locked -p zeron-mcp --lib
+      - name: Native audio and WebRTC AEC3
+        run: cargo test --locked -p zeron-audio --features aec --lib
+
+  native-platform-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile subscription bridge without audio hardware or provider access
+        run: cargo check --locked -p zeron-harness -p zeron-engine
+      - name: Installed and development runtime resolution
+        run: cargo test --locked -p zeron-voice-media --lib
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+      - name: Initialize a projected Windows runtime (no provider or audio devices)
+        if: runner.os == 'Windows'
+        run: |
+          $env:ZERON_VOICE_MEDIA_DIR = Join-Path $env:RUNNER_TEMP 'zeron-media/codex-resources/voice'
+          python scripts/package-voice-runtime.py --download --destination $env:ZERON_VOICE_MEDIA_DIR
+          if ($LASTEXITCODE -ne 0) { throw 'Voice runtime packaging failed' }
+          cargo test --locked -p zeron-voice-media --lib packaged_native_runtime_initializes_without_audio_devices -- --ignored

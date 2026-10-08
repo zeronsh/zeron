@@ -205,6 +205,33 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "notification-opened")
     }
 
+    /// An unknown chat stays on Sessions and reports the failed open.
+    /// `-route` calls the same AppRouter.openSession entry point as a push
+    /// tap, without needing APNs or a host-side sender. This reproduces the
+    /// failed-open path, not the original notification's delivery or
+    /// the sync timing that may have made its chat unavailable.
+    func testUnknownChatRouteReturnsToSessions() {
+        let chatId = "missing-notification-chat-\(UUID().uuidString)"
+        let app = launch(["-route", "chat:\(chatId)"])
+        XCTAssertTrue(app.staticTexts["Couldn't open session. Try again."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["new-session"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.scrollViews["transcript"].exists, "failed open must not present a conversation")
+        XCTAssertFalse(app.staticTexts["Unavailable"].exists)
+
+        let prompt = app.staticTexts.matching(NSPredicate(
+            format: "label == %@",
+            "You: How does the layout engine avoid measuring text on the main thread?"
+        )).firstMatch
+        let reply = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Plan for the rewrite"
+        )).firstMatch
+        XCTAssertFalse(prompt.exists, "fixture prompt must never appear for a missing chat")
+        XCTAssertFalse(reply.exists, "fixture reply must never appear for a missing chat")
+        XCTAssertFalse(app.cells["session-\(chatId)"].exists)
+        snapshot(app, "unknown-chat-returned-to-sessions")
+    }
+
     func testTabsAndSearch() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))

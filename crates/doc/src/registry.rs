@@ -6,8 +6,16 @@
 //!   `rows` frames (the server merges; clients never re-merge server rows);
 //! - `pending` op batches — local writes not yet acked, replayed over the
 //!   authoritative rows for every read (optimistic overlay), re-pushed on
-//!   reconnect (idempotent by strict-`>` clock compare);
+//!   reconnect (idempotent by strict-`>` clock compare). Repeated writes to
+//!   one row in the unsent tail coalesce ([`coalesce_ops`]) wherever the
+//!   room's outcome — rows AND push notifications — stays identical, so an
+//!   offline queue grows with rows touched and status transitions, not with
+//!   writes made (see `RegistryDoc::coalesce_unsent`);
 //! - an HLC clock stamping every local write.
+//!
+//! A local-only replica ([`RegistryDoc::set_local_only`]) has no server to
+//! ack anything: its writes fold straight into `authoritative` and `pending`
+//! stays empty.
 //!
 //! The merge function [`apply_op`] mirrors `edge/src/registry-core.ts` 1:1 —
 //! the shared test vectors live in both files; change them together. The
@@ -290,6 +298,111 @@ pub fn row_to_seed_op(row: &RegistryRow) -> RowOp {
     }
 }
 
+/// One op with EXACTLY the effect of applying `a` then `b` (same row) to any
+/// row state — live, tombstoned, or missing — or `None` when no single op
+/// can express the pair. Per-field writes always merge (newest clock wins, a
+/// tie keeps `a`, as in [`apply_op`]); what can break exactness is
+/// existence: an update never creates/revives, and an upsert revives a
+/// tombstone on its own `hlc` with ALL its fields. So:
+/// - `b` update: `a` alone decides existence → `a`'s kind and revival clock;
+/// - `b` upsert: exact when `a` (an upsert) can never revive where `b` would
+///   not (`b.hlc <= a.hlc`), or when `b` overwrites every field `a` wrote
+///   with a newer clock — whatever `a` revived or created, `b` replaces;
+/// - deletes compare against the row's clocks at apply time and never fold.
+///
+/// The steady-state writers (full-row session/chat/device upserts, field
+/// updates) all hit the exact cases. A merge whose result the room would
+/// reject as oversized ([`MAX_OP_BYTES`]) is refused too: the inputs stay
+/// separate and each still fits.
+pub fn coalesce_ops(a: &RowOp, b: &RowOp) -> Option<RowOp> {
+    if a.kind != b.kind || a.id != b.id {
+        return None;
+    }
+    let (op, hlc) = match (a.op, b.op) {
+        (OpKind::Delete, _) | (_, OpKind::Delete) => return None,
+        (_, OpKind::Update) => (a.op, a.hlc.clone()),
+        (OpKind::Upsert, OpKind::Upsert) if b.hlc <= a.hlc || shadows(b, a) => {
+            (OpKind::Upsert, a.hlc.clone().max(b.hlc.clone()))
+        }
+        (OpKind::Update, OpKind::Upsert) if shadows(b, a) => (OpKind::Upsert, b.hlc.clone()),
+        _ => return None,
+    };
+    let mut writes: BTreeMap<String, (Value, String)> = BTreeMap::new();
+    for (key, value) in a.set.iter().flatten() {
+        writes.insert(key.clone(), (value.clone(), a.clock_for(key).to_string()));
+    }
+    for (key, value) in b.set.iter().flatten() {
+        let clock = b.clock_for(key);
+        if writes
+            .get(key)
+            .is_none_or(|(_, prev)| hlc_newer(clock, Some(prev)))
+        {
+            writes.insert(key.clone(), (value.clone(), clock.to_string()));
+        }
+    }
+    // Every write keeps its ORIGINAL clock; only those differing from the
+    // op's `hlc` need an explicit override.
+    let mut set = BTreeMap::new();
+    let mut clocks = BTreeMap::new();
+    for (key, (value, clock)) in writes {
+        if clock != hlc {
+            clocks.insert(key.clone(), clock);
+        }
+        set.insert(key, value);
+    }
+    let merged = RowOp {
+        kind: a.kind.clone(),
+        id: a.id.clone(),
+        op,
+        set: Some(set),
+        hlc,
+        clocks: (!clocks.is_empty()).then_some(clocks),
+    };
+    fits_op_budget(&merged).then_some(merged)
+}
+
+/// Per-op serialized budget — the 1:1 mirror of `MAX_OP_BYTES` in
+/// `edge/src/registry-core.ts`; `validateOp` rejects (and with it the whole
+/// batch) any op whose `JSON.stringify` is longer.
+pub const MAX_OP_BYTES: usize = 16 * 1024;
+
+/// Whether `op` passes the room's size check. serde_json's UTF-8 byte count
+/// is never below `JSON.stringify`'s UTF-16 length for the same value, so
+/// this errs toward "too large".
+fn fits_op_budget(op: &RowOp) -> bool {
+    serde_json::to_vec(op).is_ok_and(|bytes| bytes.len() <= MAX_OP_BYTES)
+}
+
+/// The `sessions` fields the room's push notifications switch on
+/// (`notificationFor` in `edge/src/push-notify.ts`): the status indicator
+/// and the completed-turn marker. `updatedAt` only gates staleness, so the
+/// 10 s keepalive touch differs from its predecessor only there.
+fn session_signal(op: &RowOp) -> (Option<&Value>, Option<&Value>) {
+    let field = |name: &str| op.set.as_ref().and_then(|s| s.get(name));
+    (field("status"), field("lastCompletedTurn"))
+}
+
+/// A `chats` op that can change what a session notification sees
+/// (`chatForNotification`: existence/deletion, side-chat origin, archived,
+/// title). Freshness writes (`lastMessage*`, `lastSeenAt`, …) cannot.
+fn chat_gates_notifications(op: &RowOp) -> bool {
+    op.op != OpKind::Update
+        || op.set.as_ref().is_some_and(|s| {
+            ["title", "archived", "parentChatId"]
+                .iter()
+                .any(|k| s.contains_key(*k))
+        })
+}
+
+/// `b` writes every field `a` writes, each with a strictly newer clock.
+fn shadows(b: &RowOp, a: &RowOp) -> bool {
+    let b_set = b.set.as_ref();
+    a.set.iter().flatten().all(|(key, _)| {
+        b_set.is_some_and(|s| s.contains_key(key))
+            && hlc_newer(b.clock_for(key), Some(a.clock_for(key)))
+    })
+}
+
 // ── pending batches ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +450,10 @@ struct PersistedState {
     server_seq: u64,
     gc_floor: u64,
     clock: HlcClock,
+    /// See [`RegistryDoc::local_writes`]. Additive — older snapshots default
+    /// to `false`.
+    #[serde(default)]
+    local_writes: bool,
     rows: Vec<RegistryRow>,
     pending: Vec<PendingBatch>,
 }
@@ -351,6 +468,15 @@ pub struct RegistryDoc {
     gc_floor: u64,
     clock: HlcClock,
     pending: Vec<PendingBatch>,
+    /// No server will ever ack (local profile): writes fold straight into
+    /// `authoritative` — queueing them grew `pending` without bound (a field
+    /// snapshot held 178k never-acked batches for 289 rows). Runtime mode,
+    /// set by the host; not persisted.
+    local_only: bool,
+    /// Writes were folded into `authoritative` that no server has seen. If
+    /// an edge ever attaches to this replica, every row re-seeds once (see
+    /// [`Self::set_local_only`]). Persisted.
+    local_writes: bool,
     /// Bumped on every mutation (local or applied) — the engine host converts
     /// this into watch-channel publishes and snapshot debounces.
     generation: u64,
@@ -365,6 +491,8 @@ impl RegistryDoc {
             gc_floor: 0,
             clock: HlcClock::default(),
             pending: Vec::new(),
+            local_only: false,
+            local_writes: false,
             generation: 0,
         }
     }
@@ -387,6 +515,59 @@ impl RegistryDoc {
         self.pending.len()
     }
 
+    /// Total ops across pending batches (introspection/tests).
+    pub fn pending_ops_len(&self) -> usize {
+        self.pending.iter().map(|b| b.ops.len()).sum()
+    }
+
+    /// Switch local-only mode (see the `local_only` field). Entering it folds
+    /// any queued batches into `authoritative` — nothing can be in flight
+    /// without a transport. Leaving it after local-only writes re-seeds every
+    /// row with its ORIGINAL clocks (the server may hold some of them with
+    /// older values; a full `state` replace would otherwise drop the newer
+    /// local ones), exactly like the server-behind recovery in
+    /// [`Self::apply_state`]. Call before a transport attaches.
+    pub fn set_local_only(&mut self, local_only: bool) {
+        self.local_only = local_only;
+        if local_only {
+            let pending = std::mem::take(&mut self.pending);
+            if pending.is_empty() {
+                return;
+            }
+            let ops: usize = pending.iter().map(|b| b.ops.len()).sum();
+            tracing::info!(
+                batches = pending.len(),
+                ops,
+                "registry: folded queued writes into the local-only replica"
+            );
+            self.generation += 1;
+            self.local_writes = true;
+            for batch in pending {
+                for op in &batch.ops {
+                    self.fold_op(op);
+                }
+            }
+        } else if self.local_writes {
+            self.local_writes = false;
+            let seed: Vec<RowOp> = self
+                .authoritative
+                .values()
+                .flat_map(|m| m.values())
+                .map(row_to_seed_op)
+                .collect();
+            self.enqueue_ops(seed);
+        }
+    }
+
+    /// Apply one op straight to the authoritative row — the same step the
+    /// overlay replays, made permanent.
+    fn fold_op(&mut self, op: &RowOp) {
+        let row = self.authoritative.get(&op.kind).and_then(|m| m.get(&op.id));
+        if let (Some(next), true) = apply_op(row, op) {
+            self.put_authoritative(next);
+        }
+    }
+
     // ── persistence ─────────────────────────────────────────────────────────
 
     // (see PersistedState::resync_epoch)
@@ -404,6 +585,7 @@ impl RegistryDoc {
             server_seq: self.server_seq,
             gc_floor: self.gc_floor,
             clock: self.clock.clone(),
+            local_writes: self.local_writes,
             rows,
             pending: self.pending.clone(),
         };
@@ -432,12 +614,25 @@ impl RegistryDoc {
         }
         doc.gc_floor = state.gc_floor;
         doc.clock = state.clock;
+        doc.local_writes = state.local_writes;
         doc.pending = state.pending;
         for row in state.rows {
             doc.authoritative
                 .entry(row.kind.clone())
                 .or_default()
                 .insert(row.id.clone(), row);
+        }
+        // Nothing is in flight after a load, so the whole queue coalesces —
+        // this shrinks snapshots bloated before coalescing existed (178k
+        // batches → one op per touched row). The host persists the result.
+        let before = doc.pending_ops_len();
+        if doc.coalesce_unsent() > 0 {
+            tracing::info!(
+                before,
+                after = doc.pending_ops_len(),
+                batches = doc.pending.len(),
+                "registry: compacted queued writes on load"
+            );
         }
         Ok(doc)
     }
@@ -594,6 +789,14 @@ impl RegistryDoc {
         if ops.is_empty() {
             return;
         }
+        if self.local_only {
+            self.generation += 1;
+            self.local_writes = true;
+            for op in &ops {
+                self.fold_op(op);
+            }
+            return;
+        }
         // The registry room rejects any batch over its op cap (500), and a
         // rejected batch is a PERMANENT wedge: error frames carry no batch
         // id, so the client can never retire it — it replays and fails on
@@ -620,6 +823,132 @@ impl RegistryDoc {
             });
             ops = tail;
         }
+        self.coalesce_unsent();
+    }
+
+    /// Collapse repeated writes to one row across the UNSENT tail of
+    /// `pending` (everything after the last in-flight batch) into single ops
+    /// via [`coalesce_ops`]; returns how many ops were folded away.
+    ///
+    /// The room treats a batch as a unit (`applyPushBatch` in
+    /// `edge/src/registry-room.ts`): validated and committed atomically,
+    /// one seq and one rows broadcast, and push notifications derived from
+    /// each `sessions` row before vs after the WHOLE batch, labelled from the
+    /// chat row after it. So:
+    /// - only single-op batches (one local write each) take part. Multi-op
+    ///   batches — cascade deletes, re-seeds, migration seeds — are written
+    ///   as units and keep every op, in place;
+    /// - a merged op lands at the LATER op's position and the earlier one is
+    ///   removed. Moving an op later only reorders it against other rows,
+    ///   which merge independently — except a session notification reads
+    ///   its chat row, so a session op never moves past a chat op that
+    ///   gates notifications, nor such a chat op past a session op;
+    /// - session ops merge only when status and completed turn match, and
+    ///   the first op of each such run (a potential notification) never
+    ///   absorbs later ones: working→needs-input→working stays three ops,
+    ///   while a run of keepalive touches folds into the run head plus one.
+    ///   Then every batch the room applies yields the same notifications as
+    ///   the unmerged queue (the merged follower can only re-cross the
+    ///   staleness window once, exactly as the touches it replaces would).
+    ///
+    /// Ack safety: in-flight batches are never touched, so an ack always
+    /// retires exactly what was pushed. A tail batch may still have been
+    /// pushed on a dead connection (its late HTTPS ack can race a
+    /// disconnect), so a batch that gained content takes a fresh id: a stale
+    /// ack then retires nothing, and a removed batch's ack finds nothing.
+    /// Re-pushing merged ops is an idempotent LWW replay.
+    fn coalesce_unsent(&mut self) -> usize {
+        let start = self
+            .pending
+            .iter()
+            .rposition(|b| b.in_flight)
+            .map_or(0, |i| i + 1);
+        if self.pending.len().saturating_sub(start) < 2 {
+            return 0;
+        }
+        let mut tail: Vec<(String, Vec<Option<RowOp>>, bool)> = self
+            .pending
+            .split_off(start)
+            .into_iter()
+            .map(|b| (b.batch, b.ops.into_iter().map(Some).collect(), false))
+            .collect();
+        // (kind, id) → (position of that row's latest live op in the tail,
+        // whether that op heads a session-signal run).
+        let mut last: HashMap<(String, String), ((usize, usize), bool)> = HashMap::new();
+        // chat id → position of its latest notification-gating chat op.
+        let mut gating_chat: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut folded = 0;
+        for bi in 0..tail.len() {
+            for oi in 0..tail[bi].1.len() {
+                let Some(op) = tail[bi].1[oi].as_ref() else {
+                    continue;
+                };
+                let here = (bi, oi);
+                let key = (op.kind.clone(), op.id.clone());
+                let prev = last
+                    .get(&key)
+                    .and_then(|&(at, head)| Some((at, head, tail[at.0].1[at.1].as_ref()?)));
+                let session = op.kind == KIND_SESSIONS;
+                let head = session
+                    && prev.is_none_or(|(_, _, p)| {
+                        p.op == OpKind::Delete || session_signal(p) != session_signal(op)
+                    });
+                let merged = prev.and_then(|(at, prev_head, prev_op)| {
+                    let single = tail[bi].1.len() == 1 && tail[at.0].1.len() == 1;
+                    let may_move = if session {
+                        !head && !prev_head && !gating_chat.get(&op.id).is_some_and(|&c| c > at)
+                    } else if op.kind == KIND_CHATS && chat_gates_notifications(prev_op) {
+                        !last
+                            .get(&(KIND_SESSIONS.to_string(), op.id.clone()))
+                            .is_some_and(|&(s, _)| s > at)
+                    } else {
+                        true
+                    };
+                    (single && may_move)
+                        .then(|| coalesce_ops(prev_op, op))
+                        .flatten()
+                        .map(|merged| (at, merged))
+                });
+                if let Some((at, merged)) = merged {
+                    tail[at.0].1[at.1] = None;
+                    tail[bi].1[oi] = Some(merged);
+                    tail[bi].2 = true;
+                    folded += 1;
+                }
+                let op = tail[bi].1[oi].as_ref().expect("op stays live");
+                if op.kind == KIND_CHATS && chat_gates_notifications(op) {
+                    gating_chat.insert(op.id.clone(), here);
+                }
+                last.insert(key, (here, head));
+            }
+        }
+        if folded == 0 {
+            self.pending
+                .extend(tail.into_iter().map(|(batch, ops, _)| PendingBatch {
+                    batch,
+                    ops: ops.into_iter().flatten().collect(),
+                    in_flight: false,
+                }));
+            return 0;
+        }
+        for (batch, ops, gained) in tail {
+            let ops: Vec<RowOp> = ops.into_iter().flatten().collect();
+            if ops.is_empty() {
+                continue;
+            }
+            let batch = if gained {
+                format!("b-{}", self.next_hlc())
+            } else {
+                batch
+            };
+            self.pending.push(PendingBatch {
+                batch,
+                ops,
+                in_flight: false,
+            });
+        }
+        self.generation += 1;
+        folded
     }
 
     fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
@@ -652,42 +981,42 @@ impl RegistryDoc {
 
     // ── overlay reads ───────────────────────────────────────────────────────
 
-    /// The row as this device should display it: authoritative + pending ops.
-    fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
-        let mut row = self
-            .authoritative
-            .get(kind)
-            .and_then(|m| m.get(id))
-            .cloned();
-        for batch in &self.pending {
-            for op in &batch.ops {
-                if op.kind == kind && op.id == id {
-                    let (next, _) = apply_op(row.as_ref(), op);
-                    if let Some(next) = next {
-                        row = Some(next);
-                    }
-                }
-            }
-        }
-        row.filter(|r| !r.deleted)
+    fn pending_ops(&self) -> impl Iterator<Item = &RowOp> {
+        self.pending.iter().flat_map(|b| &b.ops)
     }
 
-    /// All live rows of `kind`, overlay applied.
+    /// The row as this device should display it: authoritative + pending ops.
+    fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+        overlay(
+            self.authoritative.get(kind).and_then(|m| m.get(id)),
+            self.pending_ops()
+                .filter(|op| op.kind == kind && op.id == id),
+        )
+    }
+
+    /// All live rows of `kind`, overlay applied. Pending ops are grouped by
+    /// row in one pass — rescanning the queue per row made every read
+    /// O(rows × pending).
     fn overlay_rows(&self, kind: &str) -> Vec<RegistryRow> {
-        let mut ids: Vec<String> = self
-            .authoritative
-            .get(kind)
-            .map(|m| m.keys().cloned().collect())
+        let authoritative = self.authoritative.get(kind);
+        let mut ids: Vec<&str> = authoritative
+            .map(|m| m.keys().map(String::as_str).collect())
             .unwrap_or_default();
-        for batch in &self.pending {
-            for op in &batch.ops {
-                if op.kind == kind && !ids.iter().any(|id| id == &op.id) {
-                    ids.push(op.id.clone());
-                }
+        let mut ops: HashMap<&str, Vec<&RowOp>> = HashMap::new();
+        for op in self.pending_ops().filter(|op| op.kind == kind) {
+            let row_ops = ops.entry(op.id.as_str()).or_default();
+            if row_ops.is_empty() && !authoritative.is_some_and(|m| m.contains_key(&op.id)) {
+                ids.push(&op.id);
             }
+            row_ops.push(op);
         }
-        ids.iter()
-            .filter_map(|id| self.overlay_row(kind, id))
+        ids.into_iter()
+            .filter_map(|id| {
+                overlay(
+                    authoritative.and_then(|m| m.get(id)),
+                    ops.get(id).into_iter().flatten().copied(),
+                )
+            })
             .collect()
     }
 
@@ -1366,6 +1695,22 @@ impl RegistryDoc {
         }
         Ok(count)
     }
+}
+
+/// Replay `ops` (one row's, in queue order) over its authoritative state;
+/// `None` when the result is missing or a tombstone.
+fn overlay<'a>(
+    base: Option<&RegistryRow>,
+    ops: impl IntoIterator<Item = &'a RowOp>,
+) -> Option<RegistryRow> {
+    let mut row = base.cloned();
+    for op in ops {
+        let (next, _) = apply_op(row.as_ref(), op);
+        if let Some(next) = next {
+            row = Some(next);
+        }
+    }
+    row.filter(|r| !r.deleted)
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────

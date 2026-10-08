@@ -48,6 +48,11 @@ Zeron/
   Shell/       Tab bar (Sessions, Settings, search; "New session" accessory
                with live summary), sign-in
   Debug/       Transcript lab + hitch meter
+ZeronLiveActivity/  Widget extension: the voice call's Live Activity (Dynamic
+               Island + Lock Screen), with the orb's states exported from
+               zeron-orb as vector assets
+ZeronShared/   Compiled into the app and the extension: the activity's
+               attributes and its mute/end App Intents
 ```
 
 ### Transcript pipeline

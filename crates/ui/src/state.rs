@@ -123,12 +123,16 @@ pub enum EngineMode {
 trait EngineBackend: Send + Sync {
     fn client(&self) -> &RpcClient;
     fn mode(&self) -> EngineMode;
+    async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        Err(RpcError::Failed("voice media unavailable".into()))
+    }
     /// Graceful teardown (drains runs / flushes docs for the in-process engine).
     async fn shutdown(&self);
 }
 
 /// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
 struct InProcessEngine {
+    service: Arc<dyn RpcService>,
     runtime: Arc<tokio::sync::Mutex<Option<EngineRuntime>>>,
     boot_task: tokio::task::JoinHandle<()>,
     refresh_task: tokio::task::JoinHandle<()>,
@@ -140,6 +144,9 @@ struct InProcessEngine {
 
 #[async_trait]
 impl EngineBackend for InProcessEngine {
+    async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        Ok(memory_client(self.service.clone()))
+    }
     fn client(&self) -> &RpcClient {
         &self.client
     }
@@ -244,6 +251,9 @@ struct RemoteEngine {
 
 #[async_trait]
 impl EngineBackend for RemoteEngine {
+    async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        connect_ws(&self.url).await
+    }
     fn client(&self) -> &RpcClient {
         &self.client
     }
@@ -345,7 +355,8 @@ impl EngineHandle {
         //
         // Best-effort — losing the bind race with another engine costs other
         // viewports, not this one.
-        let ipc_task = match zeron_engine::serve_ipc(engine_config.ipc_port, service).await {
+        let ipc_task = match zeron_engine::serve_ipc(engine_config.ipc_port, service.clone()).await
+        {
             Ok(task) => Some(task),
             Err(err) => {
                 tracing::warn!(
@@ -417,6 +428,7 @@ impl EngineHandle {
         });
         let handle = EngineHandle {
             inner: Arc::new(InProcessEngine {
+                service,
                 runtime,
                 boot_task,
                 refresh_task,
@@ -528,6 +540,10 @@ impl EngineHandle {
 
     pub fn mode(&self) -> EngineMode {
         self.inner.mode()
+    }
+
+    pub async fn media_client(&self) -> Result<RpcClient, RpcError> {
+        self.inner.media_client().await
     }
 
     pub fn engine_info(&self) -> &EngineInfo {
@@ -643,6 +659,56 @@ struct PendingSend {
 /// no visible trace of the send at all — the exact hole the 2026-08-19
 /// incident fell into.
 pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
+
+/// The one-shot timer behind [`AppState::watch_clock_transitions`].
+#[derive(Default)]
+struct ClockTransitions {
+    /// Re-arms the timer after every notify.
+    observation: Option<gpui::Subscription>,
+    /// The last time observers saw current state (a notify or a wake).
+    checked_at: Option<DateTime<Utc>>,
+    wake_at: Option<DateTime<Utc>>,
+    task: Option<Task<()>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CLOCK: std::cell::Cell<Option<DateTime<Utc>>> = const { std::cell::Cell::new(None) };
+}
+
+/// Wall-clock time for clock-driven state derivations. Tests pin it to the
+/// simulated executor's timeline with [`TestClock`].
+pub(crate) fn clock_now() -> DateTime<Utc> {
+    #[cfg(test)]
+    if let Some(now) = TEST_CLOCK.with(std::cell::Cell::get) {
+        return now;
+    }
+    Utc::now()
+}
+
+/// Pins [`clock_now`] on this test thread until dropped.
+#[cfg(test)]
+pub(crate) struct TestClock;
+
+#[cfg(test)]
+impl TestClock {
+    pub(crate) fn start(now: DateTime<Utc>) -> Self {
+        let clock = Self;
+        clock.set(now);
+        clock
+    }
+
+    pub(crate) fn set(&self, now: DateTime<Utc>) {
+        TEST_CLOCK.with(|clock| clock.set(Some(now)));
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        TEST_CLOCK.with(|clock| clock.set(None));
+    }
+}
 
 /// A send's attachment-upload leg in flight. `done` is bumped by the upload
 /// task per completed chunk (binary bytes); the working label reads it every
@@ -782,6 +848,8 @@ pub struct AppState {
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
+    /// Notifies at clock-driven transitions (see [`Self::watch_clock_transitions`]).
+    clock: ClockTransitions,
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
@@ -812,6 +880,31 @@ impl gpui::EventEmitter<TranscriptTextChanged> for AppState {}
 fn is_text_append(frame: &TranscriptFrame) -> bool {
     matches!(frame, TranscriptFrame::Delta { upsert, append, remove, .. }
         if upsert.is_empty() && remove.is_empty() && !append.is_empty())
+}
+
+/// Each session's indicator at `now` (the lease-dependent part of a frame).
+fn session_presence_at(sessions: &[Session], now: DateTime<Utc>) -> Vec<Indicator> {
+    sessions
+        .iter()
+        .map(|session| effective_indicator(Some(session), now))
+        .collect()
+}
+
+/// Device rows as rendered at `now`: the heartbeat timestamp only through its
+/// online state and last-seen label.
+fn device_presentation_at(devices: &[Device], now: DateTime<Utc>) -> Vec<(Device, bool, String)> {
+    devices
+        .iter()
+        .map(|device| {
+            let mut metadata = device.clone();
+            metadata.last_seen_at = None;
+            (
+                metadata,
+                crate::settings::devices::device_online(device.last_seen_at, now),
+                crate::settings::devices::format_last_seen(device.last_seen_at, now),
+            )
+        })
+        .collect()
 }
 
 impl Default for AppState {
@@ -861,6 +954,7 @@ impl AppState {
             local_device_id: None,
             harness_updates: Vec::new(),
             data_dir: None,
+            clock: ClockTransitions::default(),
             engine: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
@@ -1048,23 +1142,32 @@ impl AppState {
         true
     }
 
-    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
+    /// Returns whether anything observable changed. The engine re-publishes
+    /// identical lists (presence and sync churn elsewhere in the doc), and
+    /// each notify re-renders the whole shell.
+    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) -> bool {
+        let mut changed = false;
         if let Some(pending) = &self.pending_side_chat {
             if chats.iter().any(|chat| chat.id == pending.id) {
                 self.pending_side_chat = None;
+                changed = true;
             } else {
                 chats.push(pending.clone());
             }
         }
         sort_chats(&mut chats);
-        self.chats = chats;
-        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
-        self.chats_synced = true;
-        self.transcript_cache
-            .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
+        if !self.chats_synced || self.chats != chats {
+            changed = true;
+            self.chats = chats;
+            self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
+            self.chats_synced = true;
+            self.transcript_cache
+                .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
+        }
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
         {
+            changed = true;
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
             self.transcript_baselines.remove(selected);
             self.prepared_transcripts.remove(selected);
@@ -1078,6 +1181,7 @@ impl AppState {
             self.queue.clear();
             self.queue_task = None;
         }
+        changed
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
@@ -1085,10 +1189,7 @@ impl AppState {
     }
 
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
-        let presence: Vec<_> = sessions
-            .iter()
-            .map(|session| effective_indicator(Some(session), now))
-            .collect();
+        let presence = session_presence_at(&sessions, now);
         let presentation: Vec<_> = sessions
             .iter()
             .map(|session| {
@@ -1107,11 +1208,22 @@ impl AppState {
         changed
     }
 
-    pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) {
+    /// Returns whether the list or the healed selection changed.
+    pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) -> bool {
         sort_spaces(&mut spaces);
-        self.spaces = spaces;
-        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
-        self.spaces_synced = true;
+        let previous_selection = self.selected_space.clone();
+        let mut changed = false;
+        if !self.spaces_synced || self.spaces != spaces {
+            changed = true;
+            self.spaces = spaces;
+            self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
+            self.spaces_synced = true;
+        }
+        self.heal_space_selection();
+        changed || self.selected_space != previous_selection
+    }
+
+    fn heal_space_selection(&mut self) {
         if self.no_project {
             self.selected_space = None;
             return;
@@ -1230,9 +1342,13 @@ impl AppState {
         }
     }
 
-    pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) {
+    /// Returns whether the posture changed. The first frame after attach always
+    /// counts: it ends the bootstrap gap the shell's alert baseline waits on.
+    pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) -> bool {
+        let changed = !self.connectivity_observed || self.connectivity != connectivity;
         self.connectivity = connectivity;
         self.connectivity_observed = true;
+        changed
     }
 
     /// Is this chat's delivery path degraded — will a send QUEUE rather than
@@ -1255,8 +1371,7 @@ impl AppState {
         if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
             return false;
         }
-        if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
+        if self.connectivity.state == S::Offline || !self.device_online(&chat.device_id, Utc::now())
         {
             return true;
         }
@@ -1302,23 +1417,8 @@ impl AppState {
             self.change_requests
                 .clear_unsupported_on_version_change(&device.id, device.version.as_deref());
         }
-        let presentation: Vec<_> = devices
-            .iter()
-            .map(|device| {
-                let mut metadata = device.clone();
-                metadata.last_seen_at = None;
-                (
-                    metadata,
-                    crate::settings::devices::device_online(device.last_seen_at, now),
-                    crate::settings::devices::format_last_seen(device.last_seen_at, now),
-                )
-            })
-            .collect();
-        let session_presence: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|session| effective_indicator(Some(session), now))
-            .collect();
+        let presentation = device_presentation_at(&devices, now);
+        let session_presence = session_presence_at(&self.sessions, now);
         let changed = self.device_presentation.as_ref() != Some(&presentation)
             || self.session_presence_presentation != session_presence;
         self.device_presentation = Some(presentation);
@@ -1379,19 +1479,33 @@ impl AppState {
             .map(|s| s.id.clone())
     }
 
-    pub fn apply_harness_updates(&mut self, statuses: Vec<zeron_proto::HarnessUpdateStatus>) {
+    pub fn apply_harness_updates(
+        &mut self,
+        statuses: Vec<zeron_proto::HarnessUpdateStatus>,
+    ) -> bool {
+        if self.harness_updates == statuses {
+            return false;
+        }
         self.harness_updates = statuses;
+        true
     }
 
-    pub fn apply_auth(&mut self, auth: AuthState) {
+    pub fn apply_auth(&mut self, auth: AuthState) -> bool {
+        if self.auth.as_ref() == Some(&auth) {
+            return false;
+        }
         self.auth = Some(auth);
+        true
     }
 
     /// Tolerant AuthStatus frame reducer (see [`parse_auth_state`]).
-    pub fn apply_auth_value(&mut self, value: serde_json::Value) {
+    pub fn apply_auth_value(&mut self, value: serde_json::Value) -> bool {
         match parse_auth_state(&value) {
             Some(auth) => self.apply_auth(auth),
-            None => tracing::warn!("dropping unrecognized AuthStatus frame"),
+            None => {
+                tracing::warn!("dropping unrecognized AuthStatus frame");
+                false
+            }
         }
     }
 
@@ -1666,11 +1780,16 @@ impl AppState {
 
     /// A `WatchTransfers` snapshot: the engine-side relay leg's in-flight
     /// queued-attachment transfers, replacing the whole set each frame.
-    pub fn apply_transfers(&mut self, transfers: Vec<zeron_proto::TransferProgress>) {
-        self.transfers = transfers
+    pub fn apply_transfers(&mut self, transfers: Vec<zeron_proto::TransferProgress>) -> bool {
+        let transfers: HashMap<_, _> = transfers
             .into_iter()
             .map(|t| (t.upload_id, (t.done, t.total)))
             .collect();
+        if self.transfers == transfers {
+            return false;
+        }
+        self.transfers = transfers;
+        true
     }
 
     /// Percent of one queued attachment's relay transfer, by the uploadId
@@ -1780,10 +1899,11 @@ impl AppState {
     /// another chat (`parent_chat_id`, the Zeron MCP's orchestration link)
     /// are the parent's workers, not sessions the user started: they stay
     /// reachable by id/deep link but never take a sidebar row or jump slot.
+    /// Voice orchestrator chats are hidden the same way.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
-            .filter(|c| !c.archived && c.parent_chat_id.is_none())
+            .filter(|c| !c.archived && c.is_top_level())
     }
 
     pub(crate) fn restore_composer_target(
@@ -2010,13 +2130,86 @@ impl AppState {
         now: DateTime<Utc>,
         space_filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &Chat)> {
+        let in_filter = self.project_filter(space_filter);
         self.overview_chats(now)
             .into_iter()
-            .filter(|(_, chat)| match space_filter {
-                Some(space_id) => chat.space_id.as_deref() == Some(space_id),
-                None => true,
-            })
+            .filter(|(_, chat)| in_filter(chat))
             .collect()
+    }
+
+    /// The sidebar's project filter matches by repository: it stores one
+    /// checkout's space id, and a chat in ANY checkout of that repository
+    /// (clones and worktrees on every device, [`zeron_proto::view::project_key`])
+    /// matches. A filter naming a space not synced here matches its own id.
+    pub fn project_filter<'a>(&'a self, filter: Option<&str>) -> impl Fn(&Chat) -> bool + 'a {
+        let filter = filter.map(|id| {
+            (
+                id.to_owned(),
+                self.space_row(id).map(zeron_proto::view::project_key),
+            )
+        });
+        move |chat| {
+            let Some((id, key)) = &filter else {
+                return true;
+            };
+            match chat.space_id.as_deref() {
+                Some(space_id) if space_id == id => true,
+                Some(space_id) => key.as_ref().is_some_and(|key| {
+                    self.space_row(space_id)
+                        .is_some_and(|space| zeron_proto::view::project_key(space) == *key)
+                }),
+                None => false,
+            }
+        }
+    }
+
+    /// Every project — one per repository across devices — as its checkouts
+    /// in [`Self::project_members`] order (this device's first), ordered by
+    /// the project's name.
+    pub fn projects(&self) -> Vec<Vec<&Space>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut projects: Vec<Vec<&Space>> = self
+            .spaces
+            .iter()
+            .filter(|space| seen.insert(zeron_proto::view::project_key(space)))
+            .map(|space| self.project_members(space))
+            .collect();
+        projects.sort_by_key(|members| {
+            let representative = self.representative_space(members[0]);
+            (
+                representative.display_name().to_lowercase(),
+                representative.id.clone(),
+            )
+        });
+        projects
+    }
+
+    /// A project's host tag: its one device as in [`Self::space_device_tag`],
+    /// else the devices holding a checkout. Offline only when every one is.
+    pub fn project_device_tag(&self, members: &[&Space], now: DateTime<Utc>) -> (String, bool) {
+        let mut devices: Vec<&str> = Vec::new();
+        for member in members {
+            if !devices.contains(&member.device_id.as_str()) {
+                devices.push(member.device_id.as_str());
+            }
+        }
+        match devices.as_slice() {
+            [] => (String::new(), false),
+            [_] => self.space_device_tag(members[0], now),
+            _ => {
+                let offline = devices.iter().all(|d| !self.device_online(d, now));
+                let tag = if devices.len() == 2 {
+                    devices
+                        .iter()
+                        .map(|d| self.device_name(d).unwrap_or("Unknown device"))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                } else {
+                    format!("{} devices", devices.len())
+                };
+                (format!("@ {tag}"), offline)
+            }
+        }
     }
 
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
@@ -2030,6 +2223,113 @@ impl AppState {
             return Indicator::Working;
         }
         effective_indicator(self.session_for(chat_id), now)
+    }
+
+    /// The earliest moment after `now` at which a clock-derived value flips
+    /// with no frame to announce it: a Working/AwaitingInput session going
+    /// stale ([`SESSION_STALE_MS`]), a remote device leaving its online window
+    /// (offline glyphs, degraded delivery, Queued badges), or a pending send's
+    /// grace expiring into "Not delivered". Each deadline is the first instant
+    /// the predicate reads differently. Relative-time labels are excluded:
+    /// they advance on the views' minute heartbeat. Pure.
+    pub fn next_clock_transition(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.clock_deadlines()
+            .filter(|deadline| *deadline > now)
+            .min()
+    }
+
+    /// Whether any clock-driven transition fell in `(from, to]`. Heartbeats
+    /// that move a deadline later without notifying (session and device
+    /// liveness leases) leave an armed timer early; this tells a real
+    /// transition from such an obsolete wake. Pure.
+    fn clock_transition_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
+        self.clock_deadlines()
+            .any(|deadline| from < deadline && deadline <= to)
+    }
+
+    fn clock_deadlines(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        let stale = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                matches!(
+                    session.status,
+                    zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                )
+            })
+            // `age_ms > SESSION_STALE_MS` first holds one millisecond past it.
+            .map(|session| {
+                session.updated_at + chrono::TimeDelta::milliseconds(SESSION_STALE_MS + 1)
+            });
+        let offline = self
+            .devices
+            .iter()
+            .filter(|device| self.local_device_id.as_deref() != Some(device.id.as_str()))
+            .filter_map(|device| device.last_seen_at)
+            // Whole seconds `<= DEVICE_ONLINE_WINDOW_SECS` stay online.
+            .map(|at| {
+                at + chrono::TimeDelta::seconds(
+                    crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1,
+                )
+            });
+        let grace = self.pending_sends.values().map(|pending| {
+            pending.started + chrono::TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1)
+        });
+        stale.chain(offline).chain(grace)
+    }
+
+    /// Notify this entity at every clock-driven transition, so each state
+    /// observer (composer interrupts, session sounds, views) sees a session
+    /// go stale, a device go dark or a send's grace expire on time — no state
+    /// frame announces those. Idempotent; every notify re-arms a single
+    /// one-shot timer for the next deadline, so idle state never polls.
+    pub fn watch_clock_transitions(&mut self, cx: &mut Context<Self>) {
+        if self.clock.observation.is_none() {
+            self.clock.observation =
+                Some(cx.observe_self(|state, cx| state.arm_clock_transition(cx)));
+        }
+        self.arm_clock_transition(cx);
+    }
+
+    /// Re-evaluate the clock-dependent parts of the change-detection caches.
+    fn refresh_clock_presentations(&mut self, now: DateTime<Utc>) {
+        self.session_presence_presentation = session_presence_at(&self.sessions, now);
+        if self.device_presentation.is_some() {
+            self.device_presentation = Some(device_presentation_at(&self.devices, now));
+        }
+    }
+
+    fn arm_clock_transition(&mut self, cx: &mut Context<Self>) {
+        let now = clock_now();
+        self.clock.checked_at = Some(now);
+        let wake = self.next_clock_transition(now);
+        if wake == self.clock.wake_at && self.clock.task.is_some() {
+            return;
+        }
+        self.clock.wake_at = wake;
+        self.clock.task = wake.map(|wake| {
+            let delay = (wake - now).to_std().unwrap_or_default();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                this.update(cx, |state, cx| {
+                    state.clock.wake_at = None;
+                    state.clock.task = None;
+                    let now = clock_now();
+                    let from = state.clock.checked_at.unwrap_or(now);
+                    if state.clock_transition_between(from, now) {
+                        // Record what this transition changed, so the frame
+                        // that later reverts it (a heartbeat reviving the
+                        // session or device) compares unequal and notifies.
+                        state.refresh_clock_presentations(now);
+                        // The self-observer re-arms for the next deadline.
+                        cx.notify();
+                    } else {
+                        state.arm_clock_transition(cx);
+                    }
+                })
+                .ok();
+            })
+        });
     }
 
     pub fn selected_chat_row(&self) -> Option<&Chat> {
@@ -2138,6 +2438,7 @@ impl AppState {
             state.attach_engine(engine, cx);
         }
         state.select_chat(Some(chat.id), cx);
+        state.watch_clock_transitions(cx);
         state
     }
 
@@ -2289,29 +2590,27 @@ impl AppState {
                 cx,
                 handle.clone(),
                 methods::WATCH_CONNECTIVITY,
-                |state, value| {
-                    state.apply_connectivity(value);
-                    true
-                },
+                AppState::apply_connectivity,
             ),
             spawn_watch(
                 cx,
                 handle.clone(),
                 methods::WATCH_TRANSFERS,
-                |state, value| {
-                    state.apply_transfers(value);
-                    true
-                },
+                AppState::apply_transfers,
             ),
-            spawn_watch(cx, handle.clone(), methods::WATCH_SPACES, |state, value| {
-                state.apply_spaces(value);
-                true
-            }),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_SPACES,
+                AppState::apply_spaces,
+            ),
             // Auth frames parse tolerantly — engine and proto tags differ today.
-            spawn_watch(cx, handle.clone(), methods::AUTH_STATUS, |state, value| {
-                state.apply_auth_value(value);
-                true
-            }),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::AUTH_STATUS,
+                AppState::apply_auth_value,
+            ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         if supports_harness_updates {
@@ -2319,10 +2618,7 @@ impl AppState {
                 cx,
                 handle.clone(),
                 methods::WATCH_HARNESS_UPDATES,
-                |state, value| {
-                    state.apply_harness_updates(value);
-                    true
-                },
+                AppState::apply_harness_updates,
             ));
         }
         self.watch_tasks = watch_tasks;
@@ -2394,29 +2690,34 @@ impl AppState {
         cx.notify();
     }
 
-    fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) {
+    /// Returns whether a pending link was resolved (selected or rejected).
+    fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(link) = self.pending_deep_link.clone() else {
-            return;
+            return false;
         };
         let Some(locator) = crate::links::workspace_locator(
             self.workspace_scope,
             self.auth.as_ref(),
             self.local_device_id.as_deref(),
         ) else {
-            return;
+            return false;
         };
         if locator != link.workspace {
             self.pending_deep_link = None;
             self.deep_link_notice =
                 Some("This conversation link belongs to another workspace".into());
-            return;
+            return true;
         }
         if self.chats.iter().any(|chat| chat.id == link.chat_id) {
             self.pending_deep_link = None;
             self.select_chat(Some(link.chat_id), cx);
+            true
         } else if self.chats_synced {
             self.pending_deep_link = None;
             self.deep_link_notice = Some("The linked conversation was not found".into());
+            true
+        } else {
+            false
         }
     }
 
@@ -2656,7 +2957,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -2735,10 +3039,16 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     }
                 };
                 let alive = this.update(cx, |state, cx| {
-                    state.apply_chats(parsed);
-                    state.apply_pending_deep_link(cx);
-                    state.reconcile_change_request_watches(cx);
-                    cx.notify();
+                    // Identical re-published lists skip the re-sort fan-out:
+                    // watch reconciliation and a whole-shell re-render.
+                    let changed = state.apply_chats(parsed);
+                    let linked = state.apply_pending_deep_link(cx);
+                    if changed {
+                        state.reconcile_change_request_watches(cx);
+                    }
+                    if changed || linked {
+                        cx.notify();
+                    }
                 });
                 if alive.is_err() {
                     return;
@@ -2821,8 +3131,9 @@ fn spawn_change_request_watch(
                 };
                 if this
                     .update(cx, |state, cx| {
-                        state.change_requests.store(target.clone(), snapshot);
-                        cx.notify();
+                        if state.change_requests.store(target.clone(), snapshot) {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -2883,11 +3194,11 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     let changed = apply(state, parsed);
-                    state.apply_pending_deep_link(cx);
-                    if changed {
-                        if matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
-                            state.reconcile_change_request_watches(cx);
-                        }
+                    let linked = state.apply_pending_deep_link(cx);
+                    if changed && matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
+                        state.reconcile_change_request_watches(cx);
+                    }
+                    if changed || linked {
                         cx.notify();
                     }
                 });
@@ -4652,6 +4963,64 @@ mod tests {
     }
 
     #[test]
+    fn project_filter_and_projects_span_a_repository_across_devices() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("laptop".into());
+        let mut remote = space("remote", "metal", "/w/anara", 1);
+        remote.repository_id = Some("commit:abc".into());
+        let mut local = space("local", "laptop", "/h/anara", 2);
+        local.repository_id = Some("commit:abc".into());
+        let other = space("other", "laptop", "/h/notes", 3);
+        state.apply_spaces(vec![remote, local, other]);
+        let in_space = |id: &str, space: &str| {
+            let mut chat = chat(id, 0, None);
+            chat.space_id = Some(space.into());
+            chat
+        };
+        state.apply_chats(vec![
+            in_space("on-remote", "remote"),
+            in_space("on-local", "local"),
+            in_space("on-other", "other"),
+        ]);
+
+        // One project per repository, its checkouts local-first.
+        let projects: Vec<Vec<&str>> = state
+            .projects()
+            .iter()
+            .map(|members| members.iter().map(|s| s.id.as_str()).collect())
+            .collect();
+        assert_eq!(projects, vec![vec!["local", "remote"], vec!["other"]]);
+
+        // Filtering on either checkout shows the whole repository's chats.
+        for filter in ["remote", "local"] {
+            let mut ids: Vec<&str> = state
+                .sidebar_chats(Utc::now(), Some(filter))
+                .iter()
+                .map(|(_, c)| c.id.as_str())
+                .collect();
+            ids.sort();
+            assert_eq!(ids, ["on-local", "on-remote"], "filter {filter}");
+        }
+        let other_only: Vec<&str> = state
+            .sidebar_chats(Utc::now(), Some("other"))
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(other_only, ["on-other"]);
+
+        // A two-device project tags both hosts; a one-device one keeps the
+        // plain host tag.
+        let anara = state.projects().into_iter().next().unwrap();
+        let (tag, _) = state.project_device_tag(&anara, Utc::now());
+        assert!(tag.starts_with("@ ") && tag.contains(" · "), "{tag}");
+        let notes = state.projects().into_iter().nth(1).unwrap();
+        assert_eq!(
+            state.project_device_tag(&notes, Utc::now()).0,
+            state.space_device_tag(notes[0], Utc::now()).0
+        );
+    }
+
+    #[test]
     fn apply_chats_drops_vanished_selection() {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
@@ -4663,6 +5032,301 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    fn clock_epoch() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+            .unwrap()
+            .to_utc()
+    }
+
+    /// Builds a clock-watching state at the pinned `now` and counts its
+    /// notifications.
+    fn clock_state(
+        cx: &mut gpui::TestAppContext,
+        setup: impl FnOnce(&mut AppState),
+    ) -> (
+        Entity<AppState>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+        gpui::Subscription,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new();
+            setup(&mut state);
+            state.watch_clock_transitions(cx);
+            state
+        });
+        let notifies = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = notifies.clone();
+        let subscription =
+            cx.update(|cx| cx.observe(&state, move |_, _| counter.set(counter.get() + 1)));
+        (state, notifies, subscription)
+    }
+
+    /// Steps the simulated executor and the pinned wall clock together.
+    fn advance_to(
+        cx: &mut gpui::TestAppContext,
+        clock: &TestClock,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) {
+        clock.set(to);
+        cx.executor().advance_clock((to - from).to_std().unwrap());
+    }
+
+    /// Proves the state notifies exactly once, exactly at `deadline`.
+    fn assert_state_notifies_at(
+        cx: &mut gpui::TestAppContext,
+        now: DateTime<Utc>,
+        deadline: DateTime<Utc>,
+        setup: impl FnOnce(&mut AppState),
+    ) {
+        let clock = TestClock::start(now);
+        let (_state, notifies, _subscription) = clock_state(cx, setup);
+        let before = deadline - TimeDelta::milliseconds(1);
+        advance_to(cx, &clock, now, before);
+        assert_eq!(notifies.get(), 0, "no notify before the deadline");
+        advance_to(cx, &clock, before, deadline);
+        assert_eq!(notifies.get(), 1, "one notify at the deadline");
+        // Nothing else is due: the next minute passes silently.
+        advance_to(cx, &clock, deadline, deadline + TimeDelta::minutes(1));
+        assert_eq!(notifies.get(), 1);
+    }
+
+    #[gpui::test]
+    fn stale_session_notifies_state_at_its_cutoff(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let row = session("row", SessionStatus::Working, 10, now);
+        let cutoff = row.updated_at + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        let mut probe = AppState::new();
+        probe.sessions = vec![row.clone()];
+        assert_eq!(
+            probe.indicator_for("row", cutoff - TimeDelta::milliseconds(1)),
+            Indicator::Working
+        );
+        assert_eq!(probe.indicator_for("row", cutoff), Indicator::None);
+        assert_state_notifies_at(cx, now, cutoff, |state| state.sessions = vec![row]);
+    }
+
+    #[gpui::test]
+    fn remote_device_notifies_state_when_it_goes_offline(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let seen = now - TimeDelta::seconds(40);
+        let mut remote = device("remote", "Remote");
+        remote.last_seen_at = Some(seen);
+        // The local device is always online; its stale heartbeat is no deadline.
+        let mut local = device("local", "Local");
+        local.last_seen_at = Some(now - TimeDelta::seconds(65));
+        let offline =
+            seen + TimeDelta::seconds(crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1);
+        let mut probe = AppState::new();
+        probe.devices = vec![remote.clone()];
+        assert!(probe.device_online("remote", offline - TimeDelta::milliseconds(1)));
+        assert!(!probe.device_online("remote", offline));
+        assert_state_notifies_at(cx, now, offline, |state| {
+            state.local_device_id = Some("local".into());
+            state.devices = vec![local, remote];
+        });
+    }
+
+    #[gpui::test]
+    fn pending_send_notifies_state_when_its_grace_expires(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let started = now - TimeDelta::seconds(100);
+        let expiry = started + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        let mut probe = AppState::new();
+        probe.begin_pending_send("chat", "message", started);
+        assert!(!probe.send_undelivered("chat", expiry - TimeDelta::milliseconds(1)));
+        assert!(probe.send_undelivered("chat", expiry));
+        assert_state_notifies_at(cx, now, expiry, |state| {
+            state.begin_pending_send("chat", "message", started)
+        });
+    }
+
+    #[gpui::test]
+    fn settled_state_arms_no_clock(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let (state, notifies, _subscription) = clock_state(cx, |state| {
+            state.sessions = vec![
+                session("failed", SessionStatus::Errored, 0, now),
+                session("idle", SessionStatus::Idle, 0, now),
+            ];
+        });
+        assert!(state.read_with(cx, |state, _| state.clock.task.is_none()));
+        advance_to(cx, &clock, now, now + TimeDelta::hours(1));
+        assert_eq!(notifies.get(), 0);
+    }
+
+    #[gpui::test]
+    fn silent_heartbeat_defers_the_stale_notify(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let row = session("row", SessionStatus::Working, 10, now);
+        let first_cutoff = row.updated_at + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        let (state, notifies, _subscription) = clock_state(cx, |state| {
+            state.apply_sessions_at(vec![row], now);
+        });
+        // A heartbeat only refreshes the lease: the reducer stores it without
+        // notifying, so the armed timer is now early.
+        let heartbeat = now + TimeDelta::seconds(20);
+        advance_to(cx, &clock, now, heartbeat);
+        state.update(cx, |state, _| {
+            let changed = state.apply_sessions_at(
+                vec![session("row", SessionStatus::Working, 0, heartbeat)],
+                heartbeat,
+            );
+            assert!(!changed);
+        });
+        advance_to(cx, &clock, heartbeat, first_cutoff);
+        assert_eq!(notifies.get(), 0, "an obsolete deadline re-arms silently");
+        let cutoff = heartbeat + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        advance_to(
+            cx,
+            &clock,
+            first_cutoff,
+            cutoff - TimeDelta::milliseconds(1),
+        );
+        assert_eq!(notifies.get(), 0);
+        advance_to(cx, &clock, cutoff - TimeDelta::milliseconds(1), cutoff);
+        assert_eq!(notifies.get(), 1);
+    }
+
+    #[gpui::test]
+    fn revival_after_a_clock_transition_notifies_and_rearms(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let row = session("row", SessionStatus::Working, 0, now);
+        let stale_at = now + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        let (state, notifies, _subscription) = clock_state(cx, |state| {
+            state.apply_sessions_at(vec![row], now);
+        });
+        advance_to(cx, &clock, now, stale_at);
+        assert_eq!(notifies.get(), 1, "went stale by clock alone");
+        // A heartbeat revives it: that is a visible change again, and the
+        // revived lease arms its own cutoff.
+        let revived = stale_at + TimeDelta::seconds(1);
+        advance_to(cx, &clock, stale_at, revived);
+        state.update(cx, |state, cx| {
+            let changed = state.apply_sessions_at(
+                vec![session("row", SessionStatus::Working, 0, revived)],
+                revived,
+            );
+            assert!(changed, "revival is a change");
+            cx.notify();
+        });
+        assert_eq!(notifies.get(), 2);
+        let next_cutoff = revived + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        advance_to(cx, &clock, revived, next_cutoff);
+        assert_eq!(notifies.get(), 3, "the revived lease's cutoff fires");
+    }
+
+    #[test]
+    fn identical_chats_frames_report_no_change() {
+        let mut state = AppState::new();
+        // The first frame flips `chats_synced` even when empty.
+        assert!(state.apply_chats(vec![]));
+        assert!(!state.apply_chats(vec![]));
+        assert!(state.apply_chats(vec![chat("b", 1, None), chat("a", 0, None)]));
+        let revision = state.link_roots_revision;
+        // Same rows in a different wire order sort to the same list.
+        assert!(!state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]));
+        assert_eq!(state.link_roots_revision, revision);
+        let mut renamed = chat("a", 0, None);
+        renamed.title = Some("Renamed".into());
+        assert!(state.apply_chats(vec![renamed.clone(), chat("b", 1, None)]));
+        assert_ne!(state.link_roots_revision, revision);
+        // A selection pointing at no row still heals on an unchanged frame.
+        state.selected_chat = Some("gone".into());
+        assert!(state.apply_chats(vec![renamed, chat("b", 1, None)]));
+        assert_eq!(state.selected_chat, None);
+    }
+
+    #[test]
+    fn identical_spaces_frames_report_no_change() {
+        let mut state = AppState::new();
+        assert!(state.apply_spaces(vec![]));
+        assert!(!state.apply_spaces(vec![]));
+        let frame = vec![space("s2", "dev", "/b", 2), space("s1", "dev", "/a", 1)];
+        assert!(state.apply_spaces(frame.clone()));
+        assert_eq!(state.selected_space.as_deref(), Some("s1"));
+        assert!(!state.apply_spaces(frame.clone()));
+        // A vanished selection still heals (and reports it) on an unchanged list.
+        state.selected_space = Some("gone".into());
+        assert!(state.apply_spaces(frame));
+        assert_eq!(state.selected_space.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn identical_connectivity_frames_report_no_change() {
+        use zeron_proto::{Connectivity, ConnectivityState};
+        let mut state = AppState::new();
+        // The first frame ends the bootstrap gap even when it equals the default.
+        assert!(state.apply_connectivity(Connectivity::default()));
+        assert!(state.connectivity_observed);
+        assert!(!state.apply_connectivity(Connectivity::default()));
+        let reconnecting = Connectivity {
+            state: ConnectivityState::Reconnecting,
+            retry_at_ms: 5_000,
+            ..Default::default()
+        };
+        assert!(state.apply_connectivity(reconnecting.clone()));
+        assert!(!state.apply_connectivity(reconnecting.clone()));
+        assert!(state.apply_connectivity(Connectivity {
+            retry_at_ms: 9_000,
+            ..reconnecting
+        }));
+        // Re-attach reopens the gap: the next frame counts again.
+        state.connectivity_observed = false;
+        assert!(state.apply_connectivity(state.connectivity.clone()));
+    }
+
+    #[test]
+    fn identical_transfer_auth_and_harness_frames_report_no_change() {
+        use zeron_proto::{HarnessUpdatePhase, HarnessUpdateStatus, TransferProgress};
+        let mut state = AppState::new();
+        assert!(!state.apply_transfers(vec![]));
+        let progress = |done| TransferProgress {
+            upload_id: "u1".into(),
+            file_name: "a.png".into(),
+            done,
+            total: 100,
+        };
+        assert!(state.apply_transfers(vec![progress(10)]));
+        assert!(!state.apply_transfers(vec![progress(10)]));
+        assert!(state.apply_transfers(vec![progress(20)]));
+        assert_eq!(state.transfer_percent("u1"), Some(20));
+        assert!(state.apply_transfers(vec![]));
+
+        assert!(state.apply_auth(AuthState::SignedOut));
+        assert!(!state.apply_auth_value(serde_json::json!({ "state": "signedOut" })));
+        let user = UserProfile {
+            id: "u".into(),
+            email: "w@example.com".into(),
+            name: None,
+        };
+        assert!(state.apply_auth(AuthState::NeedsOrganization { user: user.clone() }));
+        assert!(!state.apply_auth(AuthState::NeedsOrganization { user }));
+        assert!(!state.apply_auth_value(serde_json::json!({ "bogus": true })));
+
+        let status = |phase| HarnessUpdateStatus {
+            harness: HarnessId::Codex,
+            installed_version: Some("1.0".into()),
+            latest_version: Some("2.0".into()),
+            channel: None,
+            source: Default::default(),
+            policy: Default::default(),
+            phase,
+            progress: None,
+            checked_at: None,
+            error: None,
+            can_apply: true,
+            manual_command: None,
+        };
+        assert!(!state.apply_harness_updates(vec![]));
+        assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
+        assert!(!state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
+        assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Current)]));
     }
 
     #[test]

@@ -6,7 +6,8 @@
 //! and keeps their `gitDetected`/`checkoutId`/`repositoryId` stamps truthful:
 //!
 //! - recheck on boot / when a space row is first observed;
-//! - a non-recursive `notify` watcher on the space folder — `.git` appearing or
+//! - a non-recursive watch on the space folder (on the process-wide
+//!   [`FsWatchHub`], so spaces add no watcher threads) — `.git` appearing or
 //!   vanishing (git init / de-git) kicks a recheck;
 //! - a slow 2-minute repair tick (native watchers coalesce/drop events).
 //!
@@ -32,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use zeron_proto::Space;
 
+use crate::fs_watch::{FsWatch, FsWatchHub};
 use crate::repos::Repos;
 use crate::workspace_host::WorkspaceHost;
 
@@ -43,10 +45,10 @@ const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 struct SpaceEntry {
     path: PathBuf,
     kick_tx: mpsc::UnboundedSender<()>,
-    /// Keeps the folder watcher alive; dropped on entry close. Filled
-    /// asynchronously — FSEvents registration blocks, so [`reconcile`] builds
-    /// it off the runtime and attaches it here once ready.
-    folder_watch: Mutex<Option<notify::RecommendedWatcher>>,
+    /// Keeps the folder watch alive on the shared [`FsWatchHub`]; dropped on
+    /// entry close. Filled asynchronously — FSEvents registration blocks, so
+    /// [`reconcile`] builds it off the runtime and attaches it here once ready.
+    folder_watch: Mutex<Option<FsWatch>>,
 }
 
 struct SpacesSyncInner {
@@ -141,49 +143,43 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
         ));
         let _ = kick_tx.send(()); // initial check (boot / first observed)
 
-        // Non-recursive watcher on the space folder: `.git` appearing/vanishing
+        // Non-recursive watch on the space folder: `.git` appearing/vanishing
         // among the direct children is exactly the signal we need. Watch
         // failures are fine — the repair tick still converges. Built off the
-        // runtime: FSEvents registration blocks, and reconcile runs on the
-        // spaces-watch task.
+        // runtime (canonicalizing the path stats it), and reconcile runs on
+        // the spaces-watch task.
         let weak = Arc::downgrade(&entry);
         tokio::task::spawn_blocking(move || {
             let Some(entry) = weak.upgrade() else {
                 return; // entry removed before the watcher was ready
             };
-            let tx = entry.kick_tx.clone();
-            let result =
-                notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
-                    let Ok(event) = event else { return };
-                    if event
-                        .paths
-                        .iter()
-                        .any(|p| p.file_name().is_some_and(|n| n == ".git"))
-                    {
-                        let _ = tx.send(());
-                    }
-                });
-            match result {
-                Ok(mut watcher) => {
-                    use notify::Watcher as _;
-                    match watcher.watch(&entry.path, notify::RecursiveMode::NonRecursive) {
-                        Ok(()) => {
-                            *lock(&entry.folder_watch) = Some(watcher);
-                            // Close the check→attach gap: a `.git` change while
-                            // unwatched gets caught by this recheck.
-                            let _ = entry.kick_tx.send(());
-                        }
-                        Err(err) => {
-                            tracing::debug!(path = %entry.path.display(), error = %err, "spaces: watch failed");
-                        }
-                    }
-                }
-                Err(err) => {
-                    tracing::debug!(error = %err, "spaces: watcher create failed");
-                }
-            }
+            let watch = watch_folder(&FsWatchHub::global(), &entry);
+            *lock(&entry.folder_watch) = Some(watch);
         });
     }
+}
+
+/// Register the space folder on the shared [`FsWatchHub`] — one watcher thread
+/// for every space instead of one each. A hub rescan (the watch went live,
+/// closing the check→attach gap; or events may have been lost) rechecks like
+/// a `.git` change. A failed watch (logged by the hub) never signals; the
+/// repair tick covers it. Blocking — call from the blocking pool.
+fn watch_folder(hub: &Arc<FsWatchHub>, entry: &SpaceEntry) -> FsWatch {
+    let tx = entry.kick_tx.clone();
+    hub.watch(
+        &entry.path,
+        notify::RecursiveMode::NonRecursive,
+        move |event| {
+            if event.need_rescan()
+                || event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name().is_some_and(|n| n == ".git"))
+            {
+                let _ = tx.send(());
+            }
+        },
+    )
 }
 
 /// Per-space task: trailing-debounce kicks, then recheck git presence.
@@ -331,5 +327,71 @@ async fn spaces_task(
                 sweep_orphans(&inner);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The folder watch rides the shared hub: going live sends one recheck
+    /// (the check→attach gap), `.git` appearing among the direct children
+    /// kicks, deeper churn does not (non-recursive), and a vanished folder
+    /// has no live watch and never signals.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn folder_watch_kicks_on_attach_and_git_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let (kick_tx, mut kick_rx) = mpsc::unbounded_channel();
+        let entry = Arc::new(SpaceEntry {
+            path: root.clone(),
+            kick_tx,
+            folder_watch: Mutex::new(None),
+        });
+        let hub = FsWatchHub::new();
+        let watch = {
+            let (hub, entry) = (hub.clone(), entry.clone());
+            tokio::task::spawn_blocking(move || watch_folder(&hub, &entry))
+                .await
+                .unwrap()
+        };
+        tokio::time::timeout(Duration::from_secs(5), kick_rx.recv())
+            .await
+            .expect("going live kicks a recheck")
+            .expect("kick channel open");
+        assert!(watch.is_live());
+        *lock(&entry.folder_watch) = Some(watch);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while kick_rx.try_recv().is_ok() {}
+
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(kick_rx.try_recv().is_err(), "nested churn must not kick");
+
+        std::fs::create_dir(root.join(".git")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), kick_rx.recv())
+            .await
+            .expect("`.git` appearing kicks a recheck")
+            .expect("kick channel open");
+
+        let (missing_tx, mut missing_rx) = mpsc::unbounded_channel();
+        let missing = Arc::new(SpaceEntry {
+            path: root.join("gone"),
+            kick_tx: missing_tx,
+            folder_watch: Mutex::new(None),
+        });
+        let failed = {
+            let hub = hub.clone();
+            tokio::task::spawn_blocking(move || {
+                let watch = watch_folder(&hub, &missing);
+                hub.apply();
+                watch
+            })
+            .await
+            .unwrap()
+        };
+        assert!(!failed.is_live(), "a vanished folder has no live watch");
+        assert!(missing_rx.try_recv().is_err(), "and never signals");
     }
 }

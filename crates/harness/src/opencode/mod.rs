@@ -1483,6 +1483,7 @@ async fn run_session(session: Session) {
         initial_native_command_selected,
     } = session;
     let RunControls {
+        realtime: _,
         execution_lease: _execution_lease,
         request_input,
         mut steering,

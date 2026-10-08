@@ -95,6 +95,8 @@ impl Shell {
                 self.navigation_focus.right.clone(),
                 self.navigation_focus.right.clone(),
             )
+        } else if self.voice.read(cx).stage_open {
+            (self.voice_stage_focus.clone(), self.unfocused.clone())
         } else {
             (self.composer.focus_handle(cx), self.unfocused.clone())
         }

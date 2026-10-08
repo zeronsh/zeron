@@ -53,6 +53,14 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.makeKeyAndVisible()
         if !args.contains("-lab") { shellShown() }
 
+        #if DEBUG
+        if args.contains("-voice-preview") {
+            app.voice.preview()
+            if args.contains("-voice-stage") {
+                DispatchQueue.main.async { [app] in window.rootViewController?.presentVoiceStage(app: app, source: nil) }
+            }
+        }
+        #endif
         if let router = window.rootViewController as? AppRouter, let i = args.firstIndex(of: "-route"), i + 1 < args.count {
             let route = args[i + 1]
             DispatchQueue.main.async {
@@ -91,6 +99,14 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         UIView.transition(with: window, duration: 0.35, options: [.transitionCrossDissolve, .allowAnimatedContent]) {
             window.rootViewController = root
         }
+    }
+
+    /// `zeron://voice` (the call's Live Activity) returns to the stage.
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        guard URLContexts.contains(where: { $0.url.scheme == "zeron" && $0.url.host == "voice" }),
+              app.voice.live, let root = window?.rootViewController
+        else { return }
+        root.presentVoiceStage(app: app, source: nil)
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

@@ -1,0 +1,463 @@
+{
+  "version": "0.159.0",
+  "schemas": {
+    "ThreadRealtimeAppendAudioParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "ThreadRealtimeAudioChunk": {
+          "description": "EXPERIMENTAL - thread realtime audio chunk.",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "itemId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "numChannels": {
+              "format": "uint16",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "sampleRate": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "samplesPerChannel": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "data",
+            "numChannels",
+            "sampleRate"
+          ],
+          "type": "object"
+        }
+      },
+      "description": "EXPERIMENTAL - append audio input to thread realtime.",
+      "properties": {
+        "audio": {
+          "$ref": "#/definitions/ThreadRealtimeAudioChunk"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "audio",
+        "threadId"
+      ],
+      "title": "ThreadRealtimeAppendAudioParams",
+      "type": "object"
+    },
+    "ThreadRealtimeItemAddedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "EXPERIMENTAL - raw non-audio thread realtime item emitted by the backend.",
+      "properties": {
+        "item": true,
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "threadId"
+      ],
+      "title": "ThreadRealtimeItemAddedNotification",
+      "type": "object"
+    },
+    "ThreadRealtimeOutputAudioDeltaNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "ThreadRealtimeAudioChunk": {
+          "description": "EXPERIMENTAL - thread realtime audio chunk.",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "itemId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "numChannels": {
+              "format": "uint16",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "sampleRate": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "samplesPerChannel": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "data",
+            "numChannels",
+            "sampleRate"
+          ],
+          "type": "object"
+        }
+      },
+      "description": "EXPERIMENTAL - streamed output audio emitted by thread realtime.",
+      "properties": {
+        "audio": {
+          "$ref": "#/definitions/ThreadRealtimeAudioChunk"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "audio",
+        "threadId"
+      ],
+      "title": "ThreadRealtimeOutputAudioDeltaNotification",
+      "type": "object"
+    },
+    "ThreadRealtimeStartParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "CodexResponseHandoffMode": {
+          "enum": [
+            "thinking",
+            "commentary",
+            "bemTags"
+          ],
+          "type": "string"
+        },
+        "ConversationTextRole": {
+          "enum": [
+            "user",
+            "developer",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "RealtimeConversationVersion": {
+          "enum": [
+            "v1",
+            "v2",
+            "v3"
+          ],
+          "type": "string"
+        },
+        "RealtimeOutputModality": {
+          "enum": [
+            "text",
+            "audio"
+          ],
+          "type": "string"
+        },
+        "RealtimeVoice": {
+          "enum": [
+            "alloy",
+            "arbor",
+            "ash",
+            "ballad",
+            "breeze",
+            "cedar",
+            "coral",
+            "cove",
+            "echo",
+            "ember",
+            "juniper",
+            "maple",
+            "marin",
+            "sage",
+            "shimmer",
+            "sol",
+            "spruce",
+            "vale",
+            "verse"
+          ],
+          "type": "string"
+        },
+        "ThreadRealtimeInitialItem": {
+          "description": "EXPERIMENTAL - role-bearing text item included when a realtime V3 session starts.",
+          "properties": {
+            "role": {
+              "$ref": "#/definitions/ConversationTextRole"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "text"
+          ],
+          "type": "object"
+        },
+        "ThreadRealtimeStartTransport": {
+          "description": "EXPERIMENTAL - transport used by thread realtime.",
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "enum": [
+                    "websocket"
+                  ],
+                  "title": "WebsocketThreadRealtimeStartTransportType",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "title": "WebsocketThreadRealtimeStartTransport",
+              "type": "object"
+            },
+            {
+              "properties": {
+                "sdp": {
+                  "description": "SDP offer generated by a WebRTC RTCPeerConnection after configuring audio and the realtime events data channel.",
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "webrtc"
+                  ],
+                  "title": "WebrtcThreadRealtimeStartTransportType",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sdp",
+                "type"
+              ],
+              "title": "WebrtcThreadRealtimeStartTransport",
+              "type": "object"
+            },
+            {
+              "properties": {
+                "callId": {
+                  "description": "Identifier of a realtime call already created and negotiated by the client.",
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "existingCall"
+                  ],
+                  "title": "ExistingCallThreadRealtimeStartTransportType",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "callId",
+                "type"
+              ],
+              "title": "ExistingCallThreadRealtimeStartTransport",
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "description": "EXPERIMENTAL - start a thread-scoped realtime session.",
+      "properties": {
+        "backendReasoningStatus": {
+          "description": "Relays public reasoning summaries as quiet context for realtime V3 delegations. Defaults to false.",
+          "type": "boolean"
+        },
+        "clientManagedHandoffs": {
+          "description": "Leaves Codex response handoffs to the client's explicit append calls instead of forwarding them automatically. Defaults to false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "codexResponseHandoffChannelPrefixes": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Overrides BEM channel prefixes by `analysis`, `commentary`, or `final`. Omitted channels retain their default uppercase bracketed prefixes.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "codexResponseHandoffMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodexResponseHandoffMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Selects how automatic Codex responses are routed in Frameless Bidi sessions. Omitted values default to `thinking`. Realtime V1 and V2 ignore this setting."
+        },
+        "codexResponseItemPrefix": {
+          "description": "Optional prefix added to automatic Codex response items when `codexResponsesAsItems` is true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "codexResponsesAsItems": {
+          "description": "Sends automatic Codex responses as realtime conversation items instead of handoff appends.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "delegationAckFiller": {
+          "description": "Controls whether a realtime V3 delegation produces an acknowledgement filler. Omitted values preserve the Realtime API's default behavior.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "flushTranscriptTailOnSessionEnd": {
+          "description": "Routes any transcript tail remaining at session end through Codex. Defaults to false. TODO: Remove this rollout knob once transcript-tail flushing is always enabled.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "includeStartupContext": {
+          "description": "Set to false to start without Codex's startup context. Omitted or null includes it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "initialItems": {
+          "description": "Adds complete role-bearing text items to the initial Frameless Bidi session history. This is only supported by realtime V3 and is sent during session startup. Requests are limited to 128 items and 8,192 estimated text tokens in total.",
+          "items": {
+            "$ref": "#/definitions/ThreadRealtimeInitialItem"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Overrides the configured realtime model for this session only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outputModality": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RealtimeOutputModality"
+            }
+          ],
+          "description": "Selects text or audio output for the realtime session. Transport and voice stay independent so clients can choose how they connect separately from what the model emits."
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "realtimeEndInstructions": {
+          "description": "Developer instructions given to the backing Codex model when this realtime session ends.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "realtimeSessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "realtimeStartInstructions": {
+          "description": "Developer instructions given to the backing Codex model when this realtime session starts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadRealtimeStartTransport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RealtimeConversationVersion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Overrides the configured realtime protocol version for this session only."
+        },
+        "voice": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RealtimeVoice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "outputModality",
+        "threadId"
+      ],
+      "title": "ThreadRealtimeStartParams",
+      "type": "object"
+    },
+    "ThreadRealtimeTranscriptDoneNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "EXPERIMENTAL - final transcript text emitted when realtime completes a transcript part.",
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "text": {
+          "description": "Final complete text for the transcript part.",
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text",
+        "threadId"
+      ],
+      "title": "ThreadRealtimeTranscriptDoneNotification",
+      "type": "object"
+    }
+  }
+}

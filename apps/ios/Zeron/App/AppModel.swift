@@ -17,6 +17,7 @@ final class AppModel {
         var awaiting = 0
     }
 
+    @MainActor lazy var voice = RemoteVoiceController(app: self)
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
@@ -196,7 +197,8 @@ final class AppModel {
     }
 
     /// The user signing out: this device forgets the account's local docs.
-    func signOut() {
+    @MainActor func signOut() {
+        voice.stop()
         forgetOnSignOut = true
         onSignOut?()
     }
@@ -206,7 +208,8 @@ final class AppModel {
     /// keeps a different account out of it.
     private var forgetOnSignOut = false
 
-    func signOutLocally() {
+    @MainActor func signOutLocally() {
+        voice.stop()
         client?.shutdown()
         client = nil
         Credentials.clearStored()
@@ -436,11 +439,15 @@ final class AppModel {
 
     // MARK: Sessions
 
-    func sessionSource(_ chatId: String) -> SessionSource {
-        guard let client, let handle = try? client.openSession(chatId: chatId) else {
-            return FixtureSessionSource(title: "Unavailable", subtitle: "")
+    func sessionSource(_ chatId: String) -> SessionSource? {
+        guard let client else { return nil }
+        do {
+            let handle = try client.openSession(chatId: chatId)
+            return CoreSessionSource(app: self, client: client, handle: handle, chatId: chatId)
+        } catch {
+            NSLog("open session failed: \(error)")
+            return nil
         }
-        return CoreSessionSource(app: self, client: client, handle: handle, chatId: chatId)
     }
 
     // MARK: New session

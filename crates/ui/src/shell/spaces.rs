@@ -3190,15 +3190,12 @@ impl Shell {
             return false;
         }
         let current_pins = self.sidebar_pins_for_profile(&drag.profile_key, cx);
-        let visible_ids: HashSet<String> = self
-            .state
-            .read(cx)
+        let state = self.state.read(cx);
+        let in_filter = state.project_filter(drag.filter.as_deref());
+        let visible_ids: HashSet<String> = state
             .overview_chats(Utc::now())
             .into_iter()
-            .filter(|(_, chat)| match &drag.filter {
-                Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
-                None => true,
-            })
+            .filter(|(_, chat)| in_filter(chat))
             .map(|(_, chat)| chat.id.clone())
             .collect();
         let current_ids = current_pins
@@ -3217,10 +3214,12 @@ impl Shell {
         }
     }
 
-    /// The filter's scrollable rows: "All projects", then spaces matching
-    /// the search (ranked — `popover::filter_indices`). "All" only shows on
-    /// an empty query (searching means hunting a space). The "New project…"
-    /// action is not a row here — the card renders it as a pinned footer.
+    /// The filter's scrollable rows: "All projects", then projects matching
+    /// the search (ranked — `popover::filter_indices`) — one row per
+    /// repository across devices, carrying its local-first checkout's id. "All"
+    /// only shows on an empty query (searching means hunting a project). The
+    /// "New project…" action is not a row here — the card renders it as a
+    /// pinned footer.
     fn spaces_menu_rows(&self, cx: &App) -> Vec<SpacesMenuRow> {
         let query = self
             .spaces_menu
@@ -3228,10 +3227,10 @@ impl Shell {
             .map(|menu| menu.search.read(cx).text().to_string())
             .unwrap_or_default();
         let state = self.state.read(cx);
-        let spaces = state.spaces_sorted();
-        let names: Vec<String> = spaces
+        let projects = state.projects();
+        let names: Vec<String> = projects
             .iter()
-            .map(|s| s.display_name().to_string())
+            .map(|members| state.representative_space(members[0]).display_name().to_string())
             .collect();
         let mut rows: Vec<SpacesMenuRow> = Vec::new();
         if query.trim().is_empty() {
@@ -3240,9 +3239,29 @@ impl Shell {
         rows.extend(
             popover::filter_indices(&query, &names)
                 .into_iter()
-                .map(|ix| SpacesMenuRow::Space(spaces[ix].id.clone())),
+                .map(|ix| SpacesMenuRow::Space(projects[ix][0].id.clone())),
         );
         rows
+    }
+
+    /// The repository the sidebar filter names, if any — any checkout's row
+    /// selects (and reads as) the whole project.
+    fn space_filter_key(&self, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        let id = self.settings.space_filter.as_deref()?;
+        Some(
+            state
+                .space_row(id)
+                .map_or_else(|| id.to_owned(), zeron_proto::view::project_key),
+        )
+    }
+
+    /// The project key of a menu row's space id.
+    fn space_row_key(&self, id: &str, cx: &App) -> String {
+        self.state
+            .read(cx)
+            .space_row(id)
+            .map_or_else(|| id.to_owned(), zeron_proto::view::project_key)
     }
 
     fn open_spaces_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3260,7 +3279,7 @@ impl Shell {
             }
         });
         // The highlight starts ON the current filter row.
-        let current = self.settings.space_filter.clone();
+        let current = self.space_filter_key(cx);
         let handle = search.read(cx).focus_handle(cx);
         self.spaces_menu.open(SpacesMenu {
             search,
@@ -3275,9 +3294,9 @@ impl Shell {
         let rows = self.spaces_menu_rows(cx);
         let start = match &current {
             None => 0,
-            Some(id) => rows
+            Some(key) => rows
                 .iter()
-                .position(|row| matches!(row, SpacesMenuRow::Space(s) if s == id))
+                .position(|row| matches!(row, SpacesMenuRow::Space(s) if self.space_row_key(s, cx) == *key))
                 .unwrap_or(0),
         };
         if let Some(menu) = self.spaces_menu.open_mut() {
@@ -3917,9 +3936,14 @@ impl Shell {
             let state = self.state.read(cx);
             match filter.as_deref().and_then(|id| state.space_row(id)) {
                 Some(space) => {
-                    let (tag, offline) = state.space_device_tag(space, Utc::now());
+                    let members = state.project_members(space);
+                    let (tag, offline) = state.project_device_tag(&members, Utc::now());
                     (
-                        space.display_name().to_string().into(),
+                        state
+                            .representative_space(space)
+                            .display_name()
+                            .to_string()
+                            .into(),
                         Some((tag.into(), offline)),
                     )
                 }
@@ -4126,9 +4150,10 @@ impl Shell {
         let rows = self.spaces_menu_rows(cx);
         let scrollbar = popover::rail(self, "spaces-menu-scrollbar", theme, cx);
         let filter = self.settings.space_filter.clone();
-        // Keep the host tag so projects with the same name on different
-        // devices remain distinguishable. Consume `rows` to avoid cloning
-        // the list children per frame.
+        let filter_key = self.space_filter_key(cx);
+        // Each row is a whole repository: its name, and the devices holding a
+        // checkout so same-named projects stay distinguishable. Consume `rows`
+        // to avoid cloning the list children per frame.
         let details: Vec<(
             SpacesMenuRow,
             SharedString,
@@ -4146,28 +4171,35 @@ impl Shell {
                         false,
                         filter.is_none(),
                     ),
-                    SpacesMenuRow::Space(id) => {
-                        let selected = filter.as_deref() == Some(id.as_str());
-                        match state.space_row(&id) {
-                            Some(space) => {
-                                let (tag, offline) = state.space_device_tag(space, Utc::now());
-                                (
-                                    SpacesMenuRow::Space(id),
-                                    space.display_name().to_string().into(),
-                                    Some(tag.into()),
-                                    offline,
-                                    selected,
-                                )
-                            }
-                            None => (
+                    SpacesMenuRow::Space(id) => match state.space_row(&id) {
+                        Some(space) => {
+                            let key = zeron_proto::view::project_key(space);
+                            let selected = filter_key.as_deref() == Some(key.as_str());
+                            let members = state.project_members(space);
+                            let (tag, offline) = state.project_device_tag(&members, Utc::now());
+                            (
+                                SpacesMenuRow::Space(id),
+                                state
+                                    .representative_space(space)
+                                    .display_name()
+                                    .to_string()
+                                    .into(),
+                                Some(tag.into()),
+                                offline,
+                                selected,
+                            )
+                        }
+                        None => {
+                            let selected = filter.as_deref() == Some(id.as_str());
+                            (
                                 SpacesMenuRow::Space(id),
                                 SharedString::from("?"),
                                 None,
                                 false,
                                 selected,
-                            ),
+                            )
                         }
-                    }
+                    },
                     // spaces_menu_rows never yields this variant — the
                     // footer is rendered by the card, not the list.
                     SpacesMenuRow::AddSpace => unreachable!(),
@@ -5287,16 +5319,15 @@ impl Shell {
 
     /// The Archived shelf's chats under the project filter, in sidebar order.
     fn archived_sidebar_chats(&self, cx: &App) -> Vec<zeron_proto::Chat> {
-        let filter = self.settings.space_filter.as_deref();
-        let mut rows: Vec<zeron_proto::Chat> = self
-            .state
-            .read(cx)
+        let state = self.state.read(cx);
+        let in_filter = state.project_filter(self.settings.space_filter.as_deref());
+        let mut rows: Vec<zeron_proto::Chat> = state
             .chats
             .iter()
             // Spawned children stay out of the Archived section too — the
             // same top-level rule as `visible_chats`.
-            .filter(|c| c.archived && c.parent_chat_id.is_none())
-            .filter(|chat| filter.is_none_or(|space_id| chat.space_id.as_deref() == Some(space_id)))
+            .filter(|c| c.archived && c.is_top_level())
+            .filter(|chat| in_filter(chat))
             .cloned()
             .collect();
         rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));

@@ -50,6 +50,8 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod voice_chat;
+mod voice_remote;
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt;
@@ -607,7 +609,9 @@ enum MutateParams {
     },
 }
 
+#[derive(Clone)]
 pub struct EngineRpc {
+    voice: crate::voice::VoiceManager,
     sessions: SessionsEngine,
     doc_host: DocHost,
     workspace: WorkspaceHost,
@@ -653,6 +657,7 @@ impl EngineRpc {
             capabilities: zeron_proto::capabilities::current(),
         };
         Self {
+            voice: sessions.voice_manager(),
             sessions,
             doc_host,
             workspace,
@@ -1028,7 +1033,8 @@ impl EngineRpc {
             // only unary calls below get the reply deadline.
             if matches!(
                 method,
-                methods::WATCH_CHECKOUT_CHANGE_REQUEST
+                methods::OWN_VOICE_V2
+                    | methods::WATCH_CHECKOUT_CHANGE_REQUEST
                     | methods::WATCH_WORKSPACE_GIT_STATUS
                     | methods::WATCH_HARNESS_UPDATES
             ) {
@@ -1088,6 +1094,42 @@ impl EngineRpc {
         }
     }
 
+    async fn prepare_voice_bridge(
+        &self,
+        chat: &str,
+    ) -> Result<
+        (
+            zeron_harness::codex::realtime::RealtimeHandle,
+            tokio::sync::broadcast::Receiver<zeron_proto::voice::VoiceEvent>,
+            std::sync::Arc<crate::sessions::VoiceActivity>,
+        ),
+        zeron_proto::voice::VoiceRejection,
+    > {
+        use zeron_proto::voice::VoiceRejection;
+        // Without Codex here a retry can never connect: ask for an install.
+        if !self
+            .registry
+            .resolve(HarnessId::Codex)
+            .is_ok_and(|codex| codex.installed())
+        {
+            return Err(VoiceRejection::NativeRuntimeUnavailable);
+        }
+        let mut request = self
+            .doc_host
+            .request_from_chat_row(chat, "")
+            .ok_or(VoiceRejection::Unsupported)?;
+        if request.cwd.is_empty() {
+            request.cwd = "~".into();
+        }
+        self.sessions
+            .start_idle(chat, request)
+            .await
+            .map_err(|_| VoiceRejection::Unsupported)?;
+        self.sessions
+            .take_voice_bridge(chat)
+            .ok_or(VoiceRejection::Unsupported)
+    }
+
     fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
@@ -1100,6 +1142,10 @@ impl EngineRpc {
                 cwd,
                 parent_chat_id,
             } => {
+                // A voice orchestrator is hidden, so the chats it creates are
+                // the user's top-level sessions rather than its side chats.
+                let parent_chat_id = parent_chat_id
+                    .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
                 self.workspace
                     .create_chat_with_parent(
                         &chat_id,
@@ -1160,11 +1206,13 @@ impl EngineRpc {
                 .set_chat_branch(&chat_id, &branch)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatCwd { chat_id, cwd } => self
-                .workspace
-                .set_chat_cwd(&chat_id, &cwd)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatCwd { chat_id, cwd } => {
+                self.voice.retire_chat(&chat_id);
+                self.workspace
+                    .set_chat_cwd(&chat_id, &cwd)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::SetChatActivity {
                 chat_id,
                 last_message_at,
@@ -1174,11 +1222,13 @@ impl EngineRpc {
                 .set_chat_activity(&chat_id, last_message_at, created_at)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatHost { chat_id, device_id } => self
-                .workspace
-                .set_chat_host(&chat_id, &device_id)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatHost { chat_id, device_id } => {
+                self.voice.retire_chat(&chat_id);
+                self.workspace
+                    .set_chat_host(&chat_id, &device_id)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::SetChatArchived { chat_id, archived } => self
                 .workspace
                 .set_chat_archived(&chat_id, archived)
@@ -1187,12 +1237,15 @@ impl EngineRpc {
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
-            MutateParams::SetChatConfig { chat_id, config } => self
-                .workspace
-                .set_chat_config(&chat_id, &config)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatConfig { chat_id, config } => {
+                self.voice.retire_chat(&chat_id);
+                self.workspace
+                    .set_chat_config(&chat_id, &config)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::DeleteChat { chat_id } => {
+                self.voice.retire_chat(&chat_id);
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
                 Ok(())
@@ -1307,6 +1360,12 @@ where
 }
 
 fn forward_deadline(method: &str) -> std::time::Duration {
+    if method == methods::PREPARE_VOICE_V2 {
+        return Duration::from_secs(65);
+    }
+    if method == methods::NEGOTIATE_VOICE_V2 {
+        return Duration::from_secs(95);
+    }
     use std::time::Duration;
     match method {
         methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
@@ -1334,6 +1393,9 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
 fn forwardable(method: &str) -> bool {
+    if voice_remote::handles(method) {
+        return true;
+    }
     matches!(
         method,
         methods::FORK_SIDE_CHAT
@@ -1432,6 +1494,9 @@ fn forwardable(method: &str) -> bool {
 
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
 fn is_stream_method(method: &str) -> bool {
+    if method == methods::OWN_VOICE_V2 {
+        return true;
+    }
     matches!(
         method,
         methods::WATCH_DOC_MESSAGES
@@ -1702,6 +1767,19 @@ impl RpcService for EngineRpc {
             }
             return self.forward(&target, method, params).await;
         }
+        if matches!(
+            method,
+            methods::SIGN_OUT
+                | methods::SELECT_ORG
+                | methods::COMPLETE_AGENT_LOGIN
+                | methods::ACTIVATE_AGENT_ACCOUNT
+                | methods::FORGET_AGENT_ACCOUNT
+        ) {
+            self.voice.retire();
+        }
+        if voice_remote::handles(method) {
+            return self.voice_remote(method, params).await;
+        }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())
                 .handle(method, params)
@@ -1883,7 +1961,11 @@ impl RpcService for EngineRpc {
                         "Fork must be created on the source device".into(),
                     ));
                 }
-                if let Some(existing) = self.workspace.chat(&p.chat_id).map_err(failed)? {
+                if let Some(existing) = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                {
                     if existing.parent_chat_id.as_deref() == Some(parent_chat_id.as_str()) {
                         return RpcReply::value(&existing);
                     }
@@ -1987,19 +2069,27 @@ impl RpcService for EngineRpc {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let p: ChatParams = parse_params(params)?;
-                if opening_tail {
-                    return Ok(RpcReply::Stream(
-                        opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?,
-                    ));
-                }
-                let handle = self
-                    .doc_host
-                    .open(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                Ok(RpcReply::Stream(doc_messages_stream(
-                    handle.watch_messages(),
-                    handle.doc_arc(),
-                )))
+                // An open transcript keeps its chat's checkout diff live (and
+                // discardable) even when the chat is archived; the guard lives
+                // exactly as long as the stream.
+                let interest = self.diff_sync.retain_chat(&p.chat_id);
+                let stream = if opening_tail {
+                    opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?
+                } else {
+                    let handle = self
+                        .doc_host
+                        .open(&p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    doc_messages_stream(handle.watch_messages(), handle.doc_arc())
+                };
+                Ok(RpcReply::Stream(
+                    stream
+                        .map(move |frame| {
+                            let _held = &interest;
+                            frame
+                        })
+                        .boxed(),
+                ))
             }
             methods::WATCH_QUEUE => {
                 let p: ChatParams = parse_params(params)?;
@@ -2596,7 +2686,7 @@ impl RpcService for EngineRpc {
 
                     let snapshot = self
                         .diff_sync
-                        .discard_working_tree(&identity.id, &p.expected_checksum)
+                        .discard_working_tree(&identity, &p.expected_checksum)
                         .await
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                     RpcReply::value(&serde_json::json!({
@@ -3293,6 +3383,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&snapshot)
             }
             methods::ACTIVATE_AGENT_ACCOUNT => {
+                self.voice.retire();
                 let p: AgentAccountParams = parse_params(params)?;
                 let snapshot = self
                     .agent_accounts
@@ -3302,6 +3393,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&snapshot)
             }
             methods::FORGET_AGENT_ACCOUNT => {
+                self.voice.retire();
                 let p: AgentAccountParams = parse_params(params)?;
                 let snapshot = self
                     .agent_accounts
@@ -3405,6 +3497,99 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let first = core.rpc_service();
+        let second = core.rpc_service();
+        let lease = first.voice.reserve("chat").unwrap();
+        assert!(second.voice.owns_chat("chat"));
+        assert_eq!(
+            second.voice.reserve("other").unwrap_err(),
+            zeron_proto::voice::VoiceRejection::Busy
+        );
+        let owner = second.voice.own(lease).unwrap();
+        core.sessions.shutdown().await;
+        assert!(!first.voice.owns_chat("chat"));
+        drop(owner);
+    }
+
+    #[tokio::test]
+    async fn chats_created_by_a_voice_orchestrator_are_top_level() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let orchestrator = format!("{}1", zeron_proto::voice::ORCHESTRATOR_CHAT_PREFIX);
+        for (chat, parent, expected) in [
+            ("worker", orchestrator.as_str(), None),
+            ("side", "ordinary", Some("ordinary")),
+        ] {
+            rpc.handle(
+                methods::MUTATE,
+                serde_json::json!({"op":"createChat", "chatId":chat,
+                    "parentChatId":parent, "deviceId":core.device_id,
+                    "config":{"harness":"codex","sandbox":"workspace-write"}}),
+            )
+            .await
+            .unwrap();
+            let row = core.workspace.chat(chat).unwrap().unwrap();
+            assert_eq!(row.parent_chat_id.as_deref(), expected);
+        }
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn voice_origin_uses_normal_remote_routing() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let lease = rpc.voice.reserve("voice-origin").unwrap();
+        let owner = rpc.voice.own(lease).unwrap();
+        for method in [methods::QUEUE_COMMAND, methods::QUEUE_MESSAGE] {
+            let error = match rpc.handle(method, serde_json::json!({"originChatId":"voice-origin","targetDeviceId":"remote","chatId":"other"})).await {
+                Err(error) => error,
+                Ok(_) => panic!("offline remote routing unexpectedly succeeded"),
+            };
+            assert!(
+                matches!(error, RpcError::Failed(ref message) if message == "cannot reach device remote: remote routing unavailable (offline)")
+            );
+        }
+        // Voice origin follows the same forwarding boundary as ordinary MCP
+        // calls; this fixture has no relay configured.
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({"op":"createChat", "chatId":"remote-grok",
+                "originChatId":"voice-origin", "deviceId":"remote",
+                "config":{"harness":"grok","sandbox":"workspace-write"}}),
+        )
+        .await
+        .unwrap();
+        let chat = core.workspace.chat("remote-grok").unwrap().unwrap();
+        assert_eq!(chat.device_id, "remote");
+        assert_eq!(chat.config.unwrap().harness, HarnessId::Grok);
+        drop(owner);
+        core.sessions.shutdown().await;
+    }
 
     // Each subprocess has private HOME/PATH/overrides, avoiding process-global test races.
     #[cfg(unix)]

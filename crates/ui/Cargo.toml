@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+voice-experimental = [] # Compatibility flag; native subscription voice uses Codex's packaged helper.
 project-palette-fixture = []
 compact-picker-fixture = ["gpui_platform/test-support"]
 
@@ -51,6 +52,10 @@ name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
 [dependencies]
+zeron-voice-media.workspace = true
+zeron-voice-session.workspace = true
+zeron-orb.workspace = true
+zeron-veil.workspace = true
 zeron-voice = { path = "../voice" }
 url = "2"
 zeron-proto.workspace = true
@@ -65,6 +70,7 @@ zeron-theme.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true
+tokio-util.workspace = true
 gpui-base.workspace = true
 tokio.workspace = true
 futures.workspace = true

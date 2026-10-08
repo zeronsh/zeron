@@ -1,0 +1,19 @@
+[package]
+name = "zeron-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["native"]
+native = ["dep:cpal"]
+aec = ["dep:webrtc-audio-processing"]
+
+[dependencies]
+zeron-proto.workspace = true
+base64 = "0.22"
+crossbeam-queue = "0.3"
+cpal = { version = "=0.18.2", optional = true }
+webrtc-audio-processing = { version = "~2.1.0", features = ["bundled"], optional = true }
+thiserror.workspace = true

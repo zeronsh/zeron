@@ -20,10 +20,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let openedAt = CACurrentMediaTime()
     private var reportedOpen = false
 
-    init(app: AppModel, chatId: String) {
+    init?(app: AppModel, chatId: String) {
+        guard let source = app.sessionSource(chatId) else { return nil }
         self.app = app
         self.chatId = chatId
-        self.source = app.sessionSource(chatId)
+        self.source = source
         super.init(nibName: nil, bundle: nil)
         hidesBottomBarWhenPushed = true
     }
@@ -40,6 +41,21 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.titleView = titleView
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu())
+        // The session has its own composer, so the tab bar's voice control
+        // steps aside with the accessory; the call stays a tap away up here.
+        let voiceBar = VoiceBarItem(app: app, host: self)
+        self.voiceBar = voiceBar
+        let menu = navigationItem.rightBarButtonItem!
+        let syncVoice = { [weak self, weak voiceBar] in
+            guard let self, let voiceBar else { return }
+            let items = voiceBar.visible ? [menu, voiceBar.item] : [menu]
+            if self.navigationItem.rightBarButtonItems?.count != items.count {
+                self.navigationItem.setRightBarButtonItems(items, animated: self.view.window != nil)
+            }
+        }
+        voiceToken = app.voice.observe(syncVoice)
+        hostsToken = app.observe(syncVoice)
+        syncVoice()
 
         list.frame = view.bounds
         list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -164,6 +180,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     private var hasAppeared = false
     private var backgroundObserver: NSObjectProtocol?
+    private var voiceBar: VoiceBarItem?
+    private var voiceToken: AnyObject?
+    private var hostsToken: AnyObject?
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }

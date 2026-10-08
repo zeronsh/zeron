@@ -2,6 +2,7 @@
 # Build and run an isolated macOS development bundle. Zeron.app may remain
 # open: this bundle has a separate LaunchServices/TCC identity, data directory,
 # and engine IPC port.
+# Set ZERON_DEV_BUILD_ONLY=1 to prepare the signed bundle without launching it.
 
 set -euo pipefail
 
@@ -30,6 +31,9 @@ sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Inf
 plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
+if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
+  plutil -insert LSEnvironment.CODEX_EXECUTABLE -string "$CODEX_EXECUTABLE" "$CONTENTS/Info.plist"
+fi
 
 mkdir -p "$CONTENTS/Resources/licenses"
 cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/parakeet-v3.txt
@@ -59,6 +63,11 @@ else
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
+if [[ "${ZERON_DEV_BUILD_ONLY:-0}" == "1" ]]; then
+  echo "built: $APP" >&2
+  exit 0
+fi
+
 echo "running Zeron Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
 # LaunchServices must own the process. Launching Contents/MacOS/zeron directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
@@ -68,6 +77,9 @@ OPEN_ENV=(
   --env "ZERON_DATA_DIR=$DATA_DIR"
   --env "ZERON_IPC_PORT=$IPC_PORT"
 )
+if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
+  OPEN_ENV+=(--env "CODEX_EXECUTABLE=$CODEX_EXECUTABLE")
+fi
 if [[ -n "${ZERON_OPEN_ROUTE:-}" ]]; then
   OPEN_ENV+=(--env "ZERON_OPEN_ROUTE=$ZERON_OPEN_ROUTE")
 fi

@@ -146,7 +146,7 @@ impl Shell {
         let mut chats: Vec<_> = state
             .chats
             .iter()
-            .filter(|chat| chat.parent_chat_id.is_none())
+            .filter(|chat| chat.is_top_level())
             .filter(|chat| {
                 let project = state
                     .space_for_chat(chat)

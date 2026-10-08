@@ -12,6 +12,7 @@ pub mod motion;
 pub mod preview;
 pub mod sidebar_pins;
 pub mod view;
+pub mod voice;
 pub mod workspace;
 
 pub use agent::*;

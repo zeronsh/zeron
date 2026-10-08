@@ -52,6 +52,14 @@
 	</dict>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Attach photos to messages.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Voice calls you start stream your audio to OpenAI through the ChatGPT account signed in to Codex on your host.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Take photos to attach to messages.</string>
 	<key>UILaunchScreen</key>

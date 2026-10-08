@@ -40,6 +40,25 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         liveToken = app.observe { [weak self] in
             guard let self else { return }
             self.accessoryContent.update(self.app.live)
+            // Hosts come and go with the workspace (online, capabilities).
+            self.accessoryContent.updateVoice(self.app.voice)
+        }
+        let voice = accessoryContent.voice
+        voice.onStart = { [weak self] source in
+            guard let self else { return }
+            self.openVoice(app: self.app, source: source)
+        }
+        voice.onOpen = { [weak self] source in
+            guard let self else { return }
+            self.presentVoiceStage(app: self.app, source: source)
+        }
+        voice.onMute = { [weak self] in self?.app.voice.toggleMute() }
+        voice.onEnd = { [weak self] in self?.app.voice.stop() }
+        voice.startButton.menu = voiceMenu(app: app)
+        accessoryContent.updateVoice(app.voice)
+        voiceToken = app.voice.observe { [weak self] in
+            guard let self else { return }
+            self.accessoryContent.updateVoice(self.app.voice)
         }
     }
 
@@ -63,6 +82,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     private lazy var accessoryContent = AskAnythingAccessory { [weak self] in self?.presentNewSession() }
     private lazy var accessory = UITabAccessory(contentView: accessoryContent)
     private var liveToken: AnyObject?
+    private var voiceToken: AnyObject?
 
     /// Accessory state from what's on screen: hidden over a session (it has
     /// its own composer).
@@ -144,7 +164,9 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         else { return openSession(chatId) }
         selectedTab = tab
         guard let nav = tab.viewController as? UINavigationController else { return openSession(chatId) }
-        let session = SessionViewController(app: app, chatId: chatId)
+        guard let session = SessionViewController(app: app, chatId: chatId) else {
+            return showSessionOpenError()
+        }
         UIView.performWithoutAnimation {
             nav.popToRootViewController(animated: false)
             nav.pushViewController(session, animated: false)
@@ -175,36 +197,58 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         nav.popToRootViewController(animated: false)
     }
 
+    func showSessionOpenError() {
+        if presentedViewController != nil { dismiss(animated: false) }
+        view.endEditing(true)
+        selectedTab = tabs.first { $0.identifier == "sessions" }
+        popToFrontPage()
+        syncAccessory()
+        view.layoutIfNeeded()
+        Toast.show("Couldn't open session. Try again.", in: view.window)
+    }
+
     /// Push a session on the Sessions tab (from new-session, deep links, search).
     func openSession(_ chatId: String) {
-        if presentedViewController != nil { dismiss(animated: true) }
         guard let tab = tabs.first(where: { $0.identifier == "sessions" }) else { return }
         selectedTab = tab
         guard let nav = tab.viewController as? UINavigationController else { return }
+        guard let session = SessionViewController(app: app, chatId: chatId) else {
+            return showSessionOpenError()
+        }
+        if presentedViewController != nil { dismiss(animated: true) }
         nav.popToRootViewController(animated: false)
-        nav.pushViewController(SessionViewController(app: app, chatId: chatId), animated: true)
+        nav.pushViewController(session, animated: true)
     }
 }
 
 /// The capsule above the tab bar: a plus, "New session", and a live
-/// summary of what's running ("2 working · 1 needs you"). Tapping it opens the
-/// new-session composer.
-final class AskAnythingAccessory: UIControl {
-    private let onTap: () -> Void
+/// summary of what's running ("2 working · 1 needs you"), with voice at its
+/// trailing end. Tapping the plus side opens the new-session composer; the
+/// waveform calls Codex, and during a call the strip shows it (orb, clock,
+/// mute, hang-up) and opens the call stage.
+final class AskAnythingAccessory: UIView {
+    private let newSession = PressableControl()
     private let label = UILabel()
     private let summary = UILabel()
     private let cells = StatusGlyph()
     private let mark = UIImageView(image: UIImage(systemName: "plus", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)))
+    private let plate = UIView()
+    let voice = VoiceAccessoryView()
+    private var voiceShown = false
+    private var voiceLive = false
+    private var restConstraints: [NSLayoutConstraint] = []
+    private var idleVoiceConstraints: [NSLayoutConstraint] = []
+    private var liveVoiceConstraints: [NSLayoutConstraint] = []
 
     init(onTap: @escaping () -> Void) {
-        self.onTap = onTap
         super.init(frame: .zero)
-        accessibilityIdentifier = "new-session"
-        accessibilityTraits = .button
+        newSession.accessibilityIdentifier = "new-session"
+        newSession.accessibilityTraits = .button
+        newSession.isAccessibilityElement = true
+        newSession.addAction(UIAction { _ in onTap() }, for: .touchUpInside)
 
         mark.tintColor = Palette.accent
         mark.contentMode = .center
-        let plate = UIView()
         plate.backgroundColor = Palette.accentSoft
         // A circle, concentric with the accessory capsule (7pt inset).
         plate.layer.cornerRadius = 17
@@ -218,31 +262,56 @@ final class AskAnythingAccessory: UIControl {
         summary.textColor = Palette.secondary
         summary.textAlignment = .right
         cells.isHidden = true
-        for v in [plate, label, mark, summary, cells] as [UIView] { v.translatesAutoresizingMaskIntoConstraints = false }
-        for v in [plate, label, summary, cells] as [UIView] { addSubview(v) }
+        for v in [newSession, plate, label, mark, summary, cells, voice] as [UIView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [plate, label, summary, cells] as [UIView] { newSession.addSubview(v) }
+        addSubview(newSession)
+        addSubview(voice)
+        voice.isHidden = true
         summary.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            plate.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-            plate.centerYAnchor.constraint(equalTo: centerYAnchor),
+            newSession.leadingAnchor.constraint(equalTo: leadingAnchor),
+            newSession.topAnchor.constraint(equalTo: topAnchor),
+            newSession.bottomAnchor.constraint(equalTo: bottomAnchor),
+            plate.leadingAnchor.constraint(equalTo: newSession.leadingAnchor, constant: 7),
+            plate.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             plate.widthAnchor.constraint(equalToConstant: 34),
             plate.heightAnchor.constraint(equalToConstant: 34),
             mark.centerXAnchor.constraint(equalTo: plate.centerXAnchor),
             mark.centerYAnchor.constraint(equalTo: plate.centerYAnchor),
             label.leadingAnchor.constraint(equalTo: plate.trailingAnchor, constant: 11),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: cells.leadingAnchor, constant: -10),
-            summary.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            summary.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
+            summary.trailingAnchor.constraint(equalTo: newSession.trailingAnchor, constant: -16),
+            summary.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             cells.trailingAnchor.constraint(equalTo: summary.leadingAnchor, constant: -7),
-            cells.centerYAnchor.constraint(equalTo: centerYAnchor),
+            cells.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             cells.widthAnchor.constraint(equalToConstant: 12),
             cells.heightAnchor.constraint(equalToConstant: 12),
+            voice.topAnchor.constraint(equalTo: topAnchor),
+            voice.bottomAnchor.constraint(equalTo: bottomAnchor),
+            voice.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
         ])
-        addAction(UIAction { [weak self] _ in self?.onTap() }, for: .touchUpInside)
+        // Yields while the call strip narrows this side to the plus.
+        let labelEnd = label.trailingAnchor.constraint(lessThanOrEqualTo: cells.leadingAnchor, constant: -10)
+        labelEnd.priority = .defaultHigh
+        labelEnd.isActive = true
+        // No voice: "New session" spans the capsule.
+        restConstraints = [newSession.trailingAnchor.constraint(equalTo: trailingAnchor)]
+        // Idle voice: a 34pt waveform at the trailing end.
+        idleVoiceConstraints = [
+            voice.widthAnchor.constraint(equalToConstant: 34),
+            newSession.trailingAnchor.constraint(equalTo: voice.leadingAnchor, constant: -2),
+        ]
+        // Live: the call strip takes everything after the plus.
+        liveVoiceConstraints = [
+            newSession.trailingAnchor.constraint(equalTo: plate.trailingAnchor, constant: 4),
+            voice.leadingAnchor.constraint(equalTo: plate.trailingAnchor, constant: 12),
+        ]
+        NSLayoutConstraint.activate(restConstraints)
         registerForTraitChanges([UITraitTabAccessoryEnvironment.self]) { (self: AskAnythingAccessory, _) in
             // Inline (minimized tab bar): the plus and the live summary only.
             let inline = self.traitCollection.tabAccessoryEnvironment == .inline
-            self.label.alpha = inline ? 0 : 1
+            self.label.alpha = inline || self.voiceLive ? 0 : 1
+            self.voice.setInline(inline)
         }
         update(AppModel.LiveCounts())
     }
@@ -254,12 +323,34 @@ final class AskAnythingAccessory: UIControl {
         if live.working > 0 { parts.append("\(live.working) working") }
         if live.awaiting > 0 { parts.append("\(live.awaiting) need\(live.awaiting == 1 ? "s" : "") you") }
         summary.text = parts.joined(separator: " · ")
-        cells.isHidden = parts.isEmpty
+        cells.isHidden = parts.isEmpty || voiceLive
+        summary.isHidden = voiceLive
         cells.kind = live.working > 0 ? .spinner : .dot(StatusTone.input)
-        accessibilityLabel = parts.isEmpty ? "New session" : "New session, " + parts.joined(separator: ", ")
+        newSession.accessibilityLabel = parts.isEmpty ? "New session" : "New session, " + parts.joined(separator: ", ")
     }
 
-    override var isHighlighted: Bool {
-        didSet { UIView.animate(withDuration: 0.15) { self.alpha = self.isHighlighted ? 0.6 : 1 } }
+    /// Show voice when a host can run it, and the call strip while one runs.
+    func updateVoice(_ controller: RemoteVoiceController) {
+        let shown = controller.live || controller.available
+        let live = controller.live
+        voice.update(controller)
+        guard shown != voiceShown || live != voiceLive else { return }
+        voiceShown = shown
+        voiceLive = live
+        NSLayoutConstraint.deactivate(restConstraints + idleVoiceConstraints + liveVoiceConstraints)
+        NSLayoutConstraint.activate(!shown ? restConstraints : live ? liveVoiceConstraints : idleVoiceConstraints)
+        voice.isHidden = !shown
+        let inline = traitCollection.tabAccessoryEnvironment == .inline
+        let apply = {
+            self.label.alpha = inline || live ? 0 : 1
+            self.summary.isHidden = live
+            self.cells.isHidden = live || self.summary.text?.isEmpty != false
+            self.layoutIfNeeded()
+        }
+        if window == nil || UIAccessibility.isReduceMotionEnabled {
+            apply()
+        } else {
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: apply)
+        }
     }
 }

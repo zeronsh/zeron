@@ -3,11 +3,15 @@
 //! - [`client_ffi`]: account, workspace and session state (wraps `zeron-client`).
 //! - [`layout`]: analytic transcript layout — markdown → measured display lists
 //!   (wraps `zeron-markdown` + `zeron-text`).
+//! - [`orb`]: the desktop's voice orb as paintable frames (wraps `zeron-orb`).
+//! - [`caption`]: the voice caption's streaming veil (wraps `zeron-veil`).
 
 uniffi::setup_scaffolding!("zeron_core");
 
 mod client_ffi;
 pub mod layout;
+pub mod caption;
+pub mod orb;
 pub mod wallpaper;
 
 /// Version handshake: the Swift/Kotlin bindings must match the linked library.

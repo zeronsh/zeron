@@ -71,6 +71,7 @@ const RELAY_PROBE_INTERVAL_MS: u64 = 30_000;
 const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Debounce window for local snapshot saves after a change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+
 /// Initial-join retry backoff (base, cap). A first registry-room join that
 /// fails must not strand the device offline until an app restart — retry until
 /// it lands. Jittered so N devices restarting together don't resynchronize
@@ -150,6 +151,12 @@ pub struct WorkspaceHostConfig {
     /// When present, the host joins `/registry/{orgId}/ws`. `None` = fully offline
     /// (local snapshots only; the registry still drives everything device-side).
     pub edge: Option<EdgeConfig>,
+    /// The profile can never attach an edge (`WorkspaceScope::Local`), so
+    /// registry writes fold straight into the local rows instead of queueing
+    /// for acks that will never come. Only then: a replica that may attach
+    /// later must keep its writes as ops — re-seeding folded rows as full
+    /// upserts would revive rows another device deleted meanwhile.
+    pub local_only: bool,
 }
 
 struct WorkspaceHostInner {
@@ -199,7 +206,8 @@ impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
-        let mut doc = match store.load_snapshot(REGISTRY_DOC_ID)? {
+        let stored = store.load_snapshot(REGISTRY_DOC_ID)?;
+        let mut doc = match stored {
             Some(bytes) => RegistryDoc::from_bytes(&bytes, &config.device_id)
                 .map_err(|e| EngineError::Other(format!("registry snapshot load failed: {e}")))?,
             None => {
@@ -246,6 +254,12 @@ impl WorkspaceHost {
                 doc
             }
         };
+        // A Local profile never has an edge to ack a pending batch: fold the
+        // queue (a pre-fix snapshot's 178k never-acked batches, or this
+        // boot's migration seeds) into the local rows and keep folding every
+        // write. Otherwise this re-seeds once if local-only writes exist that
+        // no server has seen. The boot save below persists the result.
+        doc.set_local_only(config.local_only);
         // Destructive-break hygiene: the pre-spaces row stays unreachable.
         store.delete_snapshot(LEGACY_WORKSPACE_DOC_ID).ok();
 
@@ -316,7 +330,14 @@ impl WorkspaceHost {
         // Persist immediately: after this boot the migration source is never
         // read again, so the registry snapshot must exist even if the process
         // dies before the first debounced save.
-        host.inner.save_snapshot();
+        if let Err(error) = host.inner.persist_snapshot() {
+            tracing::warn!(%error, "registry snapshot save failed");
+        }
+        // Reclaim free pages (a bloated store, or the pages a one-time
+        // registry compaction just freed) off the boot path. The store gates
+        // the VACUUM on its own thresholds, so ordinary boots only checkpoint.
+        let store = host.inner.store.clone();
+        tokio::task::spawn_blocking(move || store.reclaim_free_space());
         host.join_room();
         tokio::spawn(workspace_task(Arc::downgrade(&host.inner), changed_rx));
         if host.inner.config.edge.is_some() {
@@ -350,6 +371,9 @@ impl WorkspaceHost {
         mut token_changes: Option<tokio::sync::watch::Receiver<u64>>,
         token: Option<Arc<dyn zeron_rpc::TokenSource>>,
     ) {
+        // A room will ack from here on (the test seam joins edge-less
+        // hosts): queue writes again, re-seeding any folded local-only ones.
+        self.mutate(|doc| doc.set_local_only(false));
         let org_id = self.inner.config.org_id.clone();
         let reg = self.inner.reg.clone();
         let device_id = self.inner.config.device_id.clone();
@@ -1362,14 +1386,18 @@ impl WorkspaceHostInner {
         }
     }
 
-    fn persist_snapshot(&self) -> Result<(), EngineError> {
+    /// Returns the snapshot's size in bytes.
+    fn persist_snapshot(&self) -> Result<usize, EngineError> {
         // Keep export and disk write serialized: an older background snapshot
         // must not overwrite an acknowledged migration's durable snapshot.
         let doc = lock(&self.reg);
         let bytes = doc.to_bytes()?;
         self.store
             .save_snapshot(REGISTRY_DOC_ID, &bytes)
-            .map_err(|error| EngineError::Other(format!("registry snapshot save failed: {error}")))
+            .map_err(|error| {
+                EngineError::Other(format!("registry snapshot save failed: {error}"))
+            })?;
+        Ok(bytes.len())
     }
 
     /// Presence heartbeat — a memory-only frame on the room, never a row write.
@@ -1731,6 +1759,7 @@ mod tests {
                 org_id: "test-org".into(),
                 user_id: "test-user".into(),
                 edge: None,
+                local_only: false,
             },
         )
         .unwrap();
@@ -1787,6 +1816,7 @@ mod tests {
                 org_id: "test-org".into(),
                 user_id: "test-user".into(),
                 edge: None,
+                local_only: false,
             },
         )
         .unwrap();
@@ -1844,6 +1874,174 @@ mod tests {
         assert!(collapsed.revision > sections.revision);
         assert!(collapsed.sections[0].collapsed);
         assert_eq!(*preferences.borrow(), collapsed);
+    }
+
+    /// A pre-fix `registry1` snapshot: one never-acked batch per session-row
+    /// touch. Marking each batch in flight as it is written stops the doc
+    /// coalescing; `in_flight` is not persisted, so it reloads all-unsent.
+    fn save_bloated_registry(store: &zeron_sync::DocsStore, touches: usize) -> usize {
+        use super::*;
+
+        let mut doc = RegistryDoc::new("test-device");
+        for i in 0..touches {
+            doc.upsert_session(&running_session(
+                Utc::now() + chrono::Duration::milliseconds(i as i64),
+            ))
+            .unwrap();
+            doc.take_pushable();
+        }
+        assert_eq!(doc.pending_len(), touches);
+        let bytes = doc.to_bytes().unwrap();
+        store.save_snapshot(REGISTRY_DOC_ID, &bytes).unwrap();
+        bytes.len()
+    }
+
+    fn running_session(at: chrono::DateTime<chrono::Utc>) -> zeron_proto::Session {
+        zeron_proto::Session {
+            chat_id: "chat-1".into(),
+            device_id: "test-device".into(),
+            status: zeron_proto::SessionStatus::Working,
+            last_completed_turn: None,
+            started_at: None,
+            updated_at: at,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_profile_compacts_a_bloated_registry_and_never_queues() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let bloated = save_bloated_registry(&store, 5_000);
+        let host = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(host.read(|doc| doc.pending_len()), 0);
+        assert_eq!(host.read_sessions().unwrap().len(), 1);
+        // The boot save already persisted the compacted snapshot.
+        let saved = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+        assert!(saved.len() * 100 < bloated, "{} vs {bloated}", saved.len());
+        assert_eq!(
+            RegistryDoc::from_bytes(&saved, "test-device")
+                .unwrap()
+                .pending_len(),
+            0
+        );
+
+        // The 10 s running-chat heartbeat no longer accumulates anything.
+        for i in 0..100 {
+            host.record_session(&running_session(Utc::now() + chrono::Duration::seconds(i)));
+        }
+        assert_eq!(host.read(|doc| doc.pending_len()), 0);
+    }
+
+    #[tokio::test]
+    async fn synced_profile_coalesces_a_bloated_registry() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        save_bloated_registry(&store, 5_000);
+        let host = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                // Unreachable edge: writes queue (and retry) without acks.
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+                local_only: false,
+            },
+        )
+        .unwrap();
+        // The session row and this boot's device row: in flight at most once
+        // plus one coalesced unsent op each.
+        assert!(host.read(|doc| doc.pending_ops_len()) <= 4);
+        for i in 0..100 {
+            host.record_session(&running_session(Utc::now() + chrono::Duration::seconds(i)));
+        }
+        assert!(host.read(|doc| doc.pending_ops_len()) <= 4);
+        let saved = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+        assert!(
+            RegistryDoc::from_bytes(&saved, "test-device")
+                .unwrap()
+                .pending_ops_len()
+                <= 4
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn boot_compaction_reclaims_the_freed_store_pages() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let on_disk = || {
+            ["docs.sqlite3", "docs.sqlite3-wal"]
+                .iter()
+                .map(|f| std::fs::metadata(dir.path().join(f)).map_or(0, |m| m.len()))
+                .sum::<u64>()
+        };
+        // The store opens (and runs its own maintenance) BEFORE the registry
+        // shrinks, exactly as at boot.
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        // ~40 MiB of never-acked writes, built as raw snapshot JSON.
+        let mut snapshot: serde_json::Value =
+            serde_json::from_slice(&RegistryDoc::new("test-device").to_bytes().unwrap()).unwrap();
+        let preview = "x".repeat(8 * 1024);
+        snapshot["pending"] = (0..5_000)
+            .map(|i| {
+                serde_json::json!({
+                    "batch": format!("b-{i}"),
+                    "ops": [{
+                        "kind": "chats",
+                        "id": "chat-1",
+                        "op": "update",
+                        "set": { "lastMessagePreview": preview },
+                        "hlc": format!("{:013}-000000-test-device", i + 1),
+                    }],
+                })
+            })
+            .collect();
+        store
+            .save_snapshot(REGISTRY_DOC_ID, &serde_json::to_vec(&snapshot).unwrap())
+            .unwrap();
+        let bloated = on_disk();
+        assert!(bloated > 40 * 1024 * 1024, "{bloated}");
+
+        let _host = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while on_disk() * 4 > bloated {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "store not reclaimed after the boot compaction"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[test]

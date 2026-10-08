@@ -70,6 +70,7 @@ try {
     $out = Join-Path $root 'target/package'
     $arch = Get-WindowsPackageArch $probe.FileName
     $stage = Join-Path $out "zeron-$version-windows-$arch"
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath './target/release/zeron.exe' -Destination (Join-Path $stage 'zeron.exe')
     @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'zeron-update.json')

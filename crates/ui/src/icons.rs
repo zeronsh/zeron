@@ -51,7 +51,6 @@ macro_rules! icon_assets {
 }
 
 icon_assets![
-    (MICROPHONE, "microphone"),
     (PROJECT_DEFAULT, "project-default"),
     (REMOTE_SERVER, "remote-server"),
     // Service-tier bolt, drawn in the toolbar family's linear weight; the
@@ -181,6 +180,10 @@ icon_assets![
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),
     (VOLUME_LOUD, "volume-loud"),
+    // Hand-drawn microphone pair in the Solar Linear style — voice controls.
+    (MICROPHONE, "microphone"),
+    (MICROPHONE_OFF, "microphone-off"),
+    (PHONE_HANG_UP, "phone-hang-up"),
     // Hand-drawn zeron glyphs (terminal-panel.tsx / composer-actions.tsx /
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),

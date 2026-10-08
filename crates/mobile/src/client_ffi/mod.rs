@@ -12,6 +12,8 @@
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
 mod session;
+mod voice;
+pub use voice::*;
 mod types;
 
 use std::sync::Arc;

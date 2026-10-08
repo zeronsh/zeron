@@ -44,7 +44,10 @@ use crate::theme::Theme;
 mod chip;
 pub use chip::ChipKind;
 use chip::*;
-pub(crate) use chip::{ChipIcon, chip_icon, chip_text, paint_chip};
+pub(crate) use chip::{
+    CHIP_PAD_FAMILY, ChipIcon, chip_icon, chip_pad_ranges, chip_text, paint_chip,
+    text_chip_label_offset,
+};
 
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
@@ -883,8 +886,9 @@ const UNDO_LIMIT: usize = 200;
 
 const MENTION_TOOLTIP_DELAY: Duration = Duration::from_millis(420);
 const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
-// Narrow nonbreaking spaces give UI-font chips compact insets and gaps,
-// while preserving the chip's atomic wrapping and source/caret projection.
+// Nonbreaking spaces give chips their side inset, shaped in Geist like the
+// rest of the padding, while preserving the chip's atomic wrapping and
+// source/caret projection.
 const MENTION_SIDE_PAD: &str = "\u{00A0}";
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
@@ -1952,6 +1956,10 @@ pub struct ComposerInput {
     max_ascent: f32,
     #[cfg(test)]
     layout_rebuilds: usize,
+    /// The runs of the last rebuilt layout; the test text system shapes
+    /// every run alike, so tests check the requested fonts here.
+    #[cfg(test)]
+    last_runs: Vec<TextRun>,
     /// Normally keeps the caret visible through edits and rewraps. Manual
     /// wheel scrolling pauses it until the next caret move or edit.
     follow_cursor: bool,
@@ -2070,6 +2078,8 @@ impl ComposerInput {
             max_ascent: INPUT_TEXT_SIZE,
             #[cfg(test)]
             layout_rebuilds: 0,
+            #[cfg(test)]
+            last_runs: Vec::new(),
             follow_cursor: true,
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
@@ -3728,6 +3738,32 @@ impl ComposerInput {
         None
     }
 
+    /// [`chip_label_offset`] for the chip label starting at projected byte
+    /// `label`, from the shaped line holding it.
+    fn chip_label_offset(
+        &self,
+        label: usize,
+        row_top: Pixels,
+        room: Pixels,
+        window: &Window,
+    ) -> Pixels {
+        let line_ix = self
+            .line_starts
+            .partition_point(|start| *start <= label)
+            .saturating_sub(1);
+        match (self.last_lines.get(line_ix), self.line_starts.get(line_ix)) {
+            (Some(line), Some(start)) => chip_label_offset(
+                &line.unwrapped_layout,
+                label - start,
+                row_top,
+                self.line_height,
+                room,
+                window,
+            ),
+            _ => px(0.0),
+        }
+    }
+
     /// Content-local boxes occupied by a projected byte range, split at every
     /// soft wrap. A caret exactly at a wrap boundary belongs visually to both
     /// rows in GPUI; using the explicit wrap indices lets the range's first
@@ -4237,6 +4273,9 @@ impl ComposerInput {
         }
         for (_, range) in &self.projection.mentions {
             boundaries.extend([range.start, range.end]);
+            for pad in chip_pad_ranges(range) {
+                boundaries.extend([pad.start, pad.end]);
+            }
         }
         if let Some(range) = &marked {
             boundaries.extend([range.start, range.end]);
@@ -4268,17 +4307,24 @@ impl ComposerInput {
                     .projection
                     .mentions
                     .partition_point(|(_, range)| range.end <= r[0]);
-                let chip = self
+                let chip_range = self
                     .projection
                     .mentions
                     .get(mention_ix)
-                    .is_some_and(|(_, range)| range.contains(&r[0]));
+                    .map(|(_, range)| range)
+                    .filter(|range| range.contains(&r[0]));
+                let chip = chip_range.is_some();
                 let code = face_depth[composer_markdown::Face::Code as usize] > 0;
                 let mut run = run_for(
                     r[1] - r[0],
                     marked.as_ref().is_some_and(|range| range.contains(&r[0])),
                     code,
                 );
+                if chip_range.is_some_and(|range| {
+                    chip_pad_ranges(range).iter().any(|pad| pad.contains(&r[0]))
+                }) {
+                    run.font.family = CHIP_PAD_FAMILY.into();
+                }
                 if !chip {
                     if face_depth[composer_markdown::Face::Bold as usize] > 0 {
                         run.font.weight = gpui::FontWeight::BOLD;
@@ -4308,6 +4354,10 @@ impl ComposerInput {
                 run
             })
             .collect();
+        #[cfg(test)]
+        {
+            self.last_runs = runs.clone();
+        }
 
         // Each logical list line reserves its marker width for continuation
         // rows. Painting and hit testing apply the same continuation offset.
@@ -4846,13 +4896,15 @@ impl gpui::Element for ComposerTextElement {
             };
             // The path tooltip stays flush so the pointer can move onto it.
             let (tooltip_height, tooltip_gap) = (MENTION_TOOLTIP_HEIGHT, 1.0);
+            let label = chip_pad_ranges(display)[0].end;
             for local_bounds in input.bounds_for_display_range(display.clone()) {
+                let row_top = origin.y + local_bounds.origin.y;
+                // Centered on the label (see `paint_chip`).
+                let label_offset = input.chip_label_offset(label, row_top, px(1.5), window);
                 let chip_bounds = Bounds::new(
                     point(
                         origin.x + local_bounds.origin.x,
-                        // Centered on the row, which centers the label (see
-                        // `paint_chip`).
-                        origin.y + local_bounds.origin.y + px(1.5),
+                        row_top + px(1.5) + label_offset,
                     ),
                     size(local_bounds.size.width, local_bounds.size.height - px(3.0)),
                 );
@@ -8313,7 +8365,9 @@ impl Composer {
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         {
             let state = self.state.read(cx);
-            let now = chrono::Utc::now();
+            // AppState also notifies at clock-only transitions, so a run that
+            // goes stale drops its interrupt at the cutoff.
+            let now = crate::state::clock_now();
             retain_live_interrupts(&mut self.interrupting, |chat_id| {
                 matches!(
                     state.indicator_for(chat_id, now),
@@ -12511,6 +12565,47 @@ mod tests {
         assert!(server_in.try_recv().is_err());
     }
 
+    /// A run that goes stale purely by the clock (no state frame) drops its
+    /// pending interrupt at the staleness cutoff, not at some later
+    /// unrelated state change.
+    #[gpui::test]
+    fn interrupt_drops_when_its_run_goes_stale_by_clock_alone(cx: &mut gpui::TestAppContext) {
+        use chrono::TimeDelta;
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let clock = crate::state::TestClock::start(now);
+        let updated = now - TimeDelta::seconds(10);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new();
+            state.sessions = vec![zeron_proto::Session {
+                last_completed_turn: None,
+                chat_id: "c".into(),
+                device_id: "remote".into(),
+                status: zeron_proto::SessionStatus::Working,
+                started_at: Some(updated),
+                updated_at: updated,
+            }];
+            state.selected_chat = Some("c".into());
+            state.watch_clock_transitions(cx);
+            state
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, _| {
+            assert!(begin_interrupt(&mut composer.interrupting, "c"));
+        });
+        let cutoff = updated + TimeDelta::milliseconds(crate::state::SESSION_STALE_MS + 1);
+        let before = cutoff - TimeDelta::milliseconds(1);
+        clock.set(before);
+        cx.executor()
+            .advance_clock((before - now).to_std().unwrap());
+        assert!(composer.read_with(cx, |composer, _| composer.is_interrupting("c")));
+        clock.set(cutoff);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1));
+        assert!(!composer.read_with(cx, |composer, _| composer.is_interrupting("c")));
+    }
+
     #[gpui::test]
     fn inline_reference_text_preserves_selection_and_ime(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
@@ -14851,6 +14946,105 @@ mod tests {
         assert_eq!(spans[1].kind, ChipKind::Directory);
         assert_eq!(spans[0].path.as_ref(), "src/composer.rs");
         assert_eq!(spans[1].path.as_ref(), "src/components/");
+    }
+
+    /// The padding pinned to Geist is exactly the chip's NBSP padding, so the
+    /// label keeps the interface font and the insets don't follow it.
+    #[test]
+    fn chip_pad_ranges_cover_only_the_padding() {
+        let raw = format!(
+            "open {} now",
+            zeron_proto::attachment_mentions::attachment_mention_link(1, None)
+        );
+        let (display, spans) = sent_mention_display(&raw).expect("image chip projects");
+        let [lead, trail] = chip_pad_ranges(&spans[0].range);
+        assert_eq!(
+            &display[lead.clone()],
+            format!("{MENTION_SIDE_PAD}{CHIP_ICON_SLOT}")
+        );
+        assert_eq!(&display[trail.clone()], CHIP_TRAILING_PAD);
+        assert_eq!(&display[lead.end..trail.start], "Image\u{a0}1");
+    }
+
+    /// The composer shapes a chip's padding in Geist and everything else,
+    /// the chip's label included, in the interface font.
+    #[gpui::test]
+    fn composer_chip_padding_is_shaped_in_geist(cx: &mut gpui::TestAppContext) {
+        with_composer_input(cx, |input, window, cx| {
+            let raw = format!("open {} now", local_file_link("src/composer.rs", false));
+            input.set_text(&raw, cx);
+            let mut style = window.text_style();
+            style.font_family = "Geist Mono".into();
+            input.layout_text(px(600.0), &style, window, cx);
+            let (_, chip) = input.projection.mentions[0].clone();
+            let pads = chip_pad_ranges(&chip);
+            let mut at = 0;
+            let mut pinned = 0;
+            for run in &input.last_runs {
+                let range = at..at + run.len;
+                at = range.end;
+                if pads.iter().any(|pad| pad.contains(&range.start)) {
+                    assert_eq!(run.font.family.as_ref(), CHIP_PAD_FAMILY, "{range:?}");
+                    assert!(pads.iter().any(|pad| pad.end >= range.end), "{range:?}");
+                    pinned += run.len;
+                } else {
+                    assert_eq!(run.font.family.as_ref(), "Geist Mono", "{range:?}");
+                }
+            }
+            assert_eq!(pinned, pads.iter().map(|pad| pad.len()).sum::<usize>());
+        });
+    }
+
+    /// The queue's family overrides are every chip's padding, in order and
+    /// never empty, as `with_font_family_overrides` requires.
+    #[test]
+    fn queue_chip_overrides_are_the_padding_in_order() {
+        let raw = format!(
+            "{} then {}",
+            local_file_link("a.rs", false),
+            zeron_proto::attachment_mentions::attachment_mention_link(1, None),
+        );
+        let (_, spans) = sent_mention_display(&raw).expect("chips project");
+        let overrides = chip_pad_overrides(&spans);
+        let expected: Vec<_> = spans
+            .iter()
+            .flat_map(|span| chip_pad_ranges(&span.range))
+            .collect();
+        assert_eq!(overrides, expected);
+        assert!(
+            overrides
+                .windows(2)
+                .all(|pair| pair[0].end <= pair[1].start)
+        );
+    }
+
+    /// A chip centers on its label's cap height: the row's middle for Geist,
+    /// and a nudge toward the label for faces whose caps sit higher or lower.
+    #[test]
+    fn chip_centering_follows_the_label_face() {
+        // A 14 px label on a 22 px row whose top is at y = 100, at 1x.
+        let center = |ascent: f32, descent: f32, cap: f32| {
+            let em = |units: f32| units / 1000.0 * 14.0;
+            label_center_offset(100.0, 22.0, em(ascent), em(descent), em(cap), 1.0)
+        };
+        // Geist, alone or as the padding beside a Geist Mono label.
+        assert_eq!(center(1005.0, 295.0, 710.0), 0.0);
+        // A label with much shorter caps sits lower, so the pill follows.
+        assert_eq!(center(1005.0, 295.0, 560.0), 1.0);
+        // A tall face lowers the baseline past the next pixel.
+        assert_eq!(center(1200.0, 295.0, 710.0), 1.0);
+        // Without a cap height there is nothing to center on.
+        assert_eq!(center(1005.0, 295.0, 0.0), 0.0);
+        // The baseline snaps to a pixel where the row lands, so the same
+        // face can need the pill a pixel lower on a row a little further down.
+        assert_eq!(
+            label_center_offset(100.0, 22.0, 14.966, 4.13, 10.0, 1.0),
+            0.0
+        );
+        assert_eq!(
+            label_center_offset(100.2, 22.0, 14.966, 4.13, 10.0, 1.0),
+            1.0
+        );
     }
 
     /// Ordinary prompts must stay on the zero-cost path, including ones that

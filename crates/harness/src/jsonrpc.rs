@@ -44,12 +44,20 @@ type StdoutObserver = Box<dyn Fn(&str) + Send>;
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+/// Where realtime voice notifications go instead of the session channel.
+struct VoiceRouter {
+    sender: mpsc::Sender<Incoming>,
+    overflow: Arc<AtomicBool>,
+    abort_media: Box<dyn Fn() + Send + Sync>,
+}
+
 #[derive(Clone)]
 pub(crate) struct RpcClient {
     next_id: Arc<AtomicI64>,
     pending: Pending,
     writer: mpsc::UnboundedSender<String>,
     closed: Arc<AtomicBool>,
+    voice_router: Arc<Mutex<Option<VoiceRouter>>>,
 }
 
 impl RpcClient {
@@ -69,12 +77,14 @@ impl RpcClient {
         let pending: Pending = Arc::default();
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
         let closed = Arc::new(AtomicBool::new(false));
+        let voice_router = Arc::default();
         tokio::spawn(read_loop(
             stdout,
             Arc::clone(&pending),
             incoming_tx,
             closed.clone(),
             observer,
+            Arc::clone(&voice_router),
         ));
         (
             Self {
@@ -82,9 +92,39 @@ impl RpcClient {
                 pending,
                 writer: writer_tx,
                 closed,
+                voice_router,
             },
             incoming_rx,
         )
+    }
+
+    /// Route `thread/realtime/*` notifications (and `account/updated`) to a
+    /// voice channel so stdout never waits for playout. Overflow is terminal:
+    /// the flag is set and `abort_media` runs.
+    pub fn subscribe_voice(
+        &self,
+        abort_media: impl Fn() + Send + Sync + 'static,
+    ) -> (mpsc::Receiver<Incoming>, Arc<AtomicBool>) {
+        let (tx, rx) = mpsc::channel(32);
+        let overflow = Arc::new(AtomicBool::new(false));
+        *self.voice_router.lock().expect("voice router") = Some(VoiceRouter {
+            sender: tx,
+            overflow: overflow.clone(),
+            abort_media: Box::new(abort_media),
+        });
+        (rx, overflow)
+    }
+
+    /// End the subscription identified by its `overflow` flag; a newer one is
+    /// left in place.
+    pub fn unsubscribe_voice(&self, overflow: &Arc<AtomicBool>) {
+        let mut router = self.voice_router.lock().expect("voice router");
+        if router
+            .as_ref()
+            .is_some_and(|r| Arc::ptr_eq(&r.overflow, overflow))
+        {
+            *router = None;
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -228,6 +268,7 @@ async fn read_loop(
     tx: mpsc::Sender<Incoming>,
     closed: Arc<AtomicBool>,
     observer: Option<StdoutObserver>,
+    voice_router: Arc<Mutex<Option<VoiceRouter>>>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     // A read error ends the loop like EOF: either way the child's stdout is
@@ -289,6 +330,8 @@ async fn read_loop(
             }
             // Notification.
             (Some(method), None) => {
+                let realtime = method.starts_with("thread/realtime/");
+                let account_updated = method == "account/updated";
                 let incoming = Incoming::Notification {
                     method: method.to_owned(),
                     params: msg
@@ -296,6 +339,27 @@ async fn read_loop(
                         .map(Value::take)
                         .unwrap_or(Value::Null),
                 };
+                if let Some(router) = voice_router.lock().expect("voice router").as_ref() {
+                    if account_updated {
+                        // An account change ends any call; the session still sees it below.
+                        (router.abort_media)();
+                        if let Incoming::Notification { method, params } = &incoming {
+                            let copy = Incoming::Notification {
+                                method: method.clone(),
+                                params: params.clone(),
+                            };
+                            if router.sender.try_send(copy).is_err() {
+                                router.overflow.store(true, Ordering::Release);
+                            }
+                        }
+                    } else if realtime {
+                        if router.sender.try_send(incoming).is_err() {
+                            router.overflow.store(true, Ordering::Release);
+                            (router.abort_media)();
+                        }
+                        continue;
+                    }
+                }
                 if tx.send(incoming).await.is_err() {
                     return;
                 }
@@ -306,6 +370,9 @@ async fn read_loop(
     // EOF/read error: fail every awaiting request, then signal the loop.
     closed.store(true, Ordering::Release);
     pending.lock().expect("pending lock").clear();
+    if let Some(router) = voice_router.lock().expect("voice router").as_ref() {
+        (router.abort_media)();
+    }
     let _ = tx.send(Incoming::Eof).await;
 }
 
@@ -321,6 +388,7 @@ mod tests {
             pending: Arc::default(),
             writer,
             closed: Arc::new(AtomicBool::new(false)),
+            voice_router: Arc::default(),
         };
         client.notify("session/cancel", Some(json!({"sessionId": "parent"})));
         let frame: Value = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
@@ -332,6 +400,23 @@ mod tests {
         assert!(client.pending.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn stale_voice_unsubscribe_keeps_the_newer_subscription() {
+        let client = RpcClient {
+            next_id: Arc::new(AtomicI64::new(0)),
+            pending: Arc::default(),
+            writer: mpsc::unbounded_channel().0,
+            closed: Arc::new(AtomicBool::new(false)),
+            voice_router: Arc::default(),
+        };
+        let (_old_rx, old) = client.subscribe_voice(|| {});
+        let (_new_rx, new) = client.subscribe_voice(|| {});
+        client.unsubscribe_voice(&old);
+        assert!(client.voice_router.lock().unwrap().is_some());
+        client.unsubscribe_voice(&new);
+        assert!(client.voice_router.lock().unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn requests_after_eof_fail_without_entering_pending_map() {
         let (writer, mut receiver) = mpsc::unbounded_channel();
@@ -340,6 +425,7 @@ mod tests {
             pending: Arc::default(),
             writer,
             closed: Arc::new(AtomicBool::new(true)),
+            voice_router: Arc::default(),
         };
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),

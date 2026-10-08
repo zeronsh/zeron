@@ -72,9 +72,21 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         if presentedViewController != nil { dismiss(animated: true) }
         guard !isCollapsed else { return tabs.openSession(chatId) }
         if currentChatId == chatId, detail.viewControllers.first is SessionViewController { return }
+        guard let session = SessionViewController(app: app, chatId: chatId) else {
+            return showSessionOpenError()
+        }
         currentChatId = chatId
         sidebar.currentChatId = chatId
-        detail.setViewControllers([SessionViewController(app: app, chatId: chatId)], animated: false)
+        detail.setViewControllers([session], animated: false)
+    }
+
+    private func showSessionOpenError() {
+        if presentedViewController != nil { dismiss(animated: false) }
+        view.endEditing(true)
+        showDraft(prompt: nil, focus: false)
+        sidebar.showSessions()
+        show(.primary)
+        Toast.show("Couldn't open session. Try again.", in: view.window)
     }
 
     func presentNewSession(prompt: String?) {
@@ -94,9 +106,11 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             }
             // In place: the chat replaces the draft in the column and the
             // handoff carries the composer and message across.
+            guard let session = SessionViewController(app: self.app, chatId: chatId) else {
+                return self.showSessionOpenError()
+            }
             self.currentChatId = chatId
             self.sidebar.currentChatId = chatId
-            let session = SessionViewController(app: self.app, chatId: chatId)
             UIView.performWithoutAnimation {
                 self.detail.setViewControllers([session], animated: false)
                 self.view.layoutIfNeeded()
@@ -163,7 +177,10 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             let shown = (self.detail.viewControllers.first as? SessionViewController)?.chatId
             if let chatId = current {
                 if shown != chatId {
-                    self.detail.setViewControllers([SessionViewController(app: self.app, chatId: chatId)], animated: false)
+                    guard let session = SessionViewController(app: self.app, chatId: chatId) else {
+                        return self.showSessionOpenError()
+                    }
+                    self.detail.setViewControllers([session], animated: false)
                 }
                 self.sidebar.currentChatId = chatId
             } else if self.detail.viewControllers.isEmpty {
@@ -183,6 +200,9 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
     private let list: SessionsViewController
     private let nav: UINavigationController
     private let search = UISearchController(searchResultsController: nil)
+    private var voiceBar: VoiceBarItem?
+    private var voiceToken: AnyObject?
+    private var workspaceToken: AnyObject?
 
     var currentChatId: String? {
         get { list.currentChatId }
@@ -233,6 +253,19 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         list.navigationItem.rightBarButtonItem = nil
         list.toolbarItems = [settings, options, .flexibleSpace(), compose]
         nav.isToolbarHidden = false
+        // Voice beside compose, once a host can run it.
+        let voiceBar = VoiceBarItem(app: app, host: self)
+        self.voiceBar = voiceBar
+        let syncVoice = { [weak self, weak voiceBar] in
+            guard let self, let voiceBar else { return }
+            let items = voiceBar.visible ? [settings, options, .flexibleSpace(), voiceBar.item, compose] : [settings, options, .flexibleSpace(), compose]
+            if self.list.toolbarItems?.count != items.count {
+                self.list.setToolbarItems(items, animated: self.view.window != nil)
+            }
+        }
+        voiceToken = app.voice.observe(syncVoice)
+        workspaceToken = app.observe(syncVoice)
+        syncVoice()
 
         // A hairline between the sidebar and the main column.
         let edge = UIView()
@@ -254,6 +287,13 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
     func focusSearch() {
         nav.popToRootViewController(animated: false)
         search.searchBar.becomeFirstResponder()
+    }
+
+    func showSessions() {
+        search.isActive = false
+        search.searchBar.text = ""
+        list.query = ""
+        nav.popToRootViewController(animated: false)
     }
 }
 

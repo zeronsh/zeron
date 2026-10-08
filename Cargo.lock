@@ -838,6 +838,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "autotools"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef941527c41b0fc0dd48511a8154cd5fc7e29200a0ff8b7203c5d777dbc795cf"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "av-scenechange"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -944,6 +953,26 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.10.5",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.3",
+ "shlex 1.3.0",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.13.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.12.1",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1916,10 +1945,10 @@ dependencies = [
  "alsa",
  "coreaudio-rs",
  "dasp_sample",
- "jni",
+ "jni 0.21.1",
  "js-sys",
  "libc",
- "mach2",
+ "mach2 0.5.0",
  "ndk",
  "ndk-context",
  "num-derive",
@@ -1935,6 +1964,36 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "cpal"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
+dependencies = [
+ "alsa",
+ "block2 0.6.2",
+ "coreaudio-rs",
+ "dasp_sample",
+ "jni 0.22.4",
+ "js-sys",
+ "libc",
+ "mach2 0.6.0",
+ "ndk",
+ "ndk-context",
+ "num-derive",
+ "num-traits",
+ "objc2 0.6.4",
+ "objc2-audio-toolbox",
+ "objc2-avf-audio",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "web-sys",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -3087,6 +3146,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3589,7 +3654,7 @@ dependencies = [
  "async-channel",
  "async-task",
  "backtrace",
- "bindgen",
+ "bindgen 0.71.1",
  "bitflags 2.13.1",
  "block",
  "cbindgen",
@@ -3622,7 +3687,7 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "lyon",
- "mach2",
+ "mach2 0.5.0",
  "media",
  "metal",
  "num_cpus",
@@ -3778,7 +3843,7 @@ dependencies = [
  "itertools 0.14.0",
  "libc",
  "log",
- "mach2",
+ "mach2 0.5.0",
  "media",
  "metal",
  "objc",
@@ -4822,6 +4887,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "jni"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498"
+dependencies = [
+ "cfg-if",
+ "combine",
+ "jni-macros",
+ "jni-sys 0.4.1",
+ "log",
+ "simd_cesu8",
+ "thiserror 2.0.20",
+ "walkdir",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "jni-macros"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00109accc170f0bdb141fed3e393c565b6f5e072365c3bd58f5b062591560a3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "simd_cesu8",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "jni-sys"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5379,6 +5474,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mach2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
+
+[[package]]
 name = "macro_rules_attribute"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5465,7 +5566,7 @@ version = "0.1.0"
 source = "git+https://github.com/zeronsh/zui?rev=dce5c1f737a834b32c2b531d552ea78035e54093#dce5c1f737a834b32c2b531d552ea78035e54093"
 dependencies = [
  "anyhow",
- "bindgen",
+ "bindgen 0.71.1",
  "core-foundation 0.10.1",
  "core-video",
  "ctor",
@@ -6002,7 +6103,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -6113,6 +6214,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
 dependencies = [
+ "bitflags 2.13.1",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
 ]
@@ -9147,6 +9249,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
+name = "simd_cesu8"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11031e251abf8611c80f460e19dbdeb54a66db918e49c65a7065b46ac7aec520"
+dependencies = [
+ "rustc_version",
+ "simdutf8",
+]
+
+[[package]]
 name = "simd_helpers"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10093,6 +10205,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]
@@ -11492,6 +11605,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "webrtc-audio-processing"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "190c57ced88d6307ba91778c245265a99f99d900a9239c87a1b15142330c9f7e"
+dependencies = [
+ "webrtc-audio-processing-config",
+ "webrtc-audio-processing-sys",
+]
+
+[[package]]
+name = "webrtc-audio-processing-config"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "142cbc598e3dcf1a71e90109b6169ca9ce28ec1910bf74eef30f3c420ce850a4"
+
+[[package]]
+name = "webrtc-audio-processing-sys"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8f6c2b4b20a03b165378172f0dbe23c49b2630b70091026589afbe04e79cd3e"
+dependencies = [
+ "anyhow",
+ "autotools",
+ "bindgen 0.72.1",
+ "cc",
+ "fs_extra",
+ "pkg-config",
+ "regex",
+]
+
+[[package]]
 name = "webview2-com"
 version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12291,7 +12435,7 @@ dependencies = [
  "gtk",
  "http",
  "javascriptcore-rs",
- "jni",
+ "jni 0.21.1",
  "libc",
  "ndk",
  "objc2 0.6.4",
@@ -12797,7 +12941,7 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "clap",
@@ -12818,8 +12962,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-audio"
+version = "0.2.106"
+dependencies = [
+ "base64 0.22.1",
+ "cpal 0.18.2",
+ "crossbeam-queue",
+ "thiserror 2.0.20",
+ "webrtc-audio-processing",
+ "zeron-proto",
+]
+
+[[package]]
 name = "zeron-client"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12839,11 +12995,12 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-sync",
+ "zeron-voice-session",
 ]
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "chrono",
  "loro",
@@ -12857,7 +13014,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12898,7 +13055,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12920,19 +13077,20 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "zeron-proto",
+ "zeron-voice-media",
  "zip",
 ]
 
 [[package]]
 name = "zeron-markdown"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "zeron-mcp"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12950,24 +13108,34 @@ dependencies = [
 
 [[package]]
 name = "zeron-mobile"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
  "similar",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "uniffi",
  "zeron-client",
  "zeron-doc",
  "zeron-markdown",
+ "zeron-orb",
  "zeron-proto",
  "zeron-syntax",
  "zeron-text",
+ "zeron-veil",
+ "zeron-voice-session",
 ]
 
 [[package]]
+name = "zeron-orb"
+version = "0.2.106"
+
+[[package]]
 name = "zeron-preview"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12995,7 +13163,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -13006,7 +13174,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13025,7 +13193,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -13048,7 +13216,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -13082,7 +13250,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-text"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
@@ -13099,7 +13267,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "clap",
@@ -13114,7 +13282,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -13157,6 +13325,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "ttf-parser",
@@ -13175,17 +13344,21 @@ dependencies = [
  "zeron-engine",
  "zeron-harness",
  "zeron-markdown",
+ "zeron-orb",
  "zeron-proto",
  "zeron-rpc",
  "zeron-syntax",
  "zeron-theme",
  "zeron-update",
+ "zeron-veil",
  "zeron-voice",
+ "zeron-voice-media",
+ "zeron-voice-session",
 ]
 
 [[package]]
 name = "zeron-update"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
  "futures",
@@ -13200,11 +13373,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-veil"
+version = "0.2.106"
+
+[[package]]
 name = "zeron-voice"
-version = "0.2.104"
+version = "0.2.106"
 dependencies = [
  "anyhow",
- "cpal",
+ "cpal 0.17.3",
  "hound",
  "parakeet-rs",
  "reqwest",
@@ -13214,6 +13391,37 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "zeron-voice-media"
+version = "0.2.106"
+dependencies = [
+ "async-trait",
+ "semver",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "zeron-proto",
+ "zeron-voice-session",
+]
+
+[[package]]
+name = "zeron-voice-session"
+version = "0.2.106"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zeron-orb",
+ "zeron-proto",
+ "zeron-rpc",
 ]
 
 [[package]]

@@ -4,8 +4,6 @@
      bundling steps. Replace __VERSION__ before packaging. -->
 <plist version="1.0">
 <dict>
-  <key>NSMicrophoneUsageDescription</key>
-  <string>Dictate into your draft using on-device Parakeet transcription.</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
@@ -39,6 +37,8 @@
     </array>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Zeron uses your microphone for on-device dictation and for voice sessions you start. Voice sessions stream your audio to OpenAI through your ChatGPT-authenticated Codex account.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <!-- Browser tabs load user-selected HTTP dev servers. Keep the exception

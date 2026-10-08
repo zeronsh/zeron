@@ -206,7 +206,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             split.openSession(id)
             return
         }
-        navigationController?.pushViewController(SessionViewController(app: app, chatId: id), animated: true)
+        guard let session = SessionViewController(app: app, chatId: id) else {
+            (tabBarController as? MainTabController)?.showSessionOpenError()
+            return
+        }
+        navigationController?.pushViewController(session, animated: true)
     }
 
     func openFolder(_ id: String) {

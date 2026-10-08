@@ -38,6 +38,7 @@
 
 pub(crate) mod catalog;
 mod normalize;
+pub mod realtime;
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -84,6 +85,21 @@ pub fn resolve_codex_executable() -> Option<PathBuf> {
     extra.push(PathBuf::from("/opt/homebrew/bin/codex"));
     extra.push(PathBuf::from("/usr/local/bin/codex"));
     crate::executable::find_on_paths("codex", extra)
+}
+
+/// `canonicalize` yields `\\?\`-prefixed verbatim paths on Windows, which
+/// cmd.exe cannot launch batch shims through; keep the plain drive/UNC form.
+fn plain_executable(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+            return match rest.strip_prefix(r"UNC\") {
+                Some(share) => PathBuf::from(format!(r"\\{share}")),
+                None => PathBuf::from(rest),
+            };
+        }
+    }
+    path
 }
 
 /// Dotted `thread/start` config overrides that add an injected MCP server
@@ -652,7 +668,15 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, false, false).await
+    }
+
+    async fn start_idle(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls, false, true).await
     }
 
     async fn run_title(
@@ -666,7 +690,7 @@ impl Harness for CodexHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, true, false).await
     }
 }
 
@@ -676,6 +700,7 @@ impl CodexHarness {
         mut request: RunRequest,
         controls: RunControls,
         title_only: bool,
+        idle: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let native = command_request(&request.prompt, "")?;
         if native
@@ -692,7 +717,13 @@ impl CodexHarness {
                 "Codex commands cannot include attachments; send them in a separate prompt".into(),
             ));
         }
-        let exe = self.resolve_executable()?;
+        // Pin the physical release for this process and its voice helper: an
+        // installer may move the current symlink while this runtime stays warm.
+        let exe = plain_executable(
+            self.resolve_executable()?
+                .canonicalize()
+                .map_err(HarnessError::Io)?,
+        );
         // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
         // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
         // Parity with the Claude adapter, which auto-approves every
@@ -747,6 +778,8 @@ impl CodexHarness {
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
+            idle,
+            executable: exe,
             child,
             client,
             incoming,
@@ -770,7 +803,9 @@ impl CodexHarness {
 // ---------------------------------------------------------------------------
 
 struct Session {
+    executable: PathBuf,
     title_only: bool,
+    idle: bool,
     child: Child,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
@@ -946,7 +981,9 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
 /// steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        executable,
         title_only,
+        idle,
         mut child,
         client,
         mut incoming,
@@ -958,6 +995,7 @@ async fn run_session(session: Session) {
         stderr_tail,
     } = session;
     let RunControls {
+        realtime,
         execution_lease: _execution_lease,
         request_input,
         mut steering,
@@ -1052,6 +1090,16 @@ async fn run_session(session: Session) {
             .await?;
         client.notify("initialized", None);
 
+        if realtime.is_some() {
+            // Codex's first account/read announces the initial auth snapshot
+            // via account/updated. Load it before attaching the voice router,
+            // which must keep aborting media on subsequent identity updates.
+            // A failed warmup must not block text; voice probes still verify auth.
+            let _ = client
+                .request("account/read", json!({"refreshToken": false}))
+                .await;
+        }
+
         let mut start_params = start_params.clone();
         if title_only {
             // Disable each configured MCP server explicitly: an empty table
@@ -1096,9 +1144,13 @@ async fn run_session(session: Session) {
         let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
         let mut children = subagents::Subagents::new(thread_id.clone());
         children.restore(&thread["thread"]);
-        Ok::<_, HarnessError>((thread_id, children))
+        let voice_context = realtime::ThreadContext {
+            cwd: thread["cwd"].as_str().unwrap_or(&request.cwd).to_owned(),
+            model_provider: thread["modelProvider"].as_str().map(str::to_owned),
+        };
+        Ok::<_, HarnessError>((thread_id, children, voice_context))
     };
-    let (thread_id, mut children) = tokio::select! {
+    let (thread_id, mut children, voice_context) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
@@ -1173,19 +1225,30 @@ async fn run_session(session: Session) {
     }
 
     let mut router = TurnRouter::default();
-    match start_turn(&client, turn_params(&request.prompt)).await {
-        Ok(id) => router.adopt_started(id),
-        Err(e) => {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(e.to_string()),
-                    session_id: Some(thread_id.clone()),
-                }))
-                .await;
-            shutdown_child(&mut child, kill_grace).await;
-            return;
+    let _voice_bridge = realtime.map(|controls| {
+        realtime::attach(
+            client.clone(),
+            thread_id.clone(),
+            executable,
+            voice_context,
+            controls,
+        )
+    });
+    if !idle {
+        match start_turn(&client, turn_params(&request.prompt)).await {
+            Ok(id) => router.adopt_started(id),
+            Err(e) => {
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(e.to_string()),
+                        session_id: Some(thread_id.clone()),
+                    }))
+                    .await;
+                shutdown_child(&mut child, kill_grace).await;
+                return;
+            }
         }
     }
 
@@ -1203,7 +1266,7 @@ async fn run_session(session: Session) {
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // A Done has been emitted for the turn currently/last in flight.
-    let mut done_current = false;
+    let mut done_current = idle;
     let mut current_native = command_request(&request.prompt, &thread_id)
         .ok()
         .flatten()
@@ -1240,7 +1303,17 @@ async fn run_session(session: Session) {
                     }
                 }
                 match method.as_str() {
-                    "turn/started" => router.note_started(turn_id(&params)),
+                    "turn/started" => {
+                        let id=turn_id(&params);
+                        // Native voice handoffs start a turn without going through turn/start.
+                        // Publish the boundary before its text/tool deltas reach the parked engine.
+                        if done_current && !id.is_empty() && !router.is_completed(&id) {
+                            done_current=false;
+                            let (prev,next)=rotate(&mut assistant_message_id);
+                            if !send(&event_tx,AgentEvent::Steered{assistant_message_id:Some(prev),next_assistant_message_id:Some(next)}).await {break 'main;}
+                        }
+                        router.note_started(id);
+                    },
 
                     "item/agentMessage/delta" => {
                         streamed_text.insert(item_id(&params));

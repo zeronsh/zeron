@@ -33,6 +33,14 @@ pub use server::{serve_connection, serve_ws_listener};
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
+    pub const VOICE_CAPABILITIES_V2: &str = "VoiceCapabilitiesV2";
+    pub const PREPARE_VOICE_V2: &str = "PrepareVoiceV2";
+    pub const OWN_VOICE_V2: &str = "OwnVoiceV2";
+    pub const NEGOTIATE_VOICE_V2: &str = "NegotiateVoiceV2";
+    pub const CONFIRM_VOICE_MEDIA_V2: &str = "ConfirmVoiceMediaV2";
+    pub const REPORT_VOICE_MEDIA_V2: &str = "ReportVoiceMediaV2";
+    pub const STOP_VOICE_V2: &str = "StopVoiceV2";
+    pub const CANCEL_VOICE_ATTEMPT_V2: &str = "CancelVoiceAttemptV2";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
