@@ -2225,6 +2225,10 @@ async fn drive_run(
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
+    // NESTED spawns → the sink whose transcript holds their chip (a
+    // workflow's agent rows live in the workflow's doc, not the chat's).
+    let mut nested_owner: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Last tagged subagent event. A background subagent outlives the turn that
     // spawned it, and its traffic never un-parks the chat, so the idle reaper
     // measures from here as well as from the park.
@@ -2476,6 +2480,23 @@ async fn drive_run(
             let chip_streaming = folded
                 .iter()
                 .any(|p| matches!(p, MessagePart::Tool { id, .. } if id == parent_tool_use_id));
+            // A progress summary restamps the chip only — it never opens or
+            // feeds the subagent's own doc. Low-frequency by contract, so the
+            // in-place path's per-call doc write is bounded.
+            if let AgentEvent::SubagentProgress { summary } = sub_event.as_ref() {
+                if chip_streaming {
+                    zeron_doc::fold_event_into_parts(&mut folded, &event);
+                    if !dirty {
+                        dirty = true;
+                        flush_at = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    }
+                } else {
+                    let _ =
+                        doc_ref.update_subagent_chip(parent_tool_use_id, None, None, Some(summary));
+                }
+                continue;
+            }
             let sink_known = subagents.contains_key(parent_tool_use_id);
             // A Done with NO sink (a subagent that never streamed — codex
             // turn ends can beat registration) is chip-only: minting a doc
@@ -2483,6 +2504,55 @@ async fn drive_run(
             // would link the chip to that never-created doc (an empty tab
             // on click).
             let done_only = !sink_known && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
+            // A NESTED spawn: its chip lives in another subagent's transcript
+            // (a workflow's agent rows). Ref and lifecycle fold into that
+            // owner sink's parts — never the chat doc — while its own
+            // transcript gets a doc like any subagent's. The driver settles
+            // nested children before their owner, so the owner is live here.
+            let owner = (!chip_streaming)
+                .then(|| {
+                    nested_owner.get(parent_tool_use_id).cloned().or_else(|| {
+                        subagents
+                            .iter()
+                            .find(|(_, sink)| {
+                                sink.folded.iter().any(|p| {
+                                    matches!(p, MessagePart::Tool { id, call, .. }
+                                        if id == parent_tool_use_id && call.is_subagent_spawn())
+                                })
+                            })
+                            .map(|(owner, _)| owner.clone())
+                    })
+                })
+                .flatten()
+                .filter(|owner| owner != parent_tool_use_id);
+            let nested = owner.is_some();
+            if let Some(owner) = owner {
+                nested_owner.insert(parent_tool_use_id.clone(), owner.clone());
+                if let Some(owner_sink) = subagents.get_mut(&owner) {
+                    if !sink_known && !done_only {
+                        for p in owner_sink.folded.iter_mut() {
+                            if let MessagePart::Tool {
+                                id,
+                                call,
+                                subagent_ref,
+                                ..
+                            } = p
+                                && id == parent_tool_use_id
+                                && call.is_subagent_spawn()
+                            {
+                                *subagent_ref = Some(sub_id.clone());
+                            }
+                        }
+                    }
+                    zeron_doc::fold_event_into_parts(&mut owner_sink.folded, &event);
+                    let was_clean = !owner_sink.dirty;
+                    owner_sink.dirty = true;
+                    if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
+                        flush_at = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    }
+                }
+            }
             if chip_streaming {
                 if !sink_known && !done_only {
                     for p in folded.iter_mut() {
@@ -2533,7 +2603,7 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
-                    if !chip_streaming {
+                    if !chip_streaming && !nested {
                         let _ = doc_ref.update_subagent_chip(
                             parent_tool_use_id,
                             Some(&sub_id),
@@ -2546,7 +2616,7 @@ async fn drive_run(
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if done {
                 settled_subagents.insert(parent_tool_use_id.clone());
-                if !chip_streaming {
+                if !chip_streaming && !nested {
                     // A resumed run can finish an older chip without ever
                     // opening a sink. The chip's lifecycle is independent of
                     // whether this run received transcript content.
@@ -3030,9 +3100,34 @@ async fn drive_run(
 
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
+    // Nested chips fail inside their owner's transcript first, so the
+    // owner's freeze carries them.
+    let open_nested: Vec<String> = subagents
+        .keys()
+        .filter(|id| nested_owner.contains_key(*id))
+        .cloned()
+        .collect();
+    for id in open_nested {
+        if let Some(owner_sink) = nested_owner.get(&id).and_then(|o| subagents.get_mut(o)) {
+            zeron_doc::fold_event_into_parts(
+                &mut owner_sink.folded,
+                &AgentEvent::Subagent {
+                    parent_tool_use_id: id,
+                    event: Box::new(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }),
+                },
+            );
+        }
+    }
     for (parent_id, sink) in subagents.drain() {
         let doc_id = sink.doc_id.clone();
-        let _ = doc_ref.update_subagent_chip(&parent_id, None, Some("failed"), None);
+        if !nested_owner.contains_key(&parent_id) {
+            let _ = doc_ref.update_subagent_chip(&parent_id, None, Some("failed"), None);
+        }
         if let Some(json) = sink.finish(&device_id, MessageStatus::Aborted)
             && let Some(host) = inner.doc_host()
         {

@@ -48,6 +48,17 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `task_started`: `local_workflow` for a Workflow tool run.
+    #[serde(default)]
+    pub task_type: Option<String>,
+    /// `task_progress` of a workflow: every agent's latest state
+    /// (`label`, `model`, `state`, `resultPreview`, …), keyed by `index`.
+    #[serde(default)]
+    pub workflow_progress: Vec<Value>,
+    /// `task_progress` / `task_notification`: the task's running totals
+    /// (`total_tokens`, `tool_uses`, `duration_ms`).
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -88,6 +99,11 @@ pub(crate) struct MessageFrame {
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,
+    /// A tool result's structured echo. For a background Workflow launch it
+    /// names the run's `transcriptDir`, where each agent writes its own
+    /// `agent-<agentId>.jsonl`. A plain string on some tools.
+    #[serde(default, alias = "toolUseResult")]
+    pub tool_use_result: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -124,6 +140,9 @@ pub(crate) struct ContentBlock {
     pub name: String,
     #[serde(default)]
     pub input: Value,
+    /// A `tool_result`'s body: a string or an array of text blocks.
+    #[serde(default)]
+    pub content: Value,
     #[serde(default)]
     pub tool_use_id: String,
     #[serde(default)]
