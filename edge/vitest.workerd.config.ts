@@ -24,7 +24,8 @@ export default defineConfig({
           CHAT_ROOMS: { className: "ChatRoom", useSQLite: true },
           PREVIEW_ROOMS: { className: "PreviewRoom", useSQLite: true },
           REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true }
-        }
+        },
+        r2Buckets: ["BLOBS"]
       }
     })
   ],

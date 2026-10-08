@@ -22,6 +22,7 @@
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { AUTH_USER_HEADER, apnsConfig, type Env } from "./env";
 import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
+import { PushOutcomeLog } from "./push-outcomes";
 import {
   apnsPayload,
   chatForNotification,
@@ -49,12 +50,6 @@ interface SocketState {
 }
 
 interface WireOp extends Op {}
-
-interface PushOutcome {
-  ok: number;
-  rejected: number;
-  lastOkAt: number;
-}
 
 /** A phone that asked for notifications (APNs token + its choices). */
 interface PushTarget {
@@ -88,10 +83,15 @@ export class RegistryRoom implements DurableObject {
   private readonly env: Env;
   /** device → last presence beat (epoch ms). Memory-only. */
   private readonly presence = new Map<string, number>();
+  private readonly pushOutcomes: PushOutcomeLog;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
+    this.pushOutcomes = new PushOutcomeLog(
+      () => this.getMeta("pushOutcomes"),
+      (value) => this.setMeta("pushOutcomes", value)
+    );
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS rows (kind TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL, deleted INTEGER NOT NULL, del_hlc TEXT, fields TEXT NOT NULL, clocks TEXT NOT NULL, PRIMARY KEY (kind, id))"
     );
@@ -125,8 +125,20 @@ export class RegistryRoom implements DurableObject {
     );
   }
 
+  /** The newest seq ever issued, derived from the table itself. `MAX` rides
+   * the `rows_seq` index; rows only ever leave through tombstone GC, which
+   * raises `gcFloor` to the purged max, so the head never moves backward. The
+   * stored `seq` is a lower bound on top: reissuing a seq a client already
+   * holds would make it skip the new rows.
+   *
+   * Reading this way is what makes it safe to STOP storing `seq` (a row
+   * write per push) in a later release: this release is that one's rollback
+   * target, and it reads correctly whether or not the stored copy kept up. */
   private seq(): number {
-    return Number(this.getMeta("seq") ?? "0");
+    const max = [...this.ctx.storage.sql.exec("SELECT MAX(seq) AS m FROM rows")][0]?.m as
+      | number
+      | null;
+    return Math.max(max ?? 0, this.gcFloor(), Number(this.getMeta("seq") ?? "0"));
   }
 
   private gcFloor(): number {
@@ -219,7 +231,7 @@ export class RegistryRoom implements DurableObject {
         connectedSockets: this.ctx.getWebSockets().length,
         // The ONLY per-device attribution surface — kept from the 2026-08-05
         // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>,
+        pushOutcomes: this.pushOutcomes.snapshot(),
         lastBackupSeq: Number(this.getMeta("backupSeq") ?? "0"),
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
         pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
@@ -321,6 +333,7 @@ export class RegistryRoom implements DurableObject {
       // rowToSeedOp) — the ws4 repair recipe, built in.
       this.ctx.storage.sql.exec("DELETE FROM rows");
       this.ctx.storage.sql.exec("DELETE FROM meta");
+      this.pushOutcomes.reset();
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "registry reset");
@@ -467,6 +480,8 @@ export class RegistryRoom implements DurableObject {
     }
     if (applied > 0) {
       for (const row of touched.values()) this.saveRow(row);
+      // Still stored for releases that read ONLY this key (everything before
+      // the derived `seq()`): rolling back to one must not reissue a seq.
       this.setMeta("seq", String(nextSeq));
       this.markBackupDirty();
     }
@@ -579,29 +594,29 @@ export class RegistryRoom implements DurableObject {
   }
 
   private recordPush(device: string, ok: boolean): void {
-    const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
-    if (ok) {
-      entry.ok += 1;
-      entry.lastOkAt = Date.now();
-    } else {
-      entry.rejected += 1;
-    }
-    outcomes[key] = entry;
-    this.setMeta("pushOutcomes", JSON.stringify(outcomes));
+    this.pushOutcomes.record(device, ok);
   }
 
+  /** `backupDirty` is written only when it flips (once per backup cycle, not
+   * once per push) and only for releases whose alarm still gates on it —
+   * this one's alarm decides from `seq > backupSeq`. */
   private markBackupDirty(): void {
-    this.setMeta("backupDirty", "1");
+    if (this.getMeta("backupDirty") !== "1") this.setMeta("backupDirty", "1");
     void this.ctx.storage.getAlarm().then((existing) => {
       if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
     });
   }
 
-  /** Daily alarm: tombstone GC + nightly R2 backup of the full table. */
+  /** Daily alarm: tombstone GC + nightly R2 backup of the full table. Not
+   * re-armed here: an idle room stops the chain, and the next applied push
+   * re-arms it.
+   *
+   * Gated on the seq, not on `backupDirty`, so a later release may stop
+   * writing the flag and still roll back to this one without skipping a
+   * backup. */
   async alarm(): Promise<void> {
-    if (this.getMeta("backupDirty") !== "1") return; // idle: stop the chain
+    const seq = this.seq();
+    if (seq <= Number(this.getMeta("backupSeq") ?? "0")) return; // idle: stop the chain
 
     // 1. Tombstone GC. Raising gcFloor to the purged rows' max seq forces a
     //    full resync for any cursor that might have missed a purged delete.
@@ -621,17 +636,17 @@ export class RegistryRoom implements DurableObject {
     }
 
     // 2. Nightly R2 backup — monotonic by seq, so a wiped-and-reseeding room
-    //    can never replace the last good copy with a hollow one.
-    const seq = this.seq();
-    if (seq > Number(this.getMeta("backupSeq") ?? "0")) {
-      const rows = this.rowsSince(0);
-      await this.env.BLOBS.put(
-        `backup/registry/${this.ctx.id.toString()}/latest.json`,
-        JSON.stringify({ seq, at: Date.now(), rows })
-      );
-      this.setMeta("backupSeq", String(seq));
-    }
-    this.setMeta("backupDirty", "0");
+    //    can never replace the last good copy with a hollow one. GC above
+    //    leaves seq where it was (gcFloor rises to the purged max, never past).
+    const rows = this.rowsSince(0);
+    await this.env.BLOBS.put(
+      `backup/registry/${this.ctx.id.toString()}/latest.json`,
+      JSON.stringify({ seq, at: Date.now(), rows })
+    );
+    this.setMeta("backupSeq", String(seq));
+    // Cleared only if nothing landed while the R2 put was in flight — a push
+    // in that window saw the flag already set and left it for us.
+    if (this.getMeta("backupDirty") === "1" && this.seq() <= seq) this.setMeta("backupDirty", "0");
   }
 }
 

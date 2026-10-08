@@ -32,6 +32,7 @@ import {
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { PushOutcomeLog } from "./push-outcomes";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -56,12 +57,6 @@ interface SocketState {
   ready?: boolean;
 }
 
-interface PushOutcome {
-  ok: number;
-  rejected: number;
-  lastOkAt: number;
-}
-
 interface QuotaWindow {
   since: number;
   pushes: number;
@@ -76,12 +71,17 @@ export class ChatRoom implements DurableObject {
   private readonly presence = new Map<string, number>();
   /** device → rolling push quota window. Memory-only. */
   private readonly quotas = new Map<string, QuotaWindow>();
+  private readonly pushOutcomes: PushOutcomeLog;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
     ensureChatLog(ctx.storage.sql);
     this.blobs = createBlobStore(ctx.storage.sql);
+    this.pushOutcomes = new PushOutcomeLog(
+      () => getMeta(ctx.storage.sql, "pushOutcomes"),
+      (value) => setMeta(ctx.storage.sql, "pushOutcomes", value)
+    );
     // Runtime-answered keepalive; proves nothing about this DO's health.
     // Clients judge liveness by probe frames (same caveat as RegistryRoom).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -307,10 +307,7 @@ export class ChatRoom implements DurableObject {
         presence: Object.fromEntries(this.presence),
         // The ONLY per-device attribution surface — kept from the 2026-08-05
         // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-          string,
-          PushOutcome
-        >,
+        pushOutcomes: this.pushOutcomes.snapshot(),
         lastBackupSeq: Number(getMeta(sql, "backupSeq") ?? "0")
       });
     }
@@ -322,6 +319,7 @@ export class ChatRoom implements DurableObject {
       sql.exec("DELETE FROM rows");
       sql.exec("DELETE FROM meta");
       sql.exec("DELETE FROM blobs");
+      this.pushOutcomes.reset();
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "chat room reset");
@@ -517,35 +515,29 @@ export class ChatRoom implements DurableObject {
   }
 
   private recordPush(device: string, ok: boolean): void {
-    const sql = this.ctx.storage.sql;
-    const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-      string,
-      PushOutcome
-    >;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
-    if (ok) {
-      entry.ok += 1;
-      entry.lastOkAt = Date.now();
-    } else {
-      entry.rejected += 1;
-    }
-    outcomes[key] = entry;
-    setMeta(sql, "pushOutcomes", JSON.stringify(outcomes));
+    this.pushOutcomes.record(device, ok);
   }
 
+  /** `backupDirty` is written only when it flips (once per backup cycle, not
+   * once per push) and only for releases whose alarm still gates on it —
+   * this one's alarm decides from `headSeq > backupSeq`. */
   private markBackupDirty(): void {
-    setMeta(this.ctx.storage.sql, "backupDirty", "1");
+    const sql = this.ctx.storage.sql;
+    if (getMeta(sql, "backupDirty") !== "1") setMeta(sql, "backupDirty", "1");
     void this.ctx.storage.getAlarm().then((existing) => {
       if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
     });
   }
 
   /** Daily alarm: nightly R2 backup, seq-monotonic so a reset-and-reseeding
-   * room can never replace the last good copy with a hollow one. */
+   * room can never replace the last good copy with a hollow one. Not re-armed
+   * here: an idle room stops the chain, and the next push re-arms it.
+   *
+   * Gated on the head, not on `backupDirty`, so a later release may stop
+   * writing the flag and still roll back to this one without skipping a
+   * backup. */
   async alarm(): Promise<void> {
     const sql = this.ctx.storage.sql;
-    if (getMeta(sql, "backupDirty") !== "1") return; // idle: stop the chain
     const head = headSeq(sql);
     if (head > Number(getMeta(sql, "backupSeq") ?? "0")) {
       const rows = [...rowsAfter(sql, 0)].map((row) => ({
@@ -568,7 +560,11 @@ export class ChatRoom implements DurableObject {
       );
       setMeta(sql, "backupSeq", String(head));
     }
-    setMeta(sql, "backupDirty", "0");
+    // Cleared only if nothing landed while the R2 put was in flight — a push
+    // in that window saw the flag already set and left it for us.
+    if (getMeta(sql, "backupDirty") === "1" && headSeq(sql) <= Number(getMeta(sql, "backupSeq") ?? "0")) {
+      setMeta(sql, "backupDirty", "0");
+    }
   }
 }
 
