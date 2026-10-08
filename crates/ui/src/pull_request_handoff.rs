@@ -269,7 +269,7 @@ async fn matching_checkout(
             .client()
             .call(
                 methods::GET_CHANGE_REQUEST_REPOSITORY,
-                serde_json::json!({"cwd": space.path, "targetDeviceId": device}),
+                serde_json::json!({"cwd": space.path, "targetDeviceId": device, "repository": repository}),
             )
             .await;
         match result.and_then(|value| {
@@ -561,6 +561,10 @@ mod tests {
         let rpc = ScriptedRpc::new(|method, params| async move {
             assert_eq!(method, methods::GET_CHANGE_REQUEST_REPOSITORY);
             assert_eq!(params["targetDeviceId"], "remote");
+            assert!(matches!(
+                params["repository"].as_str(),
+                Some("a/b" | "missing/repo")
+            ));
             zeron_rpc::RpcReply::value(&Some(if params["cwd"] == "/right" {
                 "A/B"
             } else {

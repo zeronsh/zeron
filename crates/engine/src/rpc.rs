@@ -2573,11 +2573,20 @@ impl RpcService for EngineRpc {
                 #[derive(Deserialize)]
                 struct P {
                     cwd: String,
+                    #[serde(default)]
+                    repository: Option<String>,
                 }
                 let p: P = parse_params(params)?;
-                let repository = crate::source_control::ChangeRequestResolver::new()
-                    .repository_for_checkout(std::path::Path::new(&p.cwd))
-                    .await;
+                let resolver = crate::source_control::ChangeRequestResolver::new();
+                let cwd = std::path::Path::new(&p.cwd);
+                let repository = match p.repository {
+                    Some(repository) => {
+                        resolver
+                            .matching_repository_for_checkout(cwd, &repository)
+                            .await
+                    }
+                    None => resolver.repository_for_checkout(cwd).await,
+                };
                 RpcReply::value(&repository)
             }
             methods::LIST_CHANGE_REQUEST_PAGE => {

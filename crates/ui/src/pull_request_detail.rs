@@ -362,6 +362,7 @@ pub struct PullRequestDetailPage {
     detail: Option<ChangeRequestDetail>,
     body: Option<crate::markdown::BlockTree>,
     activity_bodies: Vec<crate::markdown::BlockTree>,
+    selection_prefix: String,
     cache: Rc<RefCell<PullRequestCache>>,
     preview: Option<ChangeRequestListItem>,
     error: Option<String>,
@@ -432,6 +433,7 @@ impl PullRequestDetailPage {
             detail: None,
             body: None,
             activity_bodies: Vec::new(),
+            selection_prefix: format!("pr-detail-{}-", cx.entity_id().as_u64()),
             cache,
             preview,
             error: None,
@@ -494,6 +496,10 @@ impl PullRequestDetailPage {
             image_previous_focus: None,
             image_failed: None,
         };
+        cx.on_release(|page: &mut Self, _| {
+            crate::markdown::render::clear_selection_surface(&page.selection_prefix);
+        })
+        .detach();
         page.file_search_subscription =
             Some(
                 cx.subscribe(&page.file_search, |page: &mut Self, input, event, cx| {
@@ -678,10 +684,15 @@ impl PullRequestDetailPage {
 
     /// Reload the details, and the diff now or on the next Code visit.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.loading || self.submission.is_some() {
             return;
         }
+        // A pending patch belongs to the pre-refresh details. Drop its task
+        // before starting the detail read, regardless of the active tab.
+        self.diff_task = None;
+        self.diff_error = None;
         self.diff = None;
+        crate::markdown::render::clear_selection_surface(&self.selection_prefix);
         self.diff_refresh_owed = true;
         let cached = self.cache.borrow_mut().get(&self.target, &self.url);
         if let Some(mut snapshot) = cached {
@@ -693,11 +704,6 @@ impl PullRequestDetailPage {
                 .put(self.target.clone(), self.url.clone(), snapshot);
         }
         self.load(true, cx);
-        if self.tab == Tab::Code {
-            self.load_diff(true, cx);
-        } else {
-            self.diff_task = None;
-        }
     }
 
     fn params(&self, refresh: bool) -> serde_json::Value {
@@ -760,6 +766,14 @@ impl PullRequestDetailPage {
                             snapshot.detail.viewer_did_author = snapshot.detail.viewer_did_author.or(preview.viewer_did_author);
                             snapshot.detail.viewer_review_requested = snapshot.detail.viewer_review_requested.or(preview.viewer_review_requested);
                         }
+                        if page.detail.as_ref().is_some_and(|detail| {
+                            detail.head_ref_oid != snapshot.detail.head_ref_oid
+                                || detail.base_ref_oid != snapshot.detail.base_ref_oid
+                        }) {
+                            page.diff_task = None;
+                            page.diff = None;
+                            page.diff_refresh_owed = true;
+                        }
                         page.fetched = Some(snapshot.fetched);
                         snapshot.diff = page.diff.clone();
                         snapshot.diff_refresh_owed = page.diff_refresh_owed;
@@ -791,6 +805,8 @@ impl PullRequestDetailPage {
         self.diff_error = None;
         let refresh = refresh || self.diff_refresh_owed;
         let params = self.params(refresh);
+        let detail = self.detail.as_ref().unwrap();
+        let revisions = (detail.base_ref_oid.clone(), detail.head_ref_oid.clone());
         self.diff_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -806,12 +822,26 @@ impl PullRequestDetailPage {
                 .spawn(async move { result.map(ParsedDiff::new) })
                 .await;
             let _ = this.update(cx, |page, cx| {
+                // Cancellation is the first line of defense; the response
+                // must also belong to the revisions currently being shown.
+                if page.loading
+                    || !page.detail.as_ref().is_some_and(|detail| {
+                        (&detail.base_ref_oid, &detail.head_ref_oid) == (&revisions.0, &revisions.1)
+                    })
+                {
+                    return;
+                }
                 page.diff_task = None;
                 match result {
                     Ok(diff) => {
                         page.diff_refresh_owed = false;
                         let cached = page.cache.borrow_mut().get(&page.target, &page.url);
-                        if let Some(mut snapshot) = cached {
+                        if let Some(mut snapshot) = cached
+                            && (
+                                snapshot.detail.base_ref_oid.as_str(),
+                                snapshot.detail.head_ref_oid.as_str(),
+                            ) == (revisions.0.as_str(), revisions.1.as_str())
+                        {
                             snapshot.diff = Some(diff.clone());
                             snapshot.diff_refresh_owed = false;
                             page.cache.borrow_mut().put(
@@ -1004,6 +1034,7 @@ impl PullRequestDetailPage {
             crate::motion::reduced_motion(cx),
             Instant::now(),
         );
+        crate::markdown::render::clear_selection_surface(&self.selection_prefix);
         self.tab = tab;
         self.scroll.scroll.set_offset(gpui::Point::default());
         if tab == Tab::Code && self.diff.is_none() && self.diff_task.is_none() {
@@ -1761,7 +1792,7 @@ impl Render for PullRequestDetailPage {
                                 |el, body| {
                                     el.child(rich_text(
                                         body,
-                                        "pr-description".into(),
+                                        format!("{}description", self.selection_prefix),
                                         &self.url,
                                         &theme,
                                         window,
@@ -2003,7 +2034,10 @@ impl Render for PullRequestDetailPage {
                                                 |body| {
                                                     div().child(rich_text(
                                                         body,
-                                                        format!("pr-activity-{index}"),
+                                                        format!(
+                                                            "{}activity-{index}",
+                                                            self.selection_prefix
+                                                        ),
                                                         &self.url,
                                                         &theme,
                                                         window,
@@ -2107,6 +2141,10 @@ impl Render for PullRequestDetailPage {
             .flex()
             .flex_col()
             .pt(px(Theme::TITLEBAR_HEIGHT))
+            // Paint before Markdown registers this frame's text geometry.
+            .child(crate::markdown::render::selection_frame_reset_for(
+                cx.entity_id().as_u64(),
+            ))
             .child(
                 div()
                     .relative()
@@ -2189,6 +2227,86 @@ mod tests {
             diff: None,
             diff_refresh_owed: false,
         }
+    }
+
+    #[gpui::test]
+    fn pull_request_selection_tracks_repaint_and_clears_on_leaving(cx: &mut gpui::TestAppContext) {
+        use crate::markdown::{render, selection};
+        let _selection = selection::test_state_lock();
+        fixture::init(cx);
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            let state = fixture::state(cx, None);
+            let cache = Rc::new(RefCell::new(PullRequestCache::default()));
+            let mut cached = snapshot("Selection");
+            cached.detail.body =
+                "First paragraph for selection.\n\nSecond paragraph stays separate.".into();
+            cached.body = crate::markdown::parse_full(&cached.detail.body);
+            let url = "https://github.com/a/b/pull/1";
+            cache.borrow_mut().put(None, url.into(), cached);
+            PullRequestDetailPage::new(state, url.into(), None, cache, None, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(1400.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let prefix = page.read_with(cx, |page, _| page.selection_prefix.clone());
+        let key = format!("{prefix}description-block-0:0");
+        assert_eq!(render::selection_test_entry_count(&prefix), 2);
+        // Layout changes and extra paints must replace, not accumulate,
+        // geometry. Click + zero-distance move must remain an empty selection.
+        cx.simulate_resize(gpui::size(px(760.0), px(1400.0)));
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        assert_eq!(render::selection_test_entry_count(&prefix), 2);
+        let position = render::selection_test_bounds(&key).origin + gpui::point(px(8.0), px(8.0));
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position,
+            pressed_button: Some(gpui::MouseButton::Left),
+            ..Default::default()
+        });
+        assert!(selection::selected_text().is_none_or(|text| text.is_empty()));
+        selection::end_active_drag();
+        selection::begin_with_span(&key, "First paragraph", 0..5);
+        page.update(cx, |page, cx| page.select_tab(Tab::Activity, cx));
+        assert!(selection::selected_text().is_none());
+        assert_eq!(render::selection_test_entry_count(&prefix), 0);
+        // A different PR instance has a disjoint namespace, including when
+        // both pages coexist during navigation.
+        let other = cx.update(|window, cx| {
+            cx.new(|cx| {
+                PullRequestDetailPage::new(
+                    fixture::state(cx, None),
+                    "https://github.com/a/b/pull/2".into(),
+                    None,
+                    Default::default(),
+                    None,
+                    window,
+                    cx,
+                )
+            })
+        });
+        let other_prefix = other.read_with(cx, |page, _| page.selection_prefix.clone());
+        assert_ne!(prefix, other_prefix);
+        let other_key = format!("{other_prefix}description:0");
+        selection::begin_with_span(&other_key, "Other PR", 0..5);
+        drop(other);
+        cx.update(|_, _| {}); // GPUI releases dropped entities after an update.
+        cx.run_until_parked();
+        assert!(
+            selection::selected_text().is_none(),
+            "releasing the view clears its selection"
+        );
     }
 
     #[test]
@@ -2390,6 +2508,110 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rpc.completed(), 2);
+    }
+
+    #[gpui::test]
+    fn pull_request_refresh_discards_pending_diff_in_either_response_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        for old_finishes_first in [true, false] {
+            let release_old = Arc::new(tokio::sync::Notify::new());
+            let release_detail = Arc::new(tokio::sync::Notify::new());
+            let diff_calls = Arc::new(AtomicUsize::new(0));
+            let rpc = ScriptedRpc::new({
+                let release_old = release_old.clone();
+                let release_detail = release_detail.clone();
+                let diff_calls = diff_calls.clone();
+                move |method, params| {
+                    let release_old = release_old.clone();
+                    let release_detail = release_detail.clone();
+                    let diff_calls = diff_calls.clone();
+                    async move {
+                        match method.as_str() {
+                            methods::GET_CHANGE_REQUEST => {
+                                release_detail.notified().await;
+                                zeron_rpc::RpcReply::value(&ChangeRequestDetail {
+                                    head_ref_oid: "b".repeat(40),
+                                    base_ref_oid: "d".repeat(40),
+                                    ..Default::default()
+                                })
+                            }
+                            methods::GET_CHANGE_REQUEST_DIFF => {
+                                let call = diff_calls.fetch_add(1, Ordering::SeqCst);
+                                if call == 0 {
+                                    assert_eq!(params["headRefOid"], "a".repeat(40));
+                                    release_old.notified().await;
+                                    zeron_rpc::RpcReply::value(&"outdated patch")
+                                } else {
+                                    assert_eq!(call, 1);
+                                    assert_eq!(params["headRefOid"], "b".repeat(40));
+                                    assert_eq!(params["baseRefOid"], "d".repeat(40));
+                                    assert_eq!(params["refresh"], true);
+                                    zeron_rpc::RpcReply::value(&"current patch")
+                                }
+                            }
+                            _ => panic!("unexpected RPC"),
+                        }
+                    }
+                }
+            });
+            let cache = Rc::new(RefCell::new(PullRequestCache::default()));
+            let url = "https://github.com/a/b/pull/1";
+            let mut cached = snapshot("Before push");
+            cached.detail.head_ref_oid = "a".repeat(40);
+            cached.detail.base_ref_oid = "c".repeat(40);
+            cache.borrow_mut().put(None, url.into(), cached);
+            let window = cx.add_window(|window, cx| {
+                PullRequestDetailPage::new(
+                    fixture::state(cx, Some(rpc.client())),
+                    url.into(),
+                    None,
+                    cache.clone(),
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            window
+                .update(cx, |page, _, cx| page.select_tab(Tab::Code, cx))
+                .unwrap();
+            rpc.settle(cx, &runtime, |_| diff_calls.load(Ordering::SeqCst) == 1);
+            window.update(cx, |page, _, cx| page.refresh(cx)).unwrap();
+            if old_finishes_first {
+                release_old.notify_one();
+                rpc.settle(cx, &runtime, |_| rpc.completed() == 1);
+                window
+                    .update(cx, |page, _, _| {
+                        assert!(page.loading && page.diff.is_none());
+                    })
+                    .unwrap();
+            }
+            release_detail.notify_one();
+            rpc.settle(cx, &runtime, |cx| {
+                window.update(cx, |page, _, _| page.diff.is_some()).unwrap()
+            });
+            if !old_finishes_first {
+                release_old.notify_one();
+                rpc.settle(cx, &runtime, |_| rpc.completed() == 3);
+            }
+            window
+                .update(cx, |page, window, _| {
+                    assert_eq!(page.diff.as_ref().unwrap().patch, "current patch");
+                    assert_eq!(page.detail.as_ref().unwrap().head_ref_oid, "b".repeat(40));
+                    let snapshot = cache.borrow_mut().get(&None, url).unwrap();
+                    assert_eq!(snapshot.diff.unwrap().patch, "current patch");
+                    assert_eq!(snapshot.detail.head_ref_oid, "b".repeat(40));
+                    assert!(!snapshot.diff_refresh_owed);
+                    window.remove_window();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            assert_eq!(diff_calls.load(Ordering::SeqCst), 2);
+        }
     }
 
     #[gpui::test]

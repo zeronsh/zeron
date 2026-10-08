@@ -201,6 +201,40 @@ impl ChangeRequestResolver {
             .then(|| format!("{}/{}", remote.owner, remote.repository))
     }
 
+    /// Match a PR's repository against every fetch remote. A fork's origin
+    /// stays the board's default identity, while upstream is a valid handoff.
+    /// Reading remote URLs is local Git only; never contact a remote here.
+    pub async fn matching_repository_for_checkout(
+        &self,
+        cwd: &Path,
+        repository: &str,
+    ) -> Option<String> {
+        if !valid_pr_repository(repository) {
+            return None;
+        }
+        let remotes = self.inspector.git_optional(cwd, &["remote"]).await?;
+        for name in remotes.lines().filter(|name| !name.is_empty()) {
+            let Some(urls) = self
+                .inspector
+                .git_optional(cwd, &["remote", "get-url", "--all", "--", name])
+                .await
+            else {
+                continue;
+            };
+            for url in urls.lines() {
+                if let Some(remote) = parse_git_remote(url)
+                    && remote.host.eq_ignore_ascii_case("github.com")
+                {
+                    let slug = format!("{}/{}", remote.owner, remote.repository);
+                    if slug.eq_ignore_ascii_case(repository) {
+                        return Some(slug);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub async fn resolve_github(
         &self,
         cwd: &Path,
@@ -2061,6 +2095,20 @@ mod tests {
                 "https://github.com/acme/upstream.git",
             ],
         );
+        // Handoffs may use an upstream checkout even when origin is a fork.
+        // Default board discovery must continue to select origin.
+        for (wanted, expected) in [
+            ("ACME/UPSTREAM", Some("acme/upstream")),
+            ("acme/zeron", Some("acme/zeron")),
+            ("missing/repository", None),
+            ("../invalid", None),
+        ] {
+            let matched: Option<String> = client.call_as(
+                methods::GET_CHANGE_REQUEST_REPOSITORY,
+                json!({"cwd": checkout, "repository": wanted, "targetDeviceId": core.device_id}),
+            ).await.unwrap();
+            assert_eq!(matched.as_deref(), expected);
+        }
         run_git(
             &checkout,
             &[
