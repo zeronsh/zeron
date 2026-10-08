@@ -372,6 +372,21 @@ impl ToolCall {
         name == "Agent" || name.starts_with("Agent: ")
     }
 
+    /// A spawn that runs a whole WORKFLOW (claude's `Workflow` tool): its
+    /// children are agents reported through progress, so the chip shows a
+    /// progress summary. Marked by `subagent_type: "workflow"` on the input.
+    pub fn is_workflow_spawn(&self) -> bool {
+        let input = match self {
+            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. } => input.as_ref(),
+            _ => None,
+        };
+        self.is_subagent_spawn()
+            && input
+                .and_then(|i| i.get("subagent_type"))
+                .and_then(serde_json::Value::as_str)
+                == Some("workflow")
+    }
+
     /// The model a subagent SPAWN was given, when the spawn named one.
     ///
     /// Read off the spawn's own input rather than the session's picked model:
@@ -653,6 +668,16 @@ pub enum AgentEvent {
     UserMessage {
         text: String,
     },
+    /// A one-line status for a spawn chip ("1/3 agents · 26.6k tokens"),
+    /// only ever wrapped in [`AgentEvent::Subagent`]. Low-frequency by
+    /// contract — a driver emits it when the child's shape changes (a
+    /// workflow agent starting or settling), never per stream delta. The
+    /// engine stamps it onto the chip's `subagent_tail`; it is not part of
+    /// the subagent's own transcript.
+    #[serde(rename_all = "camelCase")]
+    SubagentProgress {
+        summary: String,
+    },
     /// An event belonging to a SUBAGENT's nested transcript, attributed to
     /// the spawning tool call (`parent_tool_use_id` = the parent-feed
     /// `ToolCall::id` that launched it). Never folded into the parent chat
@@ -681,6 +706,18 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn workflow_spawns_are_marked_by_subagent_type() {
+        let call = |name: &str, kind: &str| ToolCall::Unknown {
+            name: name.into(),
+            input: Some(serde_json::json!({ "subagent_type": kind })),
+        };
+        assert!(call("Agent: Repo scan", "workflow").is_workflow_spawn());
+        assert!(!call("Agent: scan", "general-purpose").is_workflow_spawn());
+        // Genus first: a non-spawn never answers, whatever it carries.
+        assert!(!call("Workflow", "workflow").is_workflow_spawn());
     }
 
     /// Drivers spell the key differently; the chip must not care which one

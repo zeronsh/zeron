@@ -2476,6 +2476,23 @@ async fn drive_run(
             let chip_streaming = folded
                 .iter()
                 .any(|p| matches!(p, MessagePart::Tool { id, .. } if id == parent_tool_use_id));
+            // A progress summary restamps the chip only — it never opens or
+            // feeds the subagent's own doc. Low-frequency by contract, so the
+            // in-place path's per-call doc write is bounded.
+            if let AgentEvent::SubagentProgress { summary } = sub_event.as_ref() {
+                if chip_streaming {
+                    zeron_doc::fold_event_into_parts(&mut folded, &event);
+                    if !dirty {
+                        dirty = true;
+                        flush_at = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    }
+                } else {
+                    let _ =
+                        doc_ref.update_subagent_chip(parent_tool_use_id, None, None, Some(summary));
+                }
+                continue;
+            }
             let sink_known = subagents.contains_key(parent_tool_use_id);
             // A Done with NO sink (a subagent that never streamed — codex
             // turn ends can beat registration) is chip-only: minting a doc

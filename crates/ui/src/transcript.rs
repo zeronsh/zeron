@@ -368,9 +368,10 @@ pub struct ToolItem {
     /// Subagent lifecycle, distinct from `resolved` (eager-done: the spawn
     /// tool's own result lands while the subagent still runs).
     pub subagent_status: Option<SubagentStatus>,
-    /// One-line live tail — LEGACY docs only (new runs stopped folding it;
-    /// per-delta header rewrites read as noise). Never rendered; still
-    /// fingerprinted so an old doc's chips re-splice correctly.
+    /// One-line summary. Rendered only on WORKFLOW spawns, where a driver's
+    /// low-frequency progress writes it; other chips may carry a LEGACY live
+    /// tail (per-delta header rewrites read as noise) that is never rendered
+    /// but still fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
     /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
     /// riding the tool group — the thought process belongs inside the
@@ -924,6 +925,19 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             ),
             None => format!("{server} · {tool}"),
         },
+        // A spawn's input is only the doc's kept badge keys (model, type):
+        // name them plainly rather than as a JSON object.
+        ToolCall::Unknown {
+            name,
+            input: Some(serde_json::Value::Object(input)),
+        } if call.is_subagent_spawn() => std::iter::once(name.clone())
+            .chain(input.iter().filter_map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|value| format!("{}: {value}", key.replace('_', " ")))
+            }))
+            .collect::<Vec<_>>()
+            .join("\n"),
         ToolCall::Unknown { name, input } => match input {
             Some(input) => format!(
                 "{name}\n{}",
@@ -9481,6 +9495,26 @@ fn chip_header_row(
                     .child(SharedString::from(model.to_owned())),
             )
         })
+        .when_some(
+            tool.subagent_tail
+                .clone()
+                .filter(|_| tool.call.is_workflow_spawn()),
+            |row, summary| {
+                // A workflow's progress ("1/3 agents · 26.6k tokens"), the same
+                // passive faint label as the model. Workflow chips only: the
+                // field also carries legacy per-delta tails, never rendered.
+                row.child(
+                    div()
+                        .flex_none()
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(summary),
+                )
+            },
+        )
         .when(running, |row| {
             // The sidebar working-row spinner, in the chip's trailing slot —
             // paint-local (fixed footprint), so it never moves the layout.
@@ -15547,6 +15581,18 @@ mod tests {
         assert_eq!(
             lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
             vec!["[x] a", "[~] b", "[ ] c"]
+        );
+
+        // A spawn's kept badge keys read as plain labels, not a JSON object.
+        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Unknown {
+            name: "Agent: scan-a — done · → APPLE".into(),
+            input: Some(serde_json::json!({"model": "claude-haiku-4-5"})),
+        }) else {
+            panic!("expected an output block")
+        };
+        assert_eq!(
+            lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            vec!["Agent: scan-a — done · → APPLE", "model: claude-haiku-4-5"]
         );
 
         // Blank invocation → no block; the chip stays a plain card.

@@ -48,6 +48,17 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `task_started`: `local_workflow` for a Workflow tool run.
+    #[serde(default)]
+    pub task_type: Option<String>,
+    /// `task_progress` of a workflow: every agent's latest state
+    /// (`label`, `model`, `state`, `resultPreview`, …), keyed by `index`.
+    #[serde(default)]
+    pub workflow_progress: Vec<Value>,
+    /// `task_progress` / `task_notification`: the task's running totals
+    /// (`total_tokens`, `tool_uses`, `duration_ms`).
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]

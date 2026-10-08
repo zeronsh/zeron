@@ -67,6 +67,136 @@ fn opt_str_field(input: &Value, key: &str) -> Option<String> {
     input.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+/// Spawn tools: their tool_use id keys the subagent's chip and doc.
+fn is_spawn_tool(name: &str) -> bool {
+    matches!(name, "Agent" | "Task" | "Workflow")
+}
+
+/// A Workflow call's chip name: the inline script's `meta.description`
+/// (the input carries only the script), else a saved workflow's `name`.
+fn workflow_title(input: &Value) -> String {
+    let script = input.get("script").and_then(Value::as_str).unwrap_or("");
+    let description = script.find("meta").and_then(|meta| {
+        let rest = &script[meta..];
+        let rest = &rest[rest.find("description")? + "description".len()..];
+        let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+        let quote = rest
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '\'' | '"' | '`'))?;
+        let body = &rest[1..];
+        Some(body[..body.find(quote)?].trim().to_owned())
+    });
+    description
+        .filter(|d| !d.is_empty())
+        .or_else(|| opt_str_field(input, "name").filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| "Workflow".into())
+}
+
+/// One workflow agent's live line: "label — Bash: sleep 8 · 2 tools ·
+/// 13.3k tokens · 14s" while running; "done"/"failed" replaces the step once
+/// it settles. `terminal` is `Some(is_error)` for a settled agent.
+fn workflow_agent_line(agent: &Value, index: u64, terminal: Option<bool>) -> String {
+    let num = |key: &str| agent.get(key).and_then(Value::as_u64);
+    let label = opt_str_field(agent, "label")
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| format!("agent {index}"));
+    let step = match terminal {
+        Some(false) => Some("done".to_owned()),
+        Some(true) => Some("failed".to_owned()),
+        None => opt_str_field(agent, "lastToolName").map(|tool| {
+            match opt_str_field(agent, "lastToolSummary").filter(|s| !s.is_empty()) {
+                Some(summary) => format!("{tool}: {summary}"),
+                None => tool,
+            }
+        }),
+    };
+    let mut stats = Vec::new();
+    match num("toolCalls") {
+        Some(1) => stats.push("1 tool".to_owned()),
+        Some(n) if n > 1 => stats.push(format!("{n} tools")),
+        _ => {}
+    }
+    stats.extend(num("tokens").and_then(tokens_label));
+    // Settled agents carry `durationMs`; running ones only timestamps.
+    let elapsed = num("durationMs").or_else(|| {
+        terminal
+            .is_none()
+            .then(|| num("lastProgressAt")?.checked_sub(num("startedAt")?))
+            .flatten()
+    });
+    stats.extend(elapsed.and_then(duration_label));
+    // A settled agent's answer, first line only: the chip header truncates.
+    let outcome = terminal
+        .and_then(|_| opt_str_field(agent, "resultPreview"))
+        .and_then(|r| {
+            r.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_owned)
+        })
+        .map(|line| format!("→ {line}"));
+    let detail = step
+        .into_iter()
+        .chain(stats)
+        .chain(outcome)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if detail.is_empty() {
+        label
+    } else {
+        format!("{label} — {detail}")
+    }
+}
+
+/// A workflow agent's settled state: `Some(is_error)`, `None` while live.
+fn workflow_terminal(state: &str) -> Option<bool> {
+    match state {
+        "done" | "completed" | "success" => Some(false),
+        "failed" | "error" | "errored" | "killed" | "cancelled" | "canceled" => Some(true),
+        _ => None,
+    }
+}
+
+/// "26.6k tokens" / "812 tokens"; nothing for zero.
+fn tokens_label(n: u64) -> Option<String> {
+    match n {
+        0 => None,
+        n if n >= 1000 => Some(format!("{:.1}k tokens", n as f64 / 1000.0)),
+        n => Some(format!("{n} tokens")),
+    }
+}
+
+/// "13s" / "1m10s"; nothing under a second.
+fn duration_label(ms: u64) -> Option<String> {
+    let secs = ms / 1000;
+    match secs {
+        0 => None,
+        s if s < 60 => Some(format!("{s}s")),
+        s => Some(format!("{}m{}s", s / 60, s % 60)),
+    }
+}
+
+/// A workflow chip's summary: "1/3 agents · 26.6k tokens" while running,
+/// "3 agents · 40.1k tokens · 13s" once settled (Claude Code's own wording).
+fn workflow_summary(done: usize, total: usize, usage: Option<&Value>, settled: bool) -> String {
+    let num = |key: &str| usage.and_then(|u| u.get(key)).and_then(Value::as_u64);
+    let agents = if settled {
+        format!("{total} agent{}", if total == 1 { "" } else { "s" })
+    } else {
+        format!("{done}/{total} agents")
+    };
+    std::iter::once(agents)
+        .chain(num("total_tokens").and_then(tokens_label))
+        .chain(
+            settled
+                .then(|| num("duration_ms").and_then(duration_label))
+                .flatten(),
+        )
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// Decode a Claude `tool_use` block (name + input) into a typed [`ToolCall`].
 pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
     match name {
@@ -126,6 +256,16 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
                     format!("Agent: {description}")
                 },
                 input: (!input.is_null()).then(|| input.clone()),
+            }
+        }
+        // A Workflow run is a spawn too: its agents run in the background
+        // and report through `task_progress`, never as tagged frames.
+        "Workflow" => {
+            let mut input = input.as_object().cloned().unwrap_or_default();
+            input.insert("subagent_type".into(), "workflow".into());
+            ToolCall::Unknown {
+                name: format!("Agent: {}", workflow_title(&Value::Object(input.clone()))),
+                input: Some(Value::Object(input)),
             }
         }
         // MCP tools arrive as `mcp__<server>__<tool>`.
@@ -203,6 +343,15 @@ pub(crate) struct Normalizer {
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
     agent_spawn_tools: std::collections::HashSet<String>,
+    /// Workflow agents already surfaced (`<spawn>:wf<index>`) → last state
+    /// and chip name; `task_progress` re-sends every agent each frame, so
+    /// only changes emit.
+    workflow_agents: std::collections::HashMap<String, (String, String)>,
+    /// Workflow phases already headed (`<spawn>:<title>`).
+    workflow_phases: std::collections::HashSet<String>,
+    /// Workflow spawns → last (settled, total) agent counts summarized onto
+    /// the chip; a new summary goes out only when the counts move.
+    workflow_counts: std::collections::HashMap<String, (usize, usize)>,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
@@ -218,6 +367,9 @@ impl Normalizer {
             agent_tasks: std::collections::HashMap::new(),
             agent_tool_spawns: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
+            workflow_agents: std::collections::HashMap::new(),
+            workflow_phases: std::collections::HashSet::new(),
+            workflow_counts: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
         }
@@ -269,6 +421,7 @@ impl Normalizer {
             };
             if !(text.contains("\"Agent\"")
                 || text.contains("\"Task\"")
+                || text.contains("\"Workflow\"")
                 || text.contains("agentId"))
             {
                 continue;
@@ -289,16 +442,19 @@ impl Normalizer {
                 Some("assistant") => {
                     for block in blocks {
                         if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                            && matches!(
-                                block.get("name").and_then(Value::as_str),
-                                Some("Agent" | "Task")
-                            )
+                            && block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_spawn_tool)
                             && let Some(id) = block
                                 .get("id")
                                 .and_then(Value::as_str)
                                 .filter(|id| !id.is_empty())
                         {
                             norm.agent_spawn_tools.insert(id.to_owned());
+                            if block.get("name").and_then(Value::as_str) == Some("Workflow") {
+                                norm.workflow_counts.insert(id.to_owned(), (0, 0));
+                            }
                         }
                     }
                 }
@@ -331,6 +487,105 @@ impl Normalizer {
     pub fn rotate_for_steer(&mut self) -> (String, String) {
         let prev = std::mem::replace(&mut self.assistant_message_id, new_message_id());
         (prev, self.assistant_message_id.clone())
+    }
+
+    /// A workflow's `task_progress` → its doc: a heading per phase and one
+    /// agent chip per agent, re-emitted (same id, replaced in place) whenever
+    /// its live line changes, and resolved when it reaches a terminal state.
+    /// The wire streams no agent transcripts; this summary is all there is.
+    fn workflow_progress(&mut self, f: &super::wire::SystemFrame) -> Vec<AgentEvent> {
+        let spawn = f
+            .task_id
+            .as_deref()
+            .and_then(|task| self.agent_tasks.get(task).cloned())
+            .or_else(|| f.tool_use_id.clone().filter(|t| !t.is_empty()));
+        let Some(spawn) = spawn.filter(|s| self.agent_spawn_tools.contains(s)) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for agent in &f.workflow_progress {
+            let Some(index) = agent.get("index").and_then(Value::as_u64) else {
+                continue;
+            };
+            let id = format!("{spawn}:wf{index}");
+            let state = str_field(agent, "state");
+            let terminal = workflow_terminal(&state);
+            // A queued agent reports its requested model alias ("haiku");
+            // wait for `startedAt`, when the resolved id is filled in.
+            if agent.get("startedAt").is_none() && terminal.is_none() {
+                continue;
+            }
+            if let Some(phase) = opt_str_field(agent, "phaseTitle").filter(|p| !p.is_empty())
+                && self.workflow_phases.insert(format!("{spawn}:{phase}"))
+            {
+                out.push(tag(
+                    &spawn,
+                    AgentEvent::TextDelta {
+                        text: format!("### {phase}\n"),
+                    },
+                ));
+            }
+            let name = format!("Agent: {}", workflow_agent_line(agent, index, terminal));
+            let previous = self
+                .workflow_agents
+                .insert(id.clone(), (state.clone(), name.clone()));
+            if previous.as_ref().map(|(_, n)| n) != Some(&name) {
+                let mut input = serde_json::Map::new();
+                for (from, to) in [("model", "model"), ("promptPreview", "prompt")] {
+                    if let Some(v) = agent.get(from).filter(|v| v.is_string()) {
+                        input.insert(to.into(), v.clone());
+                    }
+                }
+                out.push(tag(
+                    &spawn,
+                    AgentEvent::ToolCall {
+                        id: id.clone(),
+                        call: ToolCall::Unknown {
+                            name,
+                            input: Some(Value::Object(input)),
+                        },
+                    },
+                ));
+            }
+            if previous.as_ref().map(|(s, _)| s) == Some(&state) {
+                continue;
+            }
+            let Some(is_error) = terminal else {
+                continue;
+            };
+            out.push(tag(
+                &spawn,
+                AgentEvent::ToolResult {
+                    id,
+                    is_error,
+                    output: opt_str_field(agent, "resultPreview")
+                        .or_else(|| opt_str_field(agent, "error")),
+                    diff: None,
+                },
+            ));
+        }
+        // Every frame re-sends every known agent (queued ones included), so
+        // the counts come straight from it; the chip hears only movements.
+        let agents = f
+            .workflow_progress
+            .iter()
+            .filter(|a| a.get("type").and_then(Value::as_str) == Some("workflow_agent"));
+        let total = agents.clone().count();
+        let settled = agents
+            .filter(|a| workflow_terminal(&str_field(a, "state")).is_some())
+            .count();
+        if let Some(counts) = self.workflow_counts.get_mut(&spawn)
+            && *counts != (settled, total)
+        {
+            *counts = (settled, total);
+            out.push(tag(
+                &spawn,
+                AgentEvent::SubagentProgress {
+                    summary: workflow_summary(settled, total, f.usage.as_ref(), false),
+                },
+            ));
+        }
+        out
     }
 
     /// Normalize one stdout frame into 0+ unified events. `interrupted` folds
@@ -373,21 +628,38 @@ impl Normalizer {
                         // Non-terminal notification shapes: nothing to close.
                         _ => return Vec::new(),
                     };
-                    return vec![tag(
-                        parent,
-                        AgentEvent::Done {
-                            status,
-                            result: None,
-                            error: None,
-                            session_id: None,
-                        },
-                    )];
+                    // A workflow's notification carries its final totals:
+                    // summarize them onto the chip before it settles.
+                    let summary = self.workflow_counts.get(parent).map(|&(_, total)| {
+                        tag(
+                            parent,
+                            AgentEvent::SubagentProgress {
+                                summary: workflow_summary(total, total, f.usage.as_ref(), true),
+                            },
+                        )
+                    });
+                    return summary
+                        .into_iter()
+                        .chain(std::iter::once(tag(
+                            parent,
+                            AgentEvent::Done {
+                                status,
+                                result: None,
+                                error: None,
+                                session_id: None,
+                            },
+                        )))
+                        .collect();
                 }
                 // An AGENT task starting (subagent_type present — subagent-
                 // owned shell tasks carry the same subtype without it):
                 // record agentId → spawn id for SendMessage steer re-keying.
+                if f.subtype == "task_progress" && !f.workflow_progress.is_empty() {
+                    return self.workflow_progress(&f);
+                }
                 if f.subtype == "task_started"
-                    && f.subagent_type.is_some()
+                    && (f.subagent_type.is_some()
+                        || f.task_type.as_deref() == Some("local_workflow"))
                     && let (Some(task), Some(tool)) = (
                         f.task_id.as_deref().filter(|t| !t.is_empty()),
                         f.tool_use_id.as_deref().filter(|t| !t.is_empty()),
@@ -509,8 +781,11 @@ impl Normalizer {
                 // Record spawn tool ids up front: `task_notification` keys on
                 // them; a task may finish before a `task_started` arrives.
                 for b in f.message.blocks() {
-                    if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
+                    if b.kind == "tool_use" && is_spawn_tool(&b.name) {
                         self.agent_spawn_tools.insert(b.id.clone());
+                        if b.name == "Workflow" {
+                            self.workflow_counts.insert(b.id.clone(), (0, 0));
+                        }
                     }
                 }
                 let mut out: Vec<AgentEvent> = f
@@ -526,20 +801,20 @@ impl Normalizer {
                         // message — the wire never echoes it on the child
                         // feed (child user frames carry tool results and
                         // steers only), so seed it here and the subagent
-                        // transcript starts the way every chat does.
-                        let opening = matches!(b.name.as_str(), "Agent" | "Task")
-                            .then(|| b.input.get("prompt"))
-                            .flatten()
-                            .and_then(Value::as_str)
-                            .filter(|p| !p.trim().is_empty())
-                            .map(|prompt| {
-                                tag(
-                                    &b.id,
-                                    AgentEvent::UserMessage {
-                                        text: prompt.to_owned(),
-                                    },
-                                )
-                            });
+                        // transcript starts the way every chat does. A
+                        // workflow has no prompt; its title opens the doc so
+                        // the chip goes live before the first progress frame.
+                        let opening = match b.name.as_str() {
+                            "Agent" | "Task" => b
+                                .input
+                                .get("prompt")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            "Workflow" => Some(workflow_title(&b.input)),
+                            _ => None,
+                        }
+                        .filter(|p| !p.trim().is_empty())
+                        .map(|text| tag(&b.id, AgentEvent::UserMessage { text }));
                         // A SendMessage steer never echoes on the child feed
                         // (live-verified) — surface it from the parent's own
                         // call, re-keyed onto the spawn it addresses.
@@ -1416,6 +1691,181 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn workflow_runs_surface_as_a_spawn_with_one_chip_per_agent() {
+        // Shapes trimmed from a live 2.1.285 capture: the agents report only
+        // through untagged task_progress, then one task_notification.
+        let mut norm = Normalizer::new();
+        let mut feed = |raw: &str| {
+            norm.normalize(
+                crate::claude::wire::parse_frame(raw).expect("parses"),
+                false,
+            )
+        };
+        let ev = feed(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_wf","name":"Workflow","input":{"script":"export const meta = {\n  name: 'apple-banana',\n  description: 'Two agents in parallel',\n}\nawait parallel([])"}}]}}"#,
+        );
+        assert!(ev.iter().any(|e| matches!(e,
+            AgentEvent::ToolCall { id, call } if id == "toolu_wf" && call.is_subagent_spawn()
+                && matches!(call, ToolCall::Unknown { name, .. } if name == "Agent: Two agents in parallel"))));
+        assert!(ev.contains(&tag(
+            "toolu_wf",
+            AgentEvent::UserMessage {
+                text: "Two agents in parallel".into()
+            }
+        )));
+        assert!(feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"wd1","tool_use_id":"toolu_wf","description":"Two agents in parallel","task_type":"local_workflow"}"#,
+        )
+        .is_empty());
+        // Agent 2 starts out queued: no `startedAt`, model still the alias.
+        let progress = |a: &str, b: &str, second: &str| {
+            format!(
+                r#"{{"type":"system","subtype":"task_progress","task_id":"wd1","tool_use_id":"toolu_wf","workflow_progress":[{{"type":"workflow_agent","index":1,"label":"Reply APPLE","model":"claude-haiku-4-5","startedAt":1,"state":"{a}","resultPreview":"APPLE"}},{{"type":"workflow_agent","index":2,"label":"Reply BANANA",{second}"state":"{b}","resultPreview":"BANANA"}}]}}"#
+            )
+        };
+        let summary = |text: &str| {
+            tag(
+                "toolu_wf",
+                AgentEvent::SubagentProgress {
+                    summary: text.into(),
+                },
+            )
+        };
+        let ev = feed(&progress("start", "start", r#""model":"haiku","#));
+        assert_eq!(ev.len(), 2);
+        assert!(
+            matches!(&ev[0], AgentEvent::Subagent { parent_tool_use_id, event }
+            if parent_tool_use_id == "toolu_wf"
+                && matches!(event.as_ref(), AgentEvent::ToolCall { id, call }
+                    if id == "toolu_wf:wf1" && call.subagent_model() == Some("claude-haiku-4-5")))
+        );
+        // The queued agent already counts toward the chip's total.
+        assert_eq!(ev[1], summary("0/2 agents"));
+        let started = r#""model":"claude-haiku-4-5","startedAt":2,"#;
+        let ev = feed(&progress("start", "start", started));
+        assert!(matches!(&ev[..], [AgentEvent::Subagent { event, .. }]
+            if matches!(event.as_ref(), AgentEvent::ToolCall { id, call }
+                if id == "toolu_wf:wf2" && call.subagent_model() == Some("claude-haiku-4-5"))));
+        // Unchanged states re-sent each frame emit nothing.
+        assert!(feed(&progress("start", "start", started)).is_empty());
+        // Settling rewrites the chip's line in place, resolves it, and moves
+        // the parent chip's count.
+        let ev = feed(&progress("start", "done", started));
+        assert!(matches!(&ev[0], AgentEvent::Subagent { event, .. }
+            if matches!(event.as_ref(), AgentEvent::ToolCall { id, call: ToolCall::Unknown { name, .. } }
+                if id == "toolu_wf:wf2" && name == "Agent: Reply BANANA — done · → BANANA")));
+        assert_eq!(
+            ev[1..],
+            [
+                tag(
+                    "toolu_wf",
+                    AgentEvent::ToolResult {
+                        id: "toolu_wf:wf2".into(),
+                        is_error: false,
+                        output: Some("BANANA".into()),
+                        diff: None,
+                    }
+                ),
+                summary("1/2 agents"),
+            ]
+        );
+        // The notification's totals land on the chip just before it settles.
+        let ev = feed(
+            r#"{"type":"system","subtype":"task_notification","task_id":"wd1","tool_use_id":"toolu_wf","status":"completed","usage":{"total_tokens":40100,"tool_uses":4,"duration_ms":70500}}"#,
+        );
+        assert_eq!(ev[0], summary("2 agents · 40.1k tokens · 1m10s"));
+        assert!(
+            matches!(&ev[1..], [AgentEvent::Subagent { parent_tool_use_id, event }]
+            if parent_tool_use_id == "toolu_wf"
+                && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. }))
+        );
+        // Progress for a task never seen as a spawn is ignored.
+        assert!(normalize_one(&progress("start", "start", started)).is_empty());
+    }
+
+    #[test]
+    fn live_workflow_capture_heads_phases_and_tracks_agent_progress() {
+        // Live 2.1.285 capture (trimmed to the Workflow call and task frames):
+        // phases Scan (2 agents running Bash/Read) then Report (1 agent).
+        let raw = include_str!("../../tests/fixtures/claude/live-2.1.285-workflow.jsonl");
+        let mut norm = Normalizer::new();
+        let events: Vec<AgentEvent> = raw
+            .lines()
+            .map(|line| crate::claude::wire::parse_frame(line).expect("parses"))
+            .flat_map(|frame| norm.normalize(frame, false))
+            .collect();
+        let tagged: Vec<&AgentEvent> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Subagent { event, .. } => Some(event.as_ref()),
+                _ => None,
+            })
+            .collect();
+        let headings: Vec<&str> = tagged
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings, ["### Scan\n", "### Report\n"]);
+        let names: Vec<&str> = tagged
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCall {
+                    call: ToolCall::Unknown { name, .. },
+                    ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        // A running line names the agent's current step; the settled line
+        // carries its totals.
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("Agent: agent-a — Bash: "))
+        );
+        assert!(names.contains(
+            &"Agent: agent-a — done · 2 tools · 13.3k tokens · 13s · → AssetCacheLocatorUtil"
+        ));
+        let results = tagged
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(results, 3);
+        // The parent chip hears only count movements, then the final totals.
+        let summaries: Vec<&str> = tagged
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::SubagentProgress { summary } => Some(summary.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summaries.first(), Some(&"0/2 agents"));
+        assert_eq!(summaries.last(), Some(&"3 agents · 38.5k tokens · 19s"));
+        assert!(
+            summaries.len() <= 6,
+            "low-frequency by contract: {summaries:?}"
+        );
+        assert!(matches!(
+            tagged.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ));
     }
 }
 
