@@ -43,9 +43,26 @@ pub(crate) fn is_image_path(path: &str) -> bool {
     })
 }
 
+/// UNC (`\\host\share`, `//host/share`), device and verbatim (`\\.\`,
+/// `\\?\`, `\??\`) and drive-relative (`C:x.png`) forms. Agent output names
+/// them freely, and merely opening one can reach another host (on Windows
+/// with the user's NTLM credentials), so they are never previewed. The
+/// engine's jail refuses them as well.
+fn is_remote_or_device_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let separator = |b: Option<&u8>| matches!(b, Some(b'/' | b'\\'));
+    (separator(bytes.first()) && separator(bytes.get(1)))
+        || path.starts_with(r"\??\")
+        || (bytes.len() >= 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && !separator(bytes.get(2)))
+}
+
 fn push_path(out: &mut Vec<SharedString>, path: &str) {
     if out.len() < MAX_IMAGES_PER_TOOL
         && is_image_path(path)
+        && !is_remote_or_device_path(path)
         && !out.iter().any(|known| known.as_ref() == path)
     {
         out.push(SharedString::from(path.to_owned()));
@@ -127,7 +144,10 @@ pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedS
 pub(crate) fn resolve_path(path: &str, cwd: Option<&str>) -> String {
     let bytes = path.as_bytes();
     let absolute = path.starts_with(['/', '\\'])
-        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':');
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'));
     match cwd.filter(|_| !absolute) {
         Some(cwd) if cwd.contains('\\') => format!(
             "{}\\{}",
@@ -247,7 +267,11 @@ impl ToolImages {
             })
             .collect();
         if self.holders.get(chip) != Some(&keys) {
-            self.holders.insert(chip.clone(), keys);
+            // Keys that dropped out of the chip (its output changed) start the
+            // grace like a collapse; ones it still shows stay held.
+            if let Some(previous) = self.holders.insert(chip.clone(), keys) {
+                self.start_grace(previous, get, cx);
+            }
         }
         thumbs
     }
@@ -262,6 +286,16 @@ impl ToolImages {
         let Some(keys) = self.holders.remove(chip) else {
             return;
         };
+        self.start_grace(keys, get, cx);
+    }
+
+    /// Keys no expanded chip holds any more start the release grace.
+    fn start_grace<V: 'static>(
+        &mut self,
+        keys: Vec<ImageKey>,
+        get: fn(&mut V) -> &mut ToolImages,
+        cx: &mut Context<V>,
+    ) {
         let at = cx.background_executor().now() + RELEASE_GRACE;
         for key in keys {
             if self.holders.values().any(|held| held.contains(&key)) {
@@ -536,11 +570,8 @@ fn decode_thumbnail(mime: &str, bytes: Vec<u8>) -> Option<(Arc<RenderImage>, f32
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
+    // Shared preview bounds: several chips may decode at once.
+    reader.limits(crate::image_media::raster_limits());
     let decoded = reader.decode().ok()?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0 || height == 0 {
@@ -628,6 +659,49 @@ mod tests {
         assert_eq!(resolve_path(r"D:\x.png", Some(r"C:\w")), r"D:\x.png");
         assert_eq!(resolve_path("/x.png", Some("/w")), "/x.png");
         assert_eq!(resolve_path("x.png", None), "x.png");
+        assert_eq!(resolve_path("C:x.png", Some("/w")), "/w/C:x.png");
+    }
+
+    #[test]
+    fn network_device_and_drive_relative_paths_are_never_previewed() {
+        let output = [
+            r"\\attacker\share\a.png",
+            "//attacker/share/b.png",
+            r"\/attacker\share\c.png",
+            "file:////attacker/share/d.png",
+            r"\\?\UNC\attacker\share\e.png",
+            r"\\?\C:\shots\f.png",
+            r"\\.\pipe\g.png",
+            r"\??\UNC\attacker\share\h.png",
+            "C:i.png",
+        ]
+        .join("\n");
+        let found = paths(
+            ToolCall::Exec {
+                command: "open ok.png".into(),
+            },
+            Some(&output),
+        );
+        assert_eq!(found, ["ok.png"]);
+        assert!(
+            paths(
+                ToolCall::ReadFile {
+                    path: r"\\attacker\share\a.png".into()
+                },
+                None
+            )
+            .is_empty()
+        );
+        // Ordinary absolute paths in both styles still preview.
+        assert_eq!(
+            paths(
+                ToolCall::Exec {
+                    command: r"cp /tmp/a.png C:\shots\b.png D:/c.png".into()
+                },
+                None
+            ),
+            ["/tmp/a.png", r"C:\shots\b.png", "D:/c.png"]
+        );
     }
 
     #[test]
@@ -643,6 +717,12 @@ mod tests {
         // Red in RGBA is [0, 0, 255, 255] in BGRA.
         assert_eq!(&image.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
         assert!(decode_thumbnail("image/png", b"nope".to_vec()).is_none());
+        // Past the shared decoder bounds: refused, never fully allocated.
+        let mut wide = Cursor::new(Vec::new());
+        image::GrayImage::new(4097, 1)
+            .write_to(&mut wide, image::ImageFormat::Png)
+            .unwrap();
+        assert!(decode_thumbnail("image/png", wide.into_inner()).is_none());
     }
 
     struct Host {
@@ -746,6 +826,37 @@ mod tests {
         cx.executor().advance_clock(RELEASE_GRACE * 2);
         cx.run_until_parked();
         host.update(cx, |host, _| assert!(host.images.is_idle()));
+    }
+
+    #[gpui::test]
+    fn keys_dropped_from_a_held_chip_are_released(cx: &mut gpui::TestAppContext) {
+        let host = cx.new(|_| Host {
+            images: ToolImages::default(),
+        });
+        let key = |path: &str| ImageKey {
+            device: "d".into(),
+            path: path.into(),
+        };
+        let (a, b) = (key("/w/a.png"), key("/w/b.png"));
+        let chip = SharedString::from("row#d0");
+        let loader = Loader {
+            engine: None,
+            local_device: None,
+        };
+        host.update(cx, |host, cx| {
+            host.images
+                .hold(&chip, vec![a.clone(), b.clone()], &loader, get, cx);
+            // The chip's output changed while expanded: `a` is gone from it.
+            host.images.hold(&chip, vec![b.clone()], &loader, get, cx);
+            assert!(host.images.entries[&a].release_at.is_some());
+            assert!(host.images.entries[&b].release_at.is_none());
+        });
+        cx.executor().advance_clock(RELEASE_GRACE * 2);
+        cx.run_until_parked();
+        host.update(cx, |host, _| {
+            assert!(!host.images.entries.contains_key(&a));
+            assert!(host.images.entries.contains_key(&b));
+        });
     }
 
     #[gpui::test]

@@ -4,7 +4,7 @@
 //! without copies or child windows. GPUI keeps every pointer event and
 //! forwards only those that reach the page; the page owns the keyboard while
 //! focused. Callbacks enqueue events and never re-enter GPUI.
-use super::model::{PageState, Presentation, allowed_navigation};
+use super::model::{PageState, Presentation, allowed_frame_navigation, allowed_navigation};
 use gpui::{Bounds, CursorStyle, Keystroke, Modifiers, MouseButton, Pixels, Point, Window};
 use std::{
     cell::{Cell, RefCell},
@@ -14,9 +14,10 @@ use webview2_com::{
     AcceleratorKeyPressedEventHandler, CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
     DocumentTitleChangedEventHandler, DownloadStartingEventHandler, FaviconChangedEventHandler,
-    HistoryChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
-    NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
+    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
+    Microsoft::Web::WebView2::Win32::*, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
     take_pwstr,
 };
 use windows::{
@@ -56,11 +57,33 @@ enum Environment {
     Failed(String),
 }
 
-#[derive(Default)]
 struct EnvironmentState {
     environment: Environment,
     /// Set once the shared folder answered ERROR_BUSY (see [`is_busy`]).
     own_folder: bool,
+    /// InPrivate profile of this window/profile's pages. Every InPrivate
+    /// controller with the same profile name shares one cookie jar — across
+    /// windows, profile switches and processes sharing the folder — so each
+    /// `BrowserData` gets its own, as macOS gets a fresh non-persistent store.
+    profile: String,
+}
+
+impl Default for EnvironmentState {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        Self {
+            environment: Environment::default(),
+            own_folder: false,
+            profile: format!(
+                "zeron-{}-{started}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+        }
+    }
 }
 
 /// A window/profile's WebView2 environment, created on first use: one
@@ -96,6 +119,19 @@ impl BrowserData {
         }
     }
 
+    /// Drop `environment` after its browser process exited, so the next page
+    /// starts a fresh one. A newer environment is left alone.
+    fn forget(&self, environment: &ICoreWebView2Environment) {
+        let mut state = self.0.borrow_mut();
+        if matches!(&state.environment, Environment::Ready(ready) if ready == environment) {
+            state.environment = Environment::Idle;
+        }
+    }
+
+    fn profile(&self) -> String {
+        self.0.borrow().profile.clone()
+    }
+
     /// Move this process to its own folder after the shared one was busy.
     /// Returns false when that already happened (no further retries).
     fn fall_back(&self) -> bool {
@@ -124,20 +160,46 @@ fn user_data_folder(own: bool) -> std::path::PathBuf {
     if !own {
         return temp.join("zeron-webview2");
     }
-    // Sweep folders of exited processes. A live runtime locks its files,
-    // so removing an in-use folder simply fails.
+    // Sweep folders of exited processes. Only those: removal deletes what
+    // it can before failing on a locked file, so a live instance's folder
+    // would lose its unlocked files.
     let pid = std::process::id();
     let sweep = temp.clone();
     std::thread::spawn(move || {
         for entry in std::fs::read_dir(&sweep).into_iter().flatten().flatten() {
             let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("zeron-webview2-") && name != format!("zeron-webview2-{pid}") {
+            let owner = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("zeron-webview2-"))
+                .and_then(|owner| owner.parse::<u32>().ok());
+            if let Some(owner) = owner
+                && owner != pid
+                && !process_alive(owner)
+            {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
     });
     temp.join(format!("zeron-webview2-{pid}"))
+}
+
+/// Whether `pid` names a running process (pids are reused, so a false
+/// "alive" only leaves a stale folder for a later sweep).
+fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let alive = GetExitCodeProcess(process, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        CloseHandle(process);
+        alive
+    }
 }
 
 fn create_environment(shared: std::rc::Weak<RefCell<EnvironmentState>>) {
@@ -206,6 +268,8 @@ fn runtime_error(error: &windows::core::Error) -> String {
 
 /// COM objects of a created page.
 struct Page {
+    /// The environment the page lives in (forgotten if its browser exits).
+    environment: ICoreWebView2Environment,
     composition: ICoreWebView2CompositionController,
     controller: ICoreWebView2Controller,
     webview: ICoreWebView2,
@@ -238,6 +302,8 @@ struct Geometry {
 pub(super) struct Host {
     hwnd: HWND,
     tx: Sender,
+    /// Where pages are created (again, after the browser process exited).
+    data: BrowserData,
     page: RefCell<Option<Page>>,
     pending_url: RefCell<Option<String>>,
     requested_url: RefCell<Option<String>>,
@@ -271,6 +337,7 @@ impl NativePage {
         let host = Rc::new(Host {
             hwnd,
             tx,
+            data: data.clone(),
             page: RefCell::new(None),
             pending_url: RefCell::new(None),
             requested_url: RefCell::new(None),
@@ -322,7 +389,13 @@ impl NativePage {
     }
 
     pub fn reload(&self) {
-        self.0.error.borrow_mut().take();
+        let failed = self.0.error.borrow_mut().take().is_some();
+        if failed && self.0.page.borrow().is_none() {
+            // Nothing is being created (that ends in a page or an error):
+            // start over, in a fresh environment if the old one died.
+            self.0.loading.set(true);
+            Host::start(&self.0, self.0.data.clone());
+        }
         if let Some(page) = &*self.0.page.borrow() {
             // Retrying the requested URL also works after a failed load.
             let failed_url = self.0.requested_url.borrow().clone();
@@ -468,6 +541,8 @@ impl Host {
         environment: &ICoreWebView2Environment,
         data: BrowserData,
     ) -> windows::core::Result<()> {
+        let profile = HSTRING::from(data.profile());
+        let attach_environment = environment.clone();
         let weak = Rc::downgrade(host);
         let handler = CreateCoreWebView2CompositionControllerCompletedHandler::create(Box::new(
             move |result, composition| {
@@ -476,7 +551,7 @@ impl Host {
                 };
                 match result.and_then(|()| composition.ok_or_else(windows::core::Error::empty)) {
                     Ok(composition) => {
-                        if let Err(error) = Host::attach(&host, composition) {
+                        if let Err(error) = Host::attach(&host, composition, &attach_environment) {
                             host.fail(&runtime_error(&error));
                         }
                     }
@@ -486,31 +561,31 @@ impl Host {
                 Ok(())
             },
         ));
+        // InPrivate in this window's own profile, or not at all: a runtime
+        // without controller options would persist cookies in the folder.
         unsafe {
-            match environment.cast::<ICoreWebView2Environment10>() {
-                Ok(environment) => {
-                    let options = environment.CreateCoreWebView2ControllerOptions()?;
-                    options.SetIsInPrivateModeEnabled(true)?;
-                    environment.CreateCoreWebView2CompositionControllerWithOptions(
-                        host.hwnd, &options, &handler,
-                    )
-                }
-                Err(_) => environment
-                    .cast::<ICoreWebView2Environment3>()?
-                    .CreateCoreWebView2CompositionController(host.hwnd, &handler),
-            }
+            let environment = environment.cast::<ICoreWebView2Environment10>()?;
+            let options = environment.CreateCoreWebView2ControllerOptions()?;
+            options.SetIsInPrivateModeEnabled(true)?;
+            options.SetProfileName(&profile)?;
+            environment
+                .CreateCoreWebView2CompositionControllerWithOptions(host.hwnd, &options, &handler)
         }
     }
 
     fn attach(
         host: &Rc<Self>,
         composition: ICoreWebView2CompositionController,
+        environment: &ICoreWebView2Environment,
     ) -> windows::core::Result<()> {
         let controller: ICoreWebView2Controller = composition.cast()?;
         let webview = unsafe { controller.CoreWebView2()? };
         unsafe {
             let settings = webview.Settings()?;
             settings.SetAreDevToolsEnabled(false)?;
+            // No page↔host channel exists; keep it that way.
+            settings.SetIsWebMessageEnabled(false)?;
+            settings.SetAreHostObjectsAllowed(false)?;
             settings.SetIsStatusBarEnabled(false)?;
             settings.SetIsZoomControlEnabled(true)?;
             if let Ok(controller) = controller.cast::<ICoreWebView2Controller3>() {
@@ -523,17 +598,60 @@ impl Host {
             webview.add_NavigationStarting(
                 &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                     if let (Some(host), Some(args)) = (weak.upgrade(), args) {
+                        // Fail closed: an unreadable target is cancelled.
                         let mut uri = PWSTR::null();
-                        args.Uri(&mut uri)?;
-                        let uri = take_pwstr(uri);
-                        if allowed_navigation(&uri) {
-                            *host.requested_url.borrow_mut() = Some(uri);
-                            host.error.borrow_mut().take();
-                            host.loading.set(true);
-                            host.changed();
-                        } else {
+                        let uri = args.Uri(&mut uri).map(|()| take_pwstr(uri));
+                        match uri {
+                            Ok(uri) if allowed_navigation(&uri) => {
+                                *host.requested_url.borrow_mut() = Some(uri);
+                                host.error.borrow_mut().take();
+                                host.loading.set(true);
+                                host.changed();
+                            }
+                            _ => args.SetCancel(true)?,
+                        }
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+            // Subframes too (the main-frame event does not see them): web
+            // content only — their own documents (about:blank, srcdoc, data:,
+            // blob:) included — never a scheme that leaves the page.
+            webview.add_FrameNavigationStarting(
+                &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                    if let Some(args) = args {
+                        let mut uri = PWSTR::null();
+                        let allowed = args
+                            .Uri(&mut uri)
+                            .is_ok_and(|()| allowed_frame_navigation(&take_pwstr(uri)));
+                        if !allowed {
                             args.SetCancel(true)?;
                         }
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+            // Never hand a page's link to another app (zeron://, ms-*, mailto:)
+            // from inside Zeron, prompt or not.
+            if let Ok(webview18) = webview.cast::<ICoreWebView2_18>() {
+                webview18.add_LaunchingExternalUriScheme(
+                    &LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
+                        if let Some(args) = args {
+                            args.SetCancel(true)?;
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )?;
+            }
+            // Camera, microphone, location, notifications, clipboard reads:
+            // nothing a preview needs, and no prompt that looks like Zeron's.
+            webview.add_PermissionRequested(
+                &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
+                    if let Some(args) = args {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
                     }
                     Ok(())
                 })),
@@ -600,13 +718,19 @@ impl Host {
             webview.add_NewWindowRequested(
                 &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
                     if let (Some(host), Some(args)) = (weak.upgrade(), args) {
+                        // Handled first: no default popup window, whatever
+                        // fails below. Only a click opens a tab — WebView2
+                        // has no popup blocker, and each opened tab could
+                        // open more.
+                        args.SetHandled(true)?;
+                        let mut clicked = windows::core::BOOL::default();
+                        args.IsUserInitiated(&mut clicked)?;
                         let mut uri = PWSTR::null();
                         args.Uri(&mut uri)?;
                         let uri = take_pwstr(uri);
-                        if allowed_navigation(&uri) {
+                        if clicked.as_bool() && allowed_navigation(&uri) {
                             let _ = host.tx.try_send(NativeEvent::NewTab(uri));
                         }
-                        args.SetHandled(true)?;
                     }
                     Ok(())
                 })),
@@ -614,9 +738,26 @@ impl Host {
             )?;
             let weak = Rc::downgrade(host);
             webview.add_ProcessFailed(
-                &ProcessFailedEventHandler::create(Box::new(move |_, _| {
-                    if let Some(host) = weak.upgrade() {
-                        host.fail("The page stopped responding. Reload to continue.");
+                &ProcessFailedEventHandler::create(Box::new(move |_, args| {
+                    let (Some(host), Some(args)) = (weak.upgrade(), args) else {
+                        return Ok(());
+                    };
+                    let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                    args.ProcessFailedKind(&mut kind)?;
+                    match kind {
+                        // The whole environment is gone: every page of it
+                        // needs a new one, which Reload then creates.
+                        COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => {
+                            host.browser_exited();
+                        }
+                        // Reload recreates the renderer.
+                        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                        | COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => {
+                            host.fail("The page stopped responding. Reload to continue.");
+                        }
+                        // GPU, utility and subframe processes are restarted
+                        // by WebView2; the page keeps working.
+                        kind => tracing::debug!(kind = kind.0, "browser helper process failed"),
                     }
                     Ok(())
                 })),
@@ -626,13 +767,30 @@ impl Host {
                 let weak = Rc::downgrade(host);
                 webview4.add_DownloadStarting(
                     &DownloadStartingEventHandler::create(Box::new(move |_, args| {
-                        if let Some(args) = args {
-                            args.SetCancel(true)?;
-                        }
-                        if let Some(host) = weak.upgrade() {
+                        let Some(args) = args else {
+                            return Ok(());
+                        };
+                        args.SetCancel(true)?;
+                        let mut uri = PWSTR::null();
+                        let uri = args
+                            .DownloadOperation()
+                            .and_then(|download| download.Uri(&mut uri))
+                            .map(|()| take_pwstr(uri))
+                            .unwrap_or_default();
+                        let Some(host) = weak.upgrade() else {
+                            return Ok(());
+                        };
+                        // Only a page that turned out to be a file is an error
+                        // (as on macOS); a download the page started leaves it
+                        // as it was.
+                        let requested = host.requested_url.borrow().clone();
+                        if requested.is_some_and(|requested| requested == uri) {
                             host.fail(
                                 "This file can’t be previewed here. Open it in your default browser.",
                             );
+                        } else {
+                            host.loading.set(false);
+                            host.changed();
                         }
                         Ok(())
                     })),
@@ -700,6 +858,7 @@ impl Host {
             )?;
         }
         *host.page.borrow_mut() = Some(Page {
+            environment: environment.clone(),
             composition,
             controller,
             webview,
@@ -740,6 +899,34 @@ impl Host {
         self.loading.set(false);
         self.update_visibility();
         self.changed();
+    }
+
+    /// The page's browser process exited: release the dead page and its
+    /// environment, and keep the URL so Reload rebuilds the page there.
+    fn browser_exited(&self) {
+        let url = self
+            .requested_url
+            .borrow()
+            .clone()
+            .or_else(|| self.page_url());
+        if let Some(page) = self.close_page() {
+            self.data.forget(&page.environment);
+        }
+        *self.pending_url.borrow_mut() = url;
+        self.fail("The browser stopped. Reload to continue.");
+    }
+
+    fn close_page(&self) -> Option<Page> {
+        let page = self.page.borrow_mut().take()?;
+        unsafe {
+            if let Some((visual, layer, _)) = &page.visual
+                && page.mounted
+            {
+                let _ = layer.RemoveVisual(visual);
+            }
+            let _ = page.controller.Close();
+        }
+        Some(page)
     }
 
     /// Browser and app shortcuts go to GPUI even while the page has focus.
@@ -793,10 +980,13 @@ impl Host {
     fn remount(&self, composition: gpui::NativeComposition) {
         let mut page = self.page.borrow_mut();
         let Some(page) = page.as_mut() else { return };
+        // Handles are only valid for their generation, and the renderer frees
+        // older ones; a callback carrying an older generation than the mounted
+        // one must not touch its pointers.
         if page
             .visual
             .as_ref()
-            .is_some_and(|(_, _, generation)| *generation == composition.generation)
+            .is_some_and(|(_, _, generation)| *generation >= composition.generation)
         {
             return;
         }
@@ -1013,16 +1203,7 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
-        if let Some(page) = self.page.borrow_mut().take() {
-            unsafe {
-                if let Some((visual, layer, _)) = &page.visual
-                    && page.mounted
-                {
-                    let _ = layer.RemoveVisual(visual);
-                }
-                let _ = page.controller.Close();
-            }
-        }
+        self.close_page();
     }
 }
 

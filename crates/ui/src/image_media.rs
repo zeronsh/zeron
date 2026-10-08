@@ -254,6 +254,16 @@ pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<Me
     decode_raster_image_bounded(bytes, max_bytes, None)
 }
 
+/// Decoder bounds for every raster preview: 4096 px per side, 64 MiB of
+/// decoder allocation.
+pub(crate) fn raster_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    limits
+}
+
 fn decode_raster_image_bounded(
     bytes: Vec<u8>,
     max_bytes: usize,
@@ -265,11 +275,7 @@ fn decode_raster_image_bounded(
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(4096);
-    limits.max_image_height = Some(4096);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
+    reader.limits(raster_limits());
     // Decode one frame and encode a static PNG so GPUI cannot expand unbounded animation frames.
     let decoded = reader.decode().map_err(|e| e.to_string())?;
     // Generated previews retain one bounded 8-bit frame. This keeps each

@@ -77,15 +77,15 @@ loro-protocol = "0.3"
 # Linux — the Metal path's snapshot/blur/composite, ported).
 # Paint-time rounded image masks (#9), bounded Windows backdrop blur and
 # translucent compositing, plus blur-aware scene batching (#10).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d", features = [
+gpui = { git = "https://github.com/zeronsh/zui", rev = "dce5c1f737a834b32c2b531d552ea78035e54093" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "dce5c1f737a834b32c2b531d552ea78035e54093", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "0966d065b23e0b7c9b53c2e186705b8bce16fe2d" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "4764fd002ab5894ec9413511d01d37481b2129ab" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "dce5c1f737a834b32c2b531d552ea78035e54093" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "47ccd07295858d66f8fe826df9651a56218eb887" }
 
 # diffs
 similar = "2"
@@ -173,27 +173,3 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
-
-# Windows scene-overlay plane (zeronsh/zui#15). Drop this patch and bump the zui
-# rev above once it merges.
-[patch."https://github.com/zeronsh/zui"]
-collections = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-derive_refineable = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_linux = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_macos = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_macros = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_platform = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_shared_string = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_tokio = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_util = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_web = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_wgpu = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-gpui_windows = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-http_client = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-media = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-perf = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-refineable = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-scheduler = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-sum_tree = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }
-util_macros = { git = "https://github.com/Master0fFate/zui", rev = "6cc8c58a3cc63cce3e136f1e63d02bd66fd57ed5" }

@@ -680,7 +680,11 @@ pub(crate) async fn read_attachment_bytes(
     if !done {
         return None;
     }
-    let bytes = BASE64.decode(b64.as_bytes()).ok()?;
+    // Callers await this on the UI thread; decode the (up to 24 MiB) payload
+    // off it.
+    let bytes = executor
+        .spawn(async move { BASE64.decode(b64.as_bytes()).ok() })
+        .await?;
     Some((name, mime, bytes))
 }
 

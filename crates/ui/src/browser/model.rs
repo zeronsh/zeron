@@ -137,6 +137,14 @@ pub fn allowed_navigation(address: &str) -> bool {
     })
 }
 
+/// Subframe navigations: web content, including a frame's own documents
+/// (`about:blank`, `about:srcdoc`, `data:`, `blob:`) — never a scheme that
+/// leaves the page (`file:`, `javascript:`, app links).
+pub fn allowed_frame_navigation(address: &str) -> bool {
+    allowed_navigation(address)
+        || url::Url::parse(address).is_ok_and(|u| matches!(u.scheme(), "about" | "data" | "blob"))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Presentation {
     #[default]
@@ -191,6 +199,28 @@ mod tests {
         }
         assert!(!allowed_navigation("javascript:alert(1)"));
         assert!(!allowed_navigation("https://user@example.com/"));
+    }
+    #[test]
+    fn frames_load_web_content_but_never_leave_the_page() {
+        for ok in [
+            "https://example.com/embed",
+            "about:blank",
+            "about:srcdoc",
+            "data:text/html,hi",
+            "blob:https://example.com/0f3e",
+        ] {
+            assert!(allowed_frame_navigation(ok), "{ok}");
+        }
+        for blocked in [
+            "zeron://open/chat/a",
+            "ms-settings:privacy",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "mailto:a@example.com",
+            "",
+        ] {
+            assert!(!allowed_frame_navigation(blocked), "{blocked}");
+        }
     }
     #[test]
     fn native_visibility_never_outlives_its_surface() {

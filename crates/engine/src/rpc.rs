@@ -3379,10 +3379,13 @@ impl RpcService for EngineRpc {
                     .filter_map(|chat| chat.cwd)
                     .map(std::path::PathBuf::from)
                     .collect();
-                let chunk = self
-                    .uploads
-                    .read_chunk(&p.path, p.offset, &roots)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let uploads = self.uploads.clone();
+                let chunk = tokio::task::spawn_blocking(move || {
+                    uploads.read_chunk(&p.path, p.offset, &roots)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chunk)
             }
             methods::FETCH_TOOL_BLOB => {

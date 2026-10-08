@@ -831,10 +831,7 @@ pub fn tool_detail(
         });
     }
     let output = output?;
-    let mut lines: Vec<SharedString> = output
-        .lines()
-        .map(|l| SharedString::from(l.to_owned()))
-        .collect();
+    let mut lines: Vec<SharedString> = output.lines().map(output_line).collect();
     // Trim trailing blank output lines so the block hugs its content.
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -848,6 +845,18 @@ pub fn tool_detail(
         lines,
         truncated_by,
     })
+}
+
+/// Chars kept per output line. Lines clip rather than wrap, but each one is
+/// still shaped whole for selection — a minified megabyte must not be.
+const OUTPUT_LINE_MAX_CHARS: usize = 8 * 1024;
+
+/// One verbatim output line, cut to [`OUTPUT_LINE_MAX_CHARS`] with an ellipsis.
+fn output_line(line: &str) -> SharedString {
+    match line.char_indices().nth(OUTPUT_LINE_MAX_CHARS) {
+        Some((cut, _)) => SharedString::from(format!("{}…", &line[..cut])),
+        None => SharedString::from(line.to_owned()),
+    }
 }
 
 /// Columns at which an invocation line soft-wraps into continuation lines.
@@ -2209,10 +2218,7 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
         let diff: zeron_proto::ToolDiff = serde_json::from_str(text).ok()?;
         return tool_detail(None, Some(&diff), None);
     }
-    let mut lines: Vec<SharedString> = text
-        .lines()
-        .map(|l| SharedString::from(l.to_owned()))
-        .collect();
+    let mut lines: Vec<SharedString> = text.lines().map(output_line).collect();
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
@@ -6105,6 +6111,21 @@ impl Transcript {
                 {
                     let format =
                         gpui::ImageFormat::from_mime_type(&mime).unwrap_or(gpui::ImageFormat::Png);
+                    // SVG is markup an agent may have written: copy the parsed,
+                    // re-serialized tree (no scripts or external resources),
+                    // as previews render it.
+                    let bytes = if format == gpui::ImageFormat::Svg {
+                        let svg = executor.spawn(async move {
+                            usvg::Tree::from_data(&bytes, &crate::image_media::svg_options())
+                                .map(|tree| tree.to_string(&usvg::WriteOptions::default()))
+                        });
+                        let Ok(svg) = svg.await else {
+                            return;
+                        };
+                        svg.into_bytes()
+                    } else {
+                        bytes
+                    };
                     let image = gpui::Image::from_bytes(format, bytes);
                     this.update(cx, |this, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
@@ -15156,6 +15177,21 @@ mod tests {
         assert_eq!(lines.len(), OUTPUT_DETAIL_MAX_LINES);
         assert_eq!(truncated_by, 40 - OUTPUT_DETAIL_MAX_LINES);
         assert_eq!(lines[0].as_ref(), "    indented 0");
+
+        // A minified megabyte line is cut on a char boundary before shaping,
+        // in the summary and in a fetched full output alike.
+        let long = format!("{}\nshort", "é".repeat(1024 * 1024));
+        for detail in [
+            tool_detail(Some(&long), None, None),
+            blob_detail(&long, false),
+        ] {
+            let Some(ToolDetail::Output { lines, .. }) = detail else {
+                panic!("expected output detail");
+            };
+            assert_eq!(lines[0].chars().count(), OUTPUT_LINE_MAX_CHARS + 1);
+            assert!(lines[0].ends_with("é…"));
+            assert_eq!(lines[1].as_ref(), "short");
+        }
 
         // Nothing → no affordance.
         assert!(tool_detail(None, None, None).is_none());
