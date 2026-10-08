@@ -12,7 +12,7 @@ use super::wire::{ContentBlock, Frame};
 /// turn looks like the agent simply never replied unless we surface it.
 fn assistant_error_text(code: &str) -> String {
     match code {
-        "authentication_failed" => "Authentication failed — sign in to Claude again.".into(),
+        "authentication_failed" => "Claude authentication failed. Retry the message; if it keeps failing, check Claude Code's login on the machine running this chat.".into(),
         "oauth_org_not_allowed" => "This organization isn't allowed to use Claude here.".into(),
         "billing_error" => "Billing error — check your Claude plan or payment method.".into(),
         "rate_limit" => "Claude usage limit reached — try again after the limit resets.".into(),
