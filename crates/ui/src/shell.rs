@@ -16976,10 +16976,18 @@ mod exit_regressions {
                 // Selecting the identity happens before navigation, without requiring a render.
                 shell.add_browser_surface(None, window, cx);
                 let original = shell.browser_profile.clone().unwrap();
+                let original_cache = shell.pull_request_cache.clone();
+                shell.pull_requests_page =
+                    Some(cx.new(|cx| PullRequestsPage::new(shell.state.clone(), cx)));
                 shell.active_chat = "another-chat".into();
                 shell.add_browser_surface(None, window, cx);
                 assert_eq!(shell.browsers.len(), 2);
                 assert_eq!(shell.browser_profile.as_ref(), Some(&original));
+                assert!(std::rc::Rc::ptr_eq(
+                    &shell.pull_request_cache,
+                    &original_cache
+                ));
+                assert!(shell.pull_requests_page.is_some());
                 shell.state.update(cx, |state, _| {
                     state.local_device_id = Some("device-b".into())
                 });
@@ -16987,18 +16995,31 @@ mod exit_regressions {
                 assert!(shell.browsers.is_empty());
                 assert!(shell.browser_subs.is_empty());
                 assert_ne!(shell.browser_profile.as_ref(), Some(&original));
+                assert!(!std::rc::Rc::ptr_eq(
+                    &shell.pull_request_cache,
+                    &original_cache
+                ));
+                assert!(shell.pull_requests_page.is_none());
                 shell.state.update(cx, |state, _| {
                     state.local_device_id = Some("device-a".into())
                 });
                 shell.sync_browser_profile(cx);
                 assert_eq!(shell.browser_profile.as_ref(), Some(&original));
                 shell.add_browser_surface(None, window, cx);
+                let restored_cache = shell.pull_request_cache.clone();
+                shell.pull_requests_page =
+                    Some(cx.new(|cx| PullRequestsPage::new(shell.state.clone(), cx)));
                 shell
                     .state
                     .update(cx, |state, _| state.workspace_scope = None);
                 shell.sync_browser_profile(cx);
                 assert!(shell.browser_profile.is_none());
                 assert!(shell.browsers.is_empty());
+                assert!(!std::rc::Rc::ptr_eq(
+                    &shell.pull_request_cache,
+                    &restored_cache
+                ));
+                assert!(shell.pull_requests_page.is_none());
             })
             .unwrap();
     }
