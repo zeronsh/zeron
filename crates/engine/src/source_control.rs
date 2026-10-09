@@ -25,12 +25,17 @@ use zeron_proto::{
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
+/// `ssh -G` only reads configuration; it never connects.
+const SSH_CONFIG_TIMEOUT: Duration = Duration::from_secs(3);
+/// `repository()` follows renames: the old name resolves to the current one.
+const GITHUB_REPOSITORY_QUERY: &str =
+    "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
 const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
 
-const GITHUB_PR_METADATA_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";
+const GITHUB_PR_METADATA_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { viewer { login } repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";
 
 fn remove_nulls(value: &mut serde_json::Value) {
     match value {
@@ -184,8 +189,10 @@ impl ChangeRequestResolver {
         }
     }
 
-    /// Resolve just the selected checkout's identity. Local Git only: no
-    /// provider lookup, repository enumeration, or remote transport.
+    /// Resolve just the selected checkout's identity. Local only: no provider
+    /// lookup, repository enumeration, or remote transport. The slug is the
+    /// remote's as written, which may predate a repository rename; the board
+    /// adopts GitHub's canonical name once its first page loads.
     pub async fn repository_for_checkout(&self, cwd: &Path) -> Option<String> {
         let remote_url = match self.inspect_checkout(cwd).await {
             Ok(source) => source.branch.remote_url?,
@@ -196,23 +203,26 @@ impl ChangeRequestResolver {
                     .await?
             }
         };
-        let remote = parse_git_remote(&remote_url)?;
-        (remote.host.eq_ignore_ascii_case("github.com"))
-            .then(|| format!("{}/{}", remote.owner, remote.repository))
+        self.github_slug(&remote_url).await
     }
 
     /// Match a PR's repository against every fetch remote. A fork's origin
     /// stays the board's default identity, while upstream is a valid handoff.
-    /// Reading remote URLs is local Git only; never contact a remote here.
+    /// Remote URLs are read with local Git only; a remote is never contacted.
+    /// When no remote names the repository as written, `github` resolves each
+    /// remote's slug to GitHub's canonical name, so a checkout cloned before a
+    /// rename (`acme/old` → `acme/new`) still matches.
     pub async fn matching_repository_for_checkout(
         &self,
         cwd: &Path,
         repository: &str,
+        github: &GitHubCli,
     ) -> Option<String> {
         if !valid_pr_repository(repository) {
             return None;
         }
         let remotes = self.inspector.git_optional(cwd, &["remote"]).await?;
+        let mut slugs = Vec::new();
         for name in remotes.lines().filter(|name| !name.is_empty()) {
             let Some(urls) = self
                 .inspector
@@ -222,17 +232,61 @@ impl ChangeRequestResolver {
                 continue;
             };
             for url in urls.lines() {
-                if let Some(remote) = parse_git_remote(url)
-                    && remote.host.eq_ignore_ascii_case("github.com")
-                {
-                    let slug = format!("{}/{}", remote.owner, remote.repository);
+                if let Some(slug) = self.github_slug(url).await {
                     if slug.eq_ignore_ascii_case(repository) {
                         return Some(slug);
+                    }
+                    if !slugs
+                        .iter()
+                        .any(|seen: &String| seen.eq_ignore_ascii_case(&slug))
+                    {
+                        slugs.push(slug);
                     }
                 }
             }
         }
+        for slug in slugs {
+            if let Some(canonical) = github.canonical_repository(&slug).await
+                && canonical.eq_ignore_ascii_case(repository)
+            {
+                return Some(canonical);
+            }
+        }
         None
+    }
+
+    /// `owner/name` for a remote on github.com. An SSH remote may name a
+    /// host alias from `~/.ssh/config` (`git@github-work:acme/zeron.git`);
+    /// `ssh -G` resolves it locally without connecting.
+    async fn github_slug(&self, remote_url: &str) -> Option<String> {
+        let remote = parse_git_remote(remote_url)?;
+        let slug = format!("{}/{}", remote.owner, remote.repository);
+        if remote.host.eq_ignore_ascii_case("github.com") {
+            return Some(slug);
+        }
+        if !is_ssh_remote(remote_url) || !valid_ssh_alias(&remote.host) {
+            return None;
+        }
+        let output = self
+            .inspector
+            .runner
+            .run(ProcessRequest {
+                program: "ssh".into(),
+                args: vec!["-G".into(), remote.host.clone()],
+                stdin: None,
+                cwd: None,
+                env: Vec::new(),
+                timeout: SSH_CONFIG_TIMEOUT,
+                output_limit: GIT_OUTPUT_LIMIT,
+            })
+            .await
+            .ok()?;
+        if !output.success || output.stdout_truncated {
+            return None;
+        }
+        ssh_config_hostname(&String::from_utf8_lossy(&output.stdout))
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+            .then_some(slug)
     }
 
     pub async fn resolve_github(
@@ -298,6 +352,11 @@ impl CheckoutChangeRequestLookup for ChangeRequestResolver {
 pub struct GitHubCli {
     runner: Arc<dyn ProcessRunner>,
     pr_cache: Arc<tokio::sync::Mutex<PrRequestCache>>,
+    /// The board's on-disk first pages. `None` keeps everything in memory
+    /// (tests, and engines without a data directory).
+    store: Option<crate::change_request_store::ChangeRequestStore>,
+    /// The active `gh` account and when it was read, keying the store.
+    account: Arc<tokio::sync::Mutex<Option<(Instant, Option<String>)>>>,
 }
 
 impl GitHubCli {
@@ -572,6 +631,9 @@ impl GitHubCli {
             if zeron_proto::change_request_assessment::valid_head_oid(&detail.head_ref_oid)
                 && let Ok(metadata) = self.fetch_pr_metadata(&detail.url, &url).await
             {
+                // Who "you" are, so every comment of yours reads as yours,
+                // reviews included, before you've commented here.
+                detail.viewer_login = metadata.viewer_login.clone();
                 let checks = metadata.checks();
                 let (head, ci, authored, requested) = metadata.into_fields();
                 if head == detail.head_ref_oid {
@@ -639,8 +701,65 @@ impl GitHubCli {
         {
             return Err(ChangeRequestError::Decode);
         }
-        serde_json::from_value(value["data"]["repository"]["pullRequest"].clone())
-            .map_err(|_| ChangeRequestError::Decode)
+        let mut metadata: GhPrMetadata =
+            serde_json::from_value(value["data"]["repository"]["pullRequest"].clone())
+                .map_err(|_| ChangeRequestError::Decode)?;
+        metadata.viewer_login = value["data"]["viewer"]["login"]
+            .as_str()
+            .filter(|login| !login.is_empty())
+            .map(str::to_owned);
+        Ok(metadata)
+    }
+
+    /// GitHub's current `owner/name` for `repository`, following renames.
+    /// `None` when GitHub can't resolve it (missing, private to another
+    /// account, offline). Shares the board's cache and rate-limit pause.
+    pub async fn canonical_repository(&self, repository: &str) -> Option<String> {
+        if !valid_pr_repository(repository) {
+            return None;
+        }
+        let repository = repository.to_ascii_lowercase();
+        let key = format!("repository:{repository}");
+        let github = self.clone();
+        let lookup = self.cached_pr_request(key, false, async move {
+            let (owner, name) = repository
+                .split_once('/')
+                .ok_or(ChangeRequestError::UnsupportedRepository)?;
+            let output = github
+                .runner
+                .run(ProcessRequest {
+                    args: vec![
+                        "api".into(),
+                        "graphql".into(),
+                        "-f".into(),
+                        format!("query={GITHUB_REPOSITORY_QUERY}"),
+                        "-f".into(),
+                        format!("owner={owner}"),
+                        "-f".into(),
+                        format!("name={name}"),
+                    ],
+                    ..github_request()
+                })
+                .await
+                .map_err(classify_run_error)?;
+            if !output.success {
+                return Err(classify_github_failure(&output.stderr));
+            }
+            if output.stdout_truncated {
+                return Err(ChangeRequestError::Decode);
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+            Ok(value["data"]["repository"]["nameWithOwner"].clone())
+        });
+        let value = tokio::time::timeout(Duration::from_secs(5), lookup)
+            .await
+            .ok()?
+            .ok()?;
+        value
+            .as_str()
+            .filter(|canonical| valid_pr_repository(canonical))
+            .map(str::to_owned)
     }
 
     pub fn new() -> Self {
@@ -651,16 +770,77 @@ impl GitHubCli {
         Self {
             runner,
             pr_cache: Default::default(),
+            store: None,
+            account: Default::default(),
         }
     }
 
+    /// Keep the board's first pages in `data_dir`, so it opens at once.
+    pub(crate) fn with_store(mut self, data_dir: &Path) -> Self {
+        self.store = Some(crate::change_request_store::ChangeRequestStore::new(
+            data_dir,
+        ));
+        self
+    }
+
+    /// The active github.com account, read from `gh`'s local config (no
+    /// network). Re-read every 30 seconds so `gh auth switch` takes effect.
+    /// `None` when it can't be told — including a token in the environment,
+    /// which may belong to another account — and then nothing is stored.
+    async fn store_account(&self) -> Option<String> {
+        if ["GH_TOKEN", "GITHUB_TOKEN"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+        {
+            return None;
+        }
+        let mut account = self.account.lock().await;
+        if let Some((read_at, login)) = account.as_ref()
+            && read_at.elapsed() < Duration::from_secs(30)
+        {
+            return login.clone();
+        }
+        let login = self
+            .runner
+            .run(ProcessRequest {
+                args: vec![
+                    "config".into(),
+                    "get".into(),
+                    "user".into(),
+                    "-h".into(),
+                    "github.com".into(),
+                ],
+                timeout: Duration::from_secs(5),
+                ..github_request()
+            })
+            .await
+            .ok()
+            .filter(|output| output.success && !output.stdout_truncated)
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|login| login.trim().to_owned())
+            .filter(|login| {
+                !login.is_empty()
+                    && login.len() <= 39
+                    && login
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            });
+        *account = Some((Instant::now(), login.clone()));
+        login
+    }
+
     /// One page of open pull requests, 50 at a time, newest updates first.
+    ///
+    /// `cached` asks for the first page's on-disk copy, whatever its age, so
+    /// the board can show it at once and refresh behind it; without one it
+    /// reads GitHub as usual. Every first page read from GitHub is stored.
     pub async fn list_page(
         &self,
         repository: &str,
         filter: zeron_proto::ChangeRequestFilter,
         after: Option<&str>,
         refresh: bool,
+        cached: bool,
     ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
         if !valid_pr_repository(repository) {
             return Err(ChangeRequestError::UnsupportedRepository);
@@ -668,6 +848,35 @@ impl GitHubCli {
         if after.is_some_and(|cursor| !valid_page_cursor(cursor)) {
             return Err(ChangeRequestError::Decode);
         }
+        let first_page = after.is_none();
+        let stored = match &self.store {
+            Some(store) if first_page => self
+                .store_account()
+                .await
+                .map(|account| (store.clone(), account)),
+            _ => None,
+        };
+        if cached
+            && !refresh
+            && let Some((store, account)) = &stored
+            && let Some(page) = store.load(account, repository, filter).await
+        {
+            return Ok(page);
+        }
+        let page = self.fetch_list_page(repository, filter, after, refresh).await?;
+        if let Some((store, account)) = stored {
+            store.save(&account, repository, filter, &page).await;
+        }
+        Ok(page)
+    }
+
+    async fn fetch_list_page(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+        after: Option<&str>,
+        refresh: bool,
+    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
         let repository = repository.to_ascii_lowercase();
         let key = format!("list:{repository}:{filter:?}:{}", after.unwrap_or_default());
         let github = self.clone();
@@ -804,6 +1013,7 @@ impl GitHubCli {
                 items,
                 next_cursor,
                 total_count: response.data.search.issue_count,
+                fetched_at: Some(Utc::now()),
             },
             canonical,
         ))
@@ -1040,6 +1250,34 @@ pub fn parse_git_remote(remote_url: &str) -> Option<GitRemote> {
         host: host.to_ascii_lowercase(),
         owner: owner.to_owned(),
         repository: repository.to_owned(),
+    })
+}
+
+/// The scp-like (`git@host:owner/repo`) and `ssh://` forms, whose host may
+/// be an `~/.ssh/config` alias. HTTP(S) hosts are always literal.
+fn is_ssh_remote(remote_url: &str) -> bool {
+    match remote_url.trim().split_once("://") {
+        Some((scheme, _)) => scheme.eq_ignore_ascii_case("ssh"),
+        None => true,
+    }
+}
+
+/// A host alias safe to hand to `ssh -G` as its destination argument: never
+/// an option, a user, or a port.
+fn valid_ssh_alias(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && !host.starts_with('-')
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+/// The `hostname` line of `ssh -G` output: the host an alias connects to.
+fn ssh_config_hostname(config: &str) -> Option<&str> {
+    config.lines().find_map(|line| {
+        let (key, value) = line.trim().split_once(char::is_whitespace)?;
+        key.eq_ignore_ascii_case("hostname").then(|| value.trim())
     })
 }
 
@@ -1294,6 +1532,9 @@ struct GhPrMetadata {
     #[serde(default)]
     #[serde(deserialize_with = "present_nullable")]
     status_check_rollup: Option<Option<GhCiRollup>>,
+    /// The signed-in account, read beside the pull request (`viewer`).
+    #[serde(skip)]
+    viewer_login: Option<String>,
 }
 
 impl GhPrMetadata {
@@ -2005,6 +2246,15 @@ mod tests {
             None,
         )
         .unwrap();
+        core.workspace
+            .create_space(
+                "space-pr",
+                &core.device_id,
+                &checkout.to_string_lossy(),
+                None,
+                true,
+            )
+            .unwrap();
         let url = "https://github.com/acme/zeron/pull/123";
         let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
         let body = "Literal `$(touch /tmp/never)`; --flag\n\"quoted\" @octocat";
@@ -2053,7 +2303,16 @@ mod tests {
             "comments":connection(json!([]),None)
         }]),None)}}}});
         let threads_empty = json!({"data":{"repository":{"pullRequest":{"reviewThreads":connection(json!([]),None)}}}});
+        let renamed = |name: &str| {
+            command_success(
+                serde_json::to_vec(&json!({"data":{"repository":{"nameWithOwner": name}}}))
+                    .unwrap(),
+            )
+        };
         let runner = FakeProcessRunner::with_responses([
+            // Matching a renamed repository resolves origin, then upstream.
+            renamed("acme/renamed"),
+            renamed("acme/upstream"),
             command_success(serde_json::to_vec(&page(123, Some("Y3Vyc29yOjE="))).unwrap()),
             command_success(serde_json::to_vec(&page(124, None)).unwrap()),
             command_success(serde_json::to_vec(&detail).unwrap()),
@@ -2084,6 +2343,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repository.as_deref(), Some("acme/zeron"));
+        // A directory that is no chat or project checkout is refused.
+        let outside = dir.path().join("elsewhere");
+        std::fs::create_dir(&outside).unwrap();
+        run_git(&outside, &["init", "--quiet"]);
+        assert!(
+            client
+                .call(
+                    methods::GET_CHANGE_REQUEST_REPOSITORY,
+                    json!({"cwd": outside, "targetDeviceId": core.device_id}),
+                )
+                .await
+                .is_err()
+        );
         // Repository grouping cannot identify a fork's GitHub slug. The
         // selected branch's remote must win over an unrelated origin.
         run_git(
@@ -2097,9 +2369,13 @@ mod tests {
         );
         // Handoffs may use an upstream checkout even when origin is a fork.
         // Default board discovery must continue to select origin.
+        // A remote written before a rename matches the repository's current
+        // name through GitHub; the lookup is cached, so a miss afterwards
+        // only resolves the remotes it hasn't seen.
         for (wanted, expected) in [
             ("ACME/UPSTREAM", Some("acme/upstream")),
             ("acme/zeron", Some("acme/zeron")),
+            ("acme/renamed", Some("acme/renamed")),
             ("missing/repository", None),
             ("../invalid", None),
         ] {
@@ -2186,7 +2462,7 @@ mod tests {
         }
         assert_eq!(
             runner.requests().len(),
-            7,
+            9,
             "the second detail read uses the real provider cache"
         );
         let diff: String = client
@@ -2257,10 +2533,16 @@ mod tests {
         let requests = runner.requests();
         assert_eq!(
             requests.len(),
-            13,
+            15,
             "invalid input never reaches gh and writes are not retried"
         );
-        for request in &requests {
+        // The first two resolve the checkout's remotes to canonical names.
+        for (request, name) in requests[..2].iter().zip(["name=zeron", "name=upstream"]) {
+            assert!(request.args.contains(&"owner=acme".into()));
+            assert!(request.args.contains(&name.into()), "{:?}", request.args);
+        }
+        let requests = &requests[2..];
+        for request in requests.iter().chain(runner.requests()[..2].iter()) {
             assert_eq!(request.program, "gh");
             assert_eq!(
                 request.env,
@@ -2359,6 +2641,52 @@ mod tests {
                 .is_err()
         );
         assert_eq!(runner.requests().len(), 4);
+    }
+
+    #[test]
+    fn ssh_host_aliases_resolve_only_from_safe_ssh_remotes() {
+        assert!(is_ssh_remote("git@github-work:acme/zeron.git"));
+        assert!(is_ssh_remote("ssh://git@github-work/acme/zeron.git"));
+        assert!(!is_ssh_remote("https://github-work/acme/zeron.git"));
+        assert!(valid_ssh_alias("github-work"));
+        assert!(valid_ssh_alias("gh.work_2"));
+        for alias in ["", "-oProxyCommand=x", "a b", "user@host", "host:22", "a;b"] {
+            assert!(!valid_ssh_alias(alias), "{alias}");
+        }
+        let config = "user git\nhostname github.com\nport 22\n";
+        assert_eq!(ssh_config_hostname(config), Some("github.com"));
+        assert_eq!(ssh_config_hostname("user git\n"), None);
+    }
+
+    #[tokio::test]
+    async fn ssh_alias_remote_matches_through_ssh_config() {
+        let runner = FakeProcessRunner::with_responses([command_success(
+            "user git\nhostname github.com\n",
+        )]);
+        let resolver = ChangeRequestResolver {
+            inspector: GitCheckoutInspector::new(runner.clone()),
+            github: GitHubCli::with_runner(runner.clone()),
+        };
+        assert_eq!(
+            resolver
+                .github_slug("git@github-work:acme/zeron.git")
+                .await
+                .as_deref(),
+            Some("acme/zeron")
+        );
+        let request = &runner.requests()[0];
+        assert_eq!(request.program, "ssh");
+        assert_eq!(request.args, ["-G", "github-work"]);
+        // Literal github.com and HTTPS hosts never consult ssh.
+        assert_eq!(
+            resolver
+                .github_slug("https://github.com/acme/zeron")
+                .await
+                .as_deref(),
+            Some("acme/zeron")
+        );
+        assert_eq!(resolver.github_slug("https://gitlab.com/acme/zeron").await, None);
+        assert_eq!(runner.requests().len(), 1);
     }
 
     #[test]
@@ -2635,6 +2963,7 @@ mod tests {
                 zeron_proto::ChangeRequestFilter::All,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -2691,6 +3020,7 @@ mod tests {
                 zeron_proto::ChangeRequestFilter::Authored,
                 None,
                 refresh,
+                false,
             )
             .await
             .map(|page| page.items)
@@ -2817,13 +3147,13 @@ mod tests {
         let github = GitHubCli::with_runner(runner.clone());
         let filter = zeron_proto::ChangeRequestFilter::All;
         let first = github
-            .list_page("acme/zeron", filter, None, false)
+            .list_page("acme/zeron", filter, None, false, false)
             .await
             .unwrap();
         assert_eq!(first.next_cursor.as_deref(), Some("Y3Vyc29yOjUw"));
         assert_eq!(first.total_count, Some(120));
         let second = github
-            .list_page("acme/zeron", filter, first.next_cursor.as_deref(), false)
+            .list_page("acme/zeron", filter, first.next_cursor.as_deref(), false, false)
             .await
             .unwrap();
         assert_eq!(second.items[0].number, 2);
@@ -2838,12 +3168,84 @@ mod tests {
         );
         assert_eq!(
             github
-                .list_page("acme/zeron", filter, Some("x repo:other/x"), false)
+                .list_page("acme/zeron", filter, Some("x repo:other/x"), false, false)
                 .await,
             Err(ChangeRequestError::Decode),
             "cursors cannot smuggle search qualifiers"
         );
         assert_eq!(runner.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pr_first_page_is_stored_on_disk_and_served_when_cached() {
+        let page = |title: &str| {
+            command_success(search_response(vec![search_pull_request(
+                "acme/zeron",
+                1,
+                title,
+                "OPEN",
+                "UNKNOWN",
+                "2026-08-10T09:30:00Z",
+                "2026-08-19T12:00:00Z",
+                false,
+                None,
+            )]))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let runner = FakeProcessRunner::with_responses([
+            command_success("me\n"),
+            page("first"),
+            page("refreshed"),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone()).with_store(dir.path());
+        let filter = zeron_proto::ChangeRequestFilter::All;
+        // Nothing stored yet: a cached read goes to GitHub and stores it.
+        let first = github
+            .list_page("acme/zeron", filter, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(first.items[0].title, "first");
+        assert!(first.fetched_at.is_some());
+        // A fresh engine (a relaunch) serves the stored page without GitHub.
+        let relaunched = GitHubCli::with_runner(runner.clone()).with_store(dir.path());
+        *relaunched.account.lock().await = Some((Instant::now(), Some("me".into())));
+        let stored = relaunched
+            .list_page("acme/zeron", filter, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(stored.items[0].title, "first");
+        // The store keeps fetch times to the millisecond.
+        assert_eq!(
+            stored.fetched_at.map(|at| at.timestamp_millis()),
+            first.fetched_at.map(|at| at.timestamp_millis())
+        );
+        // Refresh always reaches GitHub and replaces the stored page.
+        let refreshed = relaunched
+            .list_page("acme/zeron", filter, None, true, false)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.items[0].title, "refreshed");
+        let stored = relaunched
+            .list_page("acme/zeron", filter, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(stored.items[0].title, "refreshed");
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 3, "one account read and two searches");
+        assert_eq!(
+            requests[0].args,
+            ["config", "get", "user", "-h", "github.com"]
+        );
+        // Another account never sees it.
+        assert!(
+            relaunched
+                .store
+                .as_ref()
+                .unwrap()
+                .load("other", "acme/zeron", filter)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2902,12 +3304,12 @@ mod tests {
         let github = GitHubCli::with_runner(runner.clone());
         for (index, filter) in [All, Authored, Reviewing].into_iter().enumerate() {
             github
-                .list_page("acme/zeron", filter, None, false)
+                .list_page("acme/zeron", filter, None, false, false)
                 .await
                 .unwrap();
             assert_eq!(runner.requests().len(), index + 1);
             github
-                .list_page("ACME/ZERON", filter, None, false)
+                .list_page("ACME/ZERON", filter, None, false, false)
                 .await
                 .unwrap();
             assert_eq!(runner.requests().len(), index + 1);
@@ -2924,7 +3326,7 @@ mod tests {
             );
         }
         github
-            .list_page("acme/zeron", All, None, false)
+            .list_page("acme/zeron", All, None, false, false)
             .await
             .unwrap();
         assert_eq!(runner.requests().len(), 3);

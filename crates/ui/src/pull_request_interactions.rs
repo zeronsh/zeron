@@ -251,14 +251,34 @@ impl PullRequestDetailPage {
                 .chars()
                 .take(160)
                 .collect();
+            // A quiet status line above the composer: a spinner, then the
+            // comment's opening words, faded.
             stack = stack.child(
                 div()
                     .id("pr-comment-pending")
                     .debug_selector(|| "pr-comment-pending".into())
-                    .text_color(theme.text_muted)
+                    .px(px(16.0))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
                     .text_size(crate::typography::ui_rems(12.0))
-                    .truncate()
-                    .child(format!("Posting: {excerpt}")),
+                    .text_color(theme.text_muted)
+                    .child(crate::loaders::mini_glyph_spinner(
+                        "pr-comment-pending-spinner",
+                        1.5,
+                        theme.glyph,
+                        cx.entity_id(),
+                        cx,
+                    ))
+                    .child(div().flex_none().child("Posting comment"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(excerpt),
+                    ),
             );
         }
         if self.mention_token.is_some() {

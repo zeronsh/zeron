@@ -17,10 +17,10 @@ const PICKER_HEIGHT: f32 = 360.0;
 const STICKY_BLUR: f32 = 32.0;
 const STICKY_VEIL: f32 = 0.18;
 const CARD_RADIUS: f32 = 12.0;
-// GPUI clips descendants to rectangles. Keep their rectangle inside the
-// rounded border: 1px border + 4px inset clears the 12px arc at every corner.
-// Never paint shell-colored corner covers: frost has no solid backdrop color.
-const CARD_CONTENT_INSET: f32 = 4.0;
+// Rows run flush to the card's 1px border. Whatever scrolls past a corner is
+// clipped along the inner arc per pixel (`rounded_clip`); a painted corner
+// cover can't do that on frost, which has no solid backdrop color.
+const CARD_CLIP_RADIUS: f32 = CARD_RADIUS - 1.0;
 
 fn stream_frame(theme: &Theme, content: impl IntoElement) -> impl IntoElement {
     div()
@@ -33,8 +33,7 @@ fn stream_frame(theme: &Theme, content: impl IntoElement) -> impl IntoElement {
         .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(theme.border)
-        .p(px(CARD_CONTENT_INSET))
-        .child(content)
+        .child(crate::rounded_clip::rounded_clip(CARD_CLIP_RADIUS, content))
 }
 
 fn stream_viewport() -> gpui::Stateful<gpui::Div> {

@@ -120,11 +120,17 @@ fn tab_slot(tab: Tab) -> f32 {
         .unwrap_or(0) as f32
 }
 
-const NAV_PADDING: f32 = 4.0;
+const NAV_PADDING: f32 = 2.0;
+/// Each segment's fill sits this far inside its slot, so a hovered segment
+/// and the thumb beside it keep a gap instead of touching.
+const NAV_SEGMENT_INSET: f32 = 2.0;
 const NAV_SEGMENT_HEIGHT: f32 = 36.0;
 /// Room above the window edge for the floating section navigation: its 16px
 /// inset, its height, and 16px of air. The diff and the comment dock end here.
-const NAV_CLEARANCE: f32 = 16.0 + NAV_SEGMENT_HEIGHT + 2.0 * NAV_PADDING + 16.0;
+const NAV_CLEARANCE: f32 = 16.0 + NAV_HEIGHT + 16.0;
+/// The pill's outer height: segment, its inset and the tray's padding on
+/// both sides, and the composer-style 1px edge.
+const NAV_HEIGHT: f32 = NAV_SEGMENT_HEIGHT + 2.0 * (NAV_SEGMENT_INSET + NAV_PADDING) + 2.0;
 
 /// What a patch row stands for in the review stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -409,6 +415,8 @@ pub struct PullRequestDetailPage {
     mention_index: usize,
     image_preview: Option<crate::attachments::PreviewImage>,
     image_focus: gpui::FocusHandle,
+    /// Held by the reading area once clicked, so Cmd/Ctrl+C reaches it.
+    content_focus: gpui::FocusHandle,
     image_task: Option<Task<()>>,
     image_cached: Option<(String, crate::attachments::PreviewImage)>,
     image_previous_focus: Option<gpui::FocusHandle>,
@@ -491,6 +499,7 @@ impl PullRequestDetailPage {
             mention_index: 0,
             image_preview: None,
             image_focus: cx.focus_handle(),
+            content_focus: cx.focus_handle(),
             image_task: None,
             image_cached: None,
             image_previous_focus: None,
@@ -594,14 +603,12 @@ impl PullRequestDetailPage {
                     .as_ref()
                     .map(|item| (item.number, item.title.clone()))
             });
-        let label = identity.as_ref().map_or_else(
-            || "Pull request".into(),
-            |(number, title)| format!("pull request {number}, {title}"),
+        let (title, number) = identity.map_or_else(
+            || ("Pull request".to_owned(), None),
+            |(number, title)| (title, Some(number)),
         );
-        let identity = identity.map_or_else(
-            || "Pull request".into(),
-            |(number, title)| format!("{number} · {title}"),
-        );
+        // The session header's shape: glyph and title. A plain header; Back
+        // returns to the board.
         div()
             .w_full()
             .min_w_0()
@@ -609,33 +616,36 @@ impl PullRequestDetailPage {
             .items_center()
             .gap(px(4.0))
             .child(
-                action("pr-back", "Back to pull requests", &theme)
+                div()
+                    .id("pr-detail-title")
+                    .debug_selector(|| "pr-detail-title".into())
+                    .role(gpui::Role::Heading)
+                    .aria_label(match number {
+                        Some(number) => format!("Pull request {number}: {title}"),
+                        None => title.clone(),
+                    })
                     .flex_1()
                     .min_w_0()
-                    .w_auto()
-                    .justify_start()
+                    .overflow_hidden()
                     .px(px(4.0))
-                    .aria_label(format!("Back to pull requests from {label}"))
+                    .flex()
+                    .items_center()
                     .gap(px(6.0))
                     .child(
                         crate::icons::icon(crate::icons::PULL_REQUEST)
-                            .size(px(13.0))
+                            .size(px(14.0))
                             .flex_none()
                             .text_color(theme.text_muted),
                     )
                     .child(
                         div()
-                            .id("pr-back-title")
-                            .debug_selector(|| "pr-back-title".into())
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.0))
-                            .child(identity),
-                    )
-                    .on_click(|_, window, cx| {
-                        cx.stop_propagation();
-                        window.dispatch_action(Box::new(ClosePullRequest), cx)
-                    }),
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text.opacity(0.85))
+                            .child(title),
+                    ),
             )
             .child(
                 action("pr-detail-refresh", "Refresh pull request", &theme)
@@ -889,9 +899,14 @@ impl PullRequestDetailPage {
             .bottom_0()
             .left(gpui::relative(position / slots))
             .w(gpui::relative(1.0 / slots))
-            .rounded_full()
-            .bg(theme.glass_hover())
-            .shadow(crate::theme::card_selected_shadows());
+            .p(px(NAV_SEGMENT_INSET))
+            .child(
+                div()
+                    .size_full()
+                    .rounded_full()
+                    .bg(theme.glass_hover())
+                    .shadow(crate::theme::card_selected_shadows()),
+            );
         let counts = self.detail.as_ref().map(|detail| {
             [
                 None,
@@ -924,47 +939,56 @@ impl PullRequestDetailPage {
                     .track_focus(&self.tab_focus[slot].clone().tab_stop(selected))
                     .tab_index(0)
                     .min_w_0()
-                    .h(px(NAV_SEGMENT_HEIGHT))
-                    .px(px(14.0))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
-                    .bg(crate::motion::mix(
-                        theme.glass_hover().opacity(0.0),
-                        theme.glass_hover(),
-                        hover * (1.0 - covered) * 0.6,
-                    ))
-                    .focus_visible(|style| style.border_2().border_color(theme.accent))
+                    .p(px(NAV_SEGMENT_INSET))
                     .cursor_pointer()
                     .on_hover(crate::motion::hover_listener(hover_key))
                     .child(
-                        crate::icons::icon(glyph)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis)),
-                    )
-                    .child(
                         div()
-                            .min_w_0()
+                            .h(px(NAV_SEGMENT_HEIGHT))
+                            .px(px(14.0))
+                            .rounded_full()
                             .flex()
-                            .items_baseline()
+                            .items_center()
+                            .justify_center()
                             .gap(px(6.0))
-                            .line_height(crate::typography::ui_rems(16.0))
-                            .child(div().min_w_0().truncate().child(label))
-                            .children(count.map(|count| {
-                                div()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
+                            .bg(crate::motion::mix(
+                                theme.glass_hover().opacity(0.0),
+                                theme.glass_hover(),
+                                hover * (1.0 - covered) * 0.6,
+                            ))
+                            .child(
+                                crate::icons::icon(glyph)
+                                    .size(px(14.0))
                                     .flex_none()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .font_weight(gpui::FontWeight::NORMAL)
-                                    .text_color(theme.text_muted)
-                                    .child(count.to_string())
-                            })),
+                                    .text_color(crate::motion::mix(
+                                        theme.text_muted,
+                                        theme.text,
+                                        emphasis,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_baseline()
+                                    .gap(px(6.0))
+                                    .line_height(crate::typography::ui_rems(16.0))
+                                    .child(div().min_w_0().truncate().child(label))
+                                    .children(count.map(|count| {
+                                        div()
+                                            .flex_none()
+                                            .text_size(crate::typography::ui_rems(11.0))
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .text_color(theme.text_muted)
+                                            .child(count.to_string())
+                                    })),
+                            ),
                     )
+                    .rounded_full()
+                    .focus_visible(|style| style.border_2().border_color(theme.accent))
                     .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
                     .on_key_down(cx.listener(
                         move |page, event: &gpui::KeyDownEvent, window, cx| {
@@ -991,8 +1015,12 @@ impl PullRequestDetailPage {
             .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .p(px(NAV_PADDING))
             .rounded_full()
-            .bg(theme.input_glass_bg())
-            .shadow_lg()
+            // The composer's material, so the two floating controls read as
+            // one family.
+            .border_1()
+            .border_color(theme.composer_surface_border())
+            .bg(theme.composer_surface_bg())
+            .when(!theme.is_frost(), |el| el.shadow_lg())
             .flex_none()
             .child(
                 div()
@@ -1003,7 +1031,7 @@ impl PullRequestDetailPage {
                     .children(segments),
             );
         // Concentric: the pill radius is the segment radius plus the padding.
-        let radius = NAV_SEGMENT_HEIGHT / 2.0 + NAV_PADDING;
+        let radius = NAV_SEGMENT_HEIGHT / 2.0 + NAV_SEGMENT_INSET + NAV_PADDING + 1.0;
         div()
             .absolute()
             .bottom(px(16.0))
@@ -1129,8 +1157,7 @@ fn activity_time(raw: &str) -> String {
 fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let icon_only = matches!(
         id,
-        "pr-back"
-            | "pr-external"
+        "pr-external"
             | "pr-copy-url"
             | "pr-copy-patch"
             | "pr-copy-path"
@@ -1147,7 +1174,6 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         "pr-previous-file" => Some(crate::icons::ALT_ARROW_UP),
         "pr-next-file" => Some(crate::icons::ALT_ARROW_DOWN),
         "pr-fold-all" => Some(crate::icons::FOLD_VERTICAL),
-        "pr-back" => Some(crate::icons::ALT_ARROW_LEFT),
         "pr-copy-url" if label == "Link copied" => Some(crate::icons::CHECK),
         "pr-copy-url" | "pr-copy-patch" | "pr-copy-path" | "pr-copy-checkout" => {
             Some(crate::icons::COPY)
@@ -1647,12 +1673,22 @@ impl Render for PullRequestDetailPage {
                                 .find(|v| !v.is_empty())
                                 .map(|v| v.replace('_', " ").to_lowercase())
                                 .unwrap_or_else(|| "Pending".into());
+                            // Status integrations set these links, so only
+                            // web pages open: never file:, smb: or app schemes.
                             let link = if check.details_url.is_empty() {
                                 &check.target_url
                             } else {
                                 &check.details_url
-                            }
-                            .clone();
+                            };
+                            let link = url::Url::parse(link)
+                                .ok()
+                                .filter(|url| {
+                                    url.scheme() == "https"
+                                        && url.username().is_empty()
+                                        && url.password().is_none()
+                                })
+                                .map(String::from)
+                                .unwrap_or_default();
                             checks = checks.child(
                                 widgets::card_row(&theme, false)
                                     .mx_0()
@@ -1885,12 +1921,14 @@ impl Render for PullRequestDetailPage {
                                     ),
                             );
                         }
-                        let viewer_login = detail
-                            .activity_comments()
-                            .find(|comment| {
-                                comment.viewer_did_author && !comment.author.login.is_empty()
-                            })
-                            .map(|comment| comment.author.login.as_str());
+                        let viewer_login = detail.viewer_login.as_deref().or_else(|| {
+                            detail
+                                .activity_comments()
+                                .find(|comment| {
+                                    comment.viewer_did_author && !comment.author.login.is_empty()
+                                })
+                                .map(|comment| comment.author.login.as_str())
+                        });
                         for (index, comment) in activity {
                             let own = comment.viewer_did_author
                                 || viewer_login.is_some_and(|login| {
@@ -1973,14 +2011,30 @@ impl Render for PullRequestDetailPage {
                                                 } else {
                                                     "Unresolved"
                                                 };
+                                                // One quiet line: where the comment sits (a link
+                                                // to it on GitHub), then its state.
+                                                let link = url::Url::parse(&comment.url)
+                                                    .ok()
+                                                    .filter(|url| {
+                                                        url.scheme() == "https"
+                                                            && url.host_str() == Some("github.com")
+                                                    });
+                                                let mut details = vec![status];
+                                                if review.is_outdated {
+                                                    details.push("Outdated");
+                                                }
+                                                if comment.reply_to.is_some() {
+                                                    details.push("Reply");
+                                                }
                                                 div()
                                                     .debug_selector(move || {
                                                         format!("pr-inline-thread-{index}")
                                                     })
+                                                    .min_w_0()
                                                     .flex()
-                                                    .flex_wrap()
                                                     .items_center()
                                                     .gap(px(8.0))
+                                                    .text_size(crate::typography::ui_rems(12.0))
                                                     .text_color(theme.text_muted)
                                                     .child(
                                                         div()
@@ -1988,46 +2042,56 @@ impl Render for PullRequestDetailPage {
                                                                 "pr-inline-location-{index}"
                                                             )))
                                                             .min_w_0()
-                                                            .max_w_full()
-                                                            .truncate()
+                                                            .h(px(22.0))
+                                                            .px(px(6.0))
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap(px(4.0))
+                                                            .rounded(px(6.0))
+                                                            .bg(theme.ink(0.035))
+                                                            .font_family(theme.font_mono.clone())
+                                                            .text_size(px(11.5))
                                                             .tooltip(widgets::text_tooltip(
                                                                 location.clone(),
                                                             ))
-                                                            .child(location),
-                                                    )
-                                                    .child(status)
-                                                    .when(review.is_outdated, |el| {
-                                                        el.child("Outdated")
-                                                    })
-                                                    .when(comment.reply_to.is_some(), |el| {
-                                                        el.child("Reply")
-                                                    })
-                                                    .children(
-                                                        url::Url::parse(&comment.url)
-                                                            .ok()
-                                                            .filter(|url| {
-                                                                url.scheme() == "https"
-                                                                    && url.host_str()
-                                                                        == Some("github.com")
-                                                            })
-                                                            .map(|url| {
-                                                                widgets::action_button(
-                                                                    &theme,
-                                                                    widgets::ActionTone::Filled,
-                                                                )
-                                                                .id(SharedString::from(format!(
-                                                                    "pr-inline-link-{index}"
-                                                                )))
+                                                            .child(
+                                                                div().min_w_0().truncate().child(location),
+                                                            )
+                                                            .when_some(link, |el, url| {
+                                                                el.debug_selector(move || {
+                                                                    format!("pr-inline-link-{index}")
+                                                                })
                                                                 .role(gpui::Role::Link)
                                                                 .aria_label(
                                                                     "Open review comment on GitHub",
                                                                 )
                                                                 .tab_index(0)
-                                                                .child("Open comment")
+                                                                .cursor_pointer()
+                                                                .hover(|style| {
+                                                                    style
+                                                                        .bg(theme.ink(0.07))
+                                                                        .text_color(theme.text)
+                                                                })
+                                                                .focus_visible(|style| {
+                                                                    style.border_1().border_color(theme.accent)
+                                                                })
+                                                                .child(
+                                                                    crate::icons::icon(
+                                                                        crate::icons::ARROW_UP_RIGHT,
+                                                                    )
+                                                                    .size(px(11.0))
+                                                                    .flex_none()
+                                                                    .text_color(theme.text_muted),
+                                                                )
                                                                 .on_click(move |_, _, cx| {
                                                                     cx.open_url(url.as_str())
                                                                 })
                                                             }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .child(details.join(" · ")),
                                                     )
                                             }))
                                             .children(self.activity_bodies.get(index).map(
@@ -2103,6 +2167,26 @@ impl Render for PullRequestDetailPage {
                 .flex_1()
                 .min_h_0()
                 .relative()
+                // Selecting text here leaves no input focused. Take focus on
+                // press so Cmd/Ctrl+C reaches the copy below; the comment
+                // composer is a sibling and keeps its own copy.
+                .track_focus(&self.content_focus)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|page, _, window, cx| window.focus(&page.content_focus, cx)),
+                )
+                .on_key_down(|event: &gpui::KeyDownEvent, _, cx| {
+                    let keystroke = &event.keystroke;
+                    if keystroke.key == "c"
+                        && (keystroke.modifiers.platform || keystroke.modifiers.control)
+                        && !keystroke.modifiers.shift
+                        && !keystroke.modifiers.alt
+                        && let Some(text) = crate::markdown::selection::selected_text()
+                    {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                        cx.stop_propagation();
+                    }
+                })
                 .on_hover(cx.listener(|page, hovered: &bool, _, cx| {
                     if page.scroll.set_list_hovered(*hovered) {
                         cx.notify();
@@ -2278,6 +2362,16 @@ mod tests {
         assert!(selection::selected_text().is_none_or(|text| text.is_empty()));
         selection::end_active_drag();
         selection::begin_with_span(&key, "First paragraph", 0..5);
+        // Clicking the text focused the reading area, so Cmd+C copies it.
+        assert!(
+            cx.update(|window, cx| page.read(cx).content_focus.is_focused(window)),
+            "pressing the text focuses the reading area"
+        );
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+            Some("First")
+        );
         page.update(cx, |page, cx| page.select_tab(Tab::Activity, cx));
         assert!(selection::selected_text().is_none());
         assert_eq!(render::selection_test_entry_count(&prefix), 0);
@@ -2903,10 +2997,12 @@ mod tests {
                 "toolbar and stream share an edge"
             );
             let scroll = cx.debug_bounds("pr-code-scroll").unwrap();
-            assert!(scroll.left() >= viewport.left() + px(4.0));
-            assert!(scroll.top() >= viewport.top() + px(4.0));
-            assert!(scroll.right() <= viewport.right() - px(4.0));
-            assert!(scroll.bottom() <= viewport.bottom() - px(4.0));
+            // Rows run flush to the card's 1px border; its rounded clip
+            // handles the corners.
+            assert_eq!(scroll.left(), viewport.left() + px(1.0));
+            assert_eq!(scroll.right(), viewport.right() - px(1.0));
+            assert_eq!(scroll.top(), viewport.top() + px(1.0));
+            assert_eq!(scroll.bottom(), viewport.bottom() - px(1.0));
             let header = cx.debug_bounds("pr-file-header-0").unwrap();
             assert_eq!(header.size.height, px(crate::changes::FILE_HEADER_HEIGHT));
             if width >= 900.0 {
@@ -3354,7 +3450,7 @@ mod tests {
             cx.simulate_resize(gpui::size(px(width), px(800.0)));
             cx.run_until_parked();
             let mut previous_right = px(0.0);
-            for selector in ["pr-back", "pr-detail-refresh", "pr-copy-url", "pr-external"] {
+            for selector in ["pr-detail-title", "pr-detail-refresh", "pr-copy-url", "pr-external"] {
                 let bounds = cx.debug_bounds(selector).unwrap();
                 assert!(
                     bounds.left() >= previous_right && bounds.right() <= px(width),
@@ -3365,7 +3461,7 @@ mod tests {
             }
             let nav = cx.debug_bounds("pr-detail-nav").unwrap();
             assert_eq!(nav.bottom(), px(784.0));
-            assert_eq!(nav.size.height, px(44.0));
+            assert_eq!(nav.size.height, px(NAV_HEIGHT));
             for selector in ["pr-summary", "pr-code", "pr-activity"] {
                 let bounds = cx.debug_bounds(selector).unwrap();
                 assert!(
@@ -3463,7 +3559,7 @@ mod tests {
                 "Code shares available width with the file navigator"
             );
             assert!(nav.size.width <= px(width));
-            assert_eq!(nav.size.height, px(44.0));
+            assert_eq!(nav.size.height, px(NAV_HEIGHT));
             page.read_with(cx, |page, _| {
                 assert_eq!(
                     page.scroll.scroll.max_offset().y,
@@ -3564,6 +3660,19 @@ mod tests {
             assert_eq!(other.left(), composer.left() + px(8.0), "title's text edge");
             assert!(mine.left() > other.left());
         }
+        // Yours even when GitHub marks none of your comments: the engine
+        // reports who you are, which covers reviews too.
+        page.update(cx, |page, cx| {
+            let detail = page.detail.as_mut().unwrap();
+            detail.comments[0].viewer_did_author = false;
+            detail.viewer_login = Some("Viewer".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("pr-message-0").unwrap().right(),
+            cx.debug_bounds("pr-comment-surface").unwrap().right()
+        );
 
         cx.simulate_resize(gpui::size(px(900.0), px(400.0)));
         cx.run_until_parked();
@@ -3630,9 +3739,8 @@ mod tests {
             assert!(cx.debug_bounds("pr-message-0").is_none());
             assert_eq!(cx.debug_bounds("pr-comment-surface").unwrap(), composer);
         }
-        let title = cx.debug_bounds("pr-back-title").unwrap();
-        let back = cx.debug_bounds("pr-back").unwrap();
-        assert!(title.size.width > px(100.0) && back.contains(&title.center()));
+        let title = cx.debug_bounds("pr-detail-title").unwrap();
+        assert!(title.size.width > px(100.0));
         cx.simulate_mouse_down(
             title.center(),
             gpui::MouseButton::Left,
@@ -3644,7 +3752,7 @@ mod tests {
             gpui::Modifiers::default(),
         );
         host.read_with(cx, |host, _| {
-            assert!(host.returned, "the title is part of the back action")
+            assert!(!host.returned, "the title is a header, not a back button")
         });
     }
 

@@ -794,6 +794,12 @@ pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
     Chat(String),
     PullRequests,
+    /// One pull request's detail view over the board, and the device whose
+    /// `gh` reads it (`None` = this device).
+    PullRequest {
+        url: String,
+        device: Option<String>,
+    },
     Settings(SettingsSection),
 }
 
@@ -840,6 +846,11 @@ impl NavHistory {
 
     pub fn can_back(&self) -> bool {
         self.index > 0
+    }
+
+    /// The entry Back would land on.
+    pub fn previous(&self) -> Option<&NavEntry> {
+        self.index.checked_sub(1).map(|index| &self.entries[index])
     }
 
     /// Memory history keeps every entry, so "behind the last entry" is exactly
@@ -1969,6 +1980,9 @@ pub struct Shell {
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
+    /// A detail view a history step landed on, opened by the next render
+    /// (creating it needs the window).
+    pending_pull_request: Option<(String, Option<String>)>,
     pull_request_cache:
         std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
     devices_page: Option<Entity<DevicesPage>>,
@@ -2432,6 +2446,7 @@ impl Shell {
             pull_requests_page: None,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
+            pending_pull_request: None,
             pull_request_cache: Default::default(),
             devices_page: None,
             archived_page: None,
@@ -4854,8 +4869,16 @@ impl Shell {
         if matches!(self.route, Route::PullRequests) {
             return;
         }
-        self.set_route(Route::PullRequests, cx);
+        self.enter_pull_requests_route(cx);
         self.nav.push(NavEntry::PullRequests);
+    }
+
+    /// Show the board's route without recording a navigation.
+    fn enter_pull_requests_route(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::PullRequests) {
+            return;
+        }
+        self.set_route(Route::PullRequests, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         self.add_space = None;
@@ -4865,6 +4888,64 @@ impl Shell {
         }
         if self.space_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
+        }
+        cx.notify();
+    }
+
+    /// Open `url`'s detail view over the board without recording a
+    /// navigation. Re-showing the open pull request keeps its view state.
+    fn show_pull_request_detail(
+        &mut self,
+        url: String,
+        target: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_pull_request = None;
+        if self.pull_requests_page.is_none() {
+            self.pull_requests_page =
+                Some(cx.new(|cx| PullRequestsPage::new(self.state.clone(), cx)));
+        }
+        if let Some(page) = &self.pull_requests_page {
+            page.update(cx, |page, cx| page.select_url(Some(url.clone()), cx));
+        }
+        if self
+            .pull_request_detail
+            .as_ref()
+            .is_some_and(|detail| detail.read(cx).url == url)
+        {
+            cx.notify();
+            return;
+        }
+        let preview = self
+            .pull_requests_page
+            .as_ref()
+            .and_then(|page| page.read(cx).preview(&url));
+        self.pull_request_detail = Some(cx.new(|cx| {
+            crate::pull_request_detail::PullRequestDetailPage::new(
+                self.state.clone(),
+                url,
+                target,
+                self.pull_request_cache.clone(),
+                preview,
+                window,
+                cx,
+            )
+        }));
+        self.pull_request_detail_subscription = self
+            .pull_request_detail
+            .as_ref()
+            .map(|detail| cx.observe(detail, |_, _, cx| cx.notify()));
+        cx.notify();
+    }
+
+    /// Return to the board without recording a navigation.
+    fn dismiss_pull_request_detail(&mut self, cx: &mut Context<Self>) {
+        self.pending_pull_request = None;
+        self.pull_request_detail = None;
+        self.pull_request_detail_subscription = None;
+        if let Some(page) = &self.pull_requests_page {
+            page.update(cx, |page, cx| page.select_url(None, cx));
         }
         cx.notify();
     }
@@ -4914,7 +4995,13 @@ impl Shell {
                 }
             }
             NavEntry::PullRequests => {
-                self.set_route(Route::PullRequests, cx);
+                self.enter_pull_requests_route(cx);
+                self.dismiss_pull_request_detail(cx);
+            }
+            NavEntry::PullRequest { url, device } => {
+                self.enter_pull_requests_route(cx);
+                // The detail view needs the window; the next render opens it.
+                self.pending_pull_request = Some((url, device));
             }
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
@@ -9060,7 +9147,6 @@ impl Shell {
                     .min_w_0()
                     .child(self.render_sidebar_footer(theme, cx)),
             )
-            .child(self.render_pull_requests_button(theme, cx))
             .into_any_element()
     }
 
@@ -9098,12 +9184,9 @@ impl Shell {
                 // Leaving Settings through its own footer is a plain route
                 // change; nothing there should grab focus on the way out.
                 this.settings_focus_pending = false;
-                this.pull_request_detail = None;
-                this.pull_request_detail_subscription = None;
-                if let Some(page) = &this.pull_requests_page {
-                    page.update(cx, |page, cx| page.select_url(None, cx));
-                }
-                this.open_pull_requests(cx);
+                this.dismiss_pull_request_detail(cx);
+                this.enter_pull_requests_route(cx);
+                this.nav.push(NavEntry::PullRequests);
                 cx.notify();
             }))
             .tooltip(crate::settings::widgets::text_tooltip("Pull requests"))
@@ -9132,6 +9215,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Pull requests sits just left of Settings, in the same action group.
+        let pull_requests = self.render_pull_requests_button(theme, cx);
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
@@ -9348,6 +9433,7 @@ impl Shell {
                     .items_center()
                     .gap(px(2.0))
                     .children(voice_trigger)
+                    .child(pull_requests)
                     .child(
                         div()
                             .id("settings-trigger")
@@ -10452,6 +10538,9 @@ impl Shell {
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
         if matches!(self.route, Route::PullRequests) {
+            if let Some((url, device)) = self.pending_pull_request.take() {
+                self.show_pull_request_detail(url, device, window, cx);
+            }
             if self.pull_requests_page.is_none() {
                 self.pull_requests_page =
                     Some(cx.new(|cx| PullRequestsPage::new(self.state.clone(), cx)));
@@ -13116,40 +13205,25 @@ impl Render for Shell {
                                 .then(|| chat.device_id.clone())
                         })
                     };
-                    this.open_pull_requests(cx);
-                    if this.pull_requests_page.is_none() {
-                        this.pull_requests_page =
-                            Some(cx.new(|cx| PullRequestsPage::new(this.state.clone(), cx)));
-                    }
-                    if let Some(page) = &this.pull_requests_page {
-                        page.update(cx, |page, cx| page.select_url(Some(action.0.clone()), cx));
-                    }
-                    this.pull_request_detail = Some(cx.new(|cx| {
-                        crate::pull_request_detail::PullRequestDetailPage::new(
-                            this.state.clone(),
-                            action.0.clone(),
-                            target,
-                            this.pull_request_cache.clone(),
-                            this.pull_requests_page
-                                .as_ref()
-                                .and_then(|page| page.read(cx).preview(&action.0)),
-                            window,
-                            cx,
-                        )
-                    }));
-                    this.pull_request_detail_subscription = this
-                        .pull_request_detail
-                        .as_ref()
-                        .map(|detail| cx.observe(detail, |_, _, cx| cx.notify()));
-                    cx.notify();
+                    // Back from a pull request returns to wherever it was
+                    // opened from: a chat, the board, or another pull request.
+                    this.enter_pull_requests_route(cx);
+                    this.nav.push(NavEntry::PullRequest {
+                        url: action.0.clone(),
+                        device: target.clone(),
+                    });
+                    this.show_pull_request_detail(action.0.clone(), target, window, cx);
                 },
             ))
             .on_action(cx.listener(
                 |this, _: &crate::pull_request_detail::ClosePullRequest, _, cx| {
-                    this.pull_request_detail = None;
-                    this.pull_request_detail_subscription = None;
-                    if let Some(page) = &this.pull_requests_page {
-                        page.update(cx, |page, cx| page.select_url(None, cx));
+                    // Closing the detail view is Back when the board is
+                    // behind it, so history doesn't grow a loop.
+                    if this.nav.previous() == Some(&NavEntry::PullRequests) {
+                        this.navigate_back(cx);
+                    } else {
+                        this.dismiss_pull_request_detail(cx);
+                        this.nav.push(NavEntry::PullRequests);
                     }
                     cx.notify();
                 },
@@ -15895,7 +15969,9 @@ mod exit_regressions {
             .debug_bounds("open-pull-requests")
             .expect("Settings keeps the Pull requests entry");
         let gear = cx.debug_bounds("settings-trigger").unwrap();
-        assert!(entry.left() > gear.right() && entry.right() <= row.right());
+        // Just left of Settings, in the same action group.
+        assert!(entry.right() <= gear.left() && entry.left() >= row.left());
+        assert!((entry.center().y - gear.center().y).abs() < px(1.0));
         cx.simulate_click(entry.center(), gpui::Modifiers::default());
         shell.read_with(cx, |shell, _| {
             assert!(
@@ -15996,10 +16072,10 @@ mod exit_regressions {
                     });
                     cx.run_until_parked();
                     let new_session = cx.debug_bounds("titlebar-new-session").unwrap();
-                    let back = cx.debug_bounds("pr-back").unwrap();
+                    let title = cx.debug_bounds("pr-detail-title").unwrap();
                     assert!(
-                        back.left() >= new_session.right() + px(8.0),
-                        "PR back control overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, back={back:?}, new_session={new_session:?}"
+                        title.left() >= new_session.right() + px(8.0),
+                        "PR header overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, title={title:?}, new_session={new_session:?}"
                     );
                     let external = cx.debug_bounds("pr-external").unwrap();
                     assert!(external.right() <= px(width));

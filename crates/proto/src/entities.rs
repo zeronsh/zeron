@@ -914,6 +914,12 @@ pub struct ChangeRequestPage {
     pub next_cursor: Option<String>,
     /// Every match for the query, when the provider reports it.
     pub total_count: Option<u64>,
+    /// When the engine fetched this page from the provider. A page served
+    /// from the engine's on-disk copy carries its original time, so clients
+    /// can show it at once and refresh it when it has aged. Absent from
+    /// engines that predate the copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<DateTime<Utc>>,
 }
 
 /// Read-only GitHub detail response. Optional collections tolerate absent provider data.
@@ -944,6 +950,10 @@ pub struct ChangeRequestDetail {
     pub review_threads: Option<Vec<ChangeRequestReviewThread>>,
     pub files: Vec<ChangeRequestFile>,
     pub status_check_rollup: Vec<ChangeRequestCheck>,
+    /// The signed-in GitHub account, so clients can tell which comments and
+    /// reviews are the viewer's. Absent from older engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_login: Option<String>,
 }
 
 impl ChangeRequestDetail {

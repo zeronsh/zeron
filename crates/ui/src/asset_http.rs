@@ -15,28 +15,56 @@ const MAX_REDIRECTS: usize = 5;
 
 fn public_ip(ip: IpAddr) -> bool {
     fn public_v4(ip: Ipv4Addr) -> bool {
-        let [a, b, ..] = ip.octets();
+        let [a, b, c, _] = ip.octets();
         !(ip.is_loopback()
             || ip.is_private()
             || ip.is_link_local()
             || ip.is_unspecified()
             || ip.is_broadcast()
             || ip.is_documentation()
+            || ip.is_multicast()
             || a == 0
-            || (a == 100 && (64..128).contains(&b)))
+            // Shared address space (CGNAT, Tailscale).
+            || (a == 100 && (64..128).contains(&b))
+            // IETF protocol assignments and the 6to4 relay anycast.
+            || (a == 192 && b == 0 && c == 0)
+            || (a == 192 && b == 88 && c == 99)
+            // Benchmarking.
+            || (a == 198 && (18..20).contains(&b))
+            // Reserved, including the limited broadcast.
+            || a >= 240)
     }
     match ip {
         IpAddr::V4(ip) => public_v4(ip),
-        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-            Some(ip) => public_v4(ip),
-            None => {
-                let first = ip.segments()[0];
-                !(ip.is_loopback()
-                    || ip.is_unspecified()
-                    || (first & 0xfe00) == 0xfc00
-                    || (first & 0xffc0) == 0xfe80)
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            let embedded = |high: u16, low: u16| {
+                let [a, b] = high.to_be_bytes();
+                let [c, d] = low.to_be_bytes();
+                Ipv4Addr::new(a, b, c, d)
+            };
+            // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
+            // addresses reach the IPv4 host they embed.
+            if let Some(v4) = ip.to_ipv4() {
+                return !ip.is_unspecified() && !ip.is_loopback() && public_v4(v4);
             }
-        },
+            // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) also embed one.
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return public_v4(embedded(segments[6], segments[7]));
+            }
+            if segments[0] == 0x2002 {
+                return public_v4(embedded(segments[1], segments[2]));
+            }
+            let first = segments[0];
+            !(ip.is_multicast()
+                // Unique local (fc00::/7), link-local (fe80::/10), and the
+                // deprecated site-local (fec0::/10).
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || (first & 0xffc0) == 0xfec0
+                // Teredo (2001::/32) hides its IPv4 server; images never need it.
+                || (first == 0x2001 && segments[1] == 0))
+        }
     }
 }
 
@@ -121,9 +149,13 @@ impl AssetHttpClient {
             .user_agent("Zeron/desktop")
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
+            // A redirect never tells the next host which image linked to it.
+            .referer(false)
             .redirect(redirects);
         if public_only {
-            client = client.dns_resolver(Arc::new(PublicDns));
+            // Through a proxy the proxy resolves names, and an intranet name
+            // would never meet `PublicDns`. Images always connect directly.
+            client = client.dns_resolver(Arc::new(PublicDns)).no_proxy();
         }
         Arc::new(Self {
             client: client.build().expect("image HTTP client"),
@@ -191,6 +223,53 @@ mod tests {
     use super::*;
     use futures::AsyncReadExt;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt};
+
+    #[test]
+    fn public_ip_refuses_every_local_reserved_and_embedded_private_range() {
+        for address in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+            "198.18.0.1",
+            "192.0.0.8",
+            "192.88.99.1",
+            "::1",
+            "::",
+            "::ffff:127.0.0.1",
+            "::127.0.0.1",
+            "::10.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "2002:7f00:1::",
+            "2002:c0a8:101::",
+            "fc00::1",
+            "fd12::1",
+            "fe80::1",
+            "fec0::1",
+            "ff02::1",
+            "2001:0:4136:e378::1",
+        ] {
+            let ip: IpAddr = address.parse().unwrap();
+            assert!(!public_ip(ip), "{address} must be refused");
+        }
+        for address in [
+            "140.82.112.3",
+            "185.199.108.133",
+            "::ffff:140.82.112.3",
+            "64:ff9b::8c52:7003",
+            "2606:50c0:8000::153",
+        ] {
+            let ip: IpAddr = address.parse().unwrap();
+            assert!(public_ip(ip), "{address} is public");
+        }
+    }
 
     #[tokio::test]
     async fn pull_request_production_asset_transport_follows_redirects_and_bounds_downloads() {

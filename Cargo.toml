@@ -87,15 +87,16 @@ loro-protocol = "0.3"
 # Linux — the Metal path's snapshot/blur/composite, ported).
 # Paint-time rounded image masks (#9), bounded Windows backdrop blur and
 # translucent compositing, plus blur-aware scene batching (#10).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "dce5c1f737a834b32c2b531d552ea78035e54093" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "dce5c1f737a834b32c2b531d552ea78035e54093", features = [
+# Per-pixel rounded clipping (`Window::with_rounded_clip`, 361ff20).
+gpui = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "dce5c1f737a834b32c2b531d552ea78035e54093" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "47ccd07295858d66f8fe826df9651a56218eb887" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "701ca97af7983bf85343d2d1d404ab528b18ec96" }
 
 # diffs
 similar = "2"

@@ -660,6 +660,7 @@ impl EngineRpc {
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
         };
+        let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
             voice: sessions.voice_manager(),
             sessions,
@@ -672,7 +673,7 @@ impl EngineRpc {
             project_actions,
             previews: None,
             change_requests,
-            github: GitHubCli::new(),
+            github,
             diff_sync,
             uploads,
             agent_accounts,
@@ -2577,12 +2578,15 @@ impl RpcService for EngineRpc {
                     repository: Option<String>,
                 }
                 let p: P = parse_params(params)?;
+                // Only a chat or project checkout on this device: a caller
+                // never probes arbitrary directories for their remotes.
+                let cwd = self.change_request_root(&p.cwd).await?;
+                let cwd = cwd.as_path();
                 let resolver = crate::source_control::ChangeRequestResolver::new();
-                let cwd = std::path::Path::new(&p.cwd);
                 let repository = match p.repository {
                     Some(repository) => {
                         resolver
-                            .matching_repository_for_checkout(cwd, &repository)
+                            .matching_repository_for_checkout(cwd, &repository, &self.github)
                             .await
                     }
                     None => resolver.repository_for_checkout(cwd).await,
@@ -2599,6 +2603,9 @@ impl RpcService for EngineRpc {
                     after: Option<String>,
                     #[serde(default)]
                     refresh: bool,
+                    /// Serve the first page's on-disk copy when there is one.
+                    #[serde(default)]
+                    cached: bool,
                 }
                 let p: P = parse_params(params)?;
                 if !crate::source_control::valid_pr_repository(&p.repository) {
@@ -2612,7 +2619,13 @@ impl RpcService for EngineRpc {
                 }
                 let page = self
                     .github
-                    .list_page(&p.repository, p.filter, p.after.as_deref(), p.refresh)
+                    .list_page(
+                        &p.repository,
+                        p.filter,
+                        p.after.as_deref(),
+                        p.refresh,
+                        p.cached,
+                    )
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&page)

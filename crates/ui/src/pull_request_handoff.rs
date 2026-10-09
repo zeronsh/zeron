@@ -114,9 +114,36 @@ fn plain(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
-        .filter(|c| *c != '`' && !c.is_control())
+        .filter(|c| *c != '`' && !c.is_control() && !invisible(*c))
         .take(200)
         .collect()
+}
+
+/// Characters that render as nothing but still reach the model: bidi
+/// overrides, zero-width and joiner characters, tag characters, variation
+/// selectors and fillers. Pull request text is untrusted, and the person
+/// reviewing a staged prompt must see everything the agent will read.
+fn invisible(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x034F
+            | 0x061C
+            | 0x115F..=0x1160
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0x3164
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xFFA0
+            | 0xFFF9..=0xFFFB
+            | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE007F
+            | 0xE0100..=0xE01EF
+    )
 }
 
 /// A branch name reduced to characters that are inert in a shell.
@@ -306,7 +333,9 @@ impl PullRequestDetailPage {
             .or_else(|| state.local_device_id.clone())
             .unwrap_or_else(|| engine.engine_info().device_id.clone());
         let spaces = state.spaces_sorted().into_iter().cloned().collect();
-        let repo = repository(&self.url);
+        // The engine's URL for the pull request it actually read, not the
+        // link it was opened from.
+        let repo = repository(self.detail.as_ref().map_or(&self.url, |detail| &detail.url));
         self.handoff_device = Some(device.clone());
         self.handoff_error = None;
         self.handoff_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -529,6 +558,13 @@ impl PullRequestDetailPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_drops_invisible_characters_that_could_hide_instructions() {
+        let hidden = "Fix\u{202E}gnihton\u{202C} \u{200B}typo\u{E0049}\u{E0067}\u{FEFF}";
+        assert_eq!(plain(hidden), "Fixgnihton typo");
+        assert_eq!(plain("café · naïve — ok"), "café · naïve — ok");
+    }
     use zeron_proto::ChangeRequestCheck;
 
     fn detail() -> ChangeRequestDetail {

@@ -150,6 +150,76 @@ fn placeholder(label: String, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// Images in pull request text, which anyone can write: fetched through the
+/// app's guarded HTTP client (HTTPS to public addresses, 16 MiB) and decoded
+/// with the app's bounded decoder — 4096 px per side, 64 MiB of decoder
+/// memory, one frame of an animation, SVG with external references removed.
+/// GPUI's own image loader decodes without limits, so a few-KB image could
+/// otherwise exhaust memory. At most four load at once.
+struct PrImageLoader;
+
+/// Largest image body read; the transport enforces the same cap.
+const PR_IMAGE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+fn pr_image_slots() -> &'static tokio::sync::Semaphore {
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| tokio::sync::Semaphore::new(4))
+}
+
+/// SVG by declared type or by content; everything else decodes as raster.
+fn pr_image_mime(content_type: Option<&str>, bytes: &[u8]) -> &'static str {
+    let declared_svg = content_type.is_some_and(|value| value.starts_with("image/svg+xml"));
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_ascii_lowercase();
+    if declared_svg || (image::guess_format(bytes).is_err() && head.contains("<svg")) {
+        "image/svg+xml"
+    } else {
+        "image/png"
+    }
+}
+
+impl gpui::Asset for PrImageLoader {
+    type Source = SharedString;
+    type Output = Result<crate::image_media::MediaImage, SharedString>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut gpui::App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        let client = cx.http_client();
+        async move {
+            use futures::AsyncReadExt as _;
+            let _slot = pr_image_slots()
+                .acquire()
+                .await
+                .map_err(|_| SharedString::from("image loading stopped"))?;
+            let mut response = client
+                .get(source.as_ref(), ().into(), true)
+                .await
+                .map_err(|error| SharedString::from(error.to_string()))?;
+            if !response.status().is_success() {
+                return Err(format!("image request failed: {}", response.status()).into());
+            }
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let mut bytes = Vec::new();
+            response
+                .body_mut()
+                .take(PR_IMAGE_MAX_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| SharedString::from(error.to_string()))?;
+            if bytes.len() as u64 > PR_IMAGE_MAX_BYTES {
+                return Err("image is too large to preview".into());
+            }
+            let mime = pr_image_mime(content_type.as_deref(), &bytes);
+            crate::image_media::decode_image(mime, bytes).map_err(SharedString::from)
+        }
+    }
+}
+
 /// GPUI's Img resolves percentage width + auto height to the source pixel height.
 /// Measure both dimensions together, then give Img explicit pixel dimensions.
 struct PreviewImage {
@@ -167,8 +237,7 @@ impl IntoElement for PreviewImage {
 }
 
 impl gpui::Element for PreviewImage {
-    type RequestLayoutState =
-        Option<Result<std::sync::Arc<gpui::RenderImage>, gpui::ImageCacheError>>;
+    type RequestLayoutState = Option<Result<crate::image_media::MediaImage, SharedString>>;
     type PrepaintState = AnyElement;
 
     fn id(&self) -> Option<gpui::ElementId> {
@@ -185,12 +254,11 @@ impl gpui::Element for PreviewImage {
         window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
-        let resource = gpui::Resource::Uri(self.source.to_string().into());
-        let data = window.use_asset::<gpui::ImgResourceLoader>(&resource, cx);
+        let data = window.use_asset::<PrImageLoader>(&self.source, cx);
         let natural = data
             .as_ref()
             .and_then(|result| result.as_ref().ok())
-            .map(|image| image.size(0).map(|dimension| px(dimension.0 as f32)));
+            .map(|image| gpui::size(px(image.width), px(image.height)));
         let layout =
             window.request_measured_layout(Default::default(), move |known, available, _, _| {
                 let width = known
@@ -222,7 +290,7 @@ impl gpui::Element for PreviewImage {
         cx: &mut gpui::App,
     ) -> AnyElement {
         let mut child = match data {
-            Some(Ok(image)) => gpui::img(image.clone())
+            Some(Ok(image)) => gpui::img(image.image.clone())
                 .id(self.id.clone())
                 .debug_selector(|| "pr-description-image".into())
                 .w(bounds.size.width)
@@ -309,9 +377,8 @@ pub(super) fn media(
                     move |_, window, cx| {
                         cx.stop_propagation();
                         // A failed inline image offers the browser instead.
-                        let resource = gpui::Resource::Uri(source.clone().into());
                         if matches!(
-                            window.get_asset::<gpui::ImgResourceLoader>(&resource, cx),
+                            window.get_asset::<PrImageLoader>(&SharedString::from(source.clone()), cx),
                             Some(Err(_))
                         ) {
                             cx.open_url(&source);

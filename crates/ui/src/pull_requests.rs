@@ -1,5 +1,4 @@
 use std::{
-    cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
     time::Instant,
@@ -7,8 +6,8 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, Context, Entity, Focusable, IntoElement, Render, ScrollHandle, SharedString,
-    Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, Focusable, IntoElement, ListOffset, ListState, Render,
+    ScrollHandle, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 use zeron_proto::{
     ChangeRequestFilter, ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestPage,
@@ -29,6 +28,11 @@ const PR_PAGE_MAX_WIDTH: f32 = 760.0;
 const PR_PAGE_HORIZONTAL_PADDING: f32 = 40.0;
 const PR_TABLE_ROW_HEIGHT: f32 = 64.0;
 const PR_SCROLL_FADE_BAND: f32 = 24.0;
+/// A stored first page younger than this is shown as is; an older one is
+/// shown and refreshed from GitHub behind it.
+const STORED_PAGE_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+/// Every control in the board's header and filter rows shares one height.
+const HEADER_CONTROL_HEIGHT: f32 = 32.0;
 
 /// Where the loaded listing stands relative to everything GitHub matched.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -72,6 +76,51 @@ enum SortDirection {
 struct PullRequestSort {
     field: PullRequestSortField,
     direction: SortDirection,
+}
+
+/// One row of the virtualized board: a group's header, one pull request in
+/// it, or the paging footer. Only rows on screen are built each frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoardRow {
+    Group {
+        group: PullRequestGroup,
+        count: usize,
+        closed: bool,
+        first: bool,
+    },
+    /// `index` into [`Board::items`]; `first`/`last` round the group's card.
+    Item {
+        index: usize,
+        first: bool,
+        last: bool,
+    },
+    Footer,
+}
+
+/// The board's rows, rebuilt only when what they show changes.
+struct Board {
+    /// The sorted, searched list this board was built from. Held so its
+    /// identity can't be reused by a later list while the board lives.
+    sorted: Rc<Vec<ChangeRequestListItem>>,
+    personal_view: PersonalView,
+    stars: Vec<String>,
+    collapsed: Vec<PullRequestGroup>,
+    footer: bool,
+    /// The pull requests shown after the personal view's filter.
+    items: Rc<Vec<ChangeRequestListItem>>,
+    rows: Vec<BoardRow>,
+}
+
+impl Board {
+    /// What identifies a row across rebuilds, so scrolling keeps its place
+    /// when pages arrive or groups collapse.
+    fn row_key(&self, row: &BoardRow) -> Option<String> {
+        Some(match row {
+            BoardRow::Group { group, .. } => format!("group:{}", group.key()),
+            BoardRow::Item { index, .. } => format!("item:{}", self.items.get(*index)?.url),
+            BoardRow::Footer => "footer".into(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -266,8 +315,12 @@ pub struct PullRequestsPage {
     more_error: Option<PullRequestsPageError>,
     selected_url: Option<String>,
     collapsed_groups: HashSet<PullRequestGroup>,
-    group_motions: HashMap<PullRequestGroup, crate::motion::DisclosureMotion>,
-    group_heights: HashMap<PullRequestGroup, Rc<Cell<f32>>>,
+    /// The virtualized results list and the rows it shows.
+    board_list: ListState,
+    board: Option<Rc<Board>>,
+    /// The results render through `board_list` this frame (not an empty,
+    /// error or skeleton state), so the rail reads the list's geometry.
+    board_list_active: bool,
     _search_events: Subscription,
     /// `None` keeps local calls direct; a value is forwarded by the relay.
     target_device: Option<String>,
@@ -317,7 +370,143 @@ impl PullRequestsPage {
     pub(crate) fn target_device(&self) -> Option<String> {
         self.target_device.clone()
     }
+
+    fn scroll_to_top(&mut self) {
+        self.scroll.scroll.set_offset(gpui::Point::default());
+        self.board_list.scroll_to(ListOffset::default());
+    }
+
+    /// How far the results list is scrolled, in pixels from the top.
+    #[cfg(test)]
+    fn board_scroll_offset(&self) -> gpui::Pixels {
+        -self.board_list.scroll_px_offset_for_scrollbar().y
+    }
+
+    /// The board's rows for the current list, view, stars and collapsed
+    /// groups. Rebuilt only when one of those changes; the list state is
+    /// spliced so the row at the top of the viewport stays put.
+    fn board(&mut self, cx: &mut Context<Self>) -> Rc<Board> {
+        let sorted = self
+            .view_items
+            .get_or_insert_with(|| {
+                let mut items: Vec<_> = self
+                    .items
+                    .iter()
+                    .filter(|item| matches_query(item, &self.query))
+                    .cloned()
+                    .collect();
+                sort_pull_requests(&mut items, self.sort);
+                Rc::new(items)
+            })
+            .clone();
+        let stars = crate::settings::current(cx).pull_request_stars;
+        let mut collapsed: Vec<_> = self.collapsed_groups.iter().copied().collect();
+        collapsed.sort_by_key(|group| group.key());
+        let footer = self.paging.next_cursor.is_some();
+        if let Some(board) = &self.board
+            && Rc::ptr_eq(&board.sorted, &sorted)
+            && board.personal_view == self.personal_view
+            && board.stars == stars
+            && board.collapsed == collapsed
+            && board.footer == footer
+        {
+            return board.clone();
+        }
+        let items: Vec<_> = sorted
+            .iter()
+            .filter(|item| match self.personal_view {
+                PersonalView::Everything => true,
+                PersonalView::NeedsYou => !Facts::from_item(item).assess().attention.is_empty(),
+                PersonalView::Starred => stars.contains(&star_key(&item.url)),
+            })
+            .cloned()
+            .collect();
+        let groups: Vec<_> = items.iter().map(request_group).collect();
+        let mut rows = Vec::new();
+        for group in PullRequestGroup::ALL {
+            let members: Vec<_> = (0..items.len())
+                .filter(|index| groups[*index] == group)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let closed = collapsed.contains(&group);
+            rows.push(BoardRow::Group {
+                group,
+                count: members.len(),
+                closed,
+                first: rows.is_empty(),
+            });
+            if !closed {
+                let last = members.len() - 1;
+                rows.extend(
+                    members
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, index)| BoardRow::Item {
+                            index,
+                            first: n == 0,
+                            last: n == last,
+                        }),
+                );
+            }
+        }
+        if footer && !rows.is_empty() {
+            rows.push(BoardRow::Footer);
+        }
+        let board = Rc::new(Board {
+            sorted,
+            personal_view: self.personal_view,
+            stars,
+            collapsed,
+            footer,
+            items: Rc::new(items),
+            rows,
+        });
+        let previous = self.board.replace(board.clone());
+        let unchanged = previous.as_ref().is_some_and(|previous| {
+            previous.rows.len() == board.rows.len()
+                && previous
+                    .rows
+                    .iter()
+                    .zip(&board.rows)
+                    .all(|(old, new)| previous.row_key(old) == board.row_key(new) && old == new)
+        });
+        if !unchanged {
+            let top = self.board_list.logical_scroll_top();
+            let anchor = previous
+                .as_ref()
+                .and_then(|previous| previous.rows.get(top.item_ix).map(|row| (previous, row)))
+                .and_then(|(previous, row)| previous.row_key(row));
+            self.board_list
+                .splice(0..self.board_list.item_count(), board.rows.len());
+            // Always land explicitly: a splice shifts a scroll position at or
+            // past the replaced range by the rows it inserts, so a list that
+            // was empty (position 0) would otherwise jump to its end.
+            let landing = anchor
+                .and_then(|anchor| {
+                    board
+                        .rows
+                        .iter()
+                        .position(|row| board.row_key(row).as_ref() == Some(&anchor))
+                })
+                .map_or(ListOffset::default(), |index| ListOffset {
+                    item_ix: index,
+                    offset_in_item: top.offset_in_item,
+                });
+            self.board_list.scroll_to(landing);
+        }
+        board
+    }
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        // The transcript's pattern: a virtualized list that tells the view
+        // when it scrolls, so the floating rail can follow.
+        let board_list = ListState::new(0, gpui::ListAlignment::Top, px(800.0))
+            .with_uniform_item_height(px(PR_TABLE_ROW_HEIGHT));
+        let weak = cx.entity().downgrade();
+        board_list.set_scroll_handler(move |_, _, cx| {
+            weak.update(cx, |_: &mut Self, cx| cx.notify()).ok();
+        });
         let search = cx.new(|cx| {
             ComposerInput::with_context("Search pull requests", "PaletteSearch", cx)
                 .with_text_metrics(12.0, 16.0)
@@ -329,9 +518,8 @@ impl PullRequestsPage {
             if matches!(event, ComposerInputEvent::Edited) {
                 page.query = input.read(cx).text().to_string();
                 page.view_items = None;
-                page.scroll.scroll.set_offset(gpui::Point::default());
+                page.scroll_to_top();
                 page.collapsed_groups.clear();
-                page.group_motions.clear();
                 cx.notify();
             }
         });
@@ -386,11 +574,9 @@ impl PullRequestsPage {
             more_error: None,
             selected_url: None,
             collapsed_groups: HashSet::new(),
-            group_motions: HashMap::new(),
-            group_heights: PullRequestGroup::ALL
-                .into_iter()
-                .map(|group| (group, Rc::new(Cell::new(0.0))))
-                .collect(),
+            board_list,
+            board: None,
+            board_list_active: false,
             _search_events: search_events,
             target_device: None,
             items: Vec::new(),
@@ -640,7 +826,6 @@ impl PullRequestsPage {
         self.automatic_filter = remembered.is_none();
         self.set_filter(remembered.unwrap_or(ChangeRequestFilter::Authored), cx);
         self.collapsed_groups.clear();
-        self.group_motions.clear();
         self.items.clear();
         self.paging = Paging::default();
         self.more_task = None;
@@ -648,7 +833,7 @@ impl PullRequestsPage {
         self.view_items = None;
         self.load_state = PullRequestsLoadState::Idle;
         self.last_loaded_at = None;
-        self.scroll.scroll.set_offset(gpui::Point::default());
+        self.scroll_to_top();
         self.restore_snapshot();
     }
 
@@ -998,7 +1183,7 @@ impl PullRequestsPage {
         let mut trigger =
             crate::surface_chrome::tab("pr-repository", self.repository_menu.is_open(), theme)
                 .debug_selector(|| "pr-repository".into())
-                .h(px(28.0))
+                .h(px(HEADER_CONTROL_HEIGHT))
                 .px(px(8.0))
                 .max_w(px(220.0))
                 .min_w_0()
@@ -1488,7 +1673,7 @@ impl PullRequestsPage {
                             page.sort = PullRequestSort { field, direction };
                             page.return_focus = Some(page.sort_focus.clone());
                             page.view_items = None;
-                            page.scroll.scroll.set_offset(gpui::Point::default());
+                            page.scroll_to_top();
                             page.close_sort_menu(cx);
                             cx.notify();
                         }))
@@ -1503,6 +1688,15 @@ impl PullRequestsPage {
     }
 
     fn load(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        // An ordinary load shows the engine's stored copy at once; Refresh
+        // always reaches GitHub.
+        self.load_with(refresh, !refresh, cx);
+    }
+
+    /// `cached` accepts the engine's on-disk first page, whatever its age. A
+    /// stored page older than [`STORED_PAGE_FRESH`] is shown and then
+    /// replaced by a GitHub read in the background.
+    fn load_with(&mut self, refresh: bool, cached: bool, cx: &mut Context<Self>) {
         if self.repository.is_none() || matches!(self.load_state, PullRequestsLoadState::Loading) {
             return;
         }
@@ -1528,6 +1722,7 @@ impl PullRequestsPage {
         let mut params = params_for_target(self.target_device.as_deref());
         params["repository"] = self.repository.clone().unwrap().into();
         params["refresh"] = refresh.into();
+        params["cached"] = cached.into();
         params["filter"] = serde_json::to_value(self.filter).unwrap();
         self.refreshed = refresh;
         self.load_state = PullRequestsLoadState::Loading;
@@ -1561,6 +1756,13 @@ impl PullRequestsPage {
                 }
 
                 page.request_task = None;
+                // How old the page is: a stored copy keeps its fetch time.
+                let age = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|page| page.fetched_at)
+                    .and_then(|at| (Utc::now() - at).to_std().ok())
+                    .unwrap_or_default();
                 let loaded = result.map_err(|error| map_rpc_error(&error, &target_name));
                 let paging = loaded.as_ref().ok().map(|page| Paging {
                     next_cursor: page.next_cursor.clone(),
@@ -1598,8 +1800,12 @@ impl PullRequestsPage {
                     page.automatic_filter = false;
                     page.remember_filter(page.filter);
                     let now = Instant::now();
-                    page.last_loaded_at = Some(now);
-                    page.store_snapshot(now);
+                    let loaded_at = now.checked_sub(age).unwrap_or(now);
+                    page.last_loaded_at = Some(loaded_at);
+                    page.store_snapshot(loaded_at);
+                    if cached && age > STORED_PAGE_FRESH {
+                        page.load_with(false, false, cx);
+                    }
                 }
                 cx.notify();
             })
@@ -1682,7 +1888,8 @@ impl PullRequestsPage {
     }
 
     /// "Load more" beneath the last group, with the remaining count when
-    /// GitHub reports it.
+    /// GitHub reports it. Pages load only on request, sparing the user's
+    /// GitHub rate limit.
     fn render_load_more(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.paging.next_cursor.as_ref()?;
         let loading = self.more_task.is_some();
@@ -1691,10 +1898,11 @@ impl PullRequestsPage {
             .total
             .map(|total| total.saturating_sub(self.items.len() as u64))
             .filter(|remaining| *remaining > 0);
-        let label = match (loading, remaining) {
-            (true, _) => "Loading more…".to_owned(),
-            (false, Some(remaining)) => format!("Load {} more", remaining.min(50)),
-            (false, None) => "Load more".to_owned(),
+        let label = match (loading, &self.more_error, remaining) {
+            (true, ..) => "Loading more…".to_owned(),
+            (false, Some(_), _) => "Try again".to_owned(),
+            (false, None, Some(remaining)) => format!("Load {} more", remaining.min(50)),
+            (false, None, None) => "Load more".to_owned(),
         };
         Some(
             div()
@@ -1708,21 +1916,19 @@ impl PullRequestsPage {
                     el.child(widgets::error_strip(theme, format!("{title}. {body}")))
                 })
                 .child(
-                    widgets::ghost_action(theme)
+                    // A filled, borderless button: the list's own material.
+                    widgets::action_button(theme, widgets::ActionTone::Filled)
                         .id("pull-requests-load-more")
                         .debug_selector(|| "pull-requests-load-more".to_string())
                         .role(gpui::Role::Button)
                         .aria_label(label.clone())
                         .tab_index(0)
-                        .h(px(32.0))
+                        .h(px(HEADER_CONTROL_HEIGHT))
                         .px(px(14.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .focus_visible(|style| style.border_2().border_color(theme.accent))
-                        .when(loading, |el| el.opacity(0.6))
                         .gap(px(8.0))
+                        .focus_visible(|style| style.border_2().border_color(theme.accent))
                         .when(loading, |el| {
-                            el.child(crate::loaders::mini_glyph_spinner(
+                            el.opacity(0.7).child(crate::loaders::mini_glyph_spinner(
                                 "pull-requests-more-spinner",
                                 1.5,
                                 theme.glyph,
@@ -1731,7 +1937,10 @@ impl PullRequestsPage {
                             ))
                         })
                         .child(label)
-                        .on_click(cx.listener(|page, _, _, cx| page.load_more(cx))),
+                        .on_click(cx.listener(|page, _, _, cx| {
+                            page.more_error = None;
+                            page.load_more(cx)
+                        })),
                 )
                 .into_any_element(),
         )
@@ -1772,7 +1981,7 @@ impl PullRequestsPage {
             .border_color(gpui::transparent_black())
             .focus_visible(|style| style.border_2().border_color(theme.accent))
             .flex_none()
-            .h(px(32.0))
+            .h(px(HEADER_CONTROL_HEIGHT))
             .px(px(8.0))
             .rounded(px(6.0))
             .flex()
@@ -2038,12 +2247,87 @@ fn empty_action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::S
         .child(label)
 }
 
+/// The results list's rail geometry, read from the list state itself (the
+/// file tree's approach): viewport, content extent, and the offset as a
+/// positive distance from the top.
+fn board_rail_geometry(list: &ListState) -> Option<(popover::MenuScrollbarMetrics, gpui::Pixels)> {
+    let bounds = list.viewport_bounds();
+    let viewport = f32::from(bounds.size.height);
+    let max_scroll = f32::from(list.max_offset_for_scrollbar().y);
+    let offset = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    let metrics =
+        popover::MenuScrollbarMetrics::from_parts(viewport, viewport + max_scroll, offset)?;
+    Some((metrics, bounds.top()))
+}
+
+fn board_scroll_overflow(list: &ListState) -> (bool, bool) {
+    let offset = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    let max = f32::from(list.max_offset_for_scrollbar().y);
+    (offset > 0.5, offset < max - 0.5)
+}
+
+impl PullRequestsPage {
+    fn apply_board_rail_target(
+        &mut self,
+        metrics: &popover::MenuScrollbarMetrics,
+        track_top: gpui::Pixels,
+        pointer_y: gpui::Pixels,
+    ) -> bool {
+        let Some(fraction) = popover::ScrollRailHost::rail_bar(self)
+            .drag_target_in(metrics, track_top, pointer_y)
+        else {
+            return false;
+        };
+        self.board_list
+            .set_offset_from_scrollbar(gpui::Point::new(px(0.0), px(-fraction * metrics.max_scroll)));
+        true
+    }
+}
+
+/// The results scroll through the virtualized list; empty, error and
+/// skeleton states scroll through the page's handle.
 impl popover::ScrollRailHost for PullRequestsPage {
     fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
         self.scroll.rail_bar()
     }
     fn rail_scroll(&self) -> Option<ScrollHandle> {
         self.scroll.rail_scroll()
+    }
+    fn rail_metrics(&mut self) -> Option<popover::MenuScrollbarMetrics> {
+        if !self.board_list_active {
+            let scroll = self.scroll.rail_scroll()?;
+            self.rail_bar().note_scroll(&scroll);
+            return self.rail_bar().metrics(&scroll);
+        }
+        let (metrics, _) = board_rail_geometry(&self.board_list)?;
+        let offset = -f32::from(self.board_list.scroll_px_offset_for_scrollbar().y);
+        self.rail_bar().note_scroll_offset(offset);
+        Some(metrics)
+    }
+    fn rail_press(&mut self, pointer_y: gpui::Pixels) -> bool {
+        if !self.board_list_active {
+            let Some(scroll) = self.scroll.rail_scroll() else {
+                return false;
+            };
+            return self.rail_bar().begin_press(&scroll, pointer_y);
+        }
+        let Some((metrics, track_top)) = board_rail_geometry(&self.board_list) else {
+            return false;
+        };
+        self.rail_bar().begin_press_in(&metrics, track_top, pointer_y);
+        self.apply_board_rail_target(&metrics, track_top, pointer_y)
+    }
+    fn rail_drag_to(&mut self, pointer_y: gpui::Pixels) -> bool {
+        if !self.board_list_active {
+            let Some(scroll) = self.scroll.rail_scroll() else {
+                return false;
+            };
+            return self.rail_bar().drag_to(&scroll, pointer_y);
+        }
+        let Some((metrics, track_top)) = board_rail_geometry(&self.board_list) else {
+            return false;
+        };
+        self.apply_board_rail_target(&metrics, track_top, pointer_y)
     }
 }
 
@@ -2074,37 +2358,8 @@ impl Render for PullRequestsPage {
                 (total as usize).max(self.items.len())
             })
         });
-        let items = self
-            .view_items
-            .get_or_insert_with(|| {
-                let mut items: Vec<_> = self
-                    .items
-                    .iter()
-                    .filter(|item| matches_query(item, &self.query))
-                    .cloned()
-                    .collect();
-                sort_pull_requests(&mut items, self.sort);
-                Rc::new(items)
-            })
-            .clone();
-        let stars = crate::settings::current(cx).pull_request_stars;
-        let items = if self.personal_view == PersonalView::Everything {
-            items
-        } else {
-            Rc::new(
-                items
-                    .iter()
-                    .filter(|item| match self.personal_view {
-                        PersonalView::Everything => true,
-                        PersonalView::NeedsYou => {
-                            !Facts::from_item(item).assess().attention.is_empty()
-                        }
-                        PersonalView::Starred => stars.contains(&star_key(&item.url)),
-                    })
-                    .cloned()
-                    .collect(),
-            )
-        };
+        let board = self.board(cx);
+        let items = board.items.clone();
         let layout = self
             .content_width
             .map(table_layout)
@@ -2162,30 +2417,16 @@ impl Render for PullRequestsPage {
                     .items_center()
                     .flex_wrap()
                     .gap(px(12.0))
-                    .child(widgets::page_header(&theme, "Pull requests", count).when(
-                        self.paging.next_cursor.is_some(),
-                        |el| {
-                            el.child(
-                                div()
-                                    .id("pull-requests-loaded-count")
-                                    .debug_selector(|| "pull-requests-loaded-count".into())
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(format!("{} loaded", self.items.len())),
-                            )
-                        },
-                    ))
+                    .child(widgets::page_header(&theme, "Pull requests", count))
                     .child(div().flex_1())
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .flex_wrap()
-                            .gap(px(8.0))
-                            .child(self.render_repository_menu(&theme, window, cx))
-                            .child(self.render_device_switcher(&theme, cx))
+                            .gap(px(4.0))
                             .child(
-                                widgets::ghost_action(&theme)
+                                div()
                                     .id("pull-requests-refresh")
                                     .debug_selector(|| "pull-requests-refresh".to_string())
                                     .role(gpui::Role::Button)
@@ -2196,13 +2437,19 @@ impl Render for PullRequestsPage {
                                         "Fetch the latest results from GitHub"
                                     })
                                     .tab_index(0)
+                                    .size(px(HEADER_CONTROL_HEIGHT))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .cursor_pointer()
                                     .border_1()
                                     .border_color(gpui::transparent_black())
+                                    .hover(|style| style.bg(crate::theme::ink(0.04)))
                                     .focus_visible(|style| {
                                         style.border_2().border_color(theme.accent)
                                     })
-                                    .h(px(32.0))
-                                    .flex_none()
                                     .when(loading, |el| el.opacity(0.5))
                                     .on_click(cx.listener(|page, _, _, cx| page.refresh(cx)))
                                     .child(if refreshing {
@@ -2221,7 +2468,9 @@ impl Render for PullRequestsPage {
                                             .into_any_element()
                                     })
                                     .tooltip(widgets::text_tooltip(freshness)),
-                            ),
+                            )
+                            .child(self.render_repository_menu(&theme, window, cx))
+                            .child(self.render_device_switcher(&theme, cx)),
                     ),
             )
             .when(refresh_error, |el| {
@@ -2238,49 +2487,69 @@ impl Render for PullRequestsPage {
                     .items_center()
                     .gap(px(12.0))
                     .child(
-                        div().flex().items_center().gap(px(2.0)).children(
-                            [
-                                (
-                                    ChangeRequestFilter::Authored,
-                                    "Authored",
-                                    "pr-filter-authored",
-                                ),
-                                (
-                                    ChangeRequestFilter::Reviewing,
-                                    "Reviewing",
-                                    "pr-filter-reviewing",
-                                ),
-                                (ChangeRequestFilter::All, "All", "pr-filter-all"),
-                            ]
-                            .into_iter()
-                            .map(|(filter, label, id)| {
-                                let selected = self.filter_fades.value_at(id, Instant::now());
-                                let hover_key = format!("pr-filter-{}-{id}", cx.entity_id());
-                                let hover = crate::motion::hover_t(&hover_key);
-                                crate::surface_chrome::tab_frame(id, self.filter == filter, &theme)
-                                    .bg(crate::theme::wash(
-                                        0.10 * selected + 0.06 * hover * (1.0 - selected),
-                                    ))
-                                    .text_color(crate::motion::mix(
-                                        theme.text_muted,
-                                        theme.text,
-                                        selected.max(hover),
-                                    ))
-                                    .on_hover(crate::motion::hover_listener(hover_key))
-                                    .hover(move |style| {
-                                        style.bg(crate::theme::wash(
-                                            0.10 * selected + 0.06 * hover * (1.0 - selected),
+                        // A segmented control: the tray reads as one control
+                        // and each segment as one of its choices.
+                        div()
+                            .id("pr-filter-tray")
+                            .role(gpui::Role::TabList)
+                            .aria_label("Pull requests to show")
+                            .h(px(HEADER_CONTROL_HEIGHT))
+                            .flex_none()
+                            .p(px(2.0))
+                            .rounded(px(8.0))
+                            .bg(crate::theme::ink(0.035))
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
+                            .children(
+                                [
+                                    (
+                                        ChangeRequestFilter::Authored,
+                                        "Authored",
+                                        "pr-filter-authored",
+                                    ),
+                                    (
+                                        ChangeRequestFilter::Reviewing,
+                                        "Reviewing",
+                                        "pr-filter-reviewing",
+                                    ),
+                                    (ChangeRequestFilter::All, "All", "pr-filter-all"),
+                                ]
+                                .into_iter()
+                                .map(|(filter, label, id)| {
+                                    let chosen = self.filter == filter;
+                                    let selected = self.filter_fades.value_at(id, Instant::now());
+                                    let hover_key = format!("pr-filter-{}-{id}", cx.entity_id());
+                                    let hover = crate::motion::hover_t(&hover_key);
+                                    let fill = move || {
+                                        crate::theme::wash(
+                                            0.12 * selected + 0.06 * hover * (1.0 - selected),
+                                        )
+                                    };
+                                    crate::surface_chrome::tab_frame(id, chosen, &theme)
+                                        .role(gpui::Role::Tab)
+                                        .h(px(HEADER_CONTROL_HEIGHT - 4.0))
+                                        .bg(fill())
+                                        .when(chosen, |el| {
+                                            el.shadow(crate::theme::card_selected_shadows())
+                                        })
+                                        .text_color(crate::motion::mix(
+                                            theme.text_muted,
+                                            theme.text,
+                                            selected.max(hover),
                                         ))
-                                    })
-                                    .debug_selector(move || id.into())
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .px(px(10.0))
-                                    .child(label)
-                                    .on_click(cx.listener(move |page, _, _, cx| {
-                                        page.select_filter(filter, cx)
-                                    }))
-                            }),
-                        ),
+                                        .on_hover(crate::motion::hover_listener(hover_key))
+                                        .hover(move |style| style.bg(fill()))
+                                        .debug_selector(move || id.into())
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .px(px(12.0))
+                                        .child(label)
+                                        .on_click(cx.listener(move |page, _, _, cx| {
+                                            page.select_filter(filter, cx)
+                                        }))
+                                }),
+                            ),
                     )
                     .child(
                         div()
@@ -2291,7 +2560,8 @@ impl Render for PullRequestsPage {
                             .gap(px(Theme::SPACE_SM))
                             .child(
                                 crate::surface_chrome::input()
-                                    .h(px(32.0))
+                                    .h(px(HEADER_CONTROL_HEIGHT))
+                                    .rounded(px(8.0))
                                     .min_w(px(160.0))
                                     .child(
                                         icon(icons::MAGNIFER)
@@ -2328,9 +2598,7 @@ impl Render for PullRequestsPage {
                                                     });
                                                     page.query.clear();
                                                     page.view_items = None;
-                                                    page.scroll
-                                                        .scroll
-                                                        .set_offset(gpui::Point::default());
+                                                    page.scroll_to_top();
                                                     cx.notify();
                                                 }))
                                                 .child(
@@ -2353,20 +2621,63 @@ impl Render for PullRequestsPage {
                     .gap(px(8.0))
                     .children(
                         [
-                            (PersonalView::NeedsYou, "Needs you", "pr-view-needs-you"),
-                            (PersonalView::Starred, "Starred", "pr-view-starred"),
+                            (
+                                PersonalView::NeedsYou,
+                                "Needs you",
+                                "pr-view-needs-you",
+                                icons::BELL,
+                                icons::BELL,
+                            ),
+                            (
+                                PersonalView::Starred,
+                                "Starred",
+                                "pr-view-starred",
+                                icons::STAR,
+                                icons::STAR_BOLD,
+                            ),
                         ]
                         .into_iter()
-                        .map(|(view, label, id)| {
+                        .map(|(view, label, id, glyph, selected_glyph)| {
                             let selected = self.personal_view == view;
-                            crate::surface_chrome::tab_frame(id, selected, &theme)
+                            // Toggle pills in the tray's material: filled, no
+                            // outline, glyph and label centered together.
+                            let color = if selected { theme.text } else { theme.text_muted };
+                            div()
+                                .id(id)
                                 .debug_selector(move || id.into())
                                 .role(gpui::Role::Button)
                                 .aria_label(label)
                                 .aria_selected(selected)
+                                .tab_index(0)
+                                .h(px(HEADER_CONTROL_HEIGHT - 4.0))
+                                .pl(px(10.0))
+                                .pr(px(12.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(6.0))
+                                .rounded_full()
+                                .cursor_pointer()
                                 .text_size(crate::typography::ui_rems(12.0))
-                                .px(px(10.0))
                                 .line_height(crate::typography::ui_rems(16.0))
+                                .text_color(color)
+                                .when(selected, |el| {
+                                    el.bg(crate::theme::wash(0.12))
+                                        .shadow(crate::theme::card_selected_shadows())
+                                })
+                                .when(!selected, |el| {
+                                    el.bg(crate::theme::ink(0.035)).hover(|style| {
+                                        style.bg(crate::theme::ink(0.07)).text_color(theme.text)
+                                    })
+                                })
+                                .focus_visible(|style| style.border_2().border_color(theme.accent))
+                                .child(
+                                    icon(if selected { selected_glyph } else { glyph })
+                                        .size(px(13.0))
+                                        .flex_none()
+                                        .text_color(color),
+                                )
                                 .child(label)
                                 .on_click(cx.listener(move |page, _, _, cx| {
                                     page.personal_view = if selected {
@@ -2374,25 +2685,13 @@ impl Render for PullRequestsPage {
                                     } else {
                                         view
                                     };
-                                    page.scroll.scroll.set_offset(gpui::Point::default());
+                                    page.scroll_to_top();
                                     if !selected {
                                         page.select_filter(ChangeRequestFilter::All, cx);
                                     }
                                     cx.notify();
                                 }))
                         }),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "pull-requests-list-status".into())
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(crate::typography::ui_rems(16.0))
-                            .text_color(theme.text_muted)
-                            .child(if initial_loading {
-                                "Loading pull requests…".to_owned()
-                            } else {
-                                format!("{} shown · {} loaded", items.len(), self.items.len())
-                            }),
                     ),
             )
             .when(!self.query.is_empty(), |el| {
@@ -2401,71 +2700,104 @@ impl Render for PullRequestsPage {
                         .mt(px(Theme::SPACE_SM))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
-                        .child(if self.paging.next_cursor.is_some() {
-                            format!(
-                                "{} of {} loaded pull requests · load more to search further",
-                                items.len(),
-                                self.items.len()
-                            )
-                        } else {
-                            format!("{} of {} pull requests", items.len(), self.items.len())
-                        }),
+                        .child(format!(
+                            "{} of {} pull requests",
+                            items.len(),
+                            self.items.len()
+                        )),
                 )
             });
-        let content = if initial_loading {
-            crate::pull_request_skeleton::board(layout, cx.entity_id(), &theme, cx)
+        // Results render through the virtualized list; every other state is
+        // a short page in an ordinary scroll view.
+        let board_list_active = !initial_loading && !self.items.is_empty() && !items.is_empty();
+        self.board_list_active = board_list_active;
+        let content = if board_list_active {
+            None
+        } else if initial_loading {
+            Some(crate::pull_request_skeleton::board(layout, cx.entity_id(), &theme, cx))
         } else if self.items.is_empty() {
-            self.render_empty_or_error(&theme, cx)
-        } else if items.is_empty() {
-            div()
-                .id("pull-requests-no-results")
-                .debug_selector(|| "pull-requests-no-results".to_string())
-                .py(px(48.0))
-                .text_center()
-                .text_size(crate::typography::ui_rems(13.0))
-                .text_color(theme.text_muted)
-                .flex()
-                .flex_col()
-                .items_center()
-                .child(match self.personal_view {
-                    PersonalView::NeedsYou => "Nothing needs your attention in the loaded PRs",
-                    PersonalView::Starred => "No starred pull requests in the loaded PRs",
-                    PersonalView::Everything => "No matching pull requests",
-                })
-                .child(
-                    empty_action("pr-empty-clear-search", "Show loaded pull requests", &theme)
-                        .on_click(cx.listener(|page, _, _, cx| {
-                            page.search.update(cx, |input, cx| input.set_text("", cx));
-                            page.query.clear();
-                            page.personal_view = PersonalView::Everything;
-                            page.view_items = None;
-                            cx.notify();
-                        }),
-                    ),
-                )
-                .into_any_element()
+            Some(self.render_empty_or_error(&theme, cx))
         } else {
-            render_grouped_requests(
-                &items,
-                layout,
-                self.sort.field,
-                &self.collapsed_groups,
-                &self.group_motions,
-                &self.group_heights,
-                self.selected_url.as_deref(),
-                &theme,
-                cx,
+            Some(
+                div()
+                    .id("pull-requests-no-results")
+                    .debug_selector(|| "pull-requests-no-results".to_string())
+                    .py(px(48.0))
+                    .text_center()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text_muted)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(match self.personal_view {
+                        PersonalView::NeedsYou => "Nothing needs your attention",
+                        PersonalView::Starred => "No starred pull requests",
+                        PersonalView::Everything => "No matching pull requests",
+                    })
+                    .child(
+                        empty_action("pr-empty-clear-search", "Show all pull requests", &theme)
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.search.update(cx, |input, cx| input.set_text("", cx));
+                                page.query.clear();
+                                page.personal_view = PersonalView::Everything;
+                                page.view_items = None;
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
             )
         };
-        let load_more = (!initial_loading && !self.items.is_empty())
+        let load_more = (!board_list_active && !initial_loading && !self.items.is_empty())
             .then(|| self.render_load_more(&theme, cx))
             .flatten();
         let scrollbar = popover::rail(self, "pull-requests-scrollbar", &theme, cx);
-        if self.filter_fades.tick_at(Instant::now())
-            || self.group_motions.values().any(|motion| motion.animating())
-        {
+        if self.filter_fades.tick_at(Instant::now()) {
             window.request_animation_frame();
         }
+        let results = match content {
+            None => {
+                let overflow = self.board_list.clone();
+                crate::edge_fade::edge_faded(
+                    PR_SCROLL_FADE_BAND,
+                    true,
+                    true,
+                    div()
+                        .id("pull-requests-scroll")
+                        .debug_selector(|| "pull-requests-scroll".into())
+                        .size_full()
+                        .child(
+                            list(self.board_list.clone(), cx.processor(Self::render_board_row))
+                                .size_full(),
+                        ),
+                )
+                .fade_overflow_y_with(move |_| board_scroll_overflow(&overflow))
+                .into_any_element()
+            }
+            Some(content) => crate::edge_fade::edge_faded(
+                PR_SCROLL_FADE_BAND,
+                true,
+                true,
+                div()
+                    .id("pull-requests-scroll")
+                    .debug_selector(|| "pull-requests-scroll".into())
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(PR_PAGE_MAX_WIDTH))
+                            .mx_auto()
+                            .px(px(PR_PAGE_HORIZONTAL_PADDING))
+                            .pt(px(8.0))
+                            .pb(px(32.0))
+                            .child(content)
+                            .children(load_more),
+                    ),
+            )
+            .fade_overflow_y(&scroll)
+            .into_any_element(),
+        };
         // Keep the page actions reachable while browsing a long list. Only the
         // results scroll; the shared edges remain identical in every layout.
         div()
@@ -2486,35 +2818,144 @@ impl Render for PullRequestsPage {
                             cx.notify();
                         }
                     }))
-                    .child(
-                        crate::edge_fade::edge_faded(
-                            PR_SCROLL_FADE_BAND,
-                            true,
-                            true,
-                            div()
-                                .id("pull-requests-scroll")
-                                .debug_selector(|| "pull-requests-scroll".into())
-                                .size_full()
-                                .overflow_y_scroll()
-                                .track_scroll(&scroll)
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .max_w(px(PR_PAGE_MAX_WIDTH))
-                                        .mx_auto()
-                                        .relative()
-                                        .px(px(PR_PAGE_HORIZONTAL_PADDING))
-                                        .pt(px(8.0))
-                                        .pb(px(32.0))
-                                        .child(width_probe)
-                                        .child(content)
-                                        .children(load_more),
-                                ),
-                        )
-                        .fade_overflow_y(&scroll),
-                    )
+                    .child(width_probe)
+                    .child(results)
                     .children(scrollbar),
             )
+    }
+}
+
+impl PullRequestsPage {
+    /// One row of the virtualized board, framed in the page column. Built
+    /// only while on screen.
+    fn render_board_row(
+        &mut self,
+        index: usize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(board) = self.board.clone() else {
+            return div().into_any_element();
+        };
+        let Some(row) = board.rows.get(index).copied() else {
+            return div().into_any_element();
+        };
+        let theme = Theme::of(cx).clone();
+        let content = match row {
+            BoardRow::Group {
+                group,
+                count,
+                closed,
+                first,
+            } => self
+                .render_group_header(group, count, closed, &theme, cx)
+                .when(!first, |el| el.pt(px(32.0)))
+                .pb(px(8.0))
+                .into_any_element(),
+            BoardRow::Item { index, first, last } => {
+                let Some(item) = board.items.get(index) else {
+                    return div().into_any_element();
+                };
+                let layout = self
+                    .content_width
+                    .map(table_layout)
+                    .unwrap_or(PullRequestTableLayout::Narrow);
+                // Each row paints its slice of the group's card.
+                div()
+                    .w_full()
+                    .bg(widgets::block_fill(&theme))
+                    .when(first, |el| el.rounded_t(px(12.0)))
+                    .when(last, |el| el.rounded_b(px(12.0)))
+                    .child(render_table_row(
+                        item,
+                        layout,
+                        self.sort.field,
+                        first,
+                        last,
+                        self.selected_url.as_deref() == Some(item.url.as_str()),
+                        &theme,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+            BoardRow::Footer => self
+                .render_load_more(&theme, cx)
+                .unwrap_or_else(|| div().into_any_element()),
+        };
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .when(index == 0, |el| el.pt(px(8.0)))
+            .when(index + 1 == board.rows.len(), |el| el.pb(px(32.0)))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(PR_PAGE_MAX_WIDTH))
+                    .px(px(PR_PAGE_HORIZONTAL_PADDING))
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
+    fn render_group_header(
+        &mut self,
+        group: PullRequestGroup,
+        count: usize,
+        closed: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let reveal = crate::motion::state_t(
+            &format!("pr-group-{}-{}", cx.entity_id(), group.key()),
+            !closed,
+            crate::motion::GLYPH_STATE,
+            crate::motion::reduced_motion(cx),
+        );
+        div().w_full().child(
+            div()
+                .id(SharedString::from(format!(
+                    "pull-requests-group-{}",
+                    group.key()
+                )))
+                .debug_selector(move || format!("pull-requests-group-{}", group.key()))
+                .role(gpui::Role::Button)
+                .aria_label(format!("{}, {count} pull requests", group.label()))
+                .aria_expanded(!closed)
+                .tab_index(0)
+                .min_h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .focus_visible(|style| style.border_2().border_color(theme.accent))
+                .cursor_pointer()
+                .hover(|style| style.bg(crate::theme::ink(0.025)))
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    if !page.collapsed_groups.remove(&group) {
+                        page.collapsed_groups.insert(group);
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted)
+                        .with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                            reveal * 0.25,
+                        ))),
+                )
+                .child(widgets::section_label(theme, group.label()).px_0())
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(count.to_string()),
+                ),
+        )
     }
 }
 
@@ -2564,155 +3005,6 @@ fn sort_pull_requests(items: &mut [ChangeRequestListItem], sort: PullRequestSort
 
 fn pull_request_key(item: &ChangeRequestListItem) -> String {
     format!("{}#{}", item.repository, item.number)
-}
-
-fn render_grouped_requests(
-    items: &[ChangeRequestListItem],
-    layout: PullRequestTableLayout,
-    sort_field: PullRequestSortField,
-    collapsed: &HashSet<PullRequestGroup>,
-    motions: &HashMap<PullRequestGroup, crate::motion::DisclosureMotion>,
-    heights: &HashMap<PullRequestGroup, Rc<Cell<f32>>>,
-    selected_url: Option<&str>,
-    theme: &Theme,
-    cx: &mut Context<PullRequestsPage>,
-) -> AnyElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(32.0))
-        .children(PullRequestGroup::ALL.into_iter().filter_map(|group| {
-            let rows: Vec<_> = items
-                .iter()
-                .filter(|item| request_group(item) == group)
-                .collect();
-            if rows.is_empty() {
-                return None;
-            }
-            let closed = collapsed.contains(&group);
-            let measured = heights[&group].clone();
-            let full_height = measured.get().max(1.0);
-            let tween = motions
-                .get(&group)
-                .copied()
-                .filter(|motion| motion.animating());
-            let reveal = tween.map_or(if closed { 0.0 } else { 1.0 }, |motion| {
-                (motion.current() / full_height).clamp(0.0, 1.0)
-            });
-            Some(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "pull-requests-group-{}",
-                                group.key()
-                            )))
-                            .debug_selector(move || format!("pull-requests-group-{}", group.key()))
-                            .role(gpui::Role::Button)
-                            .aria_label(format!("{}, {} pull requests", group.label(), rows.len()))
-                            .aria_expanded(!closed)
-                            .tab_index(0)
-                            .min_h(px(24.0))
-                            .px(px(8.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(Theme::SPACE_SM))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(gpui::transparent_black())
-                            .focus_visible(|style| style.border_2().border_color(theme.accent))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(crate::theme::ink(0.025)))
-                            .on_click(cx.listener(move |page, _, _, cx| {
-                                let height = page.group_heights[&group].get();
-                                let previous = page.group_motions.get(&group).copied();
-                                let from = previous
-                                    .filter(|motion| motion.animating())
-                                    .map(|motion| motion.current())
-                                    .unwrap_or(if closed { 0.0 } else { height });
-                                if crate::motion::reduced_motion(cx) {
-                                    page.group_motions.remove(&group);
-                                } else {
-                                    page.group_motions.insert(
-                                        group,
-                                        crate::motion::DisclosureMotion::new(
-                                            previous.map_or(1, |motion| motion.epoch + 1),
-                                            from,
-                                            if closed { height } else { 0.0 },
-                                        ),
-                                    );
-                                }
-                                if !page.collapsed_groups.remove(&group) {
-                                    page.collapsed_groups.insert(group);
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                icon(icons::ALT_ARROW_RIGHT)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted)
-                                    .with_transformation(gpui::Transformation::rotate(
-                                        gpui::percentage(reveal * 0.25),
-                                    )),
-                            )
-                            .child(widgets::section_label(theme, group.label()).px_0())
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(rows.len().to_string()),
-                            ),
-                    )
-                    .when(!closed || tween.is_some(), |el| {
-                        let row_count = rows.len();
-                        let content = div()
-                            .w_full()
-                            .flex_none()
-                            .relative()
-                            .child(
-                                gpui::canvas(
-                                    move |bounds, _, _| {
-                                        measured.set(f32::from(bounds.size.height));
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .inset_0(),
-                            )
-                            .children(rows.into_iter().enumerate().map(|(index, item)| {
-                                render_table_row(
-                                    item,
-                                    layout,
-                                    sort_field,
-                                    index == 0,
-                                    index + 1 == row_count,
-                                    selected_url == Some(item.url.as_str()),
-                                    theme,
-                                    cx,
-                                )
-                            }));
-                        el.child(
-                            widgets::section_card(theme)
-                                .mt_0()
-                                .w_full()
-                                .when_some(tween, |el, motion| {
-                                    el.h(px(motion.current()))
-                                        .opacity(0.35 + 0.65 * reveal)
-                                        .relative()
-                                        .top(px(-3.0 * (1.0 - reveal)))
-                                })
-                                .child(content),
-                        )
-                    })
-                    .into_any_element(),
-            )
-        }))
-        .into_any_element()
 }
 
 pub(crate) fn table_row_shell(
@@ -3593,6 +3885,7 @@ mod tests {
                     },
                     next_cursor: None,
                     total_count: None,
+                    fetched_at: None,
                 })
             }
         });
@@ -3719,9 +4012,9 @@ mod tests {
                 assert!(action.size.height >= px(32.0));
                 assert!(action.left() >= px(0.0) && action.right() <= px(width));
                 if width == 900.0 {
-                    let status = cx.debug_bounds("pull-requests-list-status").unwrap();
-                    let filter = cx.debug_bounds("pr-view-starred").unwrap();
-                    assert!((status.center().y - filter.center().y).abs() < px(1.0));
+                    let needs_you = cx.debug_bounds("pr-view-needs-you").unwrap();
+                    let starred = cx.debug_bounds("pr-view-starred").unwrap();
+                    assert!((needs_you.center().y - starred.center().y).abs() < px(1.0));
                 }
             }
         }
@@ -3831,6 +4124,7 @@ mod tests {
                             items: vec![pull_request("owner/canonical", 7, 1, 1, 1)],
                             next_cursor: None,
                             total_count: Some(1),
+                            fetched_at: None,
                         })
                     }
                     _ => panic!("unexpected request {method}"),
@@ -3877,6 +4171,7 @@ mod tests {
                                 )],
                                 next_cursor: None,
                                 total_count: Some(1),
+                                fetched_at: None,
                             })
                         }
                         other => panic!("unexpected request {other}"),
@@ -4148,6 +4443,7 @@ mod tests {
                             items: vec![pull_request(repository, 7, 1, 1, 1)],
                             next_cursor: None,
                             total_count: Some(1),
+                            fetched_at: None,
                         })
                     }
                     _ => panic!("unexpected request {method}"),
@@ -4578,9 +4874,7 @@ mod tests {
             ..Default::default()
         });
         cx.run_until_parked();
-        page.read_with(cx, |page, _| {
-            assert!(page.scroll.scroll.offset().y < px(0.0))
-        });
+        page.read_with(cx, |page, _| assert!(page.board_scroll_offset() > px(0.0)));
         assert_eq!(cx.debug_bounds("pull-requests-refresh").unwrap(), refresh);
         let repository = cx.debug_bounds("pr-repository").unwrap();
         cx.simulate_mouse_down(
@@ -4668,10 +4962,11 @@ mod tests {
         cx.run_until_parked();
         page.read_with(cx, |page, _| {
             assert!(page.collapsed_groups.contains(&PullRequestGroup::Review));
-            let motion = page.group_motions[&PullRequestGroup::Review];
-            assert!(motion.from > 0.0, "collapse uses measured row height");
-            assert_eq!(motion.to, 0.0);
         });
+        assert!(
+            cx.debug_bounds("pull-request-title").is_none(),
+            "a collapsed group drops its rows from the list"
+        );
         page.update(cx, |page, cx| {
             page.search
                 .update(cx, |input, cx| input.set_text("#181", cx))
@@ -4909,6 +5204,7 @@ mod tests {
                         items: vec![pull_request("owner/repo", 99, 1, 1, 1)],
                         next_cursor: None,
                         total_count: Some(1),
+                        fetched_at: None,
                     });
                 }
                 match after.as_deref() {
@@ -4918,6 +5214,7 @@ mod tests {
                             .collect(),
                         next_cursor: Some("Y3Vyc29yOjUw".into()),
                         total_count: Some(52),
+                        fetched_at: None,
                     }),
                     Some("Y3Vyc29yOjUw") => zeron_rpc::RpcReply::value(&ChangeRequestPage {
                         // #50 moved onto the second page; it must not repeat.
@@ -4926,6 +5223,7 @@ mod tests {
                             .into(),
                         next_cursor: None,
                         total_count: Some(52),
+                        fetched_at: None,
                     }),
                     other => panic!("unexpected cursor {other:?}"),
                 }
@@ -4986,10 +5284,12 @@ mod tests {
             assert_eq!(page.items.len(), 50);
             assert_eq!(page.paging.total, Some(52));
         });
-        assert!(cx.debug_bounds("pull-requests-loaded-count").is_some());
         page.update(cx, |page, cx| {
-            let bottom = page.scroll.scroll.max_offset().y;
-            page.scroll.scroll.set_offset(gpui::point(px(0.0), -bottom));
+            let last = page.board_list.item_count() - 1;
+            page.board_list.scroll_to(ListOffset {
+                item_ix: last,
+                offset_in_item: px(0.0),
+            });
             cx.notify();
         });
         cx.run_until_parked();
@@ -5062,6 +5362,80 @@ mod tests {
             calls.lock().unwrap()[2..],
             [(None, true), (Some("Y3Vyc29yOjUw".to_owned()), true)]
         );
+    }
+
+    #[gpui::test]
+    fn pull_request_board_shows_a_stored_page_then_refreshes_it(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = {
+            let calls = calls.clone();
+            ScriptedRpc::new(move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    assert_eq!(method.as_str(), methods::LIST_CHANGE_REQUEST_PAGE);
+                    let cached = params["cached"] == true;
+                    calls.lock().unwrap().push(cached);
+                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: vec![pull_request(
+                            "owner/repo",
+                            if cached { 1 } else { 2 },
+                            1,
+                            1,
+                            1,
+                        )],
+                        next_cursor: None,
+                        total_count: Some(1),
+                        // The engine's stored copy is ten minutes old.
+                        fetched_at: Some(if cached {
+                            Utc::now() - chrono::Duration::minutes(10)
+                        } else {
+                            Utc::now()
+                        }),
+                    })
+                }
+            })
+        };
+        let client = rpc.client();
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, Some(client));
+            PullRequestsPage::new(state, cx)
+        });
+        page.update(cx, |page, cx| {
+            page.repository = Some("owner/repo".into());
+            page.load(false, cx);
+        });
+        settle(
+            cx,
+            &runtime,
+            |page| {
+                page.load_state == PullRequestsLoadState::Ready
+                    && page.items.first().is_some_and(|item| item.number == 2)
+            },
+            &page,
+            &rpc,
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [true, false],
+            "the stored page first, then GitHub behind it"
+        );
+        page.read_with(cx, |page, _| {
+            assert!(page.last_loaded_at.unwrap().elapsed().as_secs() < 60);
+        });
+
+        // A refresh goes straight to GitHub.
+        page.update(cx, |page, cx| page.refresh(cx));
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        assert_eq!(*calls.lock().unwrap(), [true, false, false]);
     }
 
     #[gpui::test]
