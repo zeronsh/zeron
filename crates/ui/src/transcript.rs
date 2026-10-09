@@ -15572,6 +15572,7 @@ mod tests {
                     chat: Some("chat".into()),
                     root: "/work/app".into(),
                     local: true,
+                    own: true,
                 }])),
                 handler: Rc::new(move |activation, _, _| {
                     recorded.borrow_mut().push(activation.clone());
@@ -15599,6 +15600,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            images: Arc::new([]),
             kind: ToolItemKind::Call,
         };
         // The chip header inside a clickable parent, standing in for the
