@@ -95,18 +95,18 @@ const DIFF_TEXT_SIZE_RATIO: f32 = DIFF_TEXT_SIZE / crate::typography::CODE_FONT_
 
 /// Size of the painted diff body text, and the size the column measurement in
 /// [`DiffHorizontalGeometry::resolve`] must use: they desync otherwise.
-fn diff_text_size(theme: &Theme) -> f32 {
+pub(crate) fn diff_text_size(theme: &Theme) -> f32 {
     crate::typography::clamp_font_size(theme.code_font_size * DIFF_TEXT_SIZE_RATIO)
 }
 
 /// The row box and the painted line box must agree, or code clips once the
 /// user moves the code font size off [`DIFF_TEXT_SIZE`].
-fn diff_line_height(theme: &Theme) -> f32 {
+pub(crate) fn diff_line_height(theme: &Theme) -> f32 {
     diff_text_size(theme) * (DIFF_LINE_HEIGHT / DIFF_TEXT_SIZE)
 }
 
-const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
-const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
+pub(crate) const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
+pub(crate) const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
 /// Breathing room after the widest source line when scrolled fully right.
 const CODE_PADDING_RIGHT: f32 = 24.0;
 
@@ -335,7 +335,7 @@ fn max_shaped_text_width(
 
 /// Count terminal-style display columns, including tab stops and wide
 /// Unicode glyphs. This is only a floor; actual shaped runs determine the extent.
-fn visual_columns(text: &str) -> usize {
+pub(crate) fn visual_columns(text: &str) -> usize {
     text.chars().fold(0usize, |columns, ch| {
         if ch == '\t' {
             columns + (DIFF_TAB_SIZE - columns % DIFF_TAB_SIZE)
@@ -1076,7 +1076,7 @@ fn excerpt_side(
     }))
 }
 
-fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
+pub(crate) fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
     if !zeron_syntax::supports_language(language) {
         return None;
     }
@@ -1488,7 +1488,7 @@ fn sticky_file_header(
 }
 
 /// Offset a sticky header upward as the next file header enters its slot.
-fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
+pub(crate) fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
     next_header_y
         .map(|y| (y - FILE_HEADER_HEIGHT).min(0.0))
         .unwrap_or(0.0)
@@ -1515,16 +1515,16 @@ impl FileHeaderPresentation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct StickyFileHeaderPaint {
-    rest_bg: gpui::Hsla,
-    hover_bg: gpui::Hsla,
-    border: gpui::Hsla,
-    frost_tint: Option<gpui::Hsla>,
+pub(crate) struct StickyFileHeaderPaint {
+    pub(crate) rest_bg: gpui::Hsla,
+    pub(crate) hover_bg: gpui::Hsla,
+    pub(crate) border: gpui::Hsla,
+    pub(crate) frost_tint: Option<gpui::Hsla>,
 }
 
 /// Resolve the sticky header from the diff's content plane, not the elevated
 /// overlay plane used by menus and popovers.
-fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
+pub(crate) fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
     if theme.is_frost() {
         let tint_alpha = match theme.appearance {
             crate::theme::Appearance::Dark => STICKY_FILE_HEADER_TINT_ALPHA_DARK,
@@ -4327,17 +4327,17 @@ impl Changes {
 }
 
 /// Green for additions — sampled from the reference diff (soft emerald).
-fn add_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) fn add_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_add // emerald-400
 }
 
 /// Red for deletions — softer than the theme danger, per the reference diff.
-fn del_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) fn del_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_del // red-400
 }
 
 /// One notice row ("New file", "Binary file — contents not shown", …).
-fn notice_row(notice: String, theme: &Theme) -> AnyElement {
+pub(crate) fn notice_row(notice: String, theme: &Theme) -> AnyElement {
     div()
         .h(px(NOTICE_HEIGHT))
         .w_full()
@@ -4352,7 +4352,7 @@ fn notice_row(notice: String, theme: &Theme) -> AnyElement {
 }
 
 /// One `@@ … @@` hunk-header row on the bluish-grey wash.
-fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
+pub(crate) fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
     div()
         .h(px(HUNK_HEADER_HEIGHT))
         .w_full()
@@ -4422,6 +4422,91 @@ fn code_text_viewport(
         }
         None => viewport.into_any_element(),
     }
+}
+
+/// Read-only unified row for PR diffs; reuse the Changes pane's gutters,
+/// source text, font settings, markers and semantic colors. The caller owns
+/// virtualization and the shared horizontal viewport.
+pub(crate) fn readonly_diff_line(
+    line: &DiffLine,
+    spans: &[zeron_syntax::HighlightSpan],
+    theme: &Theme,
+    gutter_px: f32,
+) -> AnyElement {
+    diff_line_row(line, spans, theme, gutter_px, DiffCodeWidth::Clipped, None)
+}
+
+/// Read-only unified row whose code plane scrolls with `scroll` while the
+/// gutters stay put. Every row shares one extent, so a whole multi-file
+/// stream moves as one horizontal plane.
+pub(crate) fn readonly_scrolled_diff_line(
+    line: &DiffLine,
+    spans: &[zeron_syntax::HighlightSpan],
+    theme: &Theme,
+    gutter_px: f32,
+    text_width: f32,
+    scroll: &gpui::ScrollHandle,
+    row: usize,
+) -> AnyElement {
+    diff_line_row(
+        line,
+        spans,
+        theme,
+        gutter_px,
+        DiffCodeWidth::Scrollable(DiffHorizontalMetrics {
+            max_text_width: text_width,
+            max_gutter_width: gutter_px,
+        }),
+        Some(DiffCodeScroll {
+            handle: scroll.clone(),
+            id: format!("pr-code-{row}").into(),
+        }),
+    )
+}
+
+/// Read-only split row using the same cells and divider as the Changes pane.
+pub(crate) fn readonly_split_line(
+    left: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>,
+    right: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>,
+    theme: &Theme,
+    gutter_px: f32,
+    text_width: f32,
+    scroll: &gpui::ScrollHandle,
+    row: usize,
+) -> AnyElement {
+    let width = DiffCodeWidth::Scrollable(DiffHorizontalMetrics {
+        max_text_width: text_width,
+        max_gutter_width: gutter_px,
+    });
+    let cell = |side: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>, old: bool| {
+        let content = side
+            .map(|(line, spans)| {
+                let runs = render::runs_for_syntax_line_with_plain(
+                    &line.text,
+                    spans,
+                    &font(theme.font_mono.clone()),
+                    theme.text.opacity(0.92),
+                    theme,
+                );
+                split_line_cell(
+                    line,
+                    if old { line.old_no } else { line.new_no },
+                    runs,
+                    theme,
+                    gutter_px,
+                    width,
+                    Some(DiffCodeScroll {
+                        handle: scroll.clone(),
+                        id: format!("pr-split-code-{row}-{old}").into(),
+                    }),
+                )
+            })
+            .unwrap_or_else(split_filler);
+        content
+            .debug_selector(move || format!("pr-split-cell-{row}-{old}"))
+            .into_any_element()
+    };
+    split_row(cell(left, true), cell(right, false), false, theme).into_any_element()
 }
 
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number

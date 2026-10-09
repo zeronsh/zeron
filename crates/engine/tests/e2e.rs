@@ -13,7 +13,7 @@ use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
 };
-use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
+use zeron_engine::{EngineCore, EngineRpc, HarnessRegistry, RunJournal};
 use zeron_harness::mock::MockHarness;
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{

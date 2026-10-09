@@ -208,8 +208,9 @@ impl Shell {
         // Opening any session steps the voice stage aside — including the one
         // already selected under it. The call keeps running in the background.
         self.set_voice_stage_open(false, cx);
-        self.route = Route::Chat;
+        self.set_route(Route::Chat, cx);
         self.focus_composer(cx);
+        self.nav.push(NavEntry::Chat(chat_id.clone()));
         self.state
             .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
         cx.notify();
@@ -228,7 +229,7 @@ impl Shell {
     pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
         self.command_palette = None;
         self.set_voice_stage_open(false, cx);
-        self.route = Route::Chat;
+        self.set_route(Route::Chat, cx);
         self.focus_composer(cx);
         // Pre-hide before the selection flips so the state change can't
         // auto-create a canvas tab (the panel's observer runs on the same
@@ -244,6 +245,7 @@ impl Shell {
                 panel.update(cx, |panel, cx| panel.set_open(false, cx));
             }
         }
+        self.nav.push(NavEntry::Chat(String::new()));
         let target = {
             let state = self.state.read(cx);
             project

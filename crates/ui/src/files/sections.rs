@@ -314,6 +314,7 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ChildChatRow {
     pub chat_id: String,
+    pub device_id: String,
     pub title: SharedString,
     pub status: ChatIndicator,
     pub time_ago: SharedString,
@@ -337,6 +338,7 @@ pub(super) fn child_chat_rows(
             let activity = chat.last_message_at.unwrap_or(chat.created_at);
             ChildChatRow {
                 chat_id: chat.id.clone(),
+                device_id: chat.device_id.clone(),
                 title: child_chat_title(chat).into(),
                 status: state.display_status_for(chat, now),
                 time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
@@ -370,6 +372,7 @@ pub(super) fn fingerprint(state: &AppState, chat_id: &str, now: DateTime<Utc>) -
     0xC0FFEEu64.hash(&mut hasher);
     for row in child_chat_rows(state, chat_id, now) {
         row.chat_id.hash(&mut hasher);
+        row.device_id.hash(&mut hasher);
         row.title.as_ref().hash(&mut hasher);
         (row.status as u8).hash(&mut hasher);
         row.time_ago.as_ref().hash(&mut hasher);
@@ -1096,6 +1099,7 @@ impl FilesSurface {
                             format!("files-chat-pr-{}", row.chat_id).into(),
                             summary,
                             crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                            Some(row.device_id.clone()),
                             theme,
                         )
                     }))

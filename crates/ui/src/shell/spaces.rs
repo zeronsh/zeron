@@ -2149,8 +2149,6 @@ pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
-pub(super) const SIDEBAR_DISCLOSURE_TWEEN_GRACE: std::time::Duration =
-    std::time::Duration::from_millis(120);
 /// The Archived shelf shows this many rows, then "Show more" pages by
 /// [`ARCHIVED_PAGE_ROWS`].
 const ARCHIVED_INITIAL_ROWS: usize = 10;
@@ -2501,6 +2499,9 @@ impl Shell {
         }
         self.close_spaces_menu(cx);
         self.schedule_save(cx);
+        if let Some(page) = self.pull_requests_page.as_ref() {
+            page.update(cx, |page, cx| page.on_project_scope_changed(cx));
+        }
         cx.notify();
     }
 
@@ -2529,13 +2530,14 @@ impl Shell {
     /// sidebar's current project filter.
     pub(super) fn land_in_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.cancel_pinned_session_drag(cx);
-        self.route = Route::Chat;
+        self.set_route(Route::Chat, cx);
         self.focus_composer(cx);
         // "All" stays as-is; an explicit project filter follows the new
         // project so the first send lands in a visible session.
         if self.settings.space_filter.is_some() {
             self.settings.space_filter = Some(space_id.clone());
         }
+        self.nav.push(NavEntry::Chat(String::new()));
         self.settings.last_space_id = Some(space_id.clone());
         self.state.update(cx, |s, cx| {
             s.select_space(Some(space_id), cx);
@@ -5492,6 +5494,20 @@ impl Shell {
     }
 
     // ---- add-space flow ----
+
+    pub(super) fn open_add_space_on_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
+        let device = self
+            .state
+            .read(cx)
+            .devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .cloned();
+        self.open_add_space(cx);
+        if let Some(device) = device {
+            self.add_space_pick_device(device, cx);
+        }
+    }
 
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
         self.command_palette = None;

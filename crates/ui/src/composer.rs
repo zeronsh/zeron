@@ -1515,7 +1515,7 @@ enum EditKind {
 }
 
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
-const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
+pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2135,8 +2135,22 @@ impl ComposerInput {
     }
 
     /// Keep compact fields on one row and reveal the caret horizontally.
+    /// Bound a standalone multiline composer while preserving caret scrolling.
+    pub(crate) fn with_viewport_height(mut self, height: f32) -> Self {
+        let height = height.max(self.configured_line_height);
+        self.viewport_height = Some(height);
+        self.settled_viewport_height = Some(height);
+        self
+    }
+
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    /// Join the window's Tab order, for a field the keyboard must reach.
+    pub(crate) fn with_tab_stop(mut self) -> Self {
+        self.focus_handle = self.focus_handle.tab_stop(true);
         self
     }
 
@@ -5359,9 +5373,9 @@ pub enum ComposerEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MentionToken {
-    range: Range<usize>,
-    query: String,
+pub(crate) struct MentionToken {
+    pub(crate) range: Range<usize>,
+    pub(crate) query: String,
 }
 
 /// Refine a locally identified token using Markdown source ranges. This is
@@ -5481,7 +5495,7 @@ fn completion_markdown_end(
 
 /// The `@` must begin a token. This intentionally excludes `name@example.com`
 /// and ordinary words while allowing punctuation such as `(@src`.
-fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
+pub(crate) fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
         return None;
     }
@@ -5833,7 +5847,9 @@ fn mention_error_message(err: &RpcError) -> SharedString {
             "The session's device runs an older zeron — update it to search its files".into()
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
-        RpcError::BadParams(_) | RpcError::Failed(_) => "File search failed".into(),
+        RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
+            "File search failed".into()
+        }
     }
 }
 
@@ -5938,7 +5954,7 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
             }
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
-        RpcError::BadParams(_) | RpcError::Failed(_) => {
+        RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
             if skill {
                 "Couldn't load this agent's skills".into()
             } else {
@@ -10500,21 +10516,9 @@ impl Composer {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
-                div()
-                    .id("composer-send")
-                    .debug_selector(|| "composer-send".into())
-                    .size(px(28.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(blocked, |el| el.opacity(0.35))
+                send_circle("composer-send", blocked, theme)
                     .when(!blocked, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
+                        el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .tooltip(crate::settings::widgets::text_tooltip(
                         if mode == SendButtonMode::Queue {
@@ -10523,15 +10527,39 @@ impl Composer {
                             "Send message"
                         },
                     ))
-                    .child(
-                        crate::icons::icon(crate::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(theme.bg),
-                    )
                     .into_any_element()
             }
         }
     }
+}
+
+/// The composer's send control: a size-7 filled circle with an up arrow,
+/// dimmed and inert while `blocked`. Other message composers reuse it so
+/// sending looks the same everywhere.
+pub(crate) fn send_circle(
+    id: &'static str,
+    blocked: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .size(px(28.0))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.text)
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(blocked, |el| el.opacity(0.35))
+        .when(!blocked, |el| {
+            el.cursor_pointer().hover(|s| s.opacity(0.85))
+        })
+        .child(
+            crate::icons::icon(crate::icons::ARROW_UP)
+                .size(px(14.0))
+                .text_color(theme.bg),
+        )
 }
 
 /// The completion popups' floating rails run through

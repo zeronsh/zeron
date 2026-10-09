@@ -467,6 +467,10 @@ pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
 /// Zeron Icons (icons.zeron.sh) state morph: `--zi-duration: 280ms` over
 /// `cubic-bezier(.22, 1, .36, 1)` — the sidebar glyph's panel open ↔ closed.
 pub const GLYPH_STATE: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
+/// CSS `cubic-bezier(0.2, 0, 0, 1)` — fast start, long soft landing.
+pub const EASE_OUT_SOFT: CubicBezier = CubicBezier::new(0.2, 0.0, 0.0, 1.0);
+/// Selection indicator glide between the segments of a pill nav: 260ms.
+pub const INDICATOR_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_SOFT);
 /// Zeron loader pulse period: 2.4s.
 pub const ZERON_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// Gradient matrix spinner wave period: 750ms.
@@ -743,6 +747,95 @@ impl FadeEntry {
 
     fn settled(&self, now: Instant, duration: Duration) -> bool {
         self.origin == self.target || now.saturating_duration_since(self.started) >= duration
+    }
+}
+
+/// Interruptible height tween for the shared collapsible sections.
+/// The rendered element owns the frame clock; this state preserves the current
+/// interpolated height when a second click reverses an in-flight transition.
+#[derive(Clone, Copy)]
+pub(crate) struct DisclosureMotion {
+    pub(crate) epoch: u64,
+    pub(crate) from: f32,
+    pub(crate) to: f32,
+    pub(crate) started: std::time::Instant,
+}
+
+impl DisclosureMotion {
+    pub(crate) fn new(epoch: u64, from: f32, to: f32) -> Self {
+        Self {
+            epoch,
+            from,
+            to,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn current(self) -> f32 {
+        let total = COLLAPSE.total().as_secs_f32();
+        let raw = if total > 0.0 {
+            self.started.elapsed().as_secs_f32() / total
+        } else {
+            1.0
+        };
+        lerp(self.from, self.to, COLLAPSE.progress(raw))
+    }
+
+    pub(crate) fn animating(self) -> bool {
+        self.started.elapsed() < COLLAPSE.total() + Duration::from_millis(120)
+    }
+}
+
+/// Interruptible slide of a selection indicator between segment slots.
+/// `position` is measured in segments (`1.5` sits halfway between the second
+/// and third), so a retarget mid-flight continues from the drawn position
+/// instead of jumping. Pure core — callers pass `now`.
+#[derive(Debug, Clone, Copy)]
+pub struct IndicatorSlide {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+impl IndicatorSlide {
+    pub fn at(position: f32, now: Instant) -> Self {
+        Self {
+            from: position,
+            to: position,
+            started: now,
+        }
+    }
+
+    fn duration() -> Duration {
+        INDICATOR_SLIDE.total().mul_f32(speed_scale())
+    }
+
+    fn progress(&self, now: Instant) -> f32 {
+        let duration = Self::duration();
+        if duration.is_zero() {
+            return 1.0;
+        }
+        let raw =
+            now.saturating_duration_since(self.started).as_secs_f32() / duration.as_secs_f32();
+        INDICATOR_SLIDE.progress(raw)
+    }
+
+    pub fn value_at(&self, now: Instant) -> f32 {
+        lerp(self.from, self.to, self.progress(now))
+    }
+
+    /// Aim at a new slot. Reduced motion snaps.
+    pub fn retarget(&mut self, to: f32, reduced: bool, now: Instant) {
+        let from = if reduced { to } else { self.value_at(now) };
+        *self = Self {
+            from,
+            to,
+            started: now,
+        };
+    }
+
+    pub fn animating_at(&self, now: Instant) -> bool {
+        self.from != self.to && now.saturating_duration_since(self.started) < Self::duration()
     }
 }
 
@@ -1254,6 +1347,28 @@ fn refresh_system(_cx: &mut App) {}
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn indicator_slide_is_interruptible_and_snaps_when_reduced() {
+        let t0 = Instant::now();
+        let mut slide = IndicatorSlide::at(0.0, t0);
+        assert!(!slide.animating_at(t0));
+        slide.retarget(2.0, false, t0);
+        assert_eq!(slide.value_at(t0), 0.0);
+        assert!(slide.animating_at(t0 + Duration::from_millis(50)));
+        let mid = t0 + Duration::from_millis(80);
+        let drawn = slide.value_at(mid);
+        assert!(drawn > 0.0 && drawn < 2.0);
+        // Reversing continues from where the thumb is drawn.
+        slide.retarget(0.0, false, mid);
+        assert_eq!(slide.value_at(mid), drawn);
+        let end = mid + INDICATOR_SLIDE.total();
+        assert_eq!(slide.value_at(end), 0.0);
+        assert!(!slide.animating_at(end));
+        slide.retarget(1.0, true, end);
+        assert_eq!(slide.value_at(end), 1.0);
+        assert!(!slide.animating_at(end));
+    }
     #[test]
     fn reduced_activity_pulse_is_slow_uniform_and_gentle() {
         for phase in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9] {
