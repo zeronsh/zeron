@@ -809,7 +809,9 @@ pub struct AppState {
     pub chats_synced: bool,
     pub spaces_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
-    deep_link_notice: Option<String>,
+    pending_project: Option<String>,
+    landing_space: Option<String>,
+    launch_notice: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
     /// The selected chat's pending-message queue — what was typed while the
@@ -978,7 +980,9 @@ impl AppState {
             chats_synced: false,
             spaces_synced: false,
             pending_deep_link: None,
-            deep_link_notice: None,
+            pending_project: None,
+            landing_space: None,
+            launch_notice: None,
         }
     }
 
@@ -2702,9 +2706,76 @@ impl AppState {
                 self.pending_deep_link = Some(link);
                 self.apply_pending_deep_link(cx);
             }
-            Err(error) => self.deep_link_notice = Some(error.to_string()),
+            Err(error) => self.launch_notice = Some(error.to_string()),
         }
         cx.notify();
+    }
+
+    pub fn open_project(&mut self, path: String, cx: &mut Context<Self>) {
+        self.pending_project = Some(path);
+        self.auto_selected = true;
+        self.apply_pending_project(cx);
+        cx.notify();
+    }
+
+    fn apply_pending_project(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.spaces_synced {
+            return false;
+        }
+        let (Some(device), Some(handle)) = (self.local_device_id.clone(), self.engine.clone())
+        else {
+            return false;
+        };
+        let Some(path) = self.pending_project.take() else {
+            return false;
+        };
+        if let Some(existing) = self
+            .spaces
+            .iter()
+            .find(|space| space.device_id == device && space.path == path)
+        {
+            self.landing_space = Some(existing.id.clone());
+            return true;
+        }
+        let space_id = uuid::Uuid::new_v4().to_string();
+        let git_detected = std::path::Path::new(&path).join(".git").exists();
+        self.spaces.push(Space {
+            id: space_id.clone(),
+            device_id: device.clone(),
+            path: path.clone(),
+            name: None,
+            git_detected,
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: None,
+            created_at: Utc::now(),
+        });
+        self.landing_space = Some(space_id.clone());
+        let params = serde_json::json!({
+            "op": "createSpace",
+            "spaceId": space_id,
+            "deviceId": device,
+            "path": path,
+            "gitDetected": git_detected,
+        });
+        cx.spawn(async move |this, cx| {
+            let Err(error) = handle.client().call(methods::MUTATE, params).await else {
+                return;
+            };
+            this.update(cx, |state, cx| {
+                state.spaces.retain(|space| space.id != space_id);
+                state.heal_space_selection();
+                state.launch_notice = Some(format!("Could not open the project: {error}"));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    pub fn take_landing_space(&mut self) -> Option<String> {
+        self.landing_space.take()
     }
 
     /// Returns whether a pending link was resolved (selected or rejected).
@@ -2721,8 +2792,7 @@ impl AppState {
         };
         if locator != link.workspace {
             self.pending_deep_link = None;
-            self.deep_link_notice =
-                Some("This conversation link belongs to another workspace".into());
+            self.launch_notice = Some("This conversation link belongs to another workspace".into());
             return true;
         }
         if self.chats.iter().any(|chat| chat.id == link.chat_id) {
@@ -2731,15 +2801,15 @@ impl AppState {
             true
         } else if self.chats_synced {
             self.pending_deep_link = None;
-            self.deep_link_notice = Some("The linked conversation was not found".into());
+            self.launch_notice = Some("The linked conversation was not found".into());
             true
         } else {
             false
         }
     }
 
-    pub fn take_deep_link_notice(&mut self) -> Option<String> {
-        self.deep_link_notice.take()
+    pub fn take_launch_notice(&mut self) -> Option<String> {
+        self.launch_notice.take()
     }
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
@@ -3059,7 +3129,8 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     // Identical re-published lists skip the re-sort fan-out:
                     // watch reconciliation and a whole-shell re-render.
                     let changed = state.apply_chats(parsed);
-                    let linked = state.apply_pending_deep_link(cx);
+                    let linked =
+                        state.apply_pending_deep_link(cx) | state.apply_pending_project(cx);
                     if changed {
                         state.reconcile_change_request_watches(cx);
                     }
@@ -3211,7 +3282,8 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     let changed = apply(state, parsed);
-                    let linked = state.apply_pending_deep_link(cx);
+                    let linked =
+                        state.apply_pending_deep_link(cx) | state.apply_pending_project(cx);
                     if changed && matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
                         state.reconcile_change_request_watches(cx);
                     }
@@ -3254,6 +3326,7 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
                 state.local_device_id = Some(id);
                 state.link_roots_revision = state.link_roots_revision.wrapping_add(1);
                 state.apply_pending_deep_link(cx);
+                state.apply_pending_project(cx);
                 // Watches opened before this probe conservatively route through
                 // targetDeviceId. Recreate them now that local routing is known.
                 state.change_request_tasks.clear();

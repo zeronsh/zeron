@@ -21,6 +21,7 @@ if (-not $match.Success) { throw "Unexpected installer name: $Setup" }
 $version = $match.Groups[1].Value
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1'
 $protocolKey = 'HKCU:\Software\Classes\zeron'
+$environmentKey = 'HKCU:\Environment'
 $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Zeron.lnk'
 $root = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $dir = Join-Path $root "zeron installer test $([guid]::NewGuid().ToString('N'))"
@@ -36,6 +37,12 @@ function Wait-Until([scriptblock]$Condition, [string]$What) {
         if ((Get-Date) -gt $deadline) { throw "Timed out waiting for $What" }
         Start-Sleep -Milliseconds 250
     }
+}
+
+function Test-UserPathHas([string]$Entry) {
+    $key = Get-Item -LiteralPath $environmentKey
+    $raw = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+    return (($raw -split ';') -contains $Entry)
 }
 
 $log = Join-Path $root 'zeron-setup.log'
@@ -79,6 +86,12 @@ if ($command -ne "`"$exe`" `"%1`"") { throw "zeron:// handler is '$command'" }
 if (-not (Test-Path -LiteralPath $shortcut)) { throw "Start menu shortcut missing: $shortcut" }
 Write-Output 'PASS: uninstall entry, zeron:// handler, Start menu shortcut'
 
+if (-not (Test-UserPathHas $dir)) { throw "User PATH lacks '$dir'" }
+Invoke-Checked $Setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$dir`"", "/LOG=`"$log`"") 'Setup rerun'
+$entries = @(((Get-Item -LiteralPath $environmentKey).GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';') | Where-Object { $_ -eq $dir })
+if ($entries.Count -ne 1) { throw "User PATH lists '$dir' $($entries.Count) times" }
+Write-Output 'PASS: install directory on the user PATH once'
+
 # Leftovers an in-app update can leave behind must go with the uninstall.
 Set-Content -LiteralPath (Join-Path $dir 'zeron.exe.old') -Value 'previous image'
 New-Item -ItemType Directory -Path (Join-Path $dir '.zeron-update-test') | Out-Null
@@ -94,4 +107,5 @@ foreach ($leftover in @('zeron.exe.old', '.zeron-update-test', 'zeron-update.jso
 }
 if (Test-Path -LiteralPath $protocolKey) { throw 'zeron:// handler survived uninstall' }
 if (Test-Path -LiteralPath $shortcut) { throw 'Start menu shortcut survived uninstall' }
-Write-Output 'PASS: uninstall removes the install, update leftovers, and registrations'
+Wait-Until { -not (Test-UserPathHas $dir) } 'the user PATH entry to disappear'
+Write-Output 'PASS: uninstall removes the install, update leftovers, registrations, and the PATH entry'

@@ -33,6 +33,7 @@ actions!(
         AppearanceSystem,
         AppearanceLight,
         AppearanceDark,
+        InstallCli,
     ]
 );
 
@@ -64,6 +65,29 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &AppearanceSystem, cx| appearance::set_mode(AppearanceMode::System, cx));
     cx.on_action(|_: &AppearanceLight, cx| appearance::set_mode(AppearanceMode::Light, cx));
     cx.on_action(|_: &AppearanceDark, cx| appearance::set_mode(AppearanceMode::Dark, cx));
+    #[cfg(target_os = "macos")]
+    cx.on_action(|_: &InstallCli, cx| {
+        let install = cx
+            .background_executor()
+            .spawn(async { crate::cli_install::install() });
+        cx.spawn(async move |cx| {
+            let outcome = install.await;
+            let _ = cx.update(|cx| report_cli_install(outcome, cx));
+        })
+        .detach();
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn report_cli_install(outcome: Result<String, String>, cx: &mut App) {
+    let message = outcome.unwrap_or_else(|error| error);
+    if let Some(window) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<shell::Shell>())
+    {
+        let _ = window.update(cx, |shell, _, cx| shell.show_notice(message, cx));
+    }
 }
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
@@ -175,8 +199,11 @@ pub fn app_menus() -> Vec<Menu> {
         MenuItem::action("Check for Updates…", CheckForUpdates),
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
-        MenuItem::separator(),
     ];
+    if macos {
+        app_items.push(MenuItem::action("Install 'zeron' Command…", InstallCli));
+    }
+    app_items.push(MenuItem::separator());
     if macos {
         app_items.extend([
             MenuItem::os_submenu("Services", SystemMenuType::Services),

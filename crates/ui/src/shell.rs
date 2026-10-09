@@ -2614,6 +2614,12 @@ impl Shell {
         cx.notify();
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        self.sidebar_notice = Some(message.into());
+        cx.notify();
+    }
+
     pub fn show_appshot_error(
         &mut self,
         message: String,
@@ -2646,7 +2652,7 @@ impl Shell {
             self.side_chats.clear();
             self.side_chat_creating = false;
         }
-        if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
+        if let Some(notice) = state.update(cx, |state, _| state.take_launch_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
         let next_sync_flow = {
@@ -2944,6 +2950,9 @@ impl Shell {
                     state.update(cx, |s, cx| s.select_space(target, cx));
                 }
             }
+        }
+        if let Some(space) = state.update(cx, |state, _| state.take_landing_space()) {
+            self.land_in_space(space, cx);
         }
         // Persist the selected space (the new-tab fallback under "All").
         {

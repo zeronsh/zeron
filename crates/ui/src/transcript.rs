@@ -15600,6 +15600,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             kind: ToolItemKind::Call,
+            images: Arc::new([]),
         };
         // The chip header inside a clickable parent, standing in for the
         // accordion toggle that wraps it in `render_tool_group`.

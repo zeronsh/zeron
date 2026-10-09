@@ -63,6 +63,7 @@ SolidCompression=yes
 ; replaced; the updated app starts again from the finish page.
 CloseApplications=yes
 RestartApplications=no
+ChangesEnvironment=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -94,3 +95,54 @@ Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: now
 Type: files; Name: "{app}\zeron.exe.old"
 Type: files; Name: "{app}\.zeron-update-incoming.exe"
 Type: filesandordirs; Name: "{app}\.zeron-update-*"
+
+[Code]
+const
+  EnvironmentKey = 'Environment';
+
+function UserPath(var Paths: string): Boolean;
+begin
+  Result := RegQueryStringValue(HKCU, EnvironmentKey, 'Path', Paths);
+  if not Result then
+    Paths := '';
+end;
+
+procedure AddToUserPath(const Dir: string);
+var
+  Paths: string;
+begin
+  UserPath(Paths);
+  if Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Paths) + ';') > 0 then
+    exit;
+  if (Paths <> '') and (Paths[Length(Paths)] <> ';') then
+    Paths := Paths + ';';
+  RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', Paths + Dir);
+end;
+
+procedure RemoveFromUserPath(const Dir: string);
+var
+  Paths: string;
+  Index: Integer;
+begin
+  if not UserPath(Paths) then
+    exit;
+  Paths := ';' + Paths + ';';
+  Index := Pos(';' + Uppercase(Dir) + ';', Uppercase(Paths));
+  if Index = 0 then
+    exit;
+  Delete(Paths, Index, Length(Dir) + 1);
+  Paths := Copy(Paths, 2, Length(Paths) - 2);
+  RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', Paths);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    AddToUserPath(ExpandConstant('{app}'));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveFromUserPath(ExpandConstant('{app}'));
+end;

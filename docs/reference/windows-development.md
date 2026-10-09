@@ -4,7 +4,9 @@ Windows supports native x64 and ARM64 source builds, a per-user installer,
 and portable release ZIPs. The installer (`dist/windows/zeron.iss`, Inno
 Setup 6) installs into `%LOCALAPPDATA%\Programs\Zeron` without elevation,
 registers the Start menu entry, the `zeron://` link handler, and the Settings →
-Apps uninstall entry. Both release packages carry `zeron-update.json` beside
+Apps uninstall entry, and adds the install directory to the user `PATH` so
+`zeron` (or `zeron <path>`) in a new terminal opens that folder as a project in
+the running window. Both release packages carry `zeron-update.json` beside
 `zeron.exe`, which lets the app replace its executable in place from GitHub
 releases; keep it there for portable copies. Artifact names use Rust's
 architecture token (`x86_64` or `aarch64`) so the updater can find the matching

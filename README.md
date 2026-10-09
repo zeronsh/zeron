@@ -16,6 +16,15 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 No account or network connection is needed; sessions stay on your device. The app updates itself.
 
+### Open a project from the terminal
+
+```bash
+cd ~/code/my-project
+zeron            # this folder, or: zeron <path>
+```
+
+Zeron opens on the new-session canvas with that project selected. If it is already running, the running window switches instead of a second one opening. The Windows installer puts `zeron` on the PATH; on macOS use **Zeron → Install 'zeron' Command…**; the Linux installers link `~/.local/bin/zeron`.
+
 ## Headless (CLI)
 
 For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only:

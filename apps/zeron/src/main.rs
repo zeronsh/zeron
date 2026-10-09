@@ -6,6 +6,7 @@
 
 mod auth_cli;
 mod daemon;
+mod launch;
 mod paths;
 mod update_cli;
 
@@ -20,9 +21,12 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Open a Zeron conversation URL.
-    #[arg(value_name = "URL")]
-    open_url: Option<String>,
+    /// Project folder to open (defaults to the current directory when run
+    /// from a terminal), or a zeron:// conversation link.
+    #[arg(value_name = "PATH|URL")]
+    target: Option<String>,
+    #[arg(long, hide = true)]
+    detached: bool,
     #[cfg(windows)]
     #[arg(long, hide = true)]
     wait_for_exit: Option<u32>,
@@ -148,15 +152,31 @@ fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--noop-browser")) {
         return Ok(());
     }
+    let detached = std::env::args_os().any(|arg| arg == "--detached");
     #[cfg(windows)]
-    attach_parent_console();
+    let attached = !detached && attach_parent_console();
+    #[cfg(not(windows))]
+    let attached = !detached && launch::controlling_terminal();
     let cli = Cli::parse();
+    let from_terminal = attached && !cli.detached;
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
     } else if matches!(&cli.command, None | Some(Command::Headless)) {
         zeron_update::windows::cleanup_previous_image();
     }
+    // Headed: the UI probes ZERON_IPC_PORT and connects to a running
+    // daemon, or embeds the engine in-process (ARCHITECTURE §1).
+    let headed = match &cli.command {
+        None => {
+            let launch = launch::request(cli.target.as_deref(), from_terminal)?;
+            match zeron_ui::Headed::claim(ui_config_from_env(), launch, from_terminal)? {
+                Some(headed) => Some(headed),
+                None => return Ok(()),
+            }
+        }
+        Some(_) => None,
+    };
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
     // overrides either).
     // loro's internal block-encode diagnostics log at info and flood
@@ -277,29 +297,30 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Status => daemon::status(),
         },
         None => {
-            let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
-            // Headed: the UI probes ZERON_IPC_PORT and connects to a running
-            // daemon, or embeds the engine in-process (ARCHITECTURE §1).
-            zeron_ui::run_app(zeron_ui::UiConfig {
-                data_dir: paths::data_dir(),
-                ipc_port: std::env::var("ZERON_IPC_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(27654),
-                edge_url: edge_url_from_env(),
-                workos_client_id: workos_client_id_from_env(&edge_token),
-                edge_token,
-                org_id: std::env::var("ZERON_ORG_ID").ok(),
-                default_harness: zeron_ui::HarnessId::ClaudeCode,
-                initial_url: cli.open_url,
-            });
+            headed.expect("claimed before logging").run();
             Ok(())
         }
     }
 }
 
+fn ui_config_from_env() -> zeron_ui::UiConfig {
+    let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
+    zeron_ui::UiConfig {
+        data_dir: paths::data_dir(),
+        ipc_port: std::env::var("ZERON_IPC_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(27654),
+        edge_url: edge_url_from_env(),
+        workos_client_id: workos_client_id_from_env(&edge_token),
+        edge_token,
+        org_id: std::env::var("ZERON_ORG_ID").ok(),
+        default_harness: zeron_ui::HarnessId::ClaudeCode,
+    }
+}
+
 #[cfg(windows)]
-fn attach_parent_console() {
+fn attach_parent_console() -> bool {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
         ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
@@ -313,13 +334,15 @@ fn attach_parent_console() {
     unsafe {
         let saved = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
             .map(|id| (id, GetStdHandle(id)));
-        if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
+        let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+        if attached {
             for (id, handle) in saved {
                 if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
                     SetStdHandle(id, handle);
                 }
             }
         }
+        attached
     }
 }
 

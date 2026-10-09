@@ -22,6 +22,8 @@ pub mod badges;
 pub mod browser;
 pub mod change_requests;
 pub mod changes;
+#[cfg(target_os = "macos")]
+mod cli_install;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
@@ -39,6 +41,7 @@ pub mod history;
 pub mod icons;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
+pub mod instance;
 pub mod links;
 pub mod loaders;
 pub mod markdown;
@@ -77,6 +80,7 @@ use std::path::PathBuf;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
+pub use instance::LaunchRequest;
 pub use state::EngineBootConfig;
 pub use zeron_proto::HarnessId;
 
@@ -99,8 +103,6 @@ pub struct UiConfig {
     pub workos_client_id: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
-    /// Conversation URL passed by the OS on a cold launch.
-    pub initial_url: Option<String>,
 }
 
 impl UiConfig {
@@ -126,25 +128,66 @@ struct ReopenState {
 
 impl gpui::Global for ReopenState {}
 
+pub struct Headed {
+    config: UiConfig,
+    runtime: tokio::runtime::Runtime,
+    instance: instance::InstanceGuard,
+    requests: futures::channel::mpsc::UnboundedReceiver<LaunchRequest>,
+    submit: futures::channel::mpsc::UnboundedSender<LaunchRequest>,
+}
+
+impl Headed {
+    pub fn claim(
+        config: UiConfig,
+        launch: LaunchRequest,
+        from_terminal: bool,
+    ) -> anyhow::Result<Option<Self>> {
+        // Retain ownership for the whole application lifetime. The bridge's
+        // default runtime has only two workers, insufficient for a desktop engine.
+        let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
+        if from_terminal && instance::installed() {
+            instance::hand_off(&config.data_dir, launch, runtime.handle())?;
+            return Ok(None);
+        }
+        match instance::claim_or_forward(&config.data_dir, launch, runtime.handle())? {
+            instance::Claim::Primary {
+                guard,
+                requests,
+                submit,
+            } => Ok(Some(Self {
+                config,
+                runtime,
+                instance: guard,
+                requests,
+                submit,
+            })),
+            instance::Claim::Forwarded => Ok(None),
+        }
+    }
+
+    pub fn run(self) {
+        run_app(self);
+    }
+}
+
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
-pub fn run_app(config: UiConfig) {
-    // Retain ownership for the whole application lifetime. The bridge's
-    // default runtime has only two workers, insufficient for a desktop engine.
-    let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
+fn run_app(headed: Headed) {
+    let Headed {
+        config,
+        runtime,
+        instance: _instance,
+        mut requests,
+        submit,
+    } = headed;
     let runtime_handle = runtime.handle().clone();
     let app = gpui_platform::application().with_assets(icons::Assets);
-    let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
-    let callback_tx = url_tx.clone();
     app.on_open_urls(move |urls| {
         for url in urls {
-            let _ = callback_tx.unbounded_send(url);
+            let _ = submit.unbounded_send(LaunchRequest::OpenUrl { url });
         }
     });
-    if let Some(url) = config.initial_url.clone() {
-        let _ = url_tx.unbounded_send(url);
-    }
     // Dock-icon click with no window (⌘W closed it): rebuild the main window
     // around the still-running engine — zed does the same via `on_reopen`
     // (crates/zed/src/main.rs `app.on_reopen`).
@@ -207,10 +250,10 @@ pub fn run_app(config: UiConfig) {
             state.watch_clock_transitions(cx);
             state
         });
-        let url_state = state.clone();
+        let request_state = state.clone();
         cx.spawn(async move |cx| {
-            while let Some(url) = url_rx.next().await {
-                url_state.update(cx, |state, cx| state.open_deep_link(&url, cx));
+            while let Some(request) = requests.next().await {
+                let _ = cx.update(|cx| deliver_launch_request(request, &request_state, cx));
             }
         })
         .detach();
@@ -274,6 +317,30 @@ pub(crate) fn activate_main_window(cx: &mut App) {
     {
         let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
         open_main_window(state, boot, cx);
+    }
+}
+
+fn deliver_launch_request(
+    request: LaunchRequest,
+    state: &gpui::Entity<state::AppState>,
+    cx: &mut App,
+) {
+    activate_main_window(cx);
+    if let Some(shell) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<shell::Shell>())
+    {
+        let _ = shell.update(cx, |_, window, _| window.activate_window());
+    }
+    match request {
+        LaunchRequest::Activate => {}
+        LaunchRequest::OpenUrl { url } => {
+            state.update(cx, |state, cx| state.open_deep_link(&url, cx))
+        }
+        LaunchRequest::OpenProject { path } => {
+            state.update(cx, |state, cx| state.open_project(path, cx))
+        }
     }
 }
 

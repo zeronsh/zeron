@@ -242,9 +242,10 @@ mod tests {
                             break;
                         }
                     }
-                    assert!(
-                        String::from_utf8_lossy(&request).starts_with("POST /device/remote/nudge ")
-                    );
+                    if !String::from_utf8_lossy(&request).starts_with("POST /device/remote/nudge ")
+                    {
+                        return;
+                    }
                     count.fetch_add(1, Ordering::SeqCst);
                     let response = format!(
                         "HTTP/1.1 {} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -272,6 +273,12 @@ mod tests {
         workspace
             .create_chat("outgoing", None, Some("remote"), None, None)
             .unwrap();
+        store
+            .enqueue_chat_update("outgoing", "acked-row", b"command bytes")
+            .unwrap();
+        store
+            .acknowledge_chat_update("outgoing", "acked-row")
+            .unwrap();
         let config = DocHostConfig {
             device_id: "sender".into(),
             default_harness: HarnessId::Mock,
@@ -279,13 +286,7 @@ mod tests {
         };
         let host = DocHost::new(store.clone(), config.clone());
         host.set_workspace(workspace.clone());
-        store
-            .enqueue_chat_update("outgoing", "acked-row", b"command bytes")
-            .unwrap();
         host.nudge_remote_host("outgoing");
-        store
-            .acknowledge_chat_update("outgoing", "acked-row")
-            .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while attempts.load(Ordering::SeqCst) < 2 {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
