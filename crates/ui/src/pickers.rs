@@ -412,6 +412,7 @@ const NO_ACTIVE_ROW: usize = usize::MAX;
 struct ProjectRow {
     key: String,
     name: String,
+    label: String,
 }
 
 /// One device-picker row: a device, and the picked project's checkout on it.
@@ -2416,7 +2417,8 @@ impl Pickers {
 
     /// The picker's project rows: one per project across every device —
     /// clones and worktrees sharing a repository identity are one row, named
-    /// for their representative. The device chip then picks which checkout.
+    /// for their representative and labeled with their devices. The device
+    /// chip then picks which checkout.
     fn project_rows(&self, cx: &App) -> Vec<ProjectRow> {
         let state = self.state.read(cx);
         let mut rows: Vec<ProjectRow> = Vec::new();
@@ -2425,10 +2427,22 @@ impl Pickers {
             if rows.iter().any(|row| row.key == key) {
                 continue;
             }
-            rows.push(ProjectRow {
-                key,
-                name: state.representative_space(space).display_name().to_string(),
-            });
+            let name = state.representative_space(space).display_name().to_string();
+            let mut device_ids = Vec::new();
+            let mut device_names = Vec::new();
+            for member in state.project_members(space) {
+                if device_ids.contains(&member.device_id.as_str()) {
+                    continue;
+                }
+                device_ids.push(member.device_id.as_str());
+                device_names.push(
+                    state
+                        .device_name(&member.device_id)
+                        .unwrap_or("Unknown device"),
+                );
+            }
+            let label = format!("{name}({})", device_names.join(", "));
+            rows.push(ProjectRow { key, name, label });
         }
         rows.sort_by_key(|row| (row.name.to_lowercase(), row.key.clone()));
         rows
@@ -2439,7 +2453,7 @@ impl Pickers {
     fn filtered_project_rows(&self, cx: &App) -> Vec<ProjectRow> {
         let query = self.search.read(cx).text().to_string();
         let rows = self.project_rows(cx);
-        let names: Vec<String> = rows.iter().map(|row| row.name.clone()).collect();
+        let names: Vec<String> = rows.iter().map(|row| row.label.clone()).collect();
         popover::filter_indices(&query, &names)
             .into_iter()
             .map(|ix| rows[ix].clone())
@@ -2757,7 +2771,7 @@ impl Pickers {
 
     /// The project popover: search + one row per project across devices
     /// (check on the current pick), then "New project…" and the opt-out rows.
-    /// No per-row `@ device` tag — the device chip next door picks the host.
+    /// Each project names its devices; the device chip next door picks the host.
     fn render_space_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let rows = self.filtered_project_rows(cx);
@@ -2793,7 +2807,7 @@ impl Pickers {
                         .gap(px(2.0))
                         .max_h(px(self.list_budget(152.0)))
                         .children(rows.into_iter().enumerate().map(|(ix, row)| {
-                            let label: SharedString = row.name.into();
+                            let label: SharedString = row.label.into();
                             let is_selected = selected.as_deref() == Some(row.key.as_str());
                             let key = row.key;
                             popover::menu_row_nav(
@@ -3464,7 +3478,7 @@ impl Pickers {
                 .is_some_and(|id| !state.device_online(id, chrono::Utc::now()));
             let project_label: SharedString = state
                 .selected_space_row()
-                .map(|s| s.display_name().to_string())
+                .map(|s| format!("{}({device_label})", s.display_name()))
                 .unwrap_or_else(|| "No project".to_string())
                 .into();
             (device_label, project_label, offline)
@@ -7412,18 +7426,33 @@ mod tests {
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         pickers.update(cx, |pickers, cx| {
             // One row per repository, named for its oldest checkout.
-            let rows: Vec<(String, String)> = pickers
+            let rows: Vec<(String, String, String)> = pickers
                 .project_rows(cx)
                 .into_iter()
-                .map(|row| (row.name, row.key))
+                .map(|row| (row.name, row.label, row.key))
                 .collect();
             assert_eq!(
                 rows,
                 [
-                    ("comet".into(), "repo:github.com/o/comet".into()),
-                    ("notes".into(), "notes".into())
+                    (
+                        "comet".into(),
+                        "comet(MAC, VPS)".into(),
+                        "repo:github.com/o/comet".into()
+                    ),
+                    ("notes".into(), "notes(MAC)".into(), "notes".into())
                 ]
             );
+            // Device names find the project without repeating a device for
+            // every checkout it owns.
+            pickers
+                .search
+                .update(cx, |input, cx| input.set_text("VPS", cx));
+            let filtered = pickers.filtered_project_rows(cx);
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].label, "comet(MAC, VPS)");
+            pickers
+                .search
+                .update(cx, |input, cx| input.set_text("", cx));
             // Picking it keeps the canvas on this device's checkout.
             pickers.pick_project("repo:github.com/o/comet".into(), cx);
             assert_eq!(
