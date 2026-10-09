@@ -1096,6 +1096,7 @@ impl FilesSurface {
                             format!("files-chat-pr-{}", row.chat_id).into(),
                             summary,
                             crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                            row.chat_id.clone(),
                             theme,
                         )
                     }))

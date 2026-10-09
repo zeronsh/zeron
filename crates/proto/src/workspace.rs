@@ -15,6 +15,7 @@ pub mod capabilities {
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
+    pub const GITHUB_VIEWER_V1: &str = "github-viewer-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -24,6 +25,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         HARNESS_UPDATES_V1,
+        GITHUB_VIEWER_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -105,6 +107,7 @@ mod tests {
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
                     "harness-updates-v1",
+                    "github-viewer-v1",
                     "voice-client-media-v1"
                 ],
             })
@@ -122,5 +125,6 @@ mod tests {
         assert!(info.cursor_sdk_version.is_none());
         assert!(!info.supports(capabilities::MESSAGE_QUEUE_V1));
         assert!(!info.supports(capabilities::COMPOSER_REFERENCES_V1));
+        assert!(!info.supports(capabilities::GITHUB_VIEWER_V1));
     }
 }

@@ -7,6 +7,7 @@ pub mod agent;
 pub mod attachment_mentions;
 pub mod entities;
 pub mod file_mentions;
+pub mod github;
 pub mod invocation;
 pub mod motion;
 pub mod preview;
@@ -17,6 +18,7 @@ pub mod workspace;
 
 pub use agent::*;
 pub use entities::*;
+pub use github::*;
 pub use preview::*;
 pub use sidebar_pins::*;
 pub use workspace::*;

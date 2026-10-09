@@ -3664,6 +3664,7 @@ impl Pickers {
                                 "composer-pull-request".into(),
                                 summary,
                                 crate::change_requests::ChangeRequestBadgeSurface::Composer,
+                                chat.id.clone(),
                                 &theme,
                             ),
                         ))

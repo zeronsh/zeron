@@ -67,6 +67,7 @@ mod chat_rename_tests;
 mod command_palette;
 mod file_mutations;
 mod files_panel;
+mod github;
 mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
@@ -704,6 +705,7 @@ pub enum RightSurface {
     Picker,
     File(u64),
     Browser(u64),
+    GitHub(u64),
     Diff(u64),
     Terminal(u64),
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
@@ -1972,6 +1974,9 @@ pub struct Shell {
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
+    github_surfaces: std::collections::HashMap<u64, Entity<crate::github::GitHubSurface>>,
+    github_subs: std::collections::HashMap<u64, Subscription>,
+    github_seq: u64,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
@@ -2432,6 +2437,9 @@ impl Shell {
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
+            github_surfaces: std::collections::HashMap::new(),
+            github_subs: std::collections::HashMap::new(),
+            github_seq: 0,
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
@@ -3262,6 +3270,11 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
+                RightSurface::GitHub(id) => self.github_surfaces.get(id).map(|view| {
+                    let view = view.read(cx);
+                    let url = (!view.target.resolves_checkout()).then(|| view.target.url().into());
+                    (*surface, view.title(), false, url)
+                }),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -3312,7 +3325,8 @@ impl Shell {
             | RightSurface::Terminal(_)
             | RightSurface::SideChat(_)
             | RightSurface::Subagent(_)
-            | RightSurface::Browser(_) => {
+            | RightSurface::Browser(_)
+            | RightSurface::GitHub(_) => {
                 return None;
             }
         };
@@ -3434,6 +3448,11 @@ impl Shell {
                 }
             }
             RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::GitHub(id) => {
+                if let Some(view) = self.github_surfaces.get(&id).cloned() {
+                    view.update(cx, |view, cx| view.ensure_loaded(cx));
+                }
+            }
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -3446,6 +3465,12 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let RightSurface::GitHub(id) = surface {
+            if let Some(view) = self.github_surfaces.get(&id) {
+                window.focus(&view.read(cx).focus_handle(cx), cx);
+            }
+            return;
+        }
         if let RightSurface::Browser(id) = surface {
             if let Some(browser) = self.browsers.get(&id).cloned() {
                 browser.update(cx, |browser, cx| browser.focus_address(window, cx));
@@ -3587,6 +3612,17 @@ impl Shell {
                 LinkOutcome::Rejected
             };
         }
+        if matches!(activation.action, LinkAction::Primary | LinkAction::Internal)
+            && let Some(target) = activation
+                .target
+                .navigation
+                .as_ref()
+                .ok()
+                .and_then(|url| zeron_proto::GitHubTarget::from_url(url))
+        {
+            self.add_github_surface(source, target, window, cx);
+            return LinkOutcome::Internal;
+        }
         let mut resolved = activation.clone();
         if resolved.action == LinkAction::Primary {
             resolved.action = if crate::settings::current(cx).open_web_links_in_zeron {
@@ -3610,6 +3646,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(target) = url.as_deref().and_then(zeron_proto::GitHubTarget::from_url) {
+            self.add_github_surface(self.active_chat.clone(), target, window, cx);
+            return;
+        }
         if self.active_chat.is_empty() {
             return;
         }
@@ -3634,7 +3674,25 @@ impl Shell {
         let owner = key.clone();
         let sub = cx.subscribe_in(&browser, window, move |this, _, event, window, cx| {
             match event {
-                crate::browser::BrowserEvent::Changed => cx.notify(),
+                crate::browser::BrowserEvent::Changed => {
+                    let github_target = this.browsers.get(&id).and_then(|browser| {
+                        browser
+                            .read(cx)
+                            .page
+                            .url
+                            .as_deref()
+                            .and_then(zeron_proto::GitHubTarget::from_url)
+                    });
+                    if this.panel_key(cx) == owner
+                        && this.resolved_right_active(cx) == RightSurface::Browser(id)
+                        && let Some(target) = github_target
+                    {
+                        this.close_right_surface(RightSurface::Browser(id), window, cx);
+                        this.add_github_surface(this.active_chat.clone(), target, window, cx);
+                    } else {
+                        cx.notify();
+                    }
+                }
                 crate::browser::BrowserEvent::NewTab(url) => {
                     // A background page cannot open a tab in the wrong session.
                     if this.panel_key(cx) == owner
@@ -4228,6 +4286,10 @@ impl Shell {
                     browser.update(cx, |browser, cx| browser.close(cx));
                 }
                 self.browser_subs.remove(&id);
+            }
+            RightSurface::GitHub(id) => {
+                self.github_surfaces.remove(&id);
+                self.github_subs.remove(&id);
             }
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
@@ -5664,6 +5726,22 @@ impl Shell {
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        let github_ids = self
+            .github_surfaces
+            .iter()
+            .filter_map(|(id, view)| {
+                let belongs_to_panel = self
+                    .right_tabs
+                    .get(&chat_id)
+                    .is_some_and(|tabs| tabs.contains(&RightSurface::GitHub(*id)));
+                (belongs_to_panel || view.read(cx).source_session() == chat_id).then_some(*id)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        self.github_surfaces.retain(|id, _| !github_ids.contains(id));
+        self.github_subs.retain(|id, _| !github_ids.contains(id));
+        for tabs in self.right_tabs.values_mut() {
+            tabs.retain(|surface| !matches!(surface, RightSurface::GitHub(id) if github_ids.contains(id)));
+        }
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
                 if let RightSurface::Browser(id) = surface {
@@ -7926,6 +8004,7 @@ impl Shell {
                                     format!("{row_id}-compact-pr").into(),
                                     summary,
                                     crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    id.clone(),
                                     theme,
                                 )
                             }
@@ -8043,6 +8122,7 @@ impl Shell {
                                     format!("{row_id}-pr").into(),
                                     summary,
                                     crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    id.clone(),
                                     search_query,
                                     theme,
                                 )
@@ -11046,6 +11126,9 @@ impl Shell {
                     .cloned()
                     .map(|browser| browser.into_any_element())
                     .unwrap_or_else(|| self.render_surface_picker(cx)),
+                RightSurface::GitHub(id) => self.github_surfaces.get(&id).cloned()
+                    .map(|view| view.into_any_element())
+                    .unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Terminal(tab) => {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
@@ -11210,6 +11293,11 @@ impl Shell {
                             |this, _, window, cx| this.add_browser_surface(None, window, cx),
                         )),
                     )
+                    .when(self.github_repository_target(cx).is_some(), |el| el.child(
+                        row("surface-card-github", icons::PULL_REQUEST, "GitHub").on_click(cx.listener(
+                            |this, _, window, cx| this.open_github_repository(window, cx),
+                        )),
+                    ))
                     .child(
                         row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
                             cx.listener(|this, _, _, cx| {
@@ -11428,6 +11516,7 @@ impl Shell {
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
+                RightSurface::GitHub(_) => icons::PULL_REQUEST,
                 RightSurface::Picker => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
@@ -11453,6 +11542,7 @@ impl Shell {
                     .browsers
                     .get(&id)
                     .is_some_and(|b| b.read(cx).page.loading),
+                RightSurface::GitHub(id) => self.github_surfaces.get(&id).is_some_and(|view| view.read(cx).loading()),
                 RightSurface::Subagent(id) => self.subagent_tabs.get(&id).is_some_and(|tab| {
                     self.state
                         .read(cx)
@@ -11794,6 +11884,16 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Browser")),
                         )
+                        .when(self.github_repository_target(cx).is_some(), |el| el.child(
+                            popover::menu_row(&theme, false, "right-plus-github")
+                                .id("right-plus-github-row")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_github_repository(window, cx);
+                                    this.close_right_plus(cx);
+                                }))
+                                .child(icon(icons::PULL_REQUEST).size(px(13.0)).text_color(theme.text_muted))
+                                .child("GitHub"),
+                        ))
                         .child(
                             popover::menu_row(&theme, false, "right-plus-terminal")
                                 .id("right-plus-terminal-row")
@@ -12743,6 +12843,8 @@ impl Render for Shell {
                 }
                 self.browsers.clear();
                 self.browser_subs.clear();
+                self.github_surfaces.clear();
+                self.github_subs.clear();
                 self.browser_context = crate::browser::BrowserContext::default();
             }
             self.browser_profile = browser_profile;
@@ -12927,6 +13029,9 @@ impl Render for Shell {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)
                 }
+            }))
+            .on_action(cx.listener(|this, action: &crate::github::OpenGitHub, window, cx| {
+                this.open_github_action(action, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
                 if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {

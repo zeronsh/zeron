@@ -14,6 +14,7 @@ compact-picker-fixture = ["gpui_platform/test-support"]
 # a nested Wayland compositor has stopped requesting idle frames.
 browser-fixture = ["gpui/bench"]
 windows-render-fixture = []
+github-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
@@ -32,6 +33,10 @@ required-features = ["browser-fixture"]
 [[example]]
 name = "windows-render-fixture"
 required-features = ["windows-render-fixture"]
+
+[[example]]
+name = "github-fixture"
+required-features = ["github-fixture"]
 
 [[example]]
 name = "appshots-fixture"

@@ -13027,6 +13027,7 @@ dependencies = [
  "loro",
  "notify",
  "nucleo-matcher",
+ "percent-encoding",
  "portable-pty",
  "reqwest",
  "rusqlite",
@@ -13170,6 +13171,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 
