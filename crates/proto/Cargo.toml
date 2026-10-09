@@ -11,3 +11,4 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 pulldown-cmark.workspace = true
+url = "2"

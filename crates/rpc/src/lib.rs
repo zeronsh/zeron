@@ -194,6 +194,9 @@ pub mod methods {
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
+    /// Read-only pages using the target device's existing GitHub CLI login.
+    pub const GET_GITHUB_PAGE: &str = "GetGitHubPageV1";
+    pub const GET_GITHUB_DIFF: &str = "GetGitHubDiffV1";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.

@@ -15599,6 +15599,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            images: Vec::new().into(),
             kind: ToolItemKind::Call,
         };
         // The chip header inside a clickable parent, standing in for the

@@ -1458,6 +1458,8 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
+            | methods::GET_GITHUB_PAGE
+            | methods::GET_GITHUB_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
             // Terminals live on the chat's host device.
@@ -2527,6 +2529,29 @@ impl RpcService for EngineRpc {
                     },
                 );
                 Ok(RpcReply::Stream(stream.boxed()))
+            }
+            methods::GET_GITHUB_PAGE | methods::GET_GITHUB_DIFF => {
+                #[derive(Deserialize)]
+                struct P {
+                    cwd: String,
+                    url: String,
+                }
+                let p: P = parse_params(params)?;
+                let cwd = self.change_request_root(&p.cwd).await?;
+                let github = crate::source_control::GitHubCli::new();
+                if method == methods::GET_GITHUB_DIFF {
+                    let diff = github
+                        .view_diff(&cwd, &p.url)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    RpcReply::value(&diff)
+                } else {
+                    let page = github
+                        .view_page(&cwd, &p.url)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    RpcReply::value(&page)
+                }
             }
             methods::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let p: CheckoutChangeRequestParams = parse_params(params)?;

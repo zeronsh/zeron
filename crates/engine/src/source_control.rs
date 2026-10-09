@@ -16,6 +16,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use zeron_proto::{ChangeRequestState, ChangeRequestSummary};
 
+mod github_viewer;
+
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;

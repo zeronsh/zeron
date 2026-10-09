@@ -114,19 +114,21 @@ pub(crate) fn pull_request_badge(
     id: SharedString,
     summary: ChangeRequestSummary,
     surface: ChangeRequestBadgeSurface,
+    source_session: String,
     theme: &Theme,
 ) -> AnyElement {
-    pull_request_badge_with_query(id, summary, surface, None, theme)
+    pull_request_badge_with_query(id, summary, surface, source_session, None, theme)
 }
 
 pub(crate) fn pull_request_badge_with_query(
     id: SharedString,
     summary: ChangeRequestSummary,
     surface: ChangeRequestBadgeSurface,
+    source_session: String,
     query: Option<&str>,
     theme: &Theme,
 ) -> AnyElement {
-    render_pull_request_badge(id, summary, surface, query, true, theme)
+    render_pull_request_badge(id, summary, surface, query, Some(source_session), theme)
 }
 
 /// The same badge geometry without hover, tooltip, or click behavior in drag previews.
@@ -136,7 +138,7 @@ pub(crate) fn pull_request_badge_preview(
     surface: ChangeRequestBadgeSurface,
     theme: &Theme,
 ) -> AnyElement {
-    render_pull_request_badge(id, summary, surface, None, false, theme)
+    render_pull_request_badge(id, summary, surface, None, None, theme)
 }
 
 fn render_pull_request_badge(
@@ -144,7 +146,7 @@ fn render_pull_request_badge(
     summary: ChangeRequestSummary,
     surface: ChangeRequestBadgeSurface,
     query: Option<&str>,
-    interactive: bool,
+    source_session: Option<String>,
     theme: &Theme,
 ) -> AnyElement {
     let model = ChangeRequestBadgeModel::from_summary(&summary);
@@ -167,12 +169,22 @@ fn render_pull_request_badge(
         .text_size(px(if composer { 11.0 } else { 10.0 }))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(color.opacity(0.85))
-        .when(interactive, |el| {
+        .when_some(source_session, |el, source_session| {
             el.cursor_pointer()
                 .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    cx.open_url(&url);
+                    if window.modifiers().platform || window.modifiers().control {
+                        cx.open_url(&url);
+                    } else {
+                        window.dispatch_action(
+                            Box::new(crate::github::OpenGitHub {
+                                url: url.clone(),
+                                source_session: source_session.clone(),
+                            }),
+                            cx,
+                        );
+                    }
                 })
                 .tooltip(move |_, cx| {
                     cx.new(|_| ChangeRequestTooltip::new(&tooltip_summary))

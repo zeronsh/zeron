@@ -1637,6 +1637,8 @@ struct CommentDraft {
 /// (the shell calls it when the pane first opens).
 pub struct Changes {
     state: Entity<AppState>,
+    /// Published patches are independent of the checkout and local review notes.
+    published: bool,
     diffs: Vec<CheckoutDiff>,
     started: bool,
     error: Option<SharedString>,
@@ -1744,6 +1746,7 @@ impl Changes {
         let mode = DiffMode::from_split(settings.diff_split);
         Self {
             state,
+            published: false,
             mode,
             wrap_lines: settings.diff_wrap,
             diffs: Vec::new(),
@@ -1785,6 +1788,19 @@ impl Changes {
             commit: None,
             _observe: observe,
         }
+    }
+
+    pub fn for_published(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut changes = Self::new(state, cx);
+        changes.published = true;
+        changes.scope = DiffScope::Branch;
+        changes
+    }
+
+    pub fn set_published_diff(&mut self, diff: CheckoutDiff, cx: &mut Context<Self>) {
+        debug_assert!(self.published);
+        self.scoped = Some(diff);
+        self.sync(cx);
     }
 
     /// A pane pinned to one commit's diff (a History row click) — fetches
@@ -1840,6 +1856,9 @@ impl Changes {
     /// Retries with a flat 2 s delay if the stream fails or ends; the last
     /// content stays visible under an error banner meanwhile.
     pub fn ensure_watch(&mut self, cx: &mut Context<Self>) {
+        if self.published {
+            return;
+        }
         let target = self.desired_target(cx);
         if self.started && self.watch_target == target {
             return;
@@ -2287,10 +2306,12 @@ impl Changes {
                 .update(cx, |history, cx| history.ensure_loaded(cx));
             return;
         }
-        if self.scope != DiffScope::Commit {
+        if !self.published && self.scope != DiffScope::Commit {
             self.ensure_branches(cx);
         }
-        self.ensure_scoped(cx);
+        if !self.published {
+            self.ensure_scoped(cx);
+        }
         let Some(diff) = self.active_diff(cx) else {
             if self.parsed.take().is_some() {
                 self.rows.clear();
@@ -2703,6 +2724,9 @@ impl Changes {
 
     /// Cloned because rendering borrows `self` mutably a moment later.
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
+        if self.published {
+            return Vec::new();
+        }
         let state = self.state.read(cx);
         state
             .review_comments(&state.composer_key())
@@ -3108,7 +3132,9 @@ impl Changes {
         });
 
         let active = self.active_diff(cx);
-        let engine = self.state.read(cx).engine().cloned();
+        let engine = (!self.published)
+            .then(|| self.state.read(cx).engine().cloned())
+            .flatten();
         let target = self.desired_target(cx);
         let chat_id = self
             .state
@@ -3271,6 +3297,9 @@ impl Changes {
                     code_width,
                     Some(code_scroll.slot("unified")),
                 );
+                if self.published {
+                    return row;
+                }
                 let Some((side, line_no)) = line_anchor(line) else {
                     return row;
                 };
@@ -3365,7 +3394,10 @@ impl Changes {
                 let left = cell(left, true)
                     .map(IntoElement::into_any_element)
                     .unwrap_or_else(|| split_filler().into_any_element());
-                let right = match (cell(right, false), right.and_then(line_anchor)) {
+                let right = match (
+                    cell(right, false),
+                    right.and_then(line_anchor).filter(|_| !self.published),
+                ) {
                     (Some(cell), Some(anchor)) => {
                         let (side, line_no) = anchor;
                         let (move_path, leave_path) = (path.clone(), path.clone());
@@ -3611,7 +3643,7 @@ impl Changes {
                         .child(SharedString::from(format!("−{dels}"))),
                 )
             })
-            .child(
+            .when(!self.published, |el| el.child(
                 div()
                     .id(("diff-open-file", ix))
                     .flex_none()
@@ -3636,7 +3668,7 @@ impl Changes {
                             .size(px(crate::surface_chrome::ICON_SIZE))
                             .text_color(theme.text_muted),
                     ),
-            )
+            ))
             .into_any_element()
     }
 
@@ -3799,6 +3831,31 @@ impl Changes {
     /// alongside, shell-owned (they mutate shell state).
     pub fn render_header_controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        if self.published {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child("Published changes"),
+                )
+                .child(self.split_toggle(&theme, cx))
+                .child(self.wrap_toggle(&theme, cx))
+                .child(
+                    Self::header_button(
+                        "github-fold-all",
+                        crate::icons::FOLD_VERTICAL,
+                        self.fold_all_label(),
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_collapse_all(cx))),
+                )
+                .into_any_element();
+        }
         // Commit-pinned pane: the pin never changes, so a fixed identity
         // chip (mono short sha + subject) replaces the scope dropdown;
         // fold-all still trails.
@@ -4966,7 +5023,7 @@ impl Render for Changes {
         let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let no_chat = !self.published && self.state.read(cx).selected_chat_row().is_none();
         let phase = if no_chat {
             DiffPhase::Clean
         } else {
@@ -5046,7 +5103,11 @@ impl Render for Changes {
                     .justify_center()
                     .text_size(px(12.0))
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(clean_message(scope, base.as_deref())))
+                    .child(SharedString::from(if self.published {
+                        "No published text changes.".to_string()
+                    } else {
+                        clean_message(scope, base.as_deref())
+                    }))
                     .into_any_element(),
                 DiffPhase::List => {
                     if self.parsed.is_some() {

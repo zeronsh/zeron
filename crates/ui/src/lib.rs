@@ -34,6 +34,7 @@ pub mod file_icons;
 pub mod files;
 pub mod frost;
 mod glass;
+pub mod github;
 mod haptics;
 pub mod history;
 pub mod icons;

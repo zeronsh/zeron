@@ -28,6 +28,7 @@ chrono.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
+percent-encoding = "2"
 toml = "0.8"
 libc.workspace = true
 gethostname.workspace = true
