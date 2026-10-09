@@ -8,7 +8,8 @@ import WebRTC
 /// Audio behaves like a phone call: loudspeaker while the phone is in hand,
 /// the earpiece while it is held to the ear, and whatever headset or car the
 /// user connected otherwise. The call survives the screen locking (background
-/// audio); an interruption such as an incoming call ends it.
+/// audio) and shares the device with other apps' audio, so a video playing
+/// elsewhere does not take it; an interruption such as an incoming call ends it.
 @MainActor
 final class CodexVoicePeer: NSObject {
     enum Failure: Error { case closed, unavailable, permissionDenied, timeout }
@@ -25,6 +26,22 @@ final class CodexVoicePeer: NSObject {
     private var observers: [NSObjectProtocol] = []
     var onFailure: (() -> Void)?
 
+    /// The call's audio session, installed as WebRTC's *global* configuration:
+    /// WebRTC re-applies that one when the audio unit starts, so a
+    /// session-only change would be overwritten mid-call.
+    @discardableResult
+    static func installAudioConfiguration() -> RTCAudioSessionConfiguration {
+        let configuration = RTCAudioSessionConfiguration.webRTC()
+        configuration.category = AVAudioSession.Category.playAndRecord.rawValue
+        configuration.mode = AVAudioSession.Mode.voiceChat.rawValue
+        // No defaultToSpeaker: the route follows the proximity sensor instead.
+        // Mixable: a nonmixable session is interrupted when another app (or
+        // the in-app browser) starts a video, and an interruption ends the call.
+        configuration.categoryOptions = [.allowBluetoothHFP, .mixWithOthers]
+        RTCAudioSessionConfiguration.setWebRTC(configuration)
+        return configuration
+    }
+
     func prepare() async throws {
         guard !closed else { throw Failure.closed }
         guard await AVAudioApplication.requestRecordPermission() else { throw Failure.permissionDenied }
@@ -32,14 +49,7 @@ final class CodexVoicePeer: NSObject {
         let audio = RTCAudioSession.sharedInstance()
         audio.useManualAudio = true
         audio.isAudioEnabled = false
-        let configuration = RTCAudioSessionConfiguration.webRTC()
-        configuration.category = AVAudioSession.Category.playAndRecord.rawValue
-        configuration.mode = AVAudioSession.Mode.voiceChat.rawValue
-        // No defaultToSpeaker: the route follows the proximity sensor instead.
-        configuration.categoryOptions = [.allowBluetoothHFP]
-        // WebRTC re-applies its *global* configuration when the audio unit
-        // starts; a session-only change would be overwritten mid-call.
-        RTCAudioSessionConfiguration.setWebRTC(configuration)
+        let configuration = Self.installAudioConfiguration()
         audio.lockForConfiguration()
         defer { audio.unlockForConfiguration() }
         try audio.setConfiguration(configuration)
