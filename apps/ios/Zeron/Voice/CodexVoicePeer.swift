@@ -169,7 +169,9 @@ final class CodexVoicePeer: NSObject {
         let audio = RTCAudioSession.sharedInstance()
         audio.lockForConfiguration()
         try? audio.overrideOutputAudioPort(.none)
-        try? audio.setActive(false)
+        // Balanced with setMuted: WebRTC counts activations, and a release
+        // without one leaves later calls unable to deactivate the session.
+        if active { try? audio.setActive(false) }
         audio.unlockForConfiguration()
         active = false
     }
