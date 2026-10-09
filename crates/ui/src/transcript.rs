@@ -15588,6 +15588,7 @@ mod tests {
 
         let read = |path: &str| ToolItem {
             part_id: "fixture".into(),
+            images: Default::default(),
             call: ToolCall::ReadFile { path: path.into() },
             is_error: false,
             resolved: true,
