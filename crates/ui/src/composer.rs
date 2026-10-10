@@ -62,6 +62,10 @@ pub const TEXTAREA_PAD_V: f32 = 20.0;
 /// empty — it's what makes the always-expanded new-chat composer tall.
 pub const TEXTAREA_MIN: f32 = 76.0;
 pub const TEXTAREA_MAX: f32 = 260.0;
+/// How tall the question panel's free-text input may grow before it scrolls.
+/// The panel replaces the composer pill, so it must not inherit the pill's
+/// last line budget (a compact pill is a single row).
+const WIZARD_INPUT_MAX_HEIGHT: f32 = TEXTAREA_MAX - TEXTAREA_PAD_V;
 /// Expanded actions row: 2px top + 32px picker + 8px bottom.
 const ACTIONS_BOTTOM_PAD: f32 = 8.0;
 pub const ACTIONS_ROW_HEIGHT: f32 = 2.0 + 32.0 + ACTIONS_BOTTOM_PAD;
@@ -9786,6 +9790,27 @@ impl Composer {
 
     // ---- render pieces ----
 
+    /// The panel returns before the pill layout that normally sizes the shared
+    /// input, so its viewport would stay at whatever the pill last left: one
+    /// row from a compact pill, which fades a multi-line answer or prefill to
+    /// nothing. Give the input the panel's own budget and drop any pill
+    /// resize/padding state so it can grow to its content.
+    fn sync_wizard_input_viewport(&mut self, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            if input.viewport_height != Some(WIZARD_INPUT_MAX_HEIGHT)
+                || input.settled_viewport_height != Some(WIZARD_INPUT_MAX_HEIGHT)
+                || input.resizing
+                || input.overflow_top_padding != 0.0
+            {
+                input.viewport_height = Some(WIZARD_INPUT_MAX_HEIGHT);
+                input.settled_viewport_height = Some(WIZARD_INPUT_MAX_HEIGHT);
+                input.resizing = false;
+                input.overflow_top_padding = 0.0;
+                cx.notify();
+            }
+        });
+    }
+
     /// The agent-asked-a-question panel (zeron question-panel.tsx), rendered in
     /// place of the composer: the same floating-pill chrome (`rounded-[26px]
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
@@ -9820,6 +9845,7 @@ impl Composer {
         });
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
+        self.sync_wizard_input_viewport(cx);
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
 
@@ -16110,6 +16136,62 @@ mod tests {
                 Some("ordinary draft b")
             );
         });
+    }
+
+    #[gpui::test]
+    fn wizard_input_ignores_the_compact_pills_viewport(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let state = handle.update(cx, |c, _, _| c.state.clone()).unwrap();
+        let mut q = question("editor", &[], false);
+        q.prefill = Some("one\ntwo\nthree\nfour".into());
+        q.multiline = true;
+        state.update(cx, |s, _| {
+            s.selected_chat = Some("a".into());
+            s.transcript = vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "r".into(),
+                    questions: vec![q],
+                    resolved: false,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }];
+        });
+        handle
+            .update(cx, |c, _, cx| {
+                // What a compact, mid-resize pill leaves on the shared input.
+                c.input.update(cx, |i, _| {
+                    i.viewport_height = Some(INPUT_LINE_HEIGHT);
+                    i.settled_viewport_height = Some(INPUT_LINE_HEIGHT);
+                    i.resizing = true;
+                    i.overflow_top_padding = 16.0;
+                });
+                c.on_state_changed(cx);
+                assert!(c.wizard.is_some());
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |c, _, cx| {
+                let input = c.input.read(cx);
+                assert_eq!(input.text(), "one\ntwo\nthree\nfour");
+                assert_eq!(input.viewport_height, Some(WIZARD_INPUT_MAX_HEIGHT));
+                assert_eq!(input.settled_viewport_height, Some(WIZARD_INPUT_MAX_HEIGHT));
+                assert!(!input.resizing);
+                assert_eq!(input.overflow_top_padding, 0.0);
+                assert!(
+                    WIZARD_INPUT_MAX_HEIGHT > 4.0 * INPUT_LINE_HEIGHT,
+                    "a few lines of answer must fit without scrolling"
+                );
+            })
+            .unwrap();
     }
 
     #[test]
