@@ -10174,9 +10174,13 @@ impl Render for Transcript {
         // OVER the bottom fade gradient, which is a later sibling of this
         // outlet — an overlay here would be tinted by the fade.
         self.update_runway_minimum(cx);
-        let list_el = list(self.list.clone(), cx.processor(Self::render_row))
-            .size_full()
-            .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
+        let list_el = crate::overscroll::overscroll(
+            "transcript-overscroll",
+            crate::overscroll::OverscrollSource::List(self.list.clone()),
+            list(self.list.clone(), cx.processor(Self::render_row))
+                .size_full()
+                .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+        );
         let content: AnyElement = if self.doc_override.is_some() {
             // The primary transcript's fade lives on the SHELL's outlet
             // wrapper (it spans the titlebar/composer chrome); an override

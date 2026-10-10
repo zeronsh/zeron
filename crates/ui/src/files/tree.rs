@@ -220,10 +220,14 @@ impl FilesSurface {
                     TREE_FADE_BAND,
                     true,
                     true,
-                    list(self.tree_list.clone(), cx.processor(Self::render_tree_row))
-                        .flex_1()
-                        .min_h_0()
-                        .with_sizing_behavior(ListSizingBehavior::Auto),
+                    crate::overscroll::overscroll(
+                        "tree-overscroll",
+                        crate::overscroll::OverscrollSource::List(self.tree_list.clone()),
+                        list(self.tree_list.clone(), cx.processor(Self::render_tree_row))
+                            .flex_1()
+                            .min_h_0()
+                            .with_sizing_behavior(ListSizingBehavior::Auto),
+                    ),
                 )
                 .fade_overflow_y_with(move |_| tree_scroll_overflow(&overflow))
             })
