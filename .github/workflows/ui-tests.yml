@@ -7,11 +7,15 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'vendor/ironrdp-*/**'
       - '.github/actions/linux-ci/**'
       - 'scripts/ci/**'
       - 'scripts/*cursor-sdk*'
       - '.github/workflows/cursor-*.yml'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/test-remote-desktop.sh'
+      - 'scripts/test-rdp-xrdp.sh'
+      - 'scripts/collect-rdp-licenses.py'
       - '.github/workflows/ui-tests.yml'
   push:
     branches: [main]
@@ -20,11 +24,15 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'vendor/ironrdp-*/**'
       - '.github/actions/linux-ci/**'
       - 'scripts/ci/**'
       - 'scripts/*cursor-sdk*'
       - '.github/workflows/cursor-*.yml'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/test-remote-desktop.sh'
+      - 'scripts/test-rdp-xrdp.sh'
+      - 'scripts/collect-rdp-licenses.py'
       - '.github/workflows/ui-tests.yml'
   workflow_dispatch:
 
@@ -36,6 +44,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  rdp-protocol:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Protocol, TLS, input, clipboard and lifecycle contracts
+        run: cargo test --locked -p ironrdp-svc -p ironrdp-dvc -p zeron-rdp
+      - name: Build direct interoperability probe
+        run: cargo build --release --locked -p zeron-rdp --example probe
+      - name: Real xrdp login, Unicode input, clipboard and reactivation
+        timeout-minutes: 5
+        env:
+          CONTAINER_RUNTIME: docker
+        run: scripts/test-rdp-xrdp.sh "$RUNNER_TEMP/rdp-protocol"
+      - name: Upload RDP interoperability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rdp-protocol
+          path: ${{ runner.temp }}/rdp-protocol
+          if-no-files-found: warn
+
   # Every Linux Rust test that is not UI: one build, one nextest run (see
   # scripts/ci/test-core.sh). Replaces session-sync-regressions and the Rust
   # steps of cursor-compatibility and preview-tests.
@@ -86,6 +119,17 @@ jobs:
             libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake
             libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xdotool openbox
             weston ffmpeg imagemagick fonts-noto-cjk
+      - name: Native Remote Desktop rendering on X11 and Wayland
+        run: |
+          cargo build --locked -p zeron-ui --example remote-desktop-fixture --features remote-desktop-fixture
+          RDP_FIXTURE_BINARY=target/debug/examples/remote-desktop-fixture scripts/test-remote-desktop.sh "$RUNNER_TEMP/rdp-native"
+      - name: Upload Linux Remote Desktop rendering evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rdp-native-linux
+          path: ${{ runner.temp }}/rdp-native
+          if-no-files-found: warn
       - name: Build browser fixture
         run: cargo build --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: X11 and Wayland browser regressions

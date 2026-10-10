@@ -1,0 +1,41 @@
+{
+  "date": "2026-09-14",
+  "protocol_1280x800_animated_600s": {
+    "exit_code": 0,
+    "duration_seconds": 600.26,
+    "max_rss_kib": 29332,
+    "first_30s_rss_kib": 28948,
+    "final_rss_kib": 29204,
+    "cpu_seconds": 575.83,
+    "max_threads": 2,
+    "max_fds": 14,
+    "sampled_final_protocol_counters": {
+      "pdus": 397307,
+      "bytes_received": 5913634354,
+      "publications": 1938,
+      "visible": true,
+      "elapsed_ms": 596941
+    },
+    "observed_frames": 1953,
+    "hidden_publications_start": 1052,
+    "hidden_publications_end": 1052,
+    "hidden_sample_duration_ms": 192349
+  },
+  "gpui_1280x800_offline_600s": {
+    "exit_code": 0,
+    "duration_seconds": 602.18,
+    "max_rss_kib": 206356,
+    "first_30s_rss_kib": 206356,
+    "final_rss_kib": 206356,
+    "cpu_seconds": 315.06
+  },
+  "xrdp_reconnect_cycles": {
+    "completed": 20,
+    "unicode_clipboard_verified_each_cycle": true,
+    "input_file_verified": true,
+    "confirmed_resize_each_cycle": [
+      1024,
+      768
+    ]
+  }
+}

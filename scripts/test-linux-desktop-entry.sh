@@ -16,7 +16,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # A fake release: the tarball layout package-linux.sh produces, minus the real
 # binary. `uname` is shimmed so the curl installer also runs on a macOS dev box.
 PKG="zeron-$VERSION-linux-x86_64"
-mkdir -p "$WORK/site/releases" "$WORK/pkg/$PKG" "$WORK/shim"
+mkdir -p "$WORK/site/releases" "$WORK/pkg/$PKG/licenses/rdp" "$WORK/shim"
+cp "$ROOT/LICENSE" "$WORK/pkg/$PKG/licenses/rdp/LICENSE"
 printf '#!/bin/sh\nexit 0\n' >"$WORK/pkg/$PKG/zeron"
 chmod 755 "$WORK/pkg/$PKG/zeron"
 cp "$ROOT/dist/zeron.desktop" "$WORK/pkg/$PKG/zeron.desktop"
@@ -61,6 +62,10 @@ check() {
   local home="$1" data="$2" entry="$2/applications/zeron.desktop"
   [ -f "$entry" ] || fail "missing $entry"
   [ -f "$data/icons/hicolor/1024x1024/apps/zeron.png" ] || fail "missing hicolor icon"
+  if [ "$installer" = tarball ]; then
+    cmp "$WORK/pkg/$PKG/licenses/rdp/LICENSE" "$data/zeron/licenses/rdp/LICENSE" \
+      || fail "RDP license missing or changed"
+  fi
   # `$(...)` strips nothing needed here: paths in these tests have no newlines.
   grep -qxF "TryExec=$home/.zeron/app/current/zeron" "$entry" || fail "TryExec: $(grep '^TryExec' "$entry")"
   grep -qxF "Icon=$home/.zeron/app/current/zeron.png" "$entry" || fail "Icon: $(grep '^Icon' "$entry")"

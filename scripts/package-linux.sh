@@ -21,10 +21,10 @@ TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p zeron
+  cargo build --release --locked -p zeron
   BIN="$ROOT/target/release/zeron"
 else
-  cargo build -p zeron
+  cargo build --locked -p zeron
   BIN="$ROOT/target/debug/zeron"
 fi
 
@@ -36,6 +36,8 @@ install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
+cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/licenses/"
+python3 "$ROOT/scripts/collect-rdp-licenses.py" "$STAGE/licenses/rdp"
 cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
@@ -129,6 +131,13 @@ install_desktop_entry() {
 }
 install_desktop_entry "$HERE" "$APP_ROOT" \
   || echo "warn: could not install the desktop entry — Zeron won't appear in application launchers"
+
+case "${XDG_DATA_HOME:-}" in
+  /*) license_data_home="$XDG_DATA_HOME" ;;
+  *) license_data_home="$HOME/.local/share" ;;
+esac
+mkdir -p "$license_data_home/zeron/licenses"
+cp -R "$HERE/licenses/." "$license_data_home/zeron/licenses/"
 
 echo "Installed Zeron $VERSION. It updates itself from now on."
 case ":$PATH:" in
