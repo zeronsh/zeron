@@ -3592,6 +3592,25 @@ impl Shell {
             return LinkOutcome::Rejected;
         }
         if activation.target.navigation.is_err() {
+            if activation.action == LinkAction::External {
+                let owner_state = self.link_owner(&source, cx).map(|(_, state)| state);
+                let Some(state) = owner_state.as_ref().map(|state| state.read(cx)) else {
+                    return LinkOutcome::Rejected;
+                };
+                let local = state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == source)
+                    .is_some_and(|chat| {
+                        state.local_device_id.as_deref() == Some(chat.device_id.as_str())
+                    });
+                return crate::workspace_links::external_workspace_file_url(
+                    &activation.target.original,
+                    &state.file_link_roots(&source),
+                    local,
+                )
+                .map_or(LinkOutcome::Rejected, LinkOutcome::External);
+            }
             return if matches!(
                 activation.action,
                 LinkAction::Primary | LinkAction::Internal
@@ -3758,8 +3777,12 @@ impl Shell {
             &file,
             window,
             move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                if matches!(
+                    event,
+                    FilesEvent::OpenFile(_)
+                        | FilesEvent::OpenFileExternal(_)
+                        | FilesEvent::RevealFile(_)
+                ) && !this.accepts_file_navigation(&event_panel_key, &source, cx)
                 {
                     return;
                 }
@@ -3797,6 +3820,11 @@ impl Shell {
                     FilesEvent::OpenFile(path) => {
                         let owner = (source.read(cx).chat_id().to_owned(), owner_state.clone());
                         this.add_file_surface_at(owner, path.clone(), None, window, cx)
+                    }
+                    FilesEvent::OpenFileExternal(path) => {
+                        if let Some(url) = source.read(cx).external_file_url(path, cx) {
+                            cx.open_url(&url);
+                        }
                     }
                     FilesEvent::RevealFile(path) => {
                         this.add_files_surface(window, cx);
@@ -3981,26 +4009,30 @@ impl Shell {
     ) {
         self.diff_seq += 1;
         let id = self.diff_seq;
-        let sub =
-            cx.subscribe_in(
-                &changes,
-                window,
-                |this: &mut Self, _, event, window, cx| match event {
-                    ChangesEvent::OpenCommit(commit) => {
-                        this.add_commit_diff_surface(commit.clone(), window, cx);
+        let sub = cx.subscribe_in(
+            &changes,
+            window,
+            |this: &mut Self, source, event, window, cx| match event {
+                ChangesEvent::OpenCommit(commit) => {
+                    this.add_commit_diff_surface(commit.clone(), window, cx);
+                }
+                ChangesEvent::OpenFile(path) => {
+                    this.add_file_surface(path.clone(), window, cx);
+                }
+                ChangesEvent::OpenFileExternal(path) => {
+                    if let Some(url) = source.read(cx).external_file_url(path, cx) {
+                        cx.open_url(&url);
                     }
-                    ChangesEvent::OpenFile(path) => {
-                        this.add_file_surface(path.clone(), window, cx);
+                }
+                ChangesEvent::DiscardWorkingTree(request) => {
+                    if this.discard_working_tree_task.is_none() {
+                        this.discard_working_tree =
+                            Some(DiscardWorkingTreeFlow::Confirm(request.clone()));
+                        cx.notify();
                     }
-                    ChangesEvent::DiscardWorkingTree(request) => {
-                        if this.discard_working_tree_task.is_none() {
-                            this.discard_working_tree =
-                                Some(DiscardWorkingTreeFlow::Confirm(request.clone()));
-                            cx.notify();
-                        }
-                    }
-                },
-            );
+                }
+            },
+        );
         self.diffs.insert(id, changes);
         self.diff_subs.insert(id, sub);
         let key = self.panel_key(cx);
@@ -17009,6 +17041,42 @@ mod exit_regressions {
                     Some(project_target.as_str())
                 );
                 assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+
+                let sequence = shell.file_surface_seq;
+                let browsers = shell.browsers.len();
+                activation.action = LinkAction::External;
+                for (target, expected) in [
+                    (
+                        "2026-09-26/Some%20Folder/it%27s%20here.txt:12:3".to_string(),
+                        root.join("2026-09-26/Some Folder/it's here.txt"),
+                    ),
+                    (absolute, root.join("2026-09-26/Some Folder/it's here.txt")),
+                    (outside_target, outside.clone()),
+                    (project_target, project.join("notes.md")),
+                ] {
+                    activation.target = LinkTarget::new("file", &target);
+                    assert_eq!(
+                        shell.activate_session_link(&activation, window, cx),
+                        LinkOutcome::External(
+                            url::Url::from_file_path(expected).unwrap().to_string()
+                        )
+                    );
+                    assert_eq!(shell.file_surface_seq, sequence);
+                    assert_eq!(shell.browsers.len(), browsers);
+                }
+                activation.target = LinkTarget::new("file", "src/lib.rs");
+                shell
+                    .state
+                    .update(cx, |state, _| state.chats[0].device_id = "remote".into());
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
+                activation.source_session = Some("stale".into());
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
             })
             .unwrap();
     }

@@ -207,6 +207,7 @@ pub(super) struct MarkdownPreview {
     preview_focus: FocusHandle,
     open_file: Rc<dyn Fn(String, &mut gpui::App)>,
     open_web_link: Option<WebLinkHandler>,
+    open_external_file: Option<Rc<dyn Fn(String, &mut gpui::App)>>,
 }
 
 pub(super) type WebLinkHandler = Rc<dyn Fn(&render::LinkActivation, &mut gpui::App)>;
@@ -454,6 +455,7 @@ impl MarkdownPreview {
             truncated: false,
             open_file,
             open_web_link: None,
+            open_external_file: None,
         }
     }
 
@@ -1027,6 +1029,13 @@ impl MarkdownPreview {
         self.open_web_link = Some(handler);
     }
 
+    pub(super) fn set_external_file_handler(
+        &mut self,
+        handler: Rc<dyn Fn(String, &mut gpui::App)>,
+    ) {
+        self.open_external_file = Some(handler);
+    }
+
     pub(super) fn link_ui(&self, cx: &Context<Self>) -> LinkUi {
         let weak = cx.weak_entity();
         let open_web_link = self.open_web_link.clone();
@@ -1051,6 +1060,13 @@ impl MarkdownPreview {
                     let Some((path, anchor)) = relative_target(&view.path, target) else {
                         return preview_link_outcome(activation);
                     };
+                    if activation.action == render::LinkAction::External {
+                        let Some(open_external_file) = &view.open_external_file else {
+                            return render::LinkOutcome::Rejected;
+                        };
+                        open_external_file(path, cx);
+                        return render::LinkOutcome::Internal;
+                    }
                     if path == view.path {
                         if let Some(ix) = anchor.as_ref().and_then(|a| view.anchors.get(a)) {
                             view.list.scroll_to(ListOffset {
@@ -1184,10 +1200,10 @@ impl MarkdownPreview {
                                             "markdown-image-link",
                                             "Open image link",
                                         )
-                                        .on_click(move |_, window, cx| {
+                                        .on_click(move |event, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
-                                                render::LinkAction::Primary,
+                                                render::LinkAction::for_click(event),
                                                 Some(&link),
                                                 window,
                                                 cx,
@@ -1230,10 +1246,10 @@ impl MarkdownPreview {
                                     .child(text)
                                     .when(external, |el| {
                                         let link = image_link.clone();
-                                        el.cursor_pointer().on_click(move |_, window, cx| {
+                                        el.cursor_pointer().on_click(move |event, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
-                                                render::LinkAction::Primary,
+                                                render::LinkAction::for_click(event),
                                                 Some(&link),
                                                 window,
                                                 cx,
@@ -2006,6 +2022,49 @@ mod layout_tests {
 mod async_tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn external_file_links_in_preview_use_document_relative_paths(cx: &mut TestAppContext) {
+        let internal = Rc::new(RefCell::new(Vec::new()));
+        let external = Rc::new(RefCell::new(Vec::new()));
+        let view = cx.new(|cx| {
+            let captured = internal.clone();
+            let mut view = MarkdownPreview::new(
+                "docs/README.md".into(),
+                Rc::new(move |path, _| captured.borrow_mut().push(path)),
+                cx,
+            );
+            let captured = external.clone();
+            view.set_external_file_handler(Rc::new(move |path, _| {
+                captured.borrow_mut().push(path)
+            }));
+            view
+        });
+        let ui = view.update(cx, |view, cx| view.link_ui(cx));
+        let window = cx.add_window(|_, _| gpui::Empty);
+        window
+            .update(cx, |_, window, cx| {
+                for target in ["../src/hello%20world.rs#L12", "#section"] {
+                    render::activate_link(
+                        render::LinkTarget::new("file", target),
+                        render::LinkAction::External,
+                        Some(&ui),
+                        window,
+                        cx,
+                    );
+                }
+                render::activate_link(
+                    render::LinkTarget::new("file", "../src/hello%20world.rs#L12"),
+                    render::LinkAction::Primary,
+                    Some(&ui),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(*external.borrow(), ["src/hello world.rs", "docs/README.md"]);
+        assert_eq!(*internal.borrow(), ["src/hello world.rs"]);
+    }
 
     #[gpui::test]
     fn edits_and_suspension_cancel_obsolete_preview_work(cx: &mut TestAppContext) {

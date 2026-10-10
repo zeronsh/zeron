@@ -496,6 +496,11 @@ impl BrowserSurface {
                     cx.emit(BrowserEvent::NewTab(Some(url)));
                 }
             }
+            native::NativeEvent::OpenExternal(url) => {
+                if self.presentation == Presentation::Live && model::allowed_navigation(&url) {
+                    cx.open_url(&url);
+                }
+            }
             native::NativeEvent::Key(key) => {
                 if self.presentation == Presentation::Live {
                     window.focus(&self.focus, cx);

@@ -20,6 +20,7 @@ pub enum NativeEvent {
     Changed,
     Frame,
     NewTab(String),
+    OpenExternal(String),
     Clipboard(String),
     Menu(Value),
 }
@@ -140,6 +141,7 @@ impl BrowserData {
                         b'M' => {let Ok(menu)=serde_json::from_slice(&data) else {continue;};NativeEvent::Menu(menu)}
                         b'C' => NativeEvent::Clipboard(String::from_utf8_lossy(&data).into_owned()),
                         b'N' => NativeEvent::NewTab(String::from_utf8_lossy(&data).into_owned()),
+                        b'O' => NativeEvent::OpenExternal(String::from_utf8_lossy(&data).into_owned()),
                         #[cfg(feature = "browser-fixture")]
                         b'J' => { *route.evaluation.lock().unwrap() = serde_json::from_slice(&data).ok(); continue; }
                         _ => continue,
@@ -147,7 +149,7 @@ impl BrowserData {
                     // At most one latest frame is retained per page. A busy UI
                     // never accumulates video frames or blocks the engine.
                     match event {
-                        NativeEvent::NewTab(_) | NativeEvent::Clipboard(_) | NativeEvent::Menu(_) => { let _ = route.tx.blocking_send(event); }
+                        NativeEvent::NewTab(_) | NativeEvent::OpenExternal(_) | NativeEvent::Clipboard(_) | NativeEvent::Menu(_) => { let _ = route.tx.blocking_send(event); }
                         _ => { let _ = route.tx.try_send(event); }
                     }
                 }
@@ -321,6 +323,12 @@ impl super::BrowserSurface {
             NativeEvent::NewTab(url) => {
                 if self.presentation == Presentation::Live {
                     cx.emit(super::BrowserEvent::NewTab(Some(url)));
+                }
+            }
+            NativeEvent::OpenExternal(url) => {
+                if self.presentation == Presentation::Live && super::model::allowed_navigation(&url)
+                {
+                    cx.open_url(&url);
                 }
             }
             NativeEvent::Menu(menu) => {

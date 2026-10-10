@@ -193,6 +193,7 @@ pub enum FilesEvent {
     },
     Mutate(mutations::MutationIntent),
     OpenFile(String),
+    OpenFileExternal(String),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
@@ -920,6 +921,18 @@ impl FilesSurface {
 
     pub(super) fn open_tree_file(&mut self, path: String, cx: &mut Context<Self>) {
         cx.emit(FilesEvent::OpenFile(path));
+    }
+
+    pub(crate) fn external_file_url(&self, path: &str, cx: &gpui::App) -> Option<String> {
+        if !self.is_current_target(cx) {
+            return None;
+        }
+        let context = self.request_context.as_ref()?;
+        crate::workspace_links::local_file_url(
+            &context.cwd,
+            path,
+            context.target_device_id.is_none(),
+        )
     }
 
     pub(crate) fn focus_explorer(&self, window: &mut Window, cx: &mut Context<Self>) {

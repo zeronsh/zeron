@@ -202,6 +202,14 @@ static gboolean policy(WebKitWebView *web, WebKitPolicyDecision *decision,
             webkit_policy_decision_ignore(decision);
             return TRUE;
         }
+        if (webkit_navigation_action_is_user_gesture(action) &&
+            webkit_navigation_action_get_navigation_type(action) == WEBKIT_NAVIGATION_TYPE_LINK_CLICKED &&
+            webkit_navigation_action_get_mouse_button(action) == 1 &&
+            (webkit_navigation_action_get_modifiers(action) & GDK_CONTROL_MASK)) {
+            send_packet('O', p->id, uri, strlen(uri));
+            webkit_policy_decision_ignore(decision);
+            return TRUE;
+        }
         if (type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
             if (webkit_navigation_action_is_user_gesture(action))
                 send_packet('N', p->id, uri, strlen(uri));

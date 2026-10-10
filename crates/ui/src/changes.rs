@@ -1713,6 +1713,7 @@ pub enum ChangesEvent {
     OpenCommit(GitHistoryCommit),
     /// Open the post-change path in the workspace file browser.
     OpenFile(String),
+    OpenFileExternal(String),
     /// The working-tree trash button was clicked. The shell owns the global
     /// confirmation dialog and only then dispatches the destructive RPC.
     DiscardWorkingTree(DiscardWorkingTreeRequest),
@@ -1939,6 +1940,22 @@ impl Changes {
             return Some(diff.cwd);
         }
         self.state.read(cx).selected_chat_row()?.cwd.clone()
+    }
+
+    pub(crate) fn external_file_url(&self, path: &str, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        let local_device = state.local_device_id.as_deref()?;
+        if state.selected_chat_row()?.device_id != local_device {
+            return None;
+        }
+        if let Some(diff) = self.active_diff(cx) {
+            return crate::workspace_links::local_file_url(
+                &diff.cwd,
+                path,
+                diff.device_id == local_device,
+            );
+        }
+        crate::workspace_links::local_file_url(&self.scoped_cwd(cx)?, path, true)
     }
 
     /// The diff the pane currently displays: the watch stream for the working
@@ -3617,6 +3634,7 @@ impl Changes {
             .child(
                 div()
                     .id(("diff-open-file", ix))
+                    .debug_selector(move || format!("diff-open-file:{ix}"))
                     .flex_none()
                     .size(px(crate::surface_chrome::CONTROL_SIZE))
                     .flex()
@@ -3628,11 +3646,18 @@ impl Changes {
                         window.prevent_default();
                         cx.stop_propagation();
                     })
-                    .on_click(cx.listener(move |_, _, _, cx| {
+                    .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
                         cx.stop_propagation();
-                        cx.emit(ChangesEvent::OpenFile(path.clone()));
+                        if event.modifiers().control {
+                            cx.emit(ChangesEvent::OpenFileExternal(path.clone()));
+                        } else {
+                            cx.emit(ChangesEvent::OpenFile(path.clone()));
+                        }
                     }))
-                    .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Open in file browser")).into())
+                    .tooltip(|_, cx| {
+                        cx.new(|_| DiffHeaderTooltip("Open file (Ctrl+click: default app)"))
+                            .into()
+                    })
                     .tooltip_show_delay(Duration::from_millis(350))
                     .child(
                         crate::icons::icon(crate::icons::DOCUMENT)
@@ -5216,6 +5241,75 @@ impl Render for Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[gpui::test]
+    fn ctrl_click_diff_file_button_opens_externally(cx: &mut gpui::TestAppContext) {
+        struct HeaderFixture(Entity<Changes>);
+        impl Render for HeaderFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |changes, cx| {
+                    changes.render_file_header(
+                        0,
+                        &FileDiff::new("a.txt".into(), None),
+                        &FileFold::default(),
+                        FileHeaderPresentation::Row,
+                        &Theme::of(cx).clone(),
+                        cx,
+                    )
+                })
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let changes = cx.new(|cx| {
+            let state = cx.new(|_| {
+                let mut state = crate::files::test_support::state();
+                state.selected_chat = Some("chat".into());
+                state
+            });
+            Changes::new(state, cx)
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _sub = cx.update(|cx| {
+            cx.subscribe(&changes, move |_, event, _| match event {
+                ChangesEvent::OpenFile(path) => captured.borrow_mut().push((false, path.clone())),
+                ChangesEvent::OpenFileExternal(path) => {
+                    captured.borrow_mut().push((true, path.clone()))
+                }
+                _ => {}
+            })
+        });
+        let (_view, cx) = cx.add_window_view(|_, _| HeaderFixture(changes.clone()));
+        let position = cx.debug_bounds("diff-open-file:0").unwrap().center();
+        cx.simulate_click(position, gpui::Modifiers::default());
+        cx.simulate_click(
+            position,
+            gpui::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            *events.borrow(),
+            [(false, "a.txt".into()), (true, "a.txt".into())]
+        );
+        #[cfg(unix)]
+        changes.read_with(cx, |changes, cx| {
+            assert_eq!(
+                changes.external_file_url("a.txt", cx).as_deref(),
+                Some("file:///workspace/a.txt")
+            )
+        });
+        changes.update(cx, |changes, cx| {
+            changes
+                .state
+                .update(cx, |state, _| state.chats[0].device_id = "remote".into());
+            assert!(changes.external_file_url("a.txt", cx).is_none());
+        });
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(

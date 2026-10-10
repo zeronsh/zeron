@@ -208,6 +208,13 @@ impl Shell {
                     {
                         this.add_file_surface(path.clone(), window, cx);
                     }
+                    FilesEvent::OpenFileExternal(path)
+                        if this.accepts_file_navigation(&owner, &source, cx) =>
+                    {
+                        if let Some(url) = source.read(cx).external_file_url(path, cx) {
+                            cx.open_url(&url);
+                        }
+                    }
                     FilesEvent::OpenWebLink(activation) => {
                         if let crate::markdown::render::LinkOutcome::External(url) =
                             this.activate_session_link(activation, window, cx)

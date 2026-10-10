@@ -17,7 +17,7 @@ use objc2_foundation::{
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKNavigationResponse, WKNavigationResponsePolicy, WKWebView,
+    WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType, WKWebView,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -147,6 +147,7 @@ pub(super) enum NativeEvent {
     Changed,
     Finished,
     NewTab(String),
+    OpenExternal(String),
     Key(gpui::Keystroke),
     Favicon { page: String, url: String },
 }
@@ -175,6 +176,15 @@ define_class!(
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn policy(&self, _view: &WKWebView, action: &WKNavigationAction, decision: &block2::Block<dyn Fn(WKNavigationActionPolicy)>) {
             let url = unsafe { action.request().URL() }.and_then(|u| u.absoluteString()).map(|u| u.to_string()).unwrap_or_default();
+            if allowed_navigation(&url)
+                && unsafe { action.navigationType() } == WKNavigationType::LinkActivated
+                && unsafe { action.buttonNumber() } == 0
+                && unsafe { action.modifierFlags() }.contains(NSEventModifierFlags::Control)
+            {
+                let _ = self.ivars().tx.try_send(NativeEvent::OpenExternal(url));
+                decision.call((WKNavigationActionPolicy::Cancel,));
+                return;
+            }
             if allowed_navigation(&url) && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
                 *self.ivars().requested_url.borrow_mut() = Some(url.clone());
             }

@@ -12,7 +12,7 @@ use zeron_proto::{
 };
 
 use super::{
-    FilesSurface, WorkspacePathDrag, client::WorkspaceFilesClient, model::parent_path,
+    FilesEvent, FilesSurface, WorkspacePathDrag, client::WorkspaceFilesClient, model::parent_path,
     workspace_path_drag_ghost,
 };
 use crate::{
@@ -617,6 +617,7 @@ impl FilesSurface {
         );
         let content = div()
             .id(("files-search-result", index))
+            .debug_selector(move || format!("search-entry:{index}"))
             .role(gpui::Role::TreeItem)
             .aria_label(row.name.clone())
             .aria_selected(selected)
@@ -634,9 +635,15 @@ impl FilesSurface {
             .when(!selected, |element| {
                 element.hover(|style| style.bg(crate::theme::wash(0.055)))
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 this.search_state.active = index;
-                this.activate_search_result(cx);
+                if event.modifiers().control {
+                    if let Some(row) = this.search_state.tree.rows().get(index) {
+                        cx.emit(FilesEvent::OpenFileExternal(row.path.clone()));
+                    }
+                } else {
+                    this.activate_search_result(cx);
+                }
             }))
             .on_drag(drag_payload, |payload, _, _, cx| {
                 cx.stop_propagation();
@@ -912,6 +919,64 @@ mod reveal_tests {
             assert!(!surface.accepts_reveal(&first, tree_generation, reveal_generation));
             assert!(!surface.search_state.accepts(search_generation, "config"));
             assert!(surface.search_state.results.is_empty());
+        });
+    }
+}
+
+#[cfg(test)]
+mod external_click_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn ctrl_click_search_results_bypasses_reveal_and_internal_open(cx: &mut gpui::TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update(cx, |files, cx| {
+            files.search_state.query = "a".into();
+            files.search_state.results = vec![WorkspaceFileSearchMatch {
+                path: "folder/a.txt".into(),
+                name: "a.txt".into(),
+                kind: WorkspaceEntryKind::File,
+                score: 100,
+            }];
+            files.search_state.tree.rebuild(&files.search_state.results);
+            files
+                .search_list
+                .reset(files.search_state.tree.rows().len());
+            cx.notify();
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                captured.borrow_mut().push(event.clone())
+            })
+        });
+        for (path, selector) in [
+            ("folder", "search-entry:0"),
+            ("folder/a.txt", "search-entry:1"),
+        ] {
+            let position = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(
+                position,
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            assert!(events.borrow().iter().any(
+                |event| matches!(event, FilesEvent::OpenFileExternal(opened) if opened == path)
+            ));
+        }
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, FilesEvent::OpenFile(_)))
+        );
+        files.read_with(cx, |files, _| {
+            assert!(files.search_state.tree.is_expanded("folder"));
+            assert_eq!(files.search_state.query, "a");
         });
     }
 }
