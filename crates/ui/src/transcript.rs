@@ -1293,6 +1293,30 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
     motion::MotionSpec::new(user_resize_duration_ms(height_delta), curve)
 }
 
+/// A user entry's text as sent, attachment refs included.
+fn user_raw_text(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// What a Retry resends: the latest prompt as sent, attachment refs
+/// included, so its files ride along again.
+fn retry_prompt(entries: &[SessionMessageEntry]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::User)
+        .map(user_raw_text)
+        .filter(|text| !text.trim().is_empty())
+}
+
 #[cfg(test)]
 thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -1319,15 +1343,7 @@ pub fn rows_for_entry(
     let entry_id: SharedString = entry.id.clone().into();
 
     if entry.role == MessageRole::User {
-        let raw: String = entry
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let raw = user_raw_text(entry);
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
@@ -3374,6 +3390,8 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// A failed turn's "Retry": send `text`, the prompt behind it, again.
+    Resend { chat_id: String, text: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6991,6 +7009,44 @@ impl Transcript {
         }
     }
 
+    /// The Retry for the error that ended the chat's latest turn: only on
+    /// the transcript's last row, only once nothing runs, and only in the
+    /// chat's own transcript (a subagent tab has no prompt to resend). It
+    /// toggles with the working trailer, on the same row.
+    fn retry_action(
+        &self,
+        row_id: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.doc_override.is_some() || self.rows.last().map(|r| &r.id) != Some(row_id) {
+            return None;
+        }
+        let chat_id = self.chat_id.clone()?;
+        let state = self.state.read(cx);
+        let now = chrono::Utc::now();
+        let busy = matches!(
+            state.indicator_for(&chat_id, now),
+            crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+        );
+        if busy || state.send_pending(&chat_id, now) {
+            return None;
+        }
+        let text = retry_prompt(&state.transcript)?;
+        let key = SharedString::from(format!("{row_id}-retry"));
+        Some(
+            crate::popover::btn_ghost(theme, "Retry", key.clone())
+                .id(key)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(TranscriptEvent::Resend {
+                        chat_id: chat_id.clone(),
+                        text: text.clone(),
+                    });
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
@@ -7432,7 +7488,10 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ErrorChip { message } => {
+                let retry = self.retry_action(&row.id, &theme, cx);
+                error_chip(message.clone(), retry, &theme)
+            }
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
         // Diagram fences this row just requested start rendering after layout.
@@ -8915,14 +8974,17 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
+fn error_chip(message: SharedString, action: Option<AnyElement>, theme: &Theme) -> AnyElement {
     div()
         .py(px(4.0))
         .w_full()
         .child(
             notice_chip(theme, false, "Error", message, Tile)
                 .overflow_hidden()
-                .w_full(),
+                .w_full()
+                .when_some(action, |chip, action| {
+                    chip.child(div().flex().child(action))
+                }),
         )
         .into_any_element()
 }
@@ -12294,6 +12356,30 @@ mod tests {
             unreachable!();
         };
         assert_eq!(tools.len(), 2, "the error didn't split the work group");
+    }
+
+    #[test]
+    fn retry_resends_the_latest_prompt_with_its_attachments() {
+        let user = |id: &str, text: &str| SessionMessageEntry {
+            role: MessageRole::User,
+            ..assistant(id, MessageStatus::Complete, vec![text_part("t0", text)])
+        };
+        let failed = || {
+            assistant(
+                "a",
+                MessageStatus::Complete,
+                vec![MessagePart::Error {
+                    id: "e0".into(),
+                    message: "Claude is overloaded right now".into(),
+                }],
+            )
+        };
+        // The refs ride the text as sent, so the files go along again.
+        let sent = crate::attachments::with_attachments("look at this", &["/up/a.png".into()]);
+        let entries = [user("u0", "earlier"), failed(), user("u1", &sent), failed()];
+        assert_eq!(retry_prompt(&entries).as_deref(), Some(sent.as_str()));
+        assert_eq!(retry_prompt(&[failed()]), None, "nothing to resend");
+        assert_eq!(retry_prompt(&[user("u0", "  "), failed()]), None);
     }
 
     #[test]

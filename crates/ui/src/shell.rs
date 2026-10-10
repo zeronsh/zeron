@@ -4029,11 +4029,11 @@ impl Shell {
         }
     }
 
-    /// Spawn-chip events from the primary transcript AND from subagent-tab
-    /// transcripts (nested spawns open their own tabs).
+    /// Events from the primary transcript, side chats', AND subagent tabs'
+    /// (nested spawns open their own tabs).
     fn on_transcript_event(
         &mut self,
-        _: Entity<Transcript>,
+        transcript: Entity<Transcript>,
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
@@ -4051,6 +4051,21 @@ impl Shell {
                     *frozen,
                     cx,
                 );
+            }
+            TranscriptEvent::Resend { chat_id, text } => {
+                // Through the composer under the transcript that asked: the
+                // main chat's or a side chat's.
+                let composer = if transcript == self.transcript {
+                    Some(&self.composer)
+                } else {
+                    self.side_chats
+                        .values()
+                        .find(|tab| tab.transcript == transcript)
+                        .map(|tab| &tab.composer)
+                };
+                if let Some(composer) = composer.cloned() {
+                    composer.update(cx, |composer, cx| composer.resend(chat_id, text.clone(), cx));
+                }
             }
         }
     }

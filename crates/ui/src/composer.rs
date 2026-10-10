@@ -8785,6 +8785,46 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+        self.send_with(text, queue, true, cx);
+    }
+
+    /// Send `text` to `chat_id` again as a new turn (a failed turn's Retry),
+    /// if it's still this composer's chat, without touching what's in the
+    /// composer: the draft, staged files, appshots and review comments are
+    /// set aside around an ordinary send, then put back. A failure leaves
+    /// the draft alone; the prompt is still in the transcript, and so is its
+    /// Retry.
+    pub(crate) fn resend(&mut self, chat_id: &str, text: String, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.as_deref() != Some(chat_id) {
+            return;
+        }
+        let key = self.current_key.clone();
+        let draft = self.input.read(cx).text().to_string();
+        let staged = self.attachments.remove(&key);
+        let appshots = self.appshots.remove(&key);
+        let comments = self
+            .state
+            .update(cx, |state, _| state.take_review_comments(&key));
+        self.send_with(text, false, false, cx);
+        self.input.update(cx, |input, cx| input.set_text(draft, cx));
+        self.attachments.extend(staged.map(|s| (key.clone(), s)));
+        self.appshots.extend(appshots.map(|a| (key.clone(), a)));
+        self.state.update(cx, |state, cx| {
+            for comment in comments {
+                state.add_review_comment(&key, comment);
+            }
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn send_with(
+        &mut self,
+        text: String,
+        queue: bool,
+        restore_on_failure: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !self.check_reference_delivery(&text, cx) {
             return;
         }
@@ -9552,11 +9592,13 @@ impl Composer {
                         // the input on flush — setting the input directly
                         // here would be clobbered by that same swap.
                         composer.drafts.insert(restore_key.clone(), restore_text.clone());
-                    } else {
+                    } else if restore_on_failure {
                         // Already keyed to the restore target (either an
                         // existing chat, or the deleted row's watch event
                         // re-keyed to the canvas before this handler ran —
                         // no further swap will fire). Set the input directly.
+                        // A resend (always an existing chat) leaves the
+                        // user's own draft there.
                         composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
                     }
                     if !ordinary_staged.is_empty() {
@@ -12593,6 +12635,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A failed turn's Retry resends its prompt without disturbing what the
+    /// user has in the composer: the draft and staged files stay, and none
+    /// of them ride along with the resend.
+    #[gpui::test]
+    fn resend_sends_the_prompt_and_keeps_the_composer_as_it_was(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.selected_chat = Some("c".into());
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("half-typed", cx));
+            let staged = attachments::stage_png_bytes("draft.png".into(), Vec::new());
+            let staged_id = staged.id.clone();
+            composer
+                .attachments
+                .insert(composer.current_key.clone(), vec![staged]);
+            composer.resend("c", "hi".into(), cx);
+            assert_eq!(composer.input.read(cx).text(), "half-typed");
+            assert_eq!(composer.staged()[0].id, staged_id);
+        });
+        cx.run_until_parked();
+        let mut request = None;
+        while let Ok(frame) = requests.try_recv() {
+            let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+            if frame.method.as_deref() == Some(methods::QUEUE_COMMAND) {
+                request = Some(frame.params["command"]["request"].clone());
+            }
+        }
+        let request = request.expect("the resend reaches the engine");
+        assert_eq!(request["prompt"], "hi");
+        // No staged file rode along (an empty list is left off the wire).
+        assert!(request["attachments"].as_array().is_none_or(Vec::is_empty));
     }
 
     /// Issue #406: Enter submits — it must never stop a run. Stop mode only
