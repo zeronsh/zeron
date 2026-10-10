@@ -17,8 +17,10 @@
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
 
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -833,10 +835,20 @@ pub struct AppState {
     pub(crate) link_roots_revision: u64,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
-    echoes: HashMap<String, Vec<SessionMessageEntry>>,
+    echoes: Rc<RefCell<HashMap<String, Vec<SessionMessageEntry>>>>,
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
-    pending_sends: HashMap<String, PendingSend>,
+    pending_sends: Rc<RefCell<HashMap<String, PendingSend>>>,
+    optimistic_revision: Rc<Cell<u64>>,
+    use_shared_conversations: bool,
+    application: Option<Entity<AppState>>,
+    pub(crate) window_key: Option<String>,
+    application_subscription: Option<gpui::Subscription>,
+    optimistic_subscription: Option<gpui::Subscription>,
+    observed_optimistic_revision: u64,
+    pub(crate) runtime_epoch: u64,
+    is_conversation_source: bool,
+    conversation: Option<crate::chat_store::ConversationBinding>,
     /// The in-flight send's attachment upload, when it has one.
     upload_progress: Option<UploadProgress>,
     /// Engine-side queued-attachment transfers by uploadId (`WatchTransfers`
@@ -861,6 +873,7 @@ pub struct AppState {
     /// Notifies at clock-driven transitions (see [`Self::watch_clock_transitions`]).
     clock: ClockTransitions,
     engine: Option<EngineHandle>,
+    bootstrap_task: Option<Task<()>>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
@@ -955,8 +968,18 @@ impl AppState {
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
             link_roots_revision: 0,
-            echoes: HashMap::new(),
-            pending_sends: HashMap::new(),
+            echoes: Default::default(),
+            pending_sends: Default::default(),
+            optimistic_revision: Default::default(),
+            use_shared_conversations: false,
+            application: None,
+            window_key: None,
+            application_subscription: None,
+            optimistic_subscription: None,
+            observed_optimistic_revision: 0,
+            runtime_epoch: 0,
+            is_conversation_source: false,
+            conversation: None,
             upload_progress: None,
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
@@ -966,6 +989,7 @@ impl AppState {
             data_dir: None,
             clock: ClockTransitions::default(),
             engine: None,
+            bootstrap_task: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
@@ -980,6 +1004,208 @@ impl AppState {
             pending_deep_link: None,
             deep_link_notice: None,
         }
+    }
+
+    /// Window-local navigation and rendering projection of the application.
+    /// The application owns standing subscriptions; the selected chat leases a
+    /// shared conversation feed. Child views can keep the existing reducer API.
+    pub(crate) fn for_window(owner: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut state = Self::new();
+        state.use_shared_conversations = true;
+        state.window_key = Some(uuid::Uuid::new_v4().to_string());
+        state.application = Some(owner.clone());
+        state.application_subscription = Some(cx.observe(&owner, |this, owner, cx| {
+            this.sync_application(&owner, cx);
+        }));
+        state.optimistic_subscription = Some(cx.observe_self(Self::publish_optimistic_changes));
+        state.sync_application(&owner, cx);
+        state
+    }
+
+    fn publish_optimistic_changes(&mut self, cx: &mut Context<Self>) {
+        let revision = self.optimistic_revision.get();
+        if self.observed_optimistic_revision == revision {
+            return;
+        }
+        self.observed_optimistic_revision = revision;
+        let owner = cx
+            .try_global::<crate::app_runtime::AppRuntime>()
+            .map(|runtime| runtime.state.clone());
+        if let Some(owner) = owner.filter(|owner| *owner != cx.entity()) {
+            owner.update(cx, |owner, cx| {
+                if owner.observed_optimistic_revision != revision {
+                    owner.observed_optimistic_revision = revision;
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    /// Heartbeats can extend leases without notifying the application owner.
+    /// Pull those timestamps before painting or checking a window's deadline,
+    /// without notifying or cloning the lists again on every render.
+    pub(crate) fn refresh_application_heartbeats(&mut self, cx: &App) {
+        let Some(owner) = &self.application else {
+            return;
+        };
+        let source = owner.read(cx);
+        if self.runtime_epoch != source.runtime_epoch {
+            return;
+        }
+        for (session, current) in self.sessions.iter_mut().zip(&source.sessions) {
+            if session.chat_id == current.chat_id {
+                session.updated_at = current.updated_at;
+            }
+        }
+        for (device, current) in self.devices.iter_mut().zip(&source.devices) {
+            if device.id == current.id {
+                device.last_seen_at = current.last_seen_at;
+            }
+        }
+    }
+
+    fn sync_application(&mut self, owner: &Entity<AppState>, cx: &mut Context<Self>) {
+        let source = owner.read(cx);
+        let replaced = self.runtime_epoch != source.runtime_epoch;
+        let engine_changed = match (&self.engine, &source.engine) {
+            (Some(a), Some(b)) => !Arc::ptr_eq(&a.inner, &b.inner),
+            (None, None) => false,
+            _ => true,
+        };
+        if replaced {
+            self.selected_chat = None;
+            self.selected_space = None;
+            self.selected_device = None;
+            self.canvas_target = None;
+            self.no_project = false;
+            self.auto_selected = false;
+            self.review_comments.clear();
+            self.review_comment_flushes.clear();
+            self.sub_transcripts.clear();
+            self.sub_watch_tasks.clear();
+            self.upload_progress = None;
+        }
+        if replaced || engine_changed {
+            self.conversation = None;
+            self.transcript_task = None;
+            self.queue_task = None;
+            self.transcript.clear();
+            self.queue.clear();
+            self.context_usage = None;
+            self.transcript_replayed = false;
+            self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        }
+        self.runtime_epoch = source.runtime_epoch;
+        self.connection = source.connection.clone();
+        self.workspace_scope = source.workspace_scope;
+        self.auth = source.auth.clone();
+        self.devices = source.devices.clone();
+        self.sessions = source.sessions.clone();
+        self.connectivity = source.connectivity.clone();
+        self.connectivity_observed = source.connectivity_observed;
+        self.local_device_id = source.local_device_id.clone();
+        self.harness_updates = source.harness_updates.clone();
+        self.data_dir = source.data_dir.clone();
+        self.engine = source.engine.clone();
+        self.change_requests = source.change_requests.clone();
+        self.transfers = source.transfers.clone();
+        self.echoes = source.echoes.clone();
+        self.pending_sends = source.pending_sends.clone();
+        self.optimistic_revision = source.optimistic_revision.clone();
+        if self.observed_optimistic_revision != self.optimistic_revision.get() {
+            self.observed_optimistic_revision = self.optimistic_revision.get();
+            self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        }
+        if source.chats_synced {
+            self.apply_chats(source.chats.clone());
+        } else {
+            self.chats.clear();
+            self.chats_synced = false;
+        }
+        if source.spaces_synced {
+            self.apply_spaces(source.spaces.clone());
+        } else {
+            self.spaces.clear();
+            self.spaces_synced = false;
+        }
+        self.apply_pending_deep_link(cx);
+        if self.engine.is_some() && self.selected_chat.is_some() && self.conversation.is_none() {
+            self.bind_shared_conversation(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn conversation_source(
+        chat_id: String,
+        engine: Option<EngineHandle>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut state = Self::new();
+        state.is_conversation_source = true;
+        state.optimistic_subscription = Some(cx.observe_self(Self::publish_optimistic_changes));
+        state.selected_chat = Some(chat_id.clone());
+        if let Some(runtime) = cx.try_global::<crate::app_runtime::AppRuntime>() {
+            let owner = runtime.state.read(cx);
+            state.echoes = owner.echoes.clone();
+            state.pending_sends = owner.pending_sends.clone();
+            state.optimistic_revision = owner.optimistic_revision.clone();
+        }
+        state.engine = engine.clone();
+        if let Some(engine) = engine {
+            state.transcript_task =
+                Some(spawn_transcript_watch(cx, engine.clone(), chat_id.clone()));
+            if engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+            {
+                state.queue_task = Some(spawn_queue_watch(cx, engine, chat_id));
+            }
+        }
+        state
+    }
+
+    fn bind_shared_conversation(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.selected_chat.clone() else {
+            return;
+        };
+        let source = crate::chat_store::acquire(chat_id.clone(), self.engine.clone(), cx);
+        {
+            let data = source.read(cx);
+            self.transcript = data.transcript.clone();
+            self.transcript_replayed = data.transcript_replayed;
+            self.context_usage = data.context_usage.clone();
+            self.queue = data.queue.clone();
+            self.echoes = data.echoes.clone();
+            self.pending_sends = data.pending_sends.clone();
+            self.optimistic_revision = data.optimistic_revision.clone();
+        }
+        let frames = cx.subscribe(
+            &source,
+            |this, _, event: &crate::chat_store::ConversationFrame, cx| {
+                // This subscription is dropped on navigation, before attaching the
+                // replacement feed. A reset repairs both source and projections.
+                if let Err(error) = this.receive_transcript_frame(event.frame.clone(), cx) {
+                    tracing::warn!(%error, "conversation projection desynchronized");
+                    if let Some(binding) = &this.conversation {
+                        let source = binding.source.clone();
+                        let data = source.read(cx);
+                        this.transcript = data.transcript.clone();
+                        this.transcript_replayed = data.transcript_replayed;
+                        cx.notify();
+                    }
+                }
+            },
+        );
+        let metadata = cx.observe(&source, |this, source, cx| {
+            let source = source.read(cx);
+            this.queue = source.queue.clone();
+            this.context_usage = source.context_usage.clone();
+            cx.notify();
+        });
+        self.conversation = Some(crate::chat_store::ConversationBinding {
+            source,
+            _subscriptions: vec![frames, metadata],
+        });
     }
 
     /// The selected chat, or `""` on the new-chat canvas. Identical to the
@@ -1188,6 +1414,7 @@ impl AppState {
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
+            self.conversation = None;
             self.queue.clear();
             self.queue_task = None;
         }
@@ -1535,7 +1762,7 @@ impl AppState {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         // Doc frames supersede optimistic echoes carrying the same id.
         if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
+            && let Some(echoes) = self.echoes.borrow_mut().get_mut(chat_id)
         {
             echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
         }
@@ -1560,7 +1787,7 @@ impl AppState {
             self.transcript_replayed = true;
         }
         if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
+            && let Some(echoes) = self.echoes.borrow_mut().get_mut(chat_id)
         {
             let transcript = &self.transcript;
             echoes.retain(|echo| !transcript.iter().any(|e| e.id == echo.id));
@@ -1580,11 +1807,17 @@ impl AppState {
             .as_ref()
             .filter(|id| {
                 is_text_append(&frame)
-                    && !self.pending_sends.contains_key(*id)
+                    && !self.pending_sends.borrow().contains_key(*id)
                     && self.pending_echoes().is_empty()
             })
             .cloned();
+        let shared_frame = self.is_conversation_source.then(|| frame.clone());
         let result = self.apply_transcript_frame(frame);
+        if result.is_ok()
+            && let Some(frame) = shared_frame
+        {
+            cx.emit(crate::chat_store::ConversationFrame { frame });
+        }
         if let Some(doc_id) = text_doc.filter(|_| result.is_ok()) {
             cx.emit(TranscriptTextChanged { doc_id });
         } else {
@@ -1712,22 +1945,27 @@ impl AppState {
 
     /// Add an optimistic user echo (composer send path).
     pub fn push_echo(&mut self, chat_id: &str, entry: SessionMessageEntry) {
-        let echoes = self.echoes.entry(chat_id.to_string()).or_default();
+        let mut all_echoes = self.echoes.borrow_mut();
+        let echoes = all_echoes.entry(chat_id.to_string()).or_default();
         if !echoes.iter().any(|e| e.id == entry.id) {
             echoes.push(entry);
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
         }
+        self.optimistic_revision
+            .set(self.optimistic_revision.get().wrapping_add(1));
     }
 
     /// Drop an echo (send failed — the prompt returns to the draft).
     pub fn remove_echo(&mut self, chat_id: &str, message_id: &str) {
-        if let Some(echoes) = self.echoes.get_mut(chat_id) {
+        if let Some(echoes) = self.echoes.borrow_mut().get_mut(chat_id) {
             let previous_len = echoes.len();
             echoes.retain(|e| e.id != message_id);
             if echoes.len() != previous_len {
                 self.transcript_revision = self.transcript_revision.wrapping_add(1);
             }
         }
+        self.optimistic_revision
+            .set(self.optimistic_revision.get().wrapping_add(1));
     }
 
     /// Composer send fired: overlay the chat as Working until the host writes
@@ -1737,13 +1975,15 @@ impl AppState {
     /// phantom Working→Idle edge in it rang the done-chime on send (user
     /// report 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
-        self.pending_sends.insert(
+        self.pending_sends.borrow_mut().insert(
             chat_id.to_string(),
             PendingSend {
                 message_id: message_id.to_string(),
                 started: now,
             },
         );
+        self.optimistic_revision
+            .set(self.optimistic_revision.get().wrapping_add(1));
     }
 
     /// Send failed — drop the overlay so the dot tells the truth again. Only
@@ -1752,11 +1992,14 @@ impl AppState {
     pub fn end_pending_send(&mut self, chat_id: &str, message_id: &str) {
         if self
             .pending_sends
+            .borrow()
             .get(chat_id)
             .is_some_and(|p| p.message_id == message_id)
         {
-            self.pending_sends.remove(chat_id);
+            self.pending_sends.borrow_mut().remove(chat_id);
         }
+        self.optimistic_revision
+            .set(self.optimistic_revision.get().wrapping_add(1));
     }
 
     /// Attachment upload starting: expose its progress to the working label.
@@ -1817,13 +2060,17 @@ impl AppState {
         Some(((done.min(total) * 100) / total).min(99) as u8)
     }
 
+    pub(crate) fn pending_chat_ids(&self) -> Vec<String> {
+        self.pending_sends.borrow().keys().cloned().collect()
+    }
+
     /// Is a send still in flight for this chat (unacked)? Inside the grace
     /// window normally; while the chat's delivery path is degraded the
     /// overlay holds indefinitely — the truth IS "Queued", and silently
     /// expiring back to Idle left a queued send with no visible trace at
     /// all (the 30s→silence hole, 2026-08-19).
     pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.pending_sends.get(chat_id).is_some_and(|p| {
+        self.pending_sends.borrow().get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                 || self.chat_delivery_degraded(chat_id)
         })
@@ -1833,7 +2080,7 @@ impl AppState {
     /// EXPLICIT failed state ("Not delivered — retry") instead of either
     /// faking progress or silently forgetting the send ever happened.
     pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.pending_sends.get(chat_id).is_some_and(|p| {
+        self.pending_sends.borrow().get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
         })
     }
@@ -1841,9 +2088,11 @@ impl AppState {
     /// Retry pressed: restart the grace clock so the overlay returns to its
     /// Sending/Queued phase while the re-kicked delivery runs.
     pub fn retry_pending_send(&mut self, chat_id: &str, now: DateTime<Utc>) {
-        if let Some(p) = self.pending_sends.get_mut(chat_id) {
+        if let Some(p) = self.pending_sends.borrow_mut().get_mut(chat_id) {
             p.started = now;
         }
+        self.optimistic_revision
+            .set(self.optimistic_revision.get().wrapping_add(1));
     }
 
     /// When the in-flight send (if any, inside the TTL) was fired — the
@@ -1853,6 +2102,7 @@ impl AppState {
     /// half-hour mark.
     pub fn pending_send_started(&self, chat_id: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.pending_sends
+            .borrow()
             .get(chat_id)
             .filter(|p| {
                 now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
@@ -1865,11 +2115,18 @@ impl AppState {
     /// up in the transcript (it writes the message before — causally with —
     /// the Working status; sessions.rs dispatch paths).
     fn ack_pending_send_from_transcript(&mut self) {
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(pending) = self.pending_sends.get(chat_id)
-            && self.transcript.iter().any(|e| e.id == pending.message_id)
-        {
-            self.pending_sends.remove(chat_id);
+        let Some(chat_id) = self.selected_chat.as_deref() else {
+            return;
+        };
+        let acknowledged = self
+            .pending_sends
+            .borrow()
+            .get(chat_id)
+            .is_some_and(|pending| self.transcript.iter().any(|e| e.id == pending.message_id));
+        if acknowledged {
+            self.pending_sends.borrow_mut().remove(chat_id);
+            self.optimistic_revision
+                .set(self.optimistic_revision.get().wrapping_add(1));
         }
     }
 
@@ -1877,31 +2134,41 @@ impl AppState {
     /// as an echo: drop echoes (and the pending-send overlay) for queued ids.
     pub fn apply_queue(&mut self, items: Vec<zeron_doc::QueuedMessage>) {
         if let Some(chat_id) = self.selected_chat.as_deref() {
-            if let Some(echoes) = self.echoes.get_mut(chat_id) {
+            let mut changed = false;
+            if let Some(echoes) = self.echoes.borrow_mut().get_mut(chat_id) {
                 let before = echoes.len();
                 echoes.retain(|echo| !items.iter().any(|q| q.id == echo.id));
                 if echoes.len() != before {
                     self.transcript_revision = self.transcript_revision.wrapping_add(1);
+                    changed = true;
                 }
             }
-            if self
+            let queued_pending = self
                 .pending_sends
+                .borrow()
                 .get(chat_id)
-                .is_some_and(|p| items.iter().any(|q| q.id == p.message_id))
-            {
-                self.pending_sends.remove(chat_id);
+                .is_some_and(|p| items.iter().any(|q| q.id == p.message_id));
+            if queued_pending {
+                self.pending_sends.borrow_mut().remove(chat_id);
+                changed = true;
+            }
+            if changed {
+                self.optimistic_revision
+                    .set(self.optimistic_revision.get().wrapping_add(1));
             }
         }
         self.queue = items;
     }
 
-    /// Unconfirmed echoes for the selected chat, in send order.
-    pub fn pending_echoes(&self) -> &[SessionMessageEntry] {
-        self.selected_chat
-            .as_deref()
-            .and_then(|id| self.echoes.get(id))
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+    /// Shared optimistic rows; the short borrow never crosses an await.
+    pub fn pending_echoes(&self) -> Ref<'_, [SessionMessageEntry]> {
+        Ref::map(self.echoes.borrow(), |echoes| {
+            self.selected_chat
+                .as_deref()
+                .and_then(|id| echoes.get(id))
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        })
     }
 
     // ---- queries ----
@@ -2290,9 +2557,14 @@ impl AppState {
                     crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1,
                 )
             });
-        let grace = self.pending_sends.values().map(|pending| {
-            pending.started + chrono::TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1)
-        });
+        let grace: Vec<_> = self
+            .pending_sends
+            .borrow()
+            .values()
+            .map(|pending| {
+                pending.started + chrono::TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1)
+            })
+            .collect();
         stale.chain(offline).chain(grace)
     }
 
@@ -2318,6 +2590,7 @@ impl AppState {
     }
 
     fn arm_clock_transition(&mut self, cx: &mut Context<Self>) {
+        self.refresh_application_heartbeats(cx);
         let now = clock_now();
         self.clock.checked_at = Some(now);
         let wake = self.next_clock_transition(now);
@@ -2332,6 +2605,7 @@ impl AppState {
                 this.update(cx, |state, cx| {
                     state.clock.wake_at = None;
                     state.clock.task = None;
+                    state.refresh_application_heartbeats(cx);
                     let now = clock_now();
                     let from = state.clock.checked_at.unwrap_or(now);
                     if state.clock_transition_between(from, now) {
@@ -2387,9 +2661,17 @@ impl AppState {
     /// stopped. The next bootstrap must never render rows from the previous
     /// account while the local profile is opening.
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
+        if let Some(owner) = self.application.clone() {
+            owner.update(cx, |owner, cx| owner.prepare_runtime_replacement(cx));
+            return;
+        }
+        self.runtime_epoch = self.runtime_epoch.wrapping_add(1);
+        crate::chat_store::clear(cx);
         self.engine = None;
+        self.bootstrap_task = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        self.conversation = None;
         self.change_request_tasks.clear();
         self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
@@ -2420,8 +2702,8 @@ impl AppState {
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
-        self.echoes.clear();
-        self.pending_sends.clear();
+        self.echoes.borrow_mut().clear();
+        self.pending_sends.borrow_mut().clear();
         self.upload_progress = None;
         self.transfers.clear();
         self.local_device_id = None;
@@ -2472,7 +2754,7 @@ impl AppState {
             && self
                 .selected_chat
                 .as_ref()
-                .is_some_and(|id| !self.pending_sends.contains_key(id))
+                .is_some_and(|id| !self.pending_sends.borrow().contains_key(id))
     }
 
     fn is_unsaved_side_chat(&self, chat_id: &str) -> bool {
@@ -2532,6 +2814,10 @@ impl AppState {
     /// Kick off (or retry) the engine bootstrap: probe → connect-or-embed on
     /// tokio, then attach subscriptions. Safe to call again after `Failed`.
     pub fn bootstrap(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
+        let state = crate::app_runtime::owner_or(state, cx);
+        if state.read(cx).bootstrap_task.is_some() {
+            return;
+        }
         let data_dir = config.data_dir.clone();
         state.update(cx, |s, cx| {
             s.connection = ConnectionStatus::Connecting;
@@ -2541,31 +2827,35 @@ impl AppState {
             cx.notify();
         });
         let boot = Tokio::spawn(cx, EngineHandle::bootstrap(config));
-        cx.spawn(async move |cx| {
+        // The state owns this task. A strong handle in its future would retain
+        // the state if the last window closes before bootstrap completes.
+        let pending_state = state.downgrade();
+        let task = cx.spawn(async move |cx| {
             let outcome = match boot.await {
                 Ok(Ok(handle)) => Ok(handle),
                 Ok(Err(err)) => Err(format!("{err:#}")),
                 Err(join_err) => Err(join_err.to_string()),
             };
-            // NB: at the pinned rev `Entity::update(&mut AsyncApp)` returns the
-            // closure's value directly (no Result) — AsyncApp implements
-            // AppContext like App does.
-            state.update(cx, |s, cx| match outcome {
-                Ok(handle) => s.attach_engine(handle, cx),
-                Err(message) => {
-                    tracing::error!(%message, "engine bootstrap failed");
-                    s.connection = ConnectionStatus::Failed(message);
-                    cx.notify();
+            let _ = pending_state.update(cx, |s, cx| {
+                s.bootstrap_task = None;
+                match outcome {
+                    Ok(handle) => s.attach_engine(handle, cx),
+                    Err(message) => {
+                        tracing::error!(%message, "engine bootstrap failed");
+                        s.connection = ConnectionStatus::Failed(message);
+                        cx.notify();
+                    }
                 }
             });
-        })
-        .detach();
+        });
+        state.update(cx, |s, _| s.bootstrap_task = Some(task));
     }
 
     /// Wire the connected engine: mark Ready and start the standing watches.
     /// Methods the engine doesn't serve yet (chats/devices/auth land with the
     /// workspace doc in M4) fail their subscribe and are skipped gracefully.
     fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
+        crate::chat_store::clear(cx);
         // The attachment notification precedes the first connectivity frame.
         // Make that bootstrap gap explicit so the shell resets its alert
         // baseline instead of comparing the new runtime with the old one.
@@ -2691,6 +2981,12 @@ impl AppState {
     }
 
     pub fn set_change_requests_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if let Some(owner) = self.application.clone() {
+            owner.update(cx, |owner, cx| {
+                owner.set_change_requests_visible(visible, cx)
+            });
+            return;
+        }
         if self.change_requests_visible != visible {
             self.change_requests_visible = visible;
             self.reconcile_change_request_watches(cx);
@@ -2851,6 +3147,7 @@ impl AppState {
             self.transcript_replayed = true;
         }
         self.transcript_task = None;
+        self.conversation = None;
         self.queue.clear();
         self.queue_task = None;
         if let Some(id) = chat_id.as_deref() {
@@ -2875,6 +3172,8 @@ impl AppState {
             if self.is_unsaved_side_chat(&chat_id) {
                 // Nothing to watch yet, and opening its doc would start one.
                 self.transcript_replayed = true;
+            } else if self.use_shared_conversations {
+                self.bind_shared_conversation(cx);
             } else {
                 self.start_chat_watches(chat_id, cx);
             }
@@ -2887,6 +3186,11 @@ impl AppState {
     /// the authoritative opening frame repairs the local list even though the
     /// document itself did not change and therefore emitted no new frame.
     pub(crate) fn refresh_selected_queue(&mut self, cx: &mut Context<Self>) {
+        if let Some(binding) = &self.conversation {
+            let source = binding.source.clone();
+            source.update(cx, |source, cx| source.refresh_selected_queue(cx));
+            return;
+        }
         self.queue_task = None;
         let (Some(chat_id), Some(handle)) = (self.selected_chat.clone(), self.engine.clone())
         else {
@@ -2944,6 +3248,10 @@ impl AppState {
     }
 
     pub fn mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(owner) = self.application.clone() {
+            owner.update(cx, |owner, cx| owner.mark_chat_seen(chat_id, cx));
+            return;
+        }
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
             return;
         };
@@ -3520,6 +3828,43 @@ mod tests {
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `zeron_proto::view`.
     use zeron_proto::{SessionStatus, UserProfile};
+
+    #[gpui::test]
+    fn pending_bootstrap_releases_its_application_state(cx: &mut gpui::TestAppContext) {
+        // Leave Tokio unpolled so bootstrap cannot finish before the owner
+        // disappears, as when the app closes immediately after launch.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let owner = cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            let owner = cx.new(|_| AppState::new());
+            AppState::bootstrap(
+                owner.clone(),
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            );
+            assert!(owner.read(cx).bootstrap_task.is_some());
+            owner
+        });
+        let weak = owner.downgrade();
+        drop(owner);
+        cx.run_until_parked();
+        assert!(
+            weak.upgrade().is_none(),
+            "pending bootstrap retained its owner"
+        );
+    }
 
     /// A localhost port that was just free (bind :0, read, drop).
     async fn free_port() -> u16 {
@@ -5211,6 +5556,73 @@ mod tests {
     }
 
     #[gpui::test]
+    fn window_clocks_follow_silent_application_heartbeats(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let clock = TestClock::start(now);
+        let (owner, notifies, _subscription) = clock_state(cx, |state| {
+            state.apply_sessions_at(vec![session("row", SessionStatus::Working, 0, now)], now);
+            let mut remote = device("remote", "Remote");
+            remote.last_seen_at = Some(now - TimeDelta::seconds(40));
+            state.apply_devices_at(vec![remote], now);
+        });
+        let views: Vec<_> = (0..2)
+            .map(|_| {
+                cx.new(|cx| {
+                    let mut state = AppState::for_window(owner.clone(), cx);
+                    state.watch_clock_transitions(cx);
+                    state
+                })
+            })
+            .collect();
+        cx.run_until_parked();
+        notifies.set(0);
+        let heartbeat = now + TimeDelta::seconds(20);
+        advance_to(cx, &clock, now, heartbeat);
+        owner.update(cx, |state, _| {
+            assert!(!state.apply_sessions_at(
+                vec![session("row", SessionStatus::Working, 0, heartbeat)],
+                heartbeat,
+            ));
+            let mut remote = device("remote", "Remote");
+            remote.last_seen_at = Some(heartbeat - TimeDelta::seconds(40));
+            assert!(!state.apply_devices_at(vec![remote], heartbeat));
+        });
+        // Painting one window must read fresh leases without notifying it.
+        views[0].update(cx, |state, cx| state.refresh_application_heartbeats(cx));
+        assert_eq!(notifies.get(), 0);
+        let original_offline = now - TimeDelta::seconds(40)
+            + TimeDelta::seconds(crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1);
+        advance_to(cx, &clock, heartbeat, original_offline);
+        assert_eq!(notifies.get(), 0, "obsolete window deadlines stay silent");
+        for view in &views {
+            view.read_with(cx, |state, _| {
+                assert_eq!(state.sessions[0].updated_at, heartbeat);
+                assert_eq!(
+                    state.indicator_for("row", original_offline),
+                    Indicator::Working,
+                );
+                assert!(state.device_online("remote", original_offline));
+            });
+        }
+        let offline = heartbeat - TimeDelta::seconds(40)
+            + TimeDelta::seconds(crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1);
+        advance_to(cx, &clock, original_offline, offline);
+        assert_eq!(notifies.get(), 1);
+        for view in &views {
+            assert!(!view.read_with(cx, |state, _| state.device_online("remote", offline)));
+        }
+        let stale = heartbeat + TimeDelta::milliseconds(SESSION_STALE_MS + 1);
+        advance_to(cx, &clock, offline, stale);
+        assert_eq!(notifies.get(), 2);
+        for view in &views {
+            assert_eq!(
+                view.read_with(cx, |state, _| state.indicator_for("row", stale)),
+                Indicator::None,
+            );
+        }
+    }
+
+    #[gpui::test]
     fn revival_after_a_clock_transition_notifies_and_rearms(cx: &mut gpui::TestAppContext) {
         let now = clock_epoch();
         let clock = TestClock::start(now);
@@ -5533,10 +5945,10 @@ mod tests {
         let ids: Vec<_> = state
             .pending_echoes()
             .iter()
-            .map(|e| e.id.as_str())
+            .map(|e| e.id.clone())
             .collect();
         assert_eq!(ids, vec!["sent"]);
-        assert!(!state.pending_sends.contains_key("c1"));
+        assert!(!state.pending_sends.borrow().contains_key("c1"));
         assert_eq!(state.queue.len(), 1);
     }
 
@@ -5586,6 +5998,107 @@ mod tests {
             },
         );
         assert!(state.pending_echoes().is_empty());
+    }
+
+    #[gpui::test]
+    fn window_navigation_is_independent_while_catalogs_and_profile_changes_are_shared(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (owner, a, b) = cx.update(|cx| {
+            let owner = cx.new(|_| AppState::new());
+            owner.update(cx, |owner, cx| {
+                owner.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
+                cx.notify();
+            });
+            let a = cx.new(|cx| AppState::for_window(owner.clone(), cx));
+            let b = cx.new(|cx| AppState::for_window(owner.clone(), cx));
+            a.update(cx, |a, cx| a.select_chat(Some("a".into()), cx));
+            b.update(cx, |b, cx| b.select_chat(Some("b".into()), cx));
+            (owner, a, b)
+        });
+        cx.update(|cx| {
+            assert_eq!(a.read(cx).selected_chat.as_deref(), Some("a"));
+            assert_eq!(b.read(cx).selected_chat.as_deref(), Some("b"));
+            assert!(owner.read(cx).selected_chat.is_none());
+            owner.update(cx, |owner, cx| {
+                let mut rows = owner.chats.clone();
+                rows[0].title = Some("Renamed everywhere".into());
+                owner.apply_chats(rows);
+                cx.notify();
+            });
+        });
+        cx.update(|cx| {
+            assert_eq!(a.read(cx).chats, b.read(cx).chats);
+            assert_eq!(a.read(cx).selected_chat.as_deref(), Some("a"));
+            a.update(cx, |a, cx| a.prepare_runtime_replacement(cx));
+        });
+        cx.update(|cx| {
+            for view in [&a, &b] {
+                assert!(view.read(cx).chats.is_empty());
+                assert!(view.read(cx).selected_chat.is_none());
+                assert!(view.read(cx).canvas_target.is_none());
+                assert!(view.read(cx).conversation.is_none());
+                assert_eq!(view.read(cx).runtime_epoch, owner.read(cx).runtime_epoch);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn shared_conversation_projects_frames_and_optimistic_sends_into_both_views(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (a, b, source) = cx.update(|cx| {
+            let a = cx.new(|_| AppState::new());
+            let b = cx.new(|_| AppState::new());
+            for view in [&a, &b] {
+                view.update(cx, |view, cx| {
+                    view.use_shared_conversations = true;
+                    view.select_chat(Some("shared".into()), cx);
+                });
+            }
+            let source = crate::chat_store::acquire("shared".into(), None, cx);
+            a.update(cx, |view, cx| {
+                view.push_echo("shared", user_entry("sent"));
+                view.begin_pending_send("shared", "sent", Utc::now());
+                cx.notify();
+            });
+            assert_eq!(b.read(cx).pending_echoes().len(), 1);
+            assert!(b.read(cx).send_pending("shared", Utc::now()));
+            source.update(cx, |source, cx| {
+                source
+                    .receive_transcript_frame(
+                        TranscriptFrame::Reset {
+                            reset: vec![user_entry("sent")],
+                        },
+                        cx,
+                    )
+                    .unwrap()
+            });
+            (a, b, source)
+        });
+        cx.update(|cx| {
+            assert_eq!(a.read(cx).transcript.len(), 1);
+            assert_eq!(b.read(cx).transcript.len(), 1);
+            assert!(b.read(cx).pending_echoes().is_empty());
+            assert!(!b.read(cx).send_pending("shared", Utc::now()));
+            a.update(cx, |a, cx| a.select_chat(None, cx));
+            source.update(cx, |source, cx| {
+                source
+                    .receive_transcript_frame(
+                        TranscriptFrame::Reset {
+                            reset: vec![user_entry("sent"), user_entry("reply")],
+                        },
+                        cx,
+                    )
+                    .unwrap()
+            });
+        });
+        cx.update(|cx| {
+            assert!(a.read(cx).selected_chat.is_none());
+            assert!(a.read(cx).transcript.is_empty());
+            assert_eq!(b.read(cx).selected_chat.as_deref(), Some("shared"));
+            assert_eq!(b.read(cx).transcript.len(), 2);
+        });
     }
 
     #[test]

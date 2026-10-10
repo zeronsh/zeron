@@ -191,12 +191,13 @@ enum ChatMenuPage {
 }
 
 /// Hover-intent keys for the chat menu's rows; only Copy owns a submenu.
-const CHAT_MENU_ROW_RENAME: u8 = 0;
-const CHAT_MENU_ROW_PIN: u8 = 1;
-const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
-const CHAT_MENU_ROW_COPY: u8 = 3;
-const CHAT_MENU_ROW_DELETE: u8 = 4;
-const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_WINDOW: u8 = 0;
+const CHAT_MENU_ROW_RENAME: u8 = 1;
+const CHAT_MENU_ROW_PIN: u8 = 2;
+const CHAT_MENU_ROW_ARCHIVE: u8 = 3;
+const CHAT_MENU_ROW_COPY: u8 = 4;
+const CHAT_MENU_ROW_DELETE: u8 = 5;
+const CHAT_MENU_ROW_TAB: u8 = 6;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -410,6 +411,9 @@ pub fn apply_keymap(
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
+    if let Some(combo) = keymap.new_window_binding() {
+        cx.bind_keys([KeyBinding::new(&combo, crate::app_menus::NewWindow, None)]);
+    }
     cx.bind_keys([
         KeyBinding::new(
             &valid_or_default(&keymap.random_wallpaper, "mod-u"),
@@ -1422,7 +1426,7 @@ struct ChatRename {
 /// `RestartPending` survives only as the fallback when the in-place swap
 /// fails and a full quit is the safe way out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SyncFlow {
+pub(crate) enum SyncFlow {
     Idle,
     Enabling,
     Canceling,
@@ -1862,6 +1866,7 @@ enum UpdatePromptButton {
 
 #[derive(Debug, Clone)]
 enum PendingExit {
+    Application,
     CloseWindow,
     Quit,
     RuntimeChange,
@@ -1869,7 +1874,7 @@ enum PendingExit {
 }
 
 pub struct Shell {
-    state: Entity<AppState>,
+    pub(crate) state: Entity<AppState>,
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
@@ -2072,20 +2077,6 @@ pub struct Shell {
     sidebar_pin_write_notice: Option<SharedString>,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
-    /// Last seen session status per chat — the chime trigger compares against
-    /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, crate::sound::SessionNotificationState>,
-    /// Startup-aware durable connectivity notification baseline.
-    connectivity_notifications: crate::sound::ConnectivityNotificationState,
-    /// Persistent across AppState observer callbacks so simultaneous session
-    /// failures and connectivity degradation produce one attention sound.
-    attention_sound_gate: crate::sound::AttentionSoundGate,
-    /// `{device,harness,latest}` discoveries already delivered as a desktop
-    /// banner during this viewport lifetime.
-    harness_update_seen: std::collections::HashSet<String>,
-    /// Short debounce that aggregates providers finishing the same check at
-    /// slightly different times into one banner.
-    harness_update_banner_task: Option<Task<()>>,
     /// Independent watches retain device identity across selection changes.
     harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
     harness_update_expanded: bool,
@@ -2116,6 +2107,8 @@ pub struct Shell {
     /// The store's settings when `settings` last synced with it. Fields that
     /// differ from this are the Shell's edits; all others follow the store.
     settings_base: UiSettings,
+    window_key: Option<String>,
+    bounds_sub: Option<Subscription>,
     /// Session-scoped panel open flags (terminal / changes per chat; §1.10-1.11
     /// parity — heights stay in [`UiSettings`]).
     panels: SessionPanels,
@@ -2219,6 +2212,9 @@ pub struct Shell {
     /// Redraw scheduled for the next clock-driven change (see [`shell_clock_wake`]).
     clock: ClockRedraw,
     _state_observation: Subscription,
+    _operations_observation: Subscription,
+    runtime_epoch: u64,
+    application_locked: bool,
     _composer_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
@@ -2226,17 +2222,22 @@ pub struct Shell {
 }
 
 impl Shell {
+    pub(crate) fn open_conversation_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.route = Route::Chat;
+        self.state
+            .update(cx, |state, cx| state.open_deep_link(url, cx));
+        self.composer.update(cx, |composer, cx| {
+            composer.focus_pending = true;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
-        // A reopened window reuses AppState, so the engine may already be
-        // ready. Only show the boot splash while it is actually connecting.
-        let splash = match &state.read(cx).connection {
-            ConnectionStatus::Connecting => SplashPhase::Visible,
-            ConnectionStatus::Ready | ConnectionStatus::Failed(_) => SplashPhase::Gone,
-        };
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
@@ -2316,7 +2317,16 @@ impl Shell {
         // Spawn chips open their subagent's transcript as a right-pane tab.
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
         let data_dir = boot.data_dir.clone();
-        let mut settings = settings::current(cx);
+        let window_key = state.read(cx).window_key.clone();
+        let mut settings = settings::windows::current(window_key.as_deref(), cx);
+        if let Some(saved) = window_key
+            .as_deref()
+            .and_then(|key| settings.windows.get(key))
+        {
+            state.update(cx, |state, cx| {
+                state.select_chat(saved.selected_chat.clone(), cx)
+            });
+        }
         state.update(cx, |state, cx| {
             state.watch_clock_transitions(cx);
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
@@ -2324,7 +2334,9 @@ impl Shell {
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
         // Bind the customizable shortcuts from the persisted keymap.
-        apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+        if cx.try_global::<crate::app_runtime::AppRuntime>().is_none() {
+            apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+        }
         // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors. Bare
@@ -2387,7 +2399,19 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        // A second window can attach after bootstrap has already finished.
+        // It may never receive another connection notification, so only show
+        // the startup overlay while this window's initial state is connecting.
+        let splash = match state.read(cx).connection {
+            ConnectionStatus::Connecting => SplashPhase::Visible,
+            ConnectionStatus::Ready | ConnectionStatus::Failed(_) => SplashPhase::Gone,
+        };
         Self {
+            runtime_epoch: state.read(cx).runtime_epoch,
+            application_locked: false,
+            _operations_observation: cx.observe_self(|shell, cx| {
+                crate::lifecycle::publish(cx.entity(), shell.application_progress(), cx);
+            }),
             state,
             sidebar_pane,
             transcript,
@@ -2514,11 +2538,6 @@ impl Shell {
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
             space_boot_applied: false,
-            sound_prev: std::collections::HashMap::new(),
-            connectivity_notifications: Default::default(),
-            attention_sound_gate: Default::default(),
-            harness_update_seen: std::collections::HashSet::new(),
-            harness_update_banner_task: None,
             harness_update_devices: Default::default(),
             harness_update_expanded: false,
             harness_update_transition: None,
@@ -2538,7 +2557,9 @@ impl Shell {
             import_current: None,
             boot,
             data_dir,
-            settings_base: settings::current(cx),
+            settings_base: settings.clone(),
+            window_key,
+            bounds_sub: None,
             settings,
             panels: SessionPanels::default(),
             active_chat: String::new(),
@@ -2648,7 +2669,49 @@ impl Shell {
 
     // ---- splash ----
 
+    #[cfg(feature = "multi-window-fixture")]
+    pub(crate) fn startup_overlay_visible(&self) -> bool {
+        self.splash != SplashPhase::Gone
+    }
+
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        self.sync_application_progress(cx);
+        let epoch = state.read(cx).runtime_epoch;
+        if self.runtime_epoch != epoch {
+            self.runtime_epoch = epoch;
+            self.files.clear();
+            self.files_subs.clear();
+            self.file_surfaces.clear();
+            self.file_surface_subs.clear();
+            self.file_surface_paths.clear();
+            self.file_surface_keys.clear();
+            self.diffs.clear();
+            self.diff_subs.clear();
+            self.subagent_tabs.clear();
+            self.side_chats.clear();
+            self.side_chat_creating = false;
+            self.right_tabs.clear();
+            self.panels = SessionPanels::default();
+            self.org = None;
+            self.accounts_page = None;
+            self.devices_page = None;
+            self.archived_page = None;
+            self.harnesses_page = None;
+            self.last_appshot_chat = None;
+            self.terminal = None;
+            self.right_terminal = None;
+            for browser in self.browsers.values() {
+                browser.update(cx, |browser, cx| browser.close(cx));
+            }
+            self.browsers.clear();
+            self.browser_subs.clear();
+            self.browser_context = crate::browser::BrowserContext::default();
+            self.nav = NavHistory::new(NavEntry::Chat(String::new()));
+            self.route = Route::Chat;
+            self.space_boot_applied = false;
+            self.composer
+                .update(cx, |composer, cx| composer.reset_for_runtime(cx));
+        }
         // Voice is an orchestrator over every thread: navigation keeps it,
         // only losing the engine that hosts it ends the session.
         if self.voice.read(cx).chat_id.is_some()
@@ -2692,7 +2755,10 @@ impl Shell {
         // AuthStatus is shared by every viewport. Whichever viewport owns the
         // embedded runtime drains it; remote viewports request daemon shutdown
         // and all of them independently reattach to the new local runtime.
-        if signed_out_synced && self.runtime_change_task.is_none() {
+        if signed_out_synced
+            && self.runtime_change_task.is_none()
+            && !crate::lifecycle::blocks_commands(cx)
+        {
             self.start_local_runtime_transition(false, cx);
         }
         // Capture knob: the add-space palette needs only the device registry.
@@ -2766,167 +2832,6 @@ impl Shell {
                 });
             }
         }
-        // Banners and chimes share one session detector. Completion markers survive
-        // queue handoffs and never advance for interrupts or stale activity.
-        // A row's first appearance seeds the baseline silently (boot/replay).
-        // Pending sends consume completion changes silently, while questions
-        // still ring immediately. Output settings do not affect the baseline.
-        {
-            let now = Utc::now();
-            type Ping = (
-                String,
-                crate::sound::SessionNotificationState,
-                bool,
-                Option<String>,
-                bool,
-            );
-            let (sessions, connectivity, connectivity_observed) = {
-                let state = state.read(cx);
-                let sessions: Vec<Ping> = state
-                    .sessions
-                    .iter()
-                    .map(|s| {
-                        let status = crate::sound::SessionNotificationState::new(s, now);
-                        let send_pending = state.send_pending(&s.chat_id, now);
-                        let chat = state.chats.iter().find(|c| c.id == s.chat_id);
-                        let title = chat.and_then(|c| c.title.clone());
-                        let notify = chat.is_some_and(|c| c.is_top_level());
-                        (s.chat_id.clone(), status, send_pending, title, notify)
-                    })
-                    .collect();
-                (
-                    sessions,
-                    state.connectivity.state,
-                    state.connectivity_observed,
-                )
-            };
-            // Background-only banners: `active_window()` is app-level (any
-            // Zeron window being key), so a ping for a *background chat* in a
-            // focused app still stays a chime — you're already looking at
-            // Zeron; the sidebar dot carries the rest.
-            let app_focused = cx.active_window().is_some();
-            for (chat_id, status, send_pending, title, notify) in sessions {
-                let prev = self.sound_prev.insert(chat_id.clone(), status.clone());
-                // Keep side-chat baselines current, but never emit their
-                // completion, input-request, or failure sounds/banners.
-                if notify
-                    && let Some(prev) = prev
-                    && let Some(sound) = status.sound_since(&prev, send_pending)
-                {
-                    if self.settings.session_sound_enabled(sound) {
-                        let should_play = sound != crate::sound::Sound::Attention
-                            || self
-                                .attention_sound_gate
-                                .should_play(std::time::Instant::now());
-                        if should_play {
-                            crate::sound::play(sound);
-                        }
-                    }
-                    if self.settings.notifications_enabled
-                        && !(self.settings.notifications_background_only && app_focused)
-                    {
-                        let title = title.unwrap_or_else(|| "New session".into());
-                        let body = match sound {
-                            crate::sound::Sound::Done => "Run finished",
-                            crate::sound::Sound::Request => "Waiting on your input",
-                            crate::sound::Sound::Attention => "Run failed",
-                        };
-                        crate::notify::post(&title, body, Some(&chat_id));
-                    }
-                }
-            }
-            if let Some(sound) = self.connectivity_notifications.update(
-                connectivity,
-                connectivity_observed,
-                std::time::Instant::now(),
-            ) {
-                if self.settings.session_sound_enabled(sound)
-                    && self
-                        .attention_sound_gate
-                        .should_play(std::time::Instant::now())
-                {
-                    crate::sound::play(sound);
-                }
-                if self.settings.notifications_enabled
-                    && !(self.settings.notifications_background_only && app_focused)
-                {
-                    let body = match connectivity {
-                        zeron_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "Zeron is trying to reconnect",
-                    };
-                    crate::notify::post("Connection unavailable", body, None);
-                }
-            }
-        }
-        // Agent release discoveries finish independently (bounded provider
-        // concurrency), so debounce the transition and deliver one aggregate
-        // banner. Versioned releases deduplicate by version. Versionless
-        // availability deduplicates until a confirmed Current/Updated status;
-        // transient checks, disconnections and cancellation do not reset it.
-        let has_unseen_harness_update = {
-            let state = state.read(cx);
-            let device = state.local_device_id.as_deref().unwrap_or("local");
-            for status in &state.harness_updates {
-                if matches!(
-                    status.phase,
-                    zeron_proto::HarnessUpdatePhase::Current
-                        | zeron_proto::HarnessUpdatePhase::Updated
-                ) {
-                    self.harness_update_seen.remove(
-                        &harness_updates::versionless_notification_key(device, status.harness),
-                    );
-                }
-            }
-            state.harness_updates.iter().any(|status| {
-                harness_updates::notification_key(device, status)
-                    .is_some_and(|key| !self.harness_update_seen.contains(&key))
-            })
-        };
-        if has_unseen_harness_update && self.harness_update_banner_task.is_none() {
-            self.harness_update_banner_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                this.update(cx, |this, cx| {
-                    this.harness_update_banner_task = None;
-                    let new: Vec<String> = {
-                        let state = this.state.read(cx);
-                        let device = state.local_device_id.as_deref().unwrap_or("local");
-                        state
-                            .harness_updates
-                            .iter()
-                            .filter_map(|status| harness_updates::notification_key(device, status))
-                            .filter(|key| !this.harness_update_seen.contains(key))
-                            .collect()
-                    };
-                    if new.is_empty() {
-                        return;
-                    }
-                    let count = new.len();
-                    for key in &new {
-                        this.harness_update_seen.insert(key.clone());
-                    }
-                    let focused = cx.active_window().is_some();
-                    if this.settings.notifications_enabled
-                        && this.settings.agent_update_notifications
-                        && !(this.settings.notifications_background_only && focused)
-                    {
-                        let body = if count == 1 {
-                            "A coding agent update is ready"
-                        } else {
-                            "Coding agent updates are ready"
-                        };
-                        crate::notify::post(
-                            &format!(
-                                "{count} agent update{} available",
-                                if count == 1 { "" } else { "s" }
-                            ),
-                            body,
-                            Some(crate::notify::AGENT_UPDATES_TARGET),
-                        );
-                    }
-                })
-                .ok();
-            }));
-        }
         // An explicit projectless canvas must be visible in the sidebar:
         // retaining a project filter would hide the session on its first send.
         if state.read(cx).no_project
@@ -2997,6 +2902,9 @@ impl Shell {
             self.last_appshot_chat = Some(selected.clone());
         }
         if selected != self.active_chat {
+            if self.window_key.is_some() {
+                self.schedule_save(cx);
+            }
             self.suspend_file_images(cx);
             self.active_chat = selected;
             // Route history: a chat switch is a navigation. The very first
@@ -4311,6 +4219,7 @@ impl Shell {
     }
 
     fn cancel_file_close(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        crate::lifecycle::cancel(cx);
         self.pending_file_closes.remove(&surface);
         self.pending_exit = None;
         cx.notify();
@@ -4352,6 +4261,86 @@ impl Shell {
 
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::Quit, cx)
+    }
+
+    pub(crate) fn prepare_application_operation(&mut self, cx: &mut Context<Self>) -> bool {
+        self.prepare_exit(PendingExit::Application, cx)
+    }
+
+    pub(crate) fn lock_application_editors(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.application_locked = locked;
+        for files in self.files.values().chain(self.file_surfaces.values()) {
+            files.update(cx, |files, cx| files.lock_application_editors(locked, cx));
+        }
+        let composer = self.composer.read(cx);
+        let readonly = locked || composer.queue_edit_finishing;
+        composer.input.clone().update(cx, |input, cx| {
+            if input.read_only != readonly {
+                input.read_only = readonly;
+                cx.notify();
+            }
+        });
+    }
+
+    fn application_progress(&self) -> crate::lifecycle::Progress {
+        let replacing = self.runtime_change_task.is_some()
+            || matches!(
+                self.sync_flow,
+                SyncFlow::Switching { .. } | SyncFlow::Importing { .. }
+            );
+        crate::lifecycle::Progress {
+            sync: self.sync_flow,
+            error: self.runtime_change_error.clone(),
+            current: self.import_current.clone(),
+            busy: replacing
+                || self.auth_task.is_some()
+                || self.import_task.is_some()
+                || self.org.as_ref().is_some_and(|org| org.submitting),
+            replacing,
+        }
+    }
+
+    fn claim_application_operation(&mut self, cx: &mut Context<Self>) -> bool {
+        self.sync_application_progress(cx);
+        if crate::lifecycle::claim(cx.entity(), self.application_progress(), cx) {
+            true
+        } else {
+            self.show_notice(
+                crate::toast::ToastKind::Info,
+                "An application operation is already in progress",
+                cx,
+            );
+            cx.notify();
+            false
+        }
+    }
+
+    fn sync_application_progress(&mut self, cx: &Context<Self>) {
+        if let Some(progress) = crate::lifecycle::progress(cx.entity_id(), cx) {
+            self.sync_flow = progress.sync;
+            self.runtime_change_error = progress.error;
+            self.import_current = progress.current;
+        }
+    }
+
+    pub(crate) fn execute_application_operation(
+        &mut self,
+        action: crate::lifecycle::Action,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.claim_application_operation(cx) {
+            return;
+        }
+        match action {
+            crate::lifecycle::Action::Local(sign_out) => {
+                self.finish_local_runtime_transition(sign_out, cx)
+            }
+            crate::lifecycle::Action::Synced(import) => self.finish_synced_switch(import, cx),
+            crate::lifecycle::Action::RuntimeQuit => self.finish_runtime_quit(cx),
+            crate::lifecycle::Action::Install(staged) => self.finish_staged_update(staged, cx),
+            crate::lifecycle::Action::Quit => unreachable!(),
+        }
+        cx.notify();
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
@@ -4643,8 +4632,17 @@ impl Shell {
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
         self.pull_settings(cx);
-        settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
-        self.settings_base = settings::current(cx);
+        if settings::initialized(cx) {
+            settings::windows::publish(
+                self.window_key.as_deref(),
+                &self.settings_base,
+                &self.settings,
+                self.state.read(cx).selected_chat.clone(),
+                cx,
+            );
+            self.settings = settings::windows::current(self.window_key.as_deref(), cx);
+        }
+        self.settings_base = self.settings.clone();
     }
 
     /// Controls outside the Shell (Voice, typography, diff and transcript
@@ -4652,7 +4650,10 @@ impl Shell {
     /// working copy while keeping the Shell's own edits, so a geometry save
     /// can never publish an older value over another surface's choice.
     fn pull_settings(&mut self, cx: &App) {
-        let current = settings::current(cx);
+        if !settings::initialized(cx) {
+            return;
+        }
+        let current = settings::windows::current(self.window_key.as_deref(), cx);
         self.settings =
             UiSettings::merge_changes(&self.settings_base, &self.settings, current.clone());
         self.settings_base = current;
@@ -4788,9 +4789,11 @@ impl Shell {
                     this.chat_copy_intent.leave(&key);
                 }
             }))
-            .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                this.hover_chat_menu_row(key, event.position, true, cx);
-            }))
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    this.hover_chat_menu_row(key, event.position, true, cx);
+                }),
+            )
             .child(row)
             .into_any_element()
     }
@@ -4806,59 +4809,69 @@ impl Shell {
     ) -> AnyElement {
         let entity = cx.entity().downgrade();
         let exit_entity = entity.clone();
-        let mut row = popover::menu_row_nav(theme, open, false, format!("chat-menu-copy-{chat_id}"))
-            .id("chat-menu-copy")
-            .relative()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.chat_copy_intent.reset();
-                this.set_chat_copy_open(true, cx);
-                cx.stop_propagation();
-            }))
-            .child(icon(icons::COPY).size(px(16.0)).text_color(theme.text_muted))
-            .child(div().flex_1().child(SharedString::from("Copy")))
-            .child(
-                icon(icons::ALT_ARROW_RIGHT)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(
-                gpui::canvas(
-                    move |bounds, window, cx| {
-                        let left = bounds.right() + px(244.0) > window.viewport_size().width;
-                        let _ = entity.update(cx, |this, cx| {
-                            if this.chat_copy_left != left {
-                                this.chat_copy_left = left;
-                                cx.notify();
-                            }
-                        });
-                    },
-                    move |trigger, _, window, _| {
-                        if !open {
-                            return;
-                        }
-                        // Leaving the trigger anywhere but toward the submenu
-                        // closes it, as in the sidebar options menu.
-                        window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                            if phase != gpui::DispatchPhase::Bubble {
+        let mut row =
+            popover::menu_row_nav(theme, open, false, format!("chat-menu-copy-{chat_id}"))
+                .id("chat-menu-copy")
+                .relative()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.chat_copy_intent.reset();
+                    this.set_chat_copy_open(true, cx);
+                    cx.stop_propagation();
+                }))
+                .child(
+                    icon(icons::COPY)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(div().flex_1().child(SharedString::from("Copy")))
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    gpui::canvas(
+                        move |bounds, window, cx| {
+                            let left = bounds.right() + px(244.0) > window.viewport_size().width;
+                            let _ = entity.update(cx, |this, cx| {
+                                if this.chat_copy_left != left {
+                                    this.chat_copy_left = left;
+                                    cx.notify();
+                                }
+                            });
+                        },
+                        move |trigger, _, window, _| {
+                            if !open {
                                 return;
                             }
-                            let _ = exit_entity.update(cx, |this, cx| {
-                                let (bounds, left) = (this.chat_copy_bounds, this.chat_copy_left);
-                                if this
-                                    .chat_copy_intent
-                                    .contains_pointer(trigger, bounds, event.position, left)
-                                {
-                                    return;
-                                }
-                                this.chat_copy_intent.reset();
-                                this.set_chat_copy_open(false, cx);
-                            });
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
+                            // Leaving the trigger anywhere but toward the submenu
+                            // closes it, as in the sidebar options menu.
+                            window.on_mouse_event(
+                                move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                                    if phase != gpui::DispatchPhase::Bubble {
+                                        return;
+                                    }
+                                    let _ = exit_entity.update(cx, |this, cx| {
+                                        let (bounds, left) =
+                                            (this.chat_copy_bounds, this.chat_copy_left);
+                                        if this.chat_copy_intent.contains_pointer(
+                                            trigger,
+                                            bounds,
+                                            event.position,
+                                            left,
+                                        ) {
+                                            return;
+                                        }
+                                        this.chat_copy_intent.reset();
+                                        this.set_chat_copy_open(false, cx);
+                                    });
+                                },
+                            );
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                );
         if open {
             let submenu = self.render_chat_copy_submenu(chat_id, theme, cx);
             row = row.child(popover::nested_menu(
@@ -4900,7 +4913,11 @@ impl Shell {
             popover::menu_row(theme, false, format!("{id}-{chat_id}"))
                 .id(id)
                 .debug_selector(move || id.to_owned())
-                .child(icon(icons::COPY).size(px(16.0)).text_color(theme.text_muted))
+                .child(
+                    icon(icons::COPY)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
                 .child(label)
         };
         let entity = cx.entity().downgrade();
@@ -4911,9 +4928,9 @@ impl Shell {
             .flex_col()
             .gap(px(2.0))
             .when(has_path, |menu| {
-                menu.child(item("chat-copy-path", "Path".into()).on_click(cx.listener(
-                    move |this, _, _, cx| this.copy_chat_path(&path_chat_id, cx),
-                )))
+                menu.child(item("chat-copy-path", "Path".into()).on_click(
+                    cx.listener(move |this, _, _, cx| this.copy_chat_path(&path_chat_id, cx)),
+                ))
             })
             .child(
                 item("chat-copy-zeron", "Zeron conversation link".into()).on_click(cx.listener(
@@ -4921,9 +4938,11 @@ impl Shell {
                 )),
             )
             .when_some(harness_link, |menu, link| {
-                menu.child(item("chat-copy-harness", link.label.into()).on_click(cx.listener(
-                    move |this, _, _, cx| this.copy_harness_conversation_link(&harness_id, cx),
-                )))
+                menu.child(
+                    item("chat-copy-harness", link.label.into()).on_click(cx.listener(
+                        move |this, _, _, cx| this.copy_harness_conversation_link(&harness_id, cx),
+                    )),
+                )
             })
             .when(session_id, |menu| {
                 menu.child(
@@ -4957,9 +4976,17 @@ impl Shell {
         };
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
-            self.show_notice(crate::toast::ToastKind::Success, "Zeron conversation link copied", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Success,
+                "Zeron conversation link copied",
+                cx,
+            );
         } else {
-            self.show_notice(crate::toast::ToastKind::Error, "Conversation link is not ready yet", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Error,
+                "Conversation link is not ready yet",
+                cx,
+            );
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -4975,7 +5002,11 @@ impl Shell {
             .and_then(crate::links::harness_conversation_link);
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link.url));
-            self.show_notice(crate::toast::ToastKind::Success, format!("{} copied", link.label), cx);
+            self.show_notice(
+                crate::toast::ToastKind::Success,
+                format!("{} copied", link.label),
+                cx,
+            );
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -4991,7 +5022,11 @@ impl Shell {
             .and_then(|chat| chat.harness_session_id.clone());
         if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(id));
-            self.show_notice(crate::toast::ToastKind::Success, "Harness session ID copied", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Success,
+                "Harness session ID copied",
+                cx,
+            );
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -5601,7 +5636,11 @@ impl Shell {
         if !revealed {
             // The sidebar explains its own refusals.
             if surface == ChatRenameSurface::Explorer {
-                self.show_notice(crate::toast::ToastKind::Error, "Open this side chat's parent to rename it", cx);
+                self.show_notice(
+                    crate::toast::ToastKind::Error,
+                    "Open this side chat's parent to rename it",
+                    cx,
+                );
             }
             cx.notify();
             return;
@@ -6129,6 +6168,18 @@ impl Shell {
     }
 
     fn start_local_runtime_transition(&mut self, sign_out: bool, cx: &mut Context<Self>) {
+        if crate::lifecycle::installed(cx) {
+            crate::lifecycle::request(
+                crate::lifecycle::Action::Local(sign_out),
+                Some(cx.entity()),
+                cx,
+            );
+            return;
+        }
+        self.finish_local_runtime_transition(sign_out, cx);
+    }
+
+    fn finish_local_runtime_transition(&mut self, sign_out: bool, cx: &mut Context<Self>) {
         if self.runtime_change_task.is_some() {
             return;
         }
@@ -6190,6 +6241,13 @@ impl Shell {
     }
 
     fn cancel_auth_setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(owner) = crate::lifecycle::active_owner(cx.entity_id(), cx) {
+            cx.defer(move |cx| owner.update(cx, |shell, cx| shell.cancel_auth_setup(cx)));
+            return;
+        }
+        if !self.claim_application_operation(cx) {
+            return;
+        }
         let local = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -6213,6 +6271,7 @@ impl Shell {
                 .call(methods::SIGN_OUT, serde_json::json!({}))
                 .await;
             this.update(cx, |shell, cx| {
+                shell.auth_task = None;
                 match result {
                     Ok(_) => {
                         shell.org = None;
@@ -6224,7 +6283,11 @@ impl Shell {
                         if local {
                             shell.sync_flow = SyncFlow::Enabling;
                         }
-                        shell.show_notice(crate::toast::ToastKind::Error, format!("Could not cancel sign-in: {err}"), cx);
+                        shell.show_notice(
+                            crate::toast::ToastKind::Error,
+                            format!("Could not cancel sign-in: {err}"),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -6273,6 +6336,18 @@ impl Shell {
     /// Failure falls back to the quit-and-reopen dialog — the local profile is
     /// untouched, so the old path is always a safe exit.
     fn start_synced_switch(&mut self, import: bool, cx: &mut Context<Self>) {
+        if crate::lifecycle::installed(cx) {
+            crate::lifecycle::request(
+                crate::lifecycle::Action::Synced(import),
+                Some(cx.entity()),
+                cx,
+            );
+            return;
+        }
+        self.finish_synced_switch(import, cx);
+    }
+
+    fn finish_synced_switch(&mut self, import: bool, cx: &mut Context<Self>) {
         if self.runtime_change_task.is_some() {
             return;
         }
@@ -6327,6 +6402,9 @@ impl Shell {
     /// chose a fresh start); a runtime that comes back non-synced fell out of
     /// the swap — surface the quit fallback rather than pretend.
     fn drive_sync_switch(&mut self, cx: &mut Context<Self>) {
+        if !crate::lifecycle::is_owner(cx.entity_id(), cx) {
+            return;
+        }
         let SyncFlow::Switching { import } = self.sync_flow else {
             return;
         };
@@ -6370,6 +6448,9 @@ impl Shell {
     /// Subscribe to the engine's one-time import stream and mirror its
     /// progress into the wizard.
     fn spawn_local_import(&mut self, cx: &mut Context<Self>) {
+        if !self.claim_application_operation(cx) {
+            return;
+        }
         if self.import_task.is_some() {
             return;
         }
@@ -6471,6 +6552,14 @@ impl Shell {
     }
 
     fn quit_for_runtime_change(&mut self, cx: &mut Context<Self>) {
+        if crate::lifecycle::installed(cx) {
+            crate::lifecycle::request(crate::lifecycle::Action::RuntimeQuit, Some(cx.entity()), cx);
+            return;
+        }
+        self.finish_runtime_quit(cx);
+    }
+
+    fn finish_runtime_quit(&mut self, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::RuntimeChange, cx) {
             return;
         }
@@ -6525,6 +6614,9 @@ impl Shell {
     }
 
     fn start_sign_in(&mut self, cx: &mut Context<Self>) {
+        if !self.claim_application_operation(cx) {
+            return;
+        }
         let scope = self.state.read(cx).workspace_scope;
         if scope == Some(WorkspaceScope::Development) {
             return;
@@ -6541,20 +6633,28 @@ impl Shell {
                 .client()
                 .call(methods::SIGN_IN, serde_json::json!({}))
                 .await;
-            this.update(cx, |shell, cx| match result {
-                Ok(value) => {
-                    if let Some(url) = value.get("url").and_then(|u| u.as_str()) {
-                        cx.open_url(url);
+            this.update(cx, |shell, cx| {
+                shell.auth_task = None;
+                match result {
+                    Ok(value) => {
+                        if let Some(url) = value.get("url").and_then(|u| u.as_str()) {
+                            cx.open_url(url);
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-                Err(err) => {
-                    if scope == Some(WorkspaceScope::Local) && shell.sync_flow == SyncFlow::Enabling
-                    {
-                        shell.sync_flow = SyncFlow::Idle;
+                    Err(err) => {
+                        if scope == Some(WorkspaceScope::Local)
+                            && shell.sync_flow == SyncFlow::Enabling
+                        {
+                            shell.sync_flow = SyncFlow::Idle;
+                        }
+                        shell.show_notice(
+                            crate::toast::ToastKind::Error,
+                            format!("Sign in failed: {err}"),
+                            cx,
+                        );
+                        cx.notify();
                     }
-                    shell.show_notice(crate::toast::ToastKind::Error, format!("Sign in failed: {err}"), cx);
-                    cx.notify();
                 }
             })
             .ok();
@@ -6613,6 +6713,9 @@ impl Shell {
     }
 
     fn create_org(&mut self, cx: &mut Context<Self>) {
+        if !self.claim_application_operation(cx) {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -6650,6 +6753,9 @@ impl Shell {
     }
 
     fn select_org(&mut self, organization_id: String, cx: &mut Context<Self>) {
+        if !self.claim_application_operation(cx) {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -9221,6 +9327,18 @@ impl Shell {
     /// relauncher, and quit — the relauncher starts the new version once this
     /// process (and its engine lock / IPC port) is gone.
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
+        if crate::lifecycle::installed(cx) {
+            crate::lifecycle::request(
+                crate::lifecycle::Action::Install(staged),
+                Some(cx.entity()),
+                cx,
+            );
+            return;
+        }
+        self.finish_staged_update(staged, cx);
+    }
+
+    fn finish_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx) {
             return;
         }
@@ -10324,6 +10442,7 @@ impl Shell {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
             let chat_menu_closing = self.chat_menu.closing_since();
+            let window_chat = chat_id.clone();
             let is_side_chat = matches!(menu_state.tab, Some((_, RightSurface::SideChat(_))))
                 || self
                     .state
@@ -10355,19 +10474,41 @@ impl Shell {
             let menu = if chat_id.is_empty() {
                 menu
             } else {
-                let rename = popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
-                    .id("chat-menu-rename")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // A side chat's title is edited on its row under the
-                        // file tree: dock the explorer when the menu came
-                        // from its tab.
-                        if is_side_chat && !this.files_panel_open(cx) {
-                            this.add_files_surface(window, cx);
-                        }
-                        this.open_rename_chat(rename_id.clone(), cx)
-                    }))
-                    .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                    .child(SharedString::from("Rename"));
+                let new_window =
+                    popover::menu_row(&theme, false, format!("chat-menu-window-{chat_id}"))
+                        .id("chat-menu-new-window")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_chat_menu(cx);
+                            let chat = window_chat.clone();
+                            cx.defer(move |cx| {
+                                crate::window_manager::open(
+                                    crate::window_manager::Open::Chat(chat),
+                                    cx,
+                                );
+                            });
+                        }))
+                        .child(
+                            icon(icons::WINDOW_RESTORE)
+                                .size(px(16.))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Open in another window"));
+                let menu =
+                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_WINDOW, new_window, cx));
+                let rename =
+                    popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
+                        .id("chat-menu-rename")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            // A side chat's title is edited on its row under the
+                            // file tree: dock the explorer when the menu came
+                            // from its tab.
+                            if is_side_chat && !this.files_panel_open(cx) {
+                                this.add_files_surface(window, cx);
+                            }
+                            this.open_rename_chat(rename_id.clone(), cx)
+                        }))
+                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
+                        .child(SharedString::from("Rename"));
                 let menu = menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
                 let menu = if is_side_chat {
                     menu
@@ -10430,25 +10571,22 @@ impl Shell {
                     let enabled = !self.tabs_to_close(surface, action, cx).is_empty();
                     let key = key.clone();
                     let row = popover::menu_row(&theme, false, label)
-                            .id(SharedString::from(label))
-                            .when(!enabled, |el| el.opacity(0.4).cursor_default())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if !enabled {
-                                    return;
+                        .id(SharedString::from(label))
+                        .when(!enabled, |el| el.opacity(0.4).cursor_default())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if !enabled {
+                                return;
+                            }
+                            this.close_chat_menu(cx);
+                            if this.panel_key(cx) == key {
+                                for tab in this.tabs_to_close(surface, action, cx) {
+                                    this.close_right_surface(tab, window, cx);
                                 }
-                                this.close_chat_menu(cx);
-                                if this.panel_key(cx) == key {
-                                    for tab in this.tabs_to_close(surface, action, cx) {
-                                        this.close_right_surface(tab, window, cx);
-                                    }
-                                }
-                            }))
-                            .child(label);
-                    menu = menu.child(self.chat_menu_hover_row(
-                        CHAT_MENU_ROW_TAB + ix as u8,
-                        row,
-                        cx,
-                    ));
+                            }
+                        }))
+                        .child(label);
+                    menu =
+                        menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_TAB + ix as u8, row, cx));
                 }
             }
             let menu = menu.into_any_element();
@@ -13019,6 +13157,65 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.state
+            .update(cx, |state, cx| state.refresh_application_heartbeats(cx));
+        self.sync_application_progress(cx);
+        let locked = crate::lifecycle::replacing(cx);
+        if self.application_locked != locked {
+            self.lock_application_editors(locked, cx);
+        }
+        let title = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|chat| chat.title.as_deref())
+            .filter(|title| !title.is_empty())
+            .map(|title| format!("{title} — Zeron"))
+            .unwrap_or_else(|| "Zeron".into());
+        window.set_window_title(&title);
+        window.set_rem_size(px(crate::typography::font_size(cx).pixels()));
+        if self.window_key.is_some() {
+            let previous = &self.settings;
+            let stored = settings::windows::current(self.window_key.as_deref(), cx);
+            let current =
+                UiSettings::merge_changes(&self.settings_base, &self.settings, stored.clone());
+            for surface in self.files.values().chain(self.file_surfaces.values()) {
+                surface.update(cx, |surface, cx| {
+                    if previous.files_autosave_enabled != current.files_autosave_enabled {
+                        surface.set_autosave_enabled(current.files_autosave_enabled, cx);
+                    }
+                    if previous.files_autosave_delay_ms != current.files_autosave_delay_ms {
+                        surface.set_autosave_delay_ms(current.files_autosave_delay_ms, cx);
+                    }
+                    if previous.files_word_wrap != current.files_word_wrap {
+                        surface.set_word_wrap(current.files_word_wrap, window, cx);
+                    }
+                    if previous.files_show_all != current.files_show_all {
+                        surface.set_show_all_files(current.files_show_all, cx);
+                    }
+                    if previous.code_font_size != current.code_font_size {
+                        surface.set_editor_font_size(current.code_font_size, cx);
+                    }
+                });
+            }
+            self.settings = current;
+            self.settings_base = stored;
+        }
+        if self.bounds_sub.is_none()
+            && let Some(key) = self.window_key.clone()
+        {
+            self.bounds_sub = Some(cx.observe_window_bounds(window, move |_, window, cx| {
+                let geometry = settings::windows::WindowGeometry::capture(window.window_bounds());
+                settings::update(SavePolicy::Debounced, cx, |settings| {
+                    let initial = settings::windows::WindowSettings::from_ui(settings);
+                    settings
+                        .windows
+                        .entry(key.clone())
+                        .or_insert(initial)
+                        .geometry = Some(geometry);
+                });
+            }));
+        }
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this
         // view's notifications.
@@ -13077,7 +13274,9 @@ impl Render for Shell {
         {
             let shell = cx.weak_entity();
             window.defer(cx, move |window, cx| {
-                if matches!(action, PendingExit::Quit) {
+                if matches!(action, PendingExit::Application) {
+                    crate::lifecycle::resume(cx);
+                } else if matches!(action, PendingExit::Quit) {
                     crate::app_menus::request_quit(cx);
                 } else {
                     shell
@@ -13091,7 +13290,7 @@ impl Render for Shell {
                             PendingExit::InstallUpdate(staged) => {
                                 shell.apply_staged_update(staged, cx)
                             }
-                            PendingExit::Quit => unreachable!(),
+                            PendingExit::Quit | PendingExit::Application => unreachable!(),
                         })
                         .ok();
                 }
@@ -13219,13 +13418,23 @@ impl Render for Shell {
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
-                    motion::window_activation_changed(window.is_window_active(), cx);
-                    if window.is_window_active()
-                        && let Some(update) = crate::app_update::AppUpdate::global(cx)
-                    {
+                    // Window focus notifications can arrive in either order
+                    // when switching between Zeron windows. Read all windows
+                    // after the current callback releases its window borrow.
+                    cx.defer(|cx| {
+                        let active = cx.windows().into_iter().any(|handle| {
+                            cx.update_window(handle, |_, window, _| window.is_window_active())
+                                .unwrap_or(false)
+                        });
+                        motion::window_activation_changed(active, cx);
+                    });
+                    if window.is_window_active() {
+                        crate::window_manager::activated(window.window_handle().window_id(), cx);
                         // Coming back to the app (often after sleep) checks
                         // at once when a check is due by the wall clock.
-                        update.read(cx).poke();
+                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                            update.read(cx).poke();
+                        }
                     }
                     if window.is_window_active() && !this.voice.read(cx).offered() {
                         this.check_voice_codex(true, cx);
@@ -15380,7 +15589,7 @@ mod exit_regressions {
     use gpui::{AppContext, TestAppContext};
 
     #[gpui::test]
-    fn new_shell_only_shows_boot_splash_while_connecting(cx: &mut TestAppContext) {
+    fn windows_attaching_to_settled_runtime_do_not_cover_content(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
@@ -15413,16 +15622,17 @@ mod exit_regressions {
             ),
         ] {
             let window = cx.add_window(|_, cx| {
-                let state = cx.new(|_| {
+                let owner = cx.new(|_| {
                     let mut state = AppState::new();
                     state.connection = connection;
                     state
                 });
-                Shell::new(state, boot.clone(), cx)
+                let view = cx.new(|cx| AppState::for_window(owner, cx));
+                Shell::new(view, boot.clone(), cx)
             });
-            window
-                .update(cx, |shell, _, _| assert_eq!(shell.splash, expected))
-                .unwrap();
+            window.update(cx, |shell, _, _| {
+                assert_eq!(shell.splash, expected, "the initial runtime snapshot must determine splash visibility without a later notification");
+            }).unwrap();
         }
     }
 
@@ -17289,6 +17499,218 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn multi_window_navigation_drafts_notifications_and_operation_lifetime(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::window_manager::{self, Open};
+        let dir = tempfile::tempdir().unwrap();
+        let owner = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            let settings = settings::UiSettings::default();
+            crate::history::init(
+                settings.git_history_columns,
+                settings.git_history_column_widths,
+                settings.git_history_column_order.clone(),
+                settings.git_history_author_display,
+                cx,
+            );
+            settings::init(settings, dir.path(), cx);
+            crate::app_menus::init(cx);
+            crate::lifecycle::init(cx);
+            window_manager::init(cx);
+            crate::app_runtime::init(
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        owner.update(cx, |state, cx| {
+            state.workspace_scope = Some(WorkspaceScope::Local);
+            state.local_device_id = Some("local".into());
+            state.apply_chats(
+                ["a", "b"]
+                    .into_iter()
+                    .map(|id| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": "local", "title": id, "archived": false,
+                            "createdAt": "2026-09-16T00:00:00Z"
+                        }))
+                        .unwrap()
+                    })
+                    .collect(),
+            );
+            cx.notify();
+        });
+        let a = cx.update(|cx| window_manager::open(Open::Chat("a".into()), cx).unwrap());
+        let b = cx.update(|cx| window_manager::open(Open::Chat("a".into()), cx).unwrap());
+        let c = cx.update(|cx| window_manager::open(Open::Blank, cx).unwrap());
+        cx.run_until_parked();
+        c.read_with(cx, |shell, cx| {
+            assert!(shell.state.read(cx).selected_chat.is_none())
+        })
+        .unwrap();
+        for (window, text) in [(a, "draft A"), (b, "draft B")] {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell
+                        .composer
+                        .read(cx)
+                        .input
+                        .clone()
+                        .update(cx, |input, cx| input.set_text(text, cx));
+                })
+                .unwrap();
+        }
+        c.update(cx, |shell, _, cx| shell.open_chat("b".into(), cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            window_manager::activated(a.window_id(), cx);
+            assert_eq!(window_manager::chat_window("a", cx), Some(a));
+            window_manager::notified_chat("a".into(), cx);
+        });
+        for (window, text) in [(a, "draft A"), (b, "draft B")] {
+            window
+                .read_with(cx, |shell, cx| {
+                    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+                    assert_eq!(shell.composer.read(cx).input.read(cx).text(), text);
+                })
+                .unwrap();
+        }
+        c.read_with(cx, |shell, cx| {
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("b"))
+        })
+        .unwrap();
+        a.update(cx, |shell, _, _| {
+            shell.route = Route::Settings(SettingsSection::Devices)
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let locator =
+                crate::links::workspace_locator(Some(WorkspaceScope::Local), None, Some("local"))
+                    .unwrap();
+            window_manager::deep_link(crate::links::zeron_conversation_link("a", &locator), cx);
+        });
+        a.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Chat)))
+            .unwrap();
+        b.update(cx, |shell, _, cx| {
+            assert!(shell.claim_application_operation(cx));
+            shell.sync_flow = SyncFlow::Switching { import: false };
+            cx.notify();
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let closed = b
+            .update(cx, |_, window, cx| {
+                let weak = cx.weak_entity();
+                window.remove_window();
+                weak
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            closed.upgrade().is_some(),
+            "the application retains an operation after its window closes"
+        );
+        closed
+            .update(cx, |shell, cx| {
+                shell.sync_flow = SyncFlow::Idle;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            closed.upgrade().is_none(),
+            "a finished operation releases its closed view"
+        );
+        cx.update(|cx| assert_eq!(window_manager::views(cx).len(), 2));
+        assert_eq!(owner.read_with(cx, |state, _| state.chats.len()), 2);
+    }
+
+    #[gpui::test]
+    fn lifecycle_transition_waits_for_dirty_files_in_another_window(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::lifecycle::init(cx);
+        });
+        let mut windows = Vec::new();
+        for _ in 0..2 {
+            windows.push(cx.add_window(|_, cx| {
+                let state = cx.new(|_| AppState::new());
+                Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                )
+            }));
+        }
+        windows[1]
+            .update(cx, |shell, _, cx| {
+                let state = shell.state.clone();
+                let files = cx.new(|cx| {
+                    let mut files = FilesSurface::new(
+                        state,
+                        "dirty".into(),
+                        false,
+                        1000,
+                        13.,
+                        false,
+                        false,
+                        cx,
+                    );
+                    files.seed_pending_exit_test_document(true);
+                    files
+                });
+                shell.file_surfaces.insert(0, files);
+                shell
+                    .file_surface_keys
+                    .insert(("dirty".into(), "dirty".into(), "test.rs".into()), 0);
+            })
+            .unwrap();
+        windows[0]
+            .update(cx, |shell, _, cx| {
+                shell.start_local_runtime_transition(false, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        windows[0]
+            .read_with(cx, |shell, _| {
+                assert!(
+                    shell.runtime_change_error.is_none(),
+                    "transition must not run before peer saves"
+                );
+                assert!(shell.runtime_change_task.is_none());
+            })
+            .unwrap();
+        windows[1]
+            .update(cx, |shell, _, cx| {
+                assert!(matches!(shell.pending_exit, Some(PendingExit::Application)));
+                assert!(crate::lifecycle::blocks_commands(cx));
+                shell.cancel_file_close(RightSurface::File(0), cx);
+                assert!(!crate::lifecycle::blocks_commands(cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn lifecycle_actions_keep_pending_and_failed_file_saves_alive(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -17503,72 +17925,6 @@ mod right_tab_mouse_regressions {
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         cx.update(|window, cx| window.draw(cx).clear());
         (shell, cx)
-    }
-
-    #[gpui::test]
-    fn update_banner_fires_during_continuous_state_changes(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        shell.update(cx, |shell, cx| {
-            shell.settings.notifications_enabled = false;
-            shell.state.update(cx, |state, _| {
-                state.harness_updates = vec![
-                    serde_json::from_value(serde_json::json!({
-                        "harness": "codex", "phase": "available", "latestVersion": "2.0.0",
-                        "policy": "notify", "source": "unknown", "canApply": true
-                    }))
-                    .unwrap(),
-                    serde_json::from_value(serde_json::json!({
-                        "harness": "hermes", "phase": "available",
-                        "policy": "notify", "source": "unknown", "canApply": true
-                    }))
-                    .unwrap(),
-                ];
-            });
-        });
-        for _ in 0..12 {
-            shell.update(cx, |shell, cx| {
-                shell.on_state_changed(&shell.state.clone(), cx)
-            });
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(100));
-        }
-        cx.run_until_parked();
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.harness_update_seen.len(), 2);
-            assert!(shell.harness_update_banner_task.is_none());
-        });
-        // Rechecks and repeated versionless availability remain deduplicated.
-        for phase in [
-            zeron_proto::HarnessUpdatePhase::Checking,
-            zeron_proto::HarnessUpdatePhase::Available,
-        ] {
-            shell.update(cx, |shell, cx| {
-                shell
-                    .state
-                    .update(cx, |state, _| state.harness_updates[1].phase = phase);
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert!(shell.harness_update_banner_task.is_none());
-            });
-        }
-        // A confirmed current state ends the availability episode, permitting
-        // another commit-only update to notify even if the version is unchanged.
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Current
-            });
-            shell.on_state_changed(&shell.state.clone(), cx);
-            assert_eq!(shell.harness_update_seen.len(), 1);
-            shell.state.update(cx, |state, _| {
-                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Available
-            });
-            shell.on_state_changed(&shell.state.clone(), cx);
-        });
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.harness_update_seen.len(), 2)
-        });
     }
 
     #[gpui::test]
@@ -18272,9 +18628,7 @@ mod settings_modal_regressions {
     /// Carried out of the sidebar it follows the pointer, and dropped on a
     /// conversation it becomes a chat chip in that composer.
     #[gpui::test]
-    fn a_dragged_session_leaves_the_sidebar_and_drops_as_a_chat_mention(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_dragged_session_leaves_the_sidebar_and_drops_as_a_chat_mention(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         init_settings_test(settings::UiSettings::default(), dir.path(), cx);
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));

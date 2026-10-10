@@ -3379,6 +3379,9 @@ impl EventEmitter<AppearanceSettingsEvent> for AppearancePage {}
 
 impl Render for AppearancePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.selected_font = typography::effective(cx);
+        self.selected_terminal_font = typography::terminal_effective(cx);
+        self.selected_code_font = typography::code_effective(cx);
         crate::toast::take_error(&mut self.background_error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let availability = typography::availability(cx);

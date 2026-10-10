@@ -7,6 +7,8 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
+      - 'scripts/test-multi-window-linux.sh'
       - '.github/actions/linux-ci/**'
       - 'scripts/ci/**'
       - 'scripts/*cursor-sdk*'
@@ -20,6 +22,8 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
+      - 'scripts/test-multi-window-linux.sh'
       - '.github/actions/linux-ci/**'
       - 'scripts/ci/**'
       - 'scripts/*cursor-sdk*'
@@ -60,14 +64,20 @@ jobs:
         with:
           rust-cache: ui
           save-rust-cache: 'true'
-          apt-cache: gpui
+          apt-cache: gpui-multi-window
           apt-packages: >-
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
             libx11-dev libxcb1-dev libx11-xcb-dev
             libfontconfig1-dev libfreetype-dev libasound2-dev
             libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+            xvfb xauth xdotool openbox mesa-vulkan-drivers ripgrep
       - name: UI and headless layout regressions
         run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib --test voice_orb_geometry
+      - name: Native multiple-window lifecycle
+        timeout-minutes: 8
+        run: |
+          cargo build --locked -p zeron
+          bash scripts/test-multi-window-linux.sh target/debug/zeron
 
   linux-browser:
     runs-on: ubuntu-24.04

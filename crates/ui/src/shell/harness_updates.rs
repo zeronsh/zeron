@@ -5,20 +5,6 @@
 use super::*;
 use zeron_proto::{HarnessId, HarnessUpdatePhase as Phase, HarnessUpdateStatus};
 
-pub(super) fn versionless_notification_key(device: &str, harness: HarnessId) -> String {
-    format!("{device}:{harness:?}:versionless")
-}
-
-pub(super) fn notification_key(device: &str, status: &HarnessUpdateStatus) -> Option<String> {
-    if status.phase != Phase::Available {
-        return None;
-    }
-    Some(match status.latest_version.as_deref() {
-        Some(version) => format!("{device}:{:?}:{version}", status.harness),
-        None => versionless_notification_key(device, status.harness),
-    })
-}
-
 const CHIP_HEIGHT: f32 = 38.0;
 /// The summary row inside the card's 1px border, top and bottom. A row as
 /// tall as the whole card overflows the border box and sits a point low.

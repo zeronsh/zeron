@@ -405,6 +405,16 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         shell.toggle_files_panel(window, cx);
                     })
                     .unwrap();
+                // The editor's watch opens asynchronously. Observe its initial
+                // frame before writing so the external event cannot be missed.
+                wait_for(window, cx, "editor workspace watch", |shell, cx| {
+                    shell.file_surfaces.values().any(|file| {
+                        let file = file.read(cx);
+                        file.test_document_text("src/nested/main.rs").is_some()
+                            && file.test_workspace_watch_ready()
+                    })
+                })
+                .await;
                 std::fs::write(
                     project.join("src/nested/main.rs"),
                     "fn main() { println!(\"Updated\"); }\n",
