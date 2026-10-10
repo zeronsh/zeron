@@ -84,6 +84,7 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
 }
 
@@ -128,6 +129,7 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
+            worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
             _state: state,
         }
     }
@@ -955,7 +957,8 @@ impl Render for ShortcutsPage {
                                             .mt_0()
                                             .child(pull_request_destination_row),
                                     ))
-                                    .child(self.thread_naming.clone()),
+                                    .child(self.thread_naming.clone())
+                                    .child(self.worktrees.clone()),
                             ),
                     )
                     .fade_overflow_y(&self.scroll.scroll),

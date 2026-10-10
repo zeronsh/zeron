@@ -29,6 +29,7 @@ pub mod thread_naming;
 pub mod wallpaper;
 pub mod wallpaper_colors;
 pub mod widgets;
+mod worktrees;
 
 /// Sidebar drag-resize bounds (px). The minimum keeps the sidebar options
 /// button inside the sidebar beside the titlebar controls: 88 (past the
