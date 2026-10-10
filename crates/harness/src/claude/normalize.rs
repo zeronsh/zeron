@@ -206,6 +206,11 @@ pub(crate) struct Normalizer {
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
+    /// Main-thread text streamed since the last assistant frame or result.
+    /// A frame whose text was NOT streamed (a local slash command's
+    /// `<synthetic>` reply) carries it only in its blocks. Deliberately not
+    /// reset by steer rotation: the streamed message's frame may still come.
+    streamed_text: bool,
     /// Last session id seen (init or result) — used for synthetic Dones.
     pub session_id: Option<String>,
 }
@@ -219,6 +224,7 @@ impl Normalizer {
             agent_tool_spawns: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             assistant_message_id: new_message_id(),
+            streamed_text: false,
             session_id: None,
         }
     }
@@ -450,9 +456,12 @@ impl Normalizer {
                     };
                 }
                 match f.event.delta.kind.as_str() {
-                    "text_delta" => vec![AgentEvent::TextDelta {
-                        text: f.event.delta.text,
-                    }],
+                    "text_delta" => {
+                        self.streamed_text |= !f.event.delta.text.is_empty();
+                        vec![AgentEvent::TextDelta {
+                            text: f.event.delta.text,
+                        }]
+                    }
                     "thinking_delta" => vec![AgentEvent::ReasoningDelta {
                         text: f.event.delta.thinking,
                     }],
@@ -513,14 +522,27 @@ impl Normalizer {
                         self.agent_spawn_tools.insert(b.id.clone());
                     }
                 }
+                // Text normally arrives as deltas ahead of its frame; unstreamed
+                // text exists only here. A failed turn's content is left to the
+                // mapped `error` below, so the failure isn't reported twice.
+                let emit_text = !std::mem::take(&mut self.streamed_text) && f.error.is_none();
                 let mut out: Vec<AgentEvent> = f
                     .message
                     .blocks()
-                    .filter(|b: &ContentBlock| b.kind == "tool_use")
+                    .filter(|b: &ContentBlock| {
+                        b.kind == "tool_use"
+                            || (emit_text && b.kind == "text" && !b.text.is_empty())
+                    })
                     .flat_map(|b| {
-                        let call = AgentEvent::ToolCall {
-                            id: b.id.clone(),
-                            call: decode_tool_use(&b.name, &b.input),
+                        // A text block has no name, so it seeds neither an
+                        // opening nor a steer below.
+                        let call = if b.kind == "text" {
+                            AgentEvent::TextDelta { text: b.text }
+                        } else {
+                            AgentEvent::ToolCall {
+                                id: b.id.clone(),
+                                call: decode_tool_use(&b.name, &b.input),
+                            }
                         };
                         // A spawn's `prompt` is the subagent's opening user
                         // message — the wire never echoes it on the child
@@ -566,8 +588,14 @@ impl Normalizer {
                         std::iter::once(call).chain(opening).chain(steer)
                     })
                     .collect();
-                self.last_model = f.message.model.clone().or(self.last_model.take());
-                if let Some(usage) = &f.message.usage {
+                // A local command's reply runs no model: its zeroed usage would
+                // reset the context meter, and `<synthetic>` would replace the
+                // model whose context window the next result looks up.
+                let synthetic = f.message.model.as_deref() == Some("<synthetic>");
+                if !synthetic {
+                    self.last_model = f.message.model.clone().or(self.last_model.take());
+                }
+                if !synthetic && let Some(usage) = &f.message.usage {
                     let fields = [
                         "input_tokens",
                         "cache_read_input_tokens",
@@ -671,6 +699,9 @@ impl Normalizer {
             }
 
             Frame::Result(f) => {
+                // An interrupted or superseded turn can end on deltas with no
+                // assistant frame; that text must not gate the next reply.
+                self.streamed_text = false;
                 let model_usage = self
                     .last_model
                     .as_ref()
@@ -1438,6 +1469,181 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    /// A local slash command's reply, as Claude Code 2.1.289 emits it for
+    /// `/context`: one `<synthetic>` assistant frame with zeroed usage and
+    /// NO stream deltas before it.
+    const SYNTHETIC_REPLY: &str = r###"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"## Context Usage\n\n**Tokens:** 10k / 1m (1%)"}]}}"###;
+    const SYNTHETIC_TEXT: &str = "## Context Usage\n\n**Tokens:** 10k / 1m (1%)";
+
+    fn feed(norm: &mut Normalizer, frames: &[&str]) -> Vec<AgentEvent> {
+        frames
+            .iter()
+            .flat_map(|raw| {
+                let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
+                norm.normalize(frame, false)
+            })
+            .collect()
+    }
+
+    /// The main thread's text, as the fold would append it.
+    fn main_text(events: &[AgentEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn local_command_replies_surface_their_text() {
+        // `/usage`, `/context`, `/cost`, `/mcp`… answer without a model turn:
+        // the text exists only on the assistant frame (issue #734).
+        let ev = feed(&mut Normalizer::new(), &[SYNTHETIC_REPLY]);
+        assert_eq!(main_text(&ev), SYNTHETIC_TEXT, "verbatim, no added spacing");
+        let text_at = ev
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TextDelta { .. }))
+            .expect("text emitted");
+        let completed_at = ev
+            .iter()
+            .position(|e| matches!(e, AgentEvent::AssistantMessageCompleted { .. }))
+            .expect("message completed");
+        assert!(
+            text_at < completed_at,
+            "text belongs to the closing message"
+        );
+    }
+
+    #[test]
+    fn streamed_text_is_not_repeated_from_its_assistant_frame() {
+        let mut norm = Normalizer::new();
+        let ev = feed(
+            &mut norm,
+            &[
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}}"#,
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}}"#,
+                r#"{"type":"assistant","message":{"model":"primary","content":[{"type":"text","text":"Hello"}]}}"#,
+            ],
+        );
+        assert_eq!(main_text(&ev), "Hello");
+        // The next message's streamed text is gated afresh.
+        let ev = feed(
+            &mut norm,
+            &[
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Again"}}}"#,
+                r#"{"type":"assistant","message":{"model":"primary","content":[{"type":"text","text":"Again"}]}}"#,
+            ],
+        );
+        assert_eq!(main_text(&ev), "Again");
+    }
+
+    #[test]
+    fn a_steer_between_deltas_and_their_frame_does_not_repeat_text() {
+        // The run loop rotates the message id when a steer echoes; that is
+        // not the end of the streamed message whose frame is still to come.
+        let mut norm = Normalizer::new();
+        let mut ev = feed(
+            &mut norm,
+            &[
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}"#,
+            ],
+        );
+        norm.rotate_for_steer();
+        ev.extend(feed(
+            &mut norm,
+            &[r#"{"type":"assistant","message":{"model":"primary","content":[{"type":"text","text":"first"}]}}"#],
+        ));
+        assert_eq!(main_text(&ev), "first");
+    }
+
+    #[test]
+    fn a_reply_ended_without_its_frame_does_not_hide_the_next_command() {
+        // An interrupted or superseded turn streams deltas and then ends on a
+        // `result` with no assistant frame (see fake-claude's
+        // superseded-steers). The next command's reply must still show.
+        let mut norm = Normalizer::new();
+        feed(
+            &mut norm,
+            &[
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"story"}}}"#,
+                r#"{"type":"result","subtype":"success","result":"story","session_id":"s1"}"#,
+            ],
+        );
+        let ev = feed(&mut norm, &[SYNTHETIC_REPLY]);
+        assert_eq!(main_text(&ev), SYNTHETIC_TEXT);
+    }
+
+    #[test]
+    fn subagent_traffic_never_gates_main_thread_text() {
+        // A background subagent streams concurrently with the parent; its
+        // tagged frames must neither mark parent text as streamed…
+        let mut norm = Normalizer::new();
+        let ev = feed(
+            &mut norm,
+            &[
+                r#"{"type":"stream_event","parent_tool_use_id":"toolu_sub","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"sub text"}}}"#,
+                SYNTHETIC_REPLY,
+            ],
+        );
+        assert_eq!(main_text(&ev), SYNTHETIC_TEXT);
+        // …nor close the parent's streamed message early.
+        let ev = feed(
+            &mut norm,
+            &[
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"parent"}}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"sub done"}]}}"#,
+                r#"{"type":"assistant","message":{"model":"primary","content":[{"type":"text","text":"parent"}]}}"#,
+            ],
+        );
+        assert_eq!(main_text(&ev), "parent");
+    }
+
+    #[test]
+    fn errored_assistant_frames_keep_only_the_mapped_error() {
+        // Failed turns already surface `assistant_error_text`; their content
+        // must not add a second copy of the failure as reply text.
+        let ev = feed(
+            &mut Normalizer::new(),
+            &[
+                r#"{"type":"assistant","error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"Claude usage limit reached"}]}}"#,
+            ],
+        );
+        assert_eq!(main_text(&ev), "");
+        assert!(ev.contains(&AgentEvent::Error {
+            message: assistant_error_text("rate_limit")
+        }));
+    }
+
+    #[test]
+    fn synthetic_replies_leave_context_usage_and_model_alone() {
+        // `/context` must not zero the context meter it reports on, nor make
+        // `<synthetic>` the model whose window the next result looks up.
+        let mut norm = Normalizer::new();
+        feed(
+            &mut norm,
+            &[
+                r#"{"type":"assistant","message":{"model":"primary","content":[],"usage":{"input_tokens":200,"cache_read_input_tokens":40000}}}"#,
+            ],
+        );
+        let ev = feed(&mut norm, &[SYNTHETIC_REPLY]);
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, AgentEvent::ContextUsage { .. }))
+        );
+        let ev = feed(
+            &mut norm,
+            &[
+                r#"{"type":"result","subtype":"success","modelUsage":{"primary":{"contextWindow":200000},"child":{"contextWindow":1000000}}}"#,
+            ],
+        );
+        assert!(ev.contains(&AgentEvent::ContextUsage {
+            tokens: None,
+            window: Some(200000)
+        }));
     }
 }
 
