@@ -129,14 +129,17 @@ impl popover::ScrollRailHost for FilesSurface {
         &mut self.tree_bar
     }
 
-    fn rail_metrics(&mut self) -> Option<popover::MenuScrollbarMetrics> {
+    fn rail_metrics(
+        &mut self,
+        _cx: &mut gpui::Context<Self>,
+    ) -> Option<popover::MenuScrollbarMetrics> {
         let (metrics, _) = tree_rail_geometry(&self.tree_list)?;
         let offset = -f32::from(self.tree_list.scroll_px_offset_for_scrollbar().y);
         self.rail_bar().note_scroll_offset(offset);
         Some(metrics)
     }
 
-    fn rail_press(&mut self, pointer_y: gpui::Pixels) -> bool {
+    fn rail_press(&mut self, pointer_y: gpui::Pixels, _cx: &mut gpui::Context<Self>) -> bool {
         let Some((metrics, track_top)) = tree_rail_geometry(&self.tree_list) else {
             return false;
         };
@@ -145,7 +148,7 @@ impl popover::ScrollRailHost for FilesSurface {
         self.apply_tree_rail_target(&metrics, track_top, pointer_y)
     }
 
-    fn rail_drag_to(&mut self, pointer_y: gpui::Pixels) -> bool {
+    fn rail_drag_to(&mut self, pointer_y: gpui::Pixels, _cx: &mut gpui::Context<Self>) -> bool {
         let Some((metrics, track_top)) = tree_rail_geometry(&self.tree_list) else {
             return false;
         };

@@ -358,10 +358,16 @@ fn embedded_terminal_and_browser_focus_route_to_right_tabs(cx: &mut TestAppConte
     shell.update(cx, |shell, cx| {
         // No engine in this harness: reserve a real emulator tab without
         // starting a PTY, then use the normal surface activation path.
-        shell.right_terminal_panel(cx).update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
+        let key = shell.right_terminal_panel(cx).update(cx, |panel, cx| {
+            panel.set_open(true, cx);
+            panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx)
         });
-        shell.add_terminal_surface(cx);
+        shell
+            .right_tabs
+            .entry("parent".into())
+            .or_default()
+            .push(RightSurface::Terminal(key));
+        shell.set_right_active(RightSurface::Terminal(key), cx);
     });
     cx.update(|window, cx| window.draw(cx).clear());
     cx.update(|window, cx| {

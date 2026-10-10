@@ -55,7 +55,9 @@ use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
 };
-use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
+use crate::terminal::panel::{
+    TerminalPanel, TerminalTabDrag, ToggleTerminal, clamp_terminal_height,
+};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 
@@ -79,6 +81,9 @@ mod sidebar_sections;
 pub(crate) mod spaces;
 use side_chats::SideChatTab;
 mod tabs;
+mod terminal_tabs;
+#[cfg(test)]
+mod terminal_transfer_tests;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
@@ -1926,12 +1931,14 @@ pub struct Shell {
     pub(super) jump_hints: bool,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
+    terminal_observe: Option<Subscription>,
     /// Last resolved layout, for drag anchors and matching transcript clearance.
     terminal_geometry: crate::terminal::dock::SharedGeometry,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
-    /// entity from the bottom drawer's (own PTYs, own grid geometry; one
-    /// panel can only size one visible grid at a time).
+    /// entity from the bottom drawer's: independent geometry and focus,
+    /// with stable session models transferable between the two views.
     right_terminal: Option<Entity<TerminalPanel>>,
+    right_terminal_observe: Option<Subscription>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     /// Host-owned project Actions cached per (device, space).
@@ -1974,6 +1981,7 @@ pub struct Shell {
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
     /// In-flight surface-tab drag (slide animation state).
     right_tab_drag: Option<RightTabDragState>,
+    terminal_tab_insertion: Option<terminal_tabs::TerminalTabInsertion>,
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
     right_tab_scroll: gpui::ScrollHandle,
@@ -2419,7 +2427,9 @@ impl Shell {
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
+            terminal_observe: None,
             right_terminal: None,
+            right_terminal_observe: None,
             right_plus: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
@@ -2446,6 +2456,7 @@ impl Shell {
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
+            terminal_tab_insertion: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
             route,
             settings_focus: cx.focus_handle(),
@@ -3212,6 +3223,7 @@ impl Shell {
             return terminal.clone();
         }
         let terminal = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), cx));
+        self.right_terminal_observe = Some(cx.observe(&terminal, |_, _, cx| cx.notify()));
         self.right_terminal = Some(terminal.clone());
         terminal
     }
@@ -4449,6 +4461,7 @@ impl Shell {
             return terminal.clone();
         }
         let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
+        self.terminal_observe = Some(cx.observe(&terminal, |_, _, cx| cx.notify()));
         self.terminal = Some(terminal.clone());
         terminal
     }
@@ -8848,6 +8861,7 @@ impl Shell {
                         .with_animation(id, RESORT.animation(), move |el, t| {
                             el.relative().top(px(dy * (1.0 - t)))
                         })
+
                         .into_any_element()
                 } else if self.sidebar_new_keys.contains(&key) {
                     let id = SharedString::from(format!("row-in-{epoch}-{key}"));
@@ -10224,6 +10238,23 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape"
+            && cx.has_active_drag()
+            && (self.terminal_tab_insertion.is_some()
+                || self
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|panel| panel.read(cx).has_tab_drag()))
+        {
+            cx.stop_active_drag(window);
+            self.terminal_tab_insertion = None;
+            if let Some(panel) = &self.terminal {
+                panel.update(cx, |panel, cx| panel.cancel_tab_drag(cx));
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if event.keystroke.key == "escape" && self.voice.read(cx).stage_open {
             self.set_voice_stage_open(false, cx);
             cx.stop_propagation();
@@ -11743,8 +11774,16 @@ impl Shell {
 
         let theme = Theme::of(cx).clone();
         // Heal drag state if the pointer was released outside the strip.
-        if self.right_tab_drag.is_some() && !cx.has_active_drag() {
+        if !cx.has_active_drag() {
             self.right_tab_drag = None;
+            self.terminal_tab_insertion = None;
+        }
+        if self
+            .terminal_tab_insertion
+            .as_ref()
+            .is_some_and(|drop| drop.chat != self.panel_key(cx))
+        {
+            self.terminal_tab_insertion = None;
         }
         let rows = self.right_surface_rows(cx);
         let count = rows.len();
@@ -11767,8 +11806,13 @@ impl Shell {
         // relative min_w_0 region below; drop math runs in CONTENT
         // coordinates (viewport-relative x plus the scrolled-off width).
         let scroll_for_drag = self.right_tab_scroll.clone();
+        let scroll_for_terminal_drag = self.right_tab_scroll.clone();
         let mut strip = div()
             .id("right-surface-strip")
+            .debug_selector(|| "right-surface-strip".into())
+            .w_full()
+            .h_full()
+            .relative()
             .track_focus(&self.navigation_focus.tabs)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.capture_navigation_focus(true, true, window, cx);
@@ -11784,6 +11828,22 @@ impl Shell {
             // behind each chip. Stop at the scroller so the titlebar cannot
             // claim tab clicks, while wheel events still reach this scroller.
             .when(cfg!(target_os = "windows"), |strip| strip.occlude())
+            .on_drag_move::<TerminalTabDrag>(cx.listener(
+                move |this, event: &gpui::DragMoveEvent<TerminalTabDrag>, _, cx| {
+                    this.update_terminal_tab_insertion(
+                        event,
+                        &scroll_for_terminal_drag,
+                        CHIP_SLOT,
+                        count,
+                        cx,
+                    );
+                },
+            ))
+            .on_drop::<TerminalTabDrag>(cx.listener(
+                move |this, payload: &TerminalTabDrag, window, cx| {
+                    this.transfer_terminal_to_right(payload, count, window, cx);
+                },
+            ))
             .on_drag_move::<RightTabDrag>(cx.listener(
                 move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
                     let payload = event.drag(cx);
@@ -11866,9 +11926,8 @@ impl Shell {
                 }),
                 _ => false,
             };
-            // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
-            // (same slot, no width jump) — the ✕ only shows while the tab is
-            // hovered (user request).
+            // Keep the surface icon on the left; the trailing close appears
+            // on tab hover, replacing the unsaved dot in the same slot.
             let group: SharedString = format!("right-surface-tab-{ix}").into();
             let ghost_title = title.clone();
             let workspace_path = self.workspace_path_for_surface(surface, cx);
@@ -11965,6 +12024,11 @@ impl Shell {
                 // up the carve-out. The bubble dispatch reaches the chip
                 // before the strip, and the handler consumes the drag, so
                 // the two never double-apply.
+                .on_drop::<TerminalTabDrag>(cx.listener(
+                    move |this, payload: &TerminalTabDrag, window, cx| {
+                        this.transfer_terminal_to_right(payload, ix, window, cx);
+                    },
+                ))
                 .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
                     if payload.panel_key != this.panel_key(cx) {
                         this.right_tab_drag = None;
@@ -12119,6 +12183,12 @@ impl Shell {
         let plus_fade = "right-surface-add-fade";
         let mut plus = div()
             .id("right-surface-add")
+            .debug_selector(|| "right-surface-add".into())
+            .on_drop::<TerminalTabDrag>(cx.listener(
+                move |this, payload: &TerminalTabDrag, window, cx| {
+                    this.transfer_terminal_to_right(payload, count, window, cx);
+                },
+            ))
             .size(px(24.0))
             .flex_none()
             .flex()
@@ -16403,8 +16473,16 @@ mod exit_regressions {
                     shell.open_chat("terminal-session".into(), cx);
                     shell.active_chat = "terminal-session".into();
                     let panel = if embedded {
-                        shell.add_terminal_surface(cx);
-                        shell.right_terminal.clone().unwrap()
+                        // This focus harness has no engine; activate a real
+                        // reserved tab rather than a nonexistent PTY key.
+                        let panel = shell.right_terminal_panel(cx);
+                        let key = panel.update(cx, |panel, cx| {
+                            panel.set_open(true, cx);
+                            panel.reserve_tab_for_chat("terminal-session".into(), "Test terminal", cx)
+                        });
+                        shell.right_tabs.entry("terminal-session".into()).or_default().push(RightSurface::Terminal(key));
+                        shell.set_right_active(RightSurface::Terminal(key), cx);
+                        panel
                     } else {
                         shell.toggle_terminal(window, cx);
                         shell.terminal.clone().unwrap()
