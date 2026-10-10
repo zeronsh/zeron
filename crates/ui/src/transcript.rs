@@ -40,7 +40,7 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use zeron_proto::ToolCall;
+use zeron_proto::{HarnessId, ToolCall};
 
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
@@ -3373,6 +3373,12 @@ pub enum TranscriptEvent {
         doc_id: String,
         title: String,
         frozen: bool,
+    },
+    /// A signed-out error chip's "Sign in again": run `harness`'s sign-in on
+    /// `device_id`, the device hosting the chat.
+    SignIn {
+        harness: HarnessId,
+        device_id: String,
     },
 }
 
@@ -6991,6 +6997,31 @@ impl Transcript {
         }
     }
 
+    /// "Sign in again" for Claude's signed-out error, aimed at the device
+    /// hosting the chat (CLI logins are per device).
+    fn sign_in_action(
+        &self,
+        row_id: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let chat_id = self.chat_id.as_deref()?;
+        let chat = self.state.read(cx).chats.iter().find(|c| c.id == chat_id)?;
+        let device_id = chat.device_id.clone();
+        let key = SharedString::from(format!("{row_id}-sign-in"));
+        Some(
+            crate::popover::btn_ghost(theme, "Sign in again", key.clone())
+                .id(key)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(TranscriptEvent::SignIn {
+                        harness: HarnessId::ClaudeCode,
+                        device_id: device_id.clone(),
+                    });
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
@@ -7432,7 +7463,12 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ErrorChip { message } => {
+                let sign_in = signed_out(message)
+                    .then(|| self.sign_in_action(&row.id, &theme, cx))
+                    .flatten();
+                error_chip(message.clone(), sign_in, &theme)
+            }
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
         // Diagram fences this row just requested start rendering after layout.
@@ -8915,16 +8951,24 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
+fn error_chip(message: SharedString, action: Option<AnyElement>, theme: &Theme) -> AnyElement {
     div()
         .py(px(4.0))
         .w_full()
         .child(
             notice_chip(theme, false, "Error", message, Tile)
                 .overflow_hidden()
-                .w_full(),
+                .w_full()
+                .when_some(action, |chip, action| {
+                    chip.child(div().flex().child(action))
+                }),
         )
         .into_any_element()
+}
+
+/// Whether an error chip's message is Claude saying its login is dead.
+fn signed_out(message: &str) -> bool {
+    message == zeron_harness::claude::SIGNED_OUT_ERROR
 }
 
 /// A quiet fork seam. The source gets its own constrained line so long
@@ -12294,6 +12338,24 @@ mod tests {
             unreachable!();
         };
         assert_eq!(tools.len(), 2, "the error didn't split the work group");
+    }
+
+    #[test]
+    fn the_claude_signed_out_error_is_the_one_offering_sign_in() {
+        let chip = |message: &str| {
+            let error = MessagePart::Error {
+                id: "e0".into(),
+                message: message.into(),
+            };
+            let entry = assistant("a1", MessageStatus::Complete, vec![error]);
+            match &rows_for_entry(&entry, false, false, &mut parse)[0].kind {
+                RowKind::ErrorChip { message } => signed_out(message),
+                _ => panic!("an error chip"),
+            }
+        };
+        // The normalizer's text, as persisted and folded onto the chip.
+        assert!(chip(zeron_harness::claude::SIGNED_OUT_ERROR));
+        assert!(!chip("Claude is overloaded right now — try again shortly."));
     }
 
     #[test]

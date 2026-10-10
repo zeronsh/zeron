@@ -582,6 +582,15 @@ impl AccountsPage {
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
 
+    /// Start `harness`'s sign-in on the page's device: a signed-out error
+    /// chip's "Sign in again". Agents with several logins (one per provider)
+    /// leave the pick to the page.
+    pub(crate) fn sign_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        if let [only] = login_options(harness).as_slice() {
+            self.start_login(harness, only.provider, cx);
+        }
+    }
+
     pub(crate) fn set_embedded_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         if self.embedded_harness != Some(harness) {
             self.embedded_harness = Some(harness);

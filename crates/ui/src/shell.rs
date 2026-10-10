@@ -4052,6 +4052,16 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::SignIn { harness, device_id } => {
+                // The agent's Providers details, on the chat's host device.
+                self.open_settings(SettingsSection::Harnesses, cx);
+                let local = self.state.read(cx).local_device_id.as_deref();
+                let target = (local != Some(device_id.as_str())).then(|| device_id.clone());
+                let state = self.state.clone();
+                let page = cx.new(|cx| HarnessesPage::new(state, cx));
+                page.update(cx, |page, cx| page.sign_in(*harness, target, cx));
+                self.harnesses_page = Some(page);
+            }
         }
     }
 
