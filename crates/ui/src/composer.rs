@@ -10856,6 +10856,7 @@ impl Render for Composer {
                 el.child(
                     notice_chip(
                         &theme,
+                        SharedString::from(format!("composer-failure-{}", cx.entity_id())),
                         offline,
                         if offline { "Warning" } else { "Error" },
                         message,
