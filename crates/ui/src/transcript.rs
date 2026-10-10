@@ -6991,6 +6991,20 @@ impl Transcript {
         }
     }
 
+    fn run_live(&self, cx: &gpui::App) -> bool {
+        if self.doc_override.is_some() {
+            return self.doc_live;
+        }
+        self.chat_id.as_deref().is_some_and(|chat_id| {
+            matches!(
+                self.state
+                    .read(cx)
+                    .indicator_for(chat_id, chrono::Utc::now()),
+                crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+            )
+        })
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
@@ -7841,8 +7855,9 @@ impl Transcript {
         // fold — any unresolved chip (a running tool, a live thought) keeps it
         // pulsing until the turn's work settles. Compute this before the
         // collapsed-body skip, which may empty `tools`.
-        let active =
-            collapses && (auto_open || (self.compact_mode && tools.iter().any(|t| !t.resolved)));
+        let active = collapses
+            && (auto_open || (self.compact_mode && tools.iter().any(|t| !t.resolved)))
+            && self.run_live(cx);
         if self.compact_mode && active {
             self.compact_live_entries.insert(row_id.clone());
         }
