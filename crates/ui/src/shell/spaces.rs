@@ -2637,9 +2637,7 @@ impl Shell {
         self.cancel_pinned_session_drag(cx);
         self.sidebar_session_return = None;
         self.pinned_session_drag_generation = self.pinned_session_drag_generation.wrapping_add(1);
-        let top = f32::from(
-            window.mouse_position().y - cursor_offset.y - self.sidebar_scroll.bounds().top(),
-        ) - f32::from(self.sidebar_scroll.offset().y);
+        let lifted = window.mouse_position() - cursor_offset;
         self.sidebar_session_transfer = Some(SidebarSessionTransfer {
             payload: payload.clone(),
             origin: std::rc::Rc::new(std::cell::Cell::new(
@@ -2662,8 +2660,14 @@ impl Shell {
             section_gaps: Default::default(),
             siblings: Default::default(),
             slide: SidebarSessionSlide {
-                from: top,
-                to: top,
+                from: f32::from(lifted.y),
+                to: f32::from(lifted.y),
+                epoch: self.pinned_session_drag_generation << 32,
+                started: std::time::Instant::now(),
+            },
+            slide_x: SidebarSessionSlide {
+                from: f32::from(lifted.x),
+                to: f32::from(lifted.x),
                 epoch: self.pinned_session_drag_generation << 32,
                 started: std::time::Instant::now(),
             },
@@ -2826,49 +2830,100 @@ impl Shell {
         height: f32,
         theme: &Theme,
     ) -> AnyElement {
-        let viewport = self.sidebar_scroll.bounds();
-        let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
+        // Window coordinates: the row is drawn deferred and anchored, above
+        // everything and outside the sidebar's clip, so it can be carried out
+        // of the sidebar (onto a composer, to mention it). Elements live for
+        // one frame, so it is built here, never stashed for another view.
+        let list = self.sidebar_scroll.bounds();
+        let width = (f32::from(list.size.width) - 2.0 * Theme::SPACE_SM).max(0.0);
         let returning = self.sidebar_session_transfer.is_none();
         let transfer = if let Some(transfer) = self.sidebar_session_transfer.as_mut() {
             transfer
         } else {
             &mut self.sidebar_session_return.as_mut().unwrap().transfer
         };
-        let origin = f32::from(transfer.origin.get().y - viewport.top()) + scroll_top;
-        let target = if returning {
-            origin
+        let origin = transfer.origin.get();
+        let (target_x, target_y) = if returning {
+            (f32::from(origin.x), f32::from(origin.y))
         } else {
-            f32::from(transfer.pointer.y - transfer.cursor_offset.y - viewport.top()) + scroll_top
+            let lifted = transfer.pointer - transfer.cursor_offset;
+            // Over the sidebar it keeps its column for reordering; anywhere
+            // else it follows the pointer.
+            let x = if transfer.pointer.x <= list.right() {
+                origin.x
+            } else {
+                lifted.x
+            };
+            (f32::from(x), f32::from(lifted.y))
         };
-        if returning {
-            transfer.slide.retarget(target);
-        } else {
-            transfer.slide.from = target;
-            transfer.slide.to = target;
-            transfer.slide.started = std::time::Instant::now();
+        for (slide, target) in [
+            (&mut transfer.slide, target_y),
+            (&mut transfer.slide_x, target_x),
+        ] {
+            if returning {
+                slide.retarget(target);
+            } else {
+                slide.from = target;
+                slide.to = target;
+                slide.started = std::time::Instant::now();
+            }
         }
-        let from = transfer.slide.from;
-        let to = transfer.slide.to;
-        let epoch = transfer.slide.epoch;
+        let (from, to) = (transfer.slide.from, transfer.slide.to);
+        let (from_x, to_x) = (transfer.slide_x.from, transfer.slide_x.to);
+        let epoch = transfer.slide.epoch ^ transfer.slide_x.epoch.rotate_left(16);
+        // Lifted, the row is frosted glass a level above the sidebar (the
+        // queue's dragged row): what slides beneath reads as blurred, not
+        // through its text. Returning to its slot it settles back unlifted.
+        let row = if returning {
+            row
+        } else {
+            crate::frost::frosted(
+                8.0,
+                crate::frost::MENU_BLUR,
+                div()
+                    .size_full()
+                    .rounded(px(8.0))
+                    .bg(crate::popover::surface_bg(theme))
+                    .shadow_md()
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded(px(8.0))
+                            .bg(crate::theme::wash(0.06))
+                            .child(row),
+                    ),
+            )
+            .into_any_element()
+        };
         let frame = div()
-            .absolute()
-            .left(px(Theme::SPACE_SM))
-            .right(px(Theme::SPACE_SM))
+            .debug_selector(|| "sidebar-lifted-session".into())
+            .relative()
+            .w(px(width))
             .h(px(height))
             .rounded(px(8.0))
-            .when(!returning, |el| el.bg(theme.surface_raised).shadow_md())
             .child(row);
-        if self.reduced_motion {
-            frame.top(px(to)).into_any_element()
+        // Anchored at the destination; a slide home eases its offset to zero.
+        let frame = if self.reduced_motion {
+            frame.into_any_element()
         } else {
             frame
                 .with_animation(
                     ("sidebar-session-slide", epoch),
                     TAB_SLIDE.animation(),
-                    move |el, t| el.top(px(motion::lerp(from, to, t))),
+                    move |el, t| {
+                        el.left(px(motion::lerp(from_x - to_x, 0.0, t)))
+                            .top(px(motion::lerp(from - to, 0.0, t)))
+                    },
                 )
                 .into_any_element()
-        }
+        };
+        gpui::deferred(
+            gpui::anchored()
+                .position(gpui::point(px(to_x), px(to)))
+                .child(frame),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     pub(super) fn finish_sidebar_session_transfer(

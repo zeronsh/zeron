@@ -359,6 +359,7 @@ impl Shell {
             )
             .child(div().flex_none().child(composer))
             .child(Self::attachment_drop_overlay(Theme::of(cx)))
+            .child(Self::mention_drop_overlay(Theme::of(cx)))
             .into_any_element()
     }
 }

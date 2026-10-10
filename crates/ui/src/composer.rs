@@ -1247,6 +1247,17 @@ impl TextProjection {
                 }),
         );
         links.extend(
+            zeron_proto::chat_mentions::chat_mention_links(raw)
+                .into_iter()
+                .map(|link| FileMentionLink {
+                    range: link.range,
+                    basename: link.title,
+                    path: link.chat_id,
+                    kind: ChipKind::Chat,
+                    attachment: None,
+                }),
+        );
+        links.extend(
             zeron_proto::attachment_mentions::attachment_mentions(raw)
                 .into_iter()
                 .map(|mention| FileMentionLink {
@@ -1420,7 +1431,8 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
                         .iter()
                         .filter(|other| other.path != link.path)
                         .collect();
-                    if duplicates.is_empty() {
+                    // A chat's "path" is its id: always show its title.
+                    if duplicates.is_empty() || link.kind == ChipKind::Chat {
                         return link.basename.clone();
                     }
                     let parts: Vec<_> = link.path.split('/').collect();
@@ -1474,6 +1486,7 @@ fn has_mention_scheme(raw: &str) -> bool {
         || raw.contains(zeron_proto::invocation::INVOCATION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
+        || raw.contains(zeron_proto::chat_mentions::CHAT_MENTION_SCHEME)
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -6677,6 +6690,30 @@ impl Composer {
         let inserted = self.input.update(cx, |input, cx| {
             input.insert_dropped_mention(path, is_directory, cx)
         });
+        if inserted {
+            self.reset_mention(None, cx);
+            self.reset_slash(None, cx);
+            let focus = self.input.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Mention another chat at the caret: a chip the agent receives as a
+    /// reference it can read (dragged in from the sidebar).
+    pub(crate) fn add_chat_mention(
+        &mut self,
+        chat_id: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(link) = zeron_proto::chat_mentions::chat_mention_link(chat_id, title) else {
+            return;
+        };
+        let inserted = self
+            .input
+            .update(cx, |input, cx| input.insert_reference(&link, cx));
         if inserted {
             self.reset_mention(None, cx);
             self.reset_slash(None, cx);
@@ -15078,6 +15115,26 @@ mod tests {
 
     /// Ordinary prompts must stay on the zero-cost path, including ones that
     /// merely *talk about* the scheme without containing a valid mention.
+    #[test]
+    fn chat_mentions_show_as_chat_chips_with_their_title() {
+        let link =
+            zeron_proto::chat_mentions::chat_mention_link("0fd51606", "Brief Hello").unwrap();
+        let raw = format!("compare {link} and {link}");
+        let (display, spans) = sent_mention_display(&raw).expect("chat chips");
+        assert_eq!(spans.len(), 2);
+        for span in &spans {
+            assert_eq!(span.kind, ChipKind::Chat);
+            assert_eq!(span.path.as_ref(), "0fd51606");
+            assert!(display[span.range.clone()].contains("Brief\u{00A0}Hello"));
+        }
+        // Two chats with one title keep their titles, never their ids.
+        let other =
+            zeron_proto::chat_mentions::chat_mention_link("a2c4", "Brief Hello").unwrap();
+        let (display, spans) = sent_mention_display(&format!("{link} {other}")).unwrap();
+        assert!(spans.iter().all(|span| display[span.range.clone()].contains("Brief")));
+        assert!(!display.contains("a2c4"));
+    }
+
     #[test]
     fn sent_mention_display_leaves_plain_prompts_untouched() {
         assert_eq!(sent_mention_display("fix the composer"), None);

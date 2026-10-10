@@ -1120,7 +1120,9 @@ struct SidebarSessionTransfer {
     cursor_offset: Point<Pixels>,
     pointer: Point<Pixels>,
     viewport: Option<gpui::Bounds<Pixels>>,
+    /// The lifted row's window position: `slide` its top, `slide_x` its left.
     slide: SidebarSessionSlide,
+    slide_x: SidebarSessionSlide,
     preview: Option<SidebarSessionGap>,
     source_group: String,
     source_index: usize,
@@ -10929,6 +10931,7 @@ impl Shell {
                     .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
             .child(Self::attachment_drop_overlay(theme))
+            .child(Self::mention_drop_overlay(theme))
             .into_any_element()
     }
 
@@ -18086,6 +18089,81 @@ mod settings_modal_regressions {
                 );
             })
             .unwrap();
+    }
+
+    /// The full shell draws its sidebar as a cached view after its own
+    /// render, so the lifted row must be built and drawn within one frame.
+    /// Carried out of the sidebar it follows the pointer, and dropped on a
+    /// conversation it becomes a chat chip in that composer.
+    #[gpui::test]
+    fn a_dragged_session_leaves_the_sidebar_and_drops_as_a_chat_mention(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.reduced_motion = true;
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = ["older", "newer"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, id)| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "title": format!("Chat {id}"), "deviceId": "local",
+                            "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state.selected_chat = Some("newer".into());
+            });
+            shell.active_chat = "newer".into();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx.debug_bounds("chat-older").expect("sidebar row");
+        let from = row.center();
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        // Several frames of dragging, inside the sidebar and then out of it.
+        for step in 1..=6 {
+            let x = from.x + px(4.0 + 120.0 * step as f32);
+            cx.simulate_mouse_move(
+                gpui::point(x, from.y + px(40.0)),
+                Some(MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            cx.update(|window, cx| window.draw(cx).clear());
+        }
+        // The sidebar is a cached view, whose contents tests can't query by
+        // selector; the lifted row's own window position is the check.
+        let sidebar_width = shell.read_with(cx, |shell, _| shell.settings.sidebar_width);
+        shell.read_with(cx, |shell, _| {
+            let transfer = shell.sidebar_session_transfer.as_ref().expect("still dragging");
+            let left = transfer.slide_x.to;
+            let expected = f32::from(transfer.pointer.x - transfer.cursor_offset.x);
+            assert!(left > sidebar_width, "outside the sidebar the row follows the pointer");
+            assert!((left - expected).abs() < 0.5);
+        });
+        let drop = gpui::point(from.x + px(724.0), from.y + px(40.0));
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, cx| {
+            let text = shell.composer.read(cx).input.read(cx).text().to_owned();
+            assert!(
+                text.contains("[Chat older](zeron-chat:older)"),
+                "the drop mentions the chat: {text:?}"
+            );
+            assert!(shell.sidebar_session_transfer.is_none());
+        });
     }
 
     #[gpui::test]

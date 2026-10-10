@@ -30,6 +30,8 @@ pub enum ChipKind {
     Command,
     File,
     Directory,
+    /// Another chat, dropped from the sidebar.
+    Chat,
 }
 
 /// What a chip's icon is painted from: a monochrome glyph tinted like the
@@ -170,6 +172,7 @@ pub(crate) fn chip_icon(
         ChipKind::Image => ChipIcon::Glyph(crate::icons::GALLERY),
         ChipKind::Skill => ChipIcon::Glyph(crate::icons::MAGIC_STICK_3),
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
+        ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),
