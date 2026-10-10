@@ -1,4 +1,3 @@
-import AudioToolbox
 import UIKit
 
 /// The app-wide voice orchestrator call. Audio runs on this phone; Codex, its
@@ -16,6 +15,7 @@ final class RemoteVoiceController {
     private weak var app: AppModel?
     private var call: VoiceCall?
     private var media: NativeVoiceMedia?
+    private var tones: CallTones?
     private var generation: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
     private var proximity: NSObjectProtocol?
@@ -97,6 +97,12 @@ final class RemoteVoiceController {
         generation &+= 1
         state = nil; endReason = nil; muted = false; activeSince = nil
         hostName = device.name
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        // The call sounds as it is placed, well before the microphone opens
+        // and before the call asks for the audio session the tone brings up.
+        let tones = CallTones()
+        self.tones = tones
+        tones.start()
         let media = NativeVoiceMedia()
         self.media = media
         let generation = self.generation
@@ -110,9 +116,6 @@ final class RemoteVoiceController {
         media.call = call
         // A call keeps the screen awake, like the phone app.
         UIApplication.shared.isIdleTimerDisabled = true
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        // The call sounds as it is placed, well before the microphone opens.
-        CallSound.start.play()
         changed()
         return true
     }
@@ -150,9 +153,10 @@ final class RemoteVoiceController {
         let sounds = call != nil && (activeSince != nil || reason == nil)
         media?.close()
         call?.stop()
-        // After close: the call's audio session no longer ducks it.
-        if sounds { CallSound.end.play() }
-        call = nil; media = nil; state = nil; activeSince = nil
+        // After close: the call's audio no longer ducks the tone. Before the
+        // proximity sensor goes off: at the ear it plays in the earpiece.
+        tones?.end(sounds: sounds, nearEar: UIDevice.current.proximityState)
+        call = nil; media = nil; tones = nil; state = nil; activeSince = nil
         endReason = reason
         setProximityMonitoring(false)
         UIApplication.shared.isIdleTimerDisabled = false
@@ -295,24 +299,6 @@ final class RemoteVoiceController {
         let cancel: () -> Void
         init(cancel: @escaping () -> Void) { self.cancel = cancel }
         deinit { cancel() }
-    }
-}
-
-/// The call's two sounds, as system sounds: they play beside the call's own
-/// audio session and follow the ringer switch, like the phone's.
-@MainActor
-private enum CallSound: String {
-    case start = "voice-start"
-    case end = "voice-end"
-
-    private static var loaded: [CallSound: SystemSoundID] = [:]
-
-    func play() {
-        if Self.loaded[self] == nil, let url = Bundle.main.url(forResource: rawValue, withExtension: "wav") {
-            var id: SystemSoundID = 0
-            if AudioServicesCreateSystemSoundID(url as CFURL, &id) == kAudioServicesNoError { Self.loaded[self] = id }
-        }
-        if let id = Self.loaded[self] { AudioServicesPlaySystemSound(id) }
     }
 }
 
