@@ -19,7 +19,7 @@
 //!   throwaway `XDG_DATA_HOME`: Devin's own PKCE loopback, whose
 //!   `redirect_uri` port is reported for remote tunnelling. The identity is
 //!   learned from the usage probe and written back into the slot.
-//! - **OpenCode** — `$XDG_DATA_HOME/opencode/auth.json` (default
+//! - **OpenCode 1.x** — `$XDG_DATA_HOME/opencode/auth.json` (default
 //!   `~/.local/share/opencode/`): one entry PER model provider (`{type:
 //!   "oauth", access, refresh, expires, accountId?}` or `{type: "api",
 //!   key}`), re-read on every request. zeron manages the OAuth entries of
@@ -27,6 +27,10 @@
 //!   and leaves every other provider byte-for-byte. OpenCode has no lock of
 //!   its own. API-key entries aren't accounts and are left alone.
 //!   Anthropic OAuth was removed from OpenCode upstream and is not offered.
+//!   **2.x** uses `opencode.db` instead: `opencode_store` translates the
+//!   native OAuth shape and switches IDs in guarded SQLite transactions,
+//!   after the selected CLI initializes/migrates its own database. Existing
+//!   native IDs preserve refreshed tokens and other saved native logins.
 //! - **Pi** — `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent`,
 //!   0600, guarded by proper-lockfile's `auth.json.lock` DIRECTORY): the
 //!   same per-provider shape (`openai-codex`, `anthropic`, `github-copilot`),
@@ -105,7 +109,7 @@ pub(super) fn default_devin_credentials_file() -> PathBuf {
 }
 
 pub(super) fn default_opencode_auth_file() -> PathBuf {
-    xdg_data_home().join("opencode").join("auth.json")
+    zeron_harness::opencode::paths::Paths::detect().auth_file()
 }
 
 pub(super) fn default_pi_agent_dir() -> PathBuf {
@@ -176,8 +180,9 @@ pub(super) fn unsupported_login(harness: HarnessId, provider: &str) -> EngineErr
 
 /// OpenCode ignores `auth.json` while `OPENCODE_AUTH_CONTENT` is set.
 pub(super) fn opencode_env_warning() -> Option<String> {
-    std::env::var_os("OPENCODE_AUTH_CONTENT")
-        .filter(|v| !v.is_empty())
+    std::env::var("OPENCODE_AUTH_CONTENT")
+        .ok()
+        .filter(|raw| serde_json::from_str::<serde_json::Value>(raw).is_ok())
         .map(|_| {
             "OPENCODE_AUTH_CONTENT is set, so OpenCode reads its logins from that variable — \
              switching accounts here won't change what it uses."
@@ -351,7 +356,7 @@ pub(super) fn upstream_of(harness: HarnessId, store_key: &str) -> Option<Upstrea
 }
 
 /// An OAuth entry zeron can use: `type: "oauth"` with an access token.
-fn oauth_entry(entry: &serde_json::Value) -> bool {
+pub(super) fn oauth_entry(entry: &serde_json::Value) -> bool {
     entry.get("type").and_then(|v| v.as_str()) == Some("oauth")
         && str_field(entry, "access").is_some()
 }
@@ -831,12 +836,61 @@ impl AgentAccounts {
     }
 
     /// The live entry under `store_key`, if it's an OAuth login.
-    pub(super) fn live_keyed_entry(
+    pub(super) async fn keyed_entries(
+        &self,
+        harness: HarnessId,
+    ) -> Result<serde_json::Value, EngineError> {
+        if harness == HarnessId::Opencode {
+            let sqlite = self.opencode_sqlite(false).await?;
+            if sqlite {
+                let file = self.keyed_file(harness);
+                return tokio::task::spawn_blocking(move || opencode_store::read(&file))
+                    .await
+                    .map_err(|e| {
+                        EngineError::Other(format!("OpenCode credential read task: {e}"))
+                    })?;
+            }
+        }
+        let file = self.keyed_file(harness);
+        match read_json(&file) {
+            Some(value) => Ok(value),
+            None if !file.exists() => Ok(serde_json::json!({})),
+            None => Err(EngineError::Other(format!(
+                "{} exists but could not be parsed",
+                file.display()
+            ))),
+        }
+    }
+
+    pub(super) async fn opencode_sqlite(&self, initialize: bool) -> Result<bool, EngineError> {
+        if self.inner.config.opencode_native_store {
+            match zeron_harness::OpencodeHarness::new()
+                .credential_storage(initialize)
+                .await
+            {
+                Ok(storage) => {
+                    return Ok(storage == zeron_harness::opencode::CredentialStorage::Sqlite);
+                }
+                // Installed credentials can still be listed while the CLI is
+                // uninstalled. Writes require a validated, initialized CLI.
+                Err(zeron_harness::HarnessError::NotInstalled(_)) if !initialize => {}
+                Err(error) => return Err(EngineError::Other(error.to_string())),
+            }
+        }
+        let file = self.inner.config.opencode_auth_file.clone();
+        tokio::task::spawn_blocking(move || opencode_store::has_credentials(&file))
+            .await
+            .map_err(|e| EngineError::Other(format!("OpenCode credential format task: {e}")))?
+    }
+
+    pub(super) async fn live_keyed_entry(
         &self,
         harness: HarnessId,
         store_key: &str,
     ) -> Option<serde_json::Value> {
-        read_json(&self.keyed_file(harness))?
+        self.keyed_entries(harness)
+            .await
+            .ok()?
             .get(store_key)
             .filter(|entry| oauth_entry(entry))
             .cloned()
@@ -847,29 +901,69 @@ impl AgentAccounts {
     /// proper-lockfile lock. OpenCode takes no lock of its own, so zeron
     /// serialises its writers on a sidecar lock and relies on
     /// compare-before-write against OpenCode itself.
-    pub(super) fn write_keyed_entry(
+    pub(super) async fn write_keyed_entry(
         &self,
         harness: HarnessId,
         store_key: &str,
         entry: Option<&serde_json::Value>,
     ) -> Result<(), EngineError> {
+        self.write_keyed_entry_checked(harness, store_key, entry, None)
+            .await
+    }
+
+    pub(super) async fn write_keyed_entry_checked(
+        &self,
+        harness: HarnessId,
+        store_key: &str,
+        entry: Option<&serde_json::Value>,
+        expected_id: Option<&str>,
+    ) -> Result<(), EngineError> {
         let file = self.keyed_file(harness);
+        let sqlite = harness == HarnessId::Opencode && self.opencode_sqlite(true).await?;
+        if harness == HarnessId::Opencode
+            && !sqlite
+            && let Some(warning) = opencode_env_warning()
+        {
+            return Err(EngineError::Other(format!(
+                "{warning} Unset OPENCODE_AUTH_CONTENT before switching or connecting an account here"
+            )));
+        }
+        if sqlite {
+            let key = store_key.to_owned();
+            if entry.is_none() && expected_id.is_none() {
+                return Err(EngineError::Other(
+                    "OpenCode live login changed before removal; refresh and retry".into(),
+                ));
+            }
+            let entry = entry.cloned();
+            let expected = expected_id.map(str::to_owned);
+            return tokio::task::spawn_blocking(move || {
+                opencode_store::write_checked(&file, &key, entry.as_ref(), expected.as_deref())
+            })
+            .await
+            .map_err(|e| EngineError::Other(format!("OpenCode credential write task: {e}")))?;
+        }
         let lock = match harness {
             HarnessId::Pi => StoreLock::Dir(lock_path(&file)),
             _ => StoreLock::File(file.with_file_name("auth.json.zeron-lock")),
         };
-        merge_json_entry(&file, store_key, entry, lock)
+        let key = store_key.to_owned();
+        let entry = entry.cloned();
+        tokio::task::spawn_blocking(move || merge_json_entry(&file, &key, entry.as_ref(), lock))
+            .await
+            .map_err(|e| EngineError::Other(format!("Credential write task: {e}")))?
     }
 
     /// The live per-provider logins of OpenCode / Pi: `(identified,
     /// unidentified)`. An unidentified login (an opaque token whose profile
     /// call failed) is still listed, active and unswitchable.
-    pub(super) async fn detect_keyed(&self, harness: HarnessId) -> (Vec<Detected>, Vec<Detected>) {
+    pub(super) async fn detect_keyed(
+        &self,
+        harness: HarnessId,
+    ) -> Result<(Vec<Detected>, Vec<Detected>), EngineError> {
         let mut resolved = Vec::new();
         let mut unidentified = Vec::new();
-        let Some(store) = read_json(&self.keyed_file(harness)) else {
-            return (resolved, unidentified);
-        };
+        let store = self.keyed_entries(harness).await?;
         for &(store_key, upstream) in keyed_accounts(harness) {
             let Some(entry) = store.get(store_key).filter(|e| oauth_entry(e)) else {
                 continue;
@@ -882,7 +976,7 @@ impl AgentAccounts {
                 None => unidentified.push(unresolved(store_key, upstream)),
             }
         }
-        (resolved, unidentified)
+        Ok((resolved, unidentified))
     }
 
     /// The live login under ONE store key: `Some(None)` when an OAuth entry
@@ -893,7 +987,7 @@ impl AgentAccounts {
         store_key: &str,
     ) -> Option<Option<Detected>> {
         let upstream = upstream_of(harness, store_key)?;
-        let entry = self.live_keyed_entry(harness, store_key)?;
+        let entry = self.live_keyed_entry(harness, store_key).await?;
         Some(
             self.identify_entry(harness, store_key, upstream, &entry)
                 .await,

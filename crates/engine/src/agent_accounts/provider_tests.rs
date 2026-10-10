@@ -746,9 +746,144 @@ async fn opencode_swaps_one_provider_entry_and_leaves_the_rest() {
             "openai",
             Some(&openai_entry("a@example.com", "acct-a")),
         )
+        .await
         .unwrap_err();
     assert!(err.to_string().contains("could not be parsed"), "{err}");
     assert_eq!(std::fs::read_to_string(file).unwrap(), "{ not json");
+}
+
+#[tokio::test]
+async fn opencode_v2_accounts_use_sqlite_and_preserve_native_refreshes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let file = &config.opencode_auth_file;
+    let db = super::opencode_store::tests::fixture(file);
+    // A stale legacy file must not be adopted after v2's one-time migration.
+    write(
+        file,
+        &serde_json::json!({"openai":openai_entry("stale@example.com","stale")}).to_string(),
+    );
+    let legacy_before = std::fs::read(file).unwrap();
+    super::opencode_store::write(
+        file,
+        "openai",
+        Some(&openai_entry("a@example.com", "acct-a")),
+    )
+    .unwrap();
+    let a_id = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode)[0]
+        .id
+        .clone();
+    let a_native =
+        super::opencode_store::read(file).unwrap()["openai"]["_opencodeCredential"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    super::opencode_store::write(
+        file,
+        "openai",
+        Some(&openai_entry("b@example.com", "acct-b")),
+    )
+    .unwrap();
+    let listed = accounts.list(false).await.unwrap();
+    assert_eq!(rows(&listed, HarnessId::Opencode).len(), 2);
+    db.execute(
+        "UPDATE credential SET value=json_set(value,'$.refresh','native-rotated') WHERE id=?1",
+        [a_native],
+    )
+    .unwrap();
+    accounts.activate(HarnessId::Opencode, &a_id).await.unwrap();
+    let live = super::opencode_store::read(file).unwrap();
+    assert_eq!(live["openai"]["accountId"], "acct-a");
+    assert_eq!(live["openai"]["refresh"], "native-rotated");
+    assert_eq!(std::fs::read(file).unwrap(), legacy_before);
+    let refreshed = accounts.list(false).await.unwrap();
+    assert!(
+        rows(&refreshed, HarnessId::Opencode)
+            .iter()
+            .find(|row| row.id == a_id)
+            .unwrap()
+            .active
+    );
+    accounts.forget(HarnessId::Opencode, &a_id).await.unwrap();
+    assert_eq!(
+        super::opencode_store::read(file).unwrap()["openai"]["accountId"],
+        "acct-b"
+    );
+}
+
+/// Optional compatibility check against an actual downloaded OpenCode 2.x CLI.
+/// Run with ZERON_OPENCODE_TEST_EXE and --ignored. The parent gives the child
+/// private roots; no user's login, provider request or paid turn is used.
+#[test]
+#[ignore = "requires ZERON_OPENCODE_TEST_EXE pointing to an OpenCode 2.x binary"]
+fn opencode_v2_real_cli_reads_connected_account() {
+    const NAME: &str =
+        "agent_accounts::provider_tests::opencode_v2_real_cli_reads_connected_account";
+    if let Some(root) = std::env::var_os("ZERON_OPENCODE_TEST_ROOT") {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = PathBuf::from(root);
+            let mut config = AgentAccountsConfig::isolated(&root);
+            config.opencode_auth_file = zeron_harness::opencode::paths::Paths::detect().auth_file();
+            config.opencode_native_store = true;
+            let accounts = AgentAccounts::new(config.clone());
+            let mut entry = openai_entry("fixture@example.com","fixture-account");
+            entry["expires"] = serde_json::json!(now_ms()+86_400_000);
+            accounts.write_keyed_entry(HarnessId::Opencode,"openai",Some(&entry)).await.unwrap();
+            assert!(!config.opencode_auth_file.exists(),"fresh v2 must not write legacy auth.json");
+            assert_eq!(super::opencode_store::read(&config.opencode_auth_file).unwrap()["openai"]["accountId"],"fixture-account");
+            use zeron_harness::Harness;
+            let models = zeron_harness::OpencodeHarness::new().models().await.unwrap();
+            assert!(models.iter().any(|model|model.id.starts_with("openai/")),"native v2 did not load the inserted credential");
+            let snapshot = accounts.list(false).await.unwrap();
+            assert!(rows(&snapshot,HarnessId::Opencode)[0].active);
+        });
+        return;
+    }
+    let exe = std::env::var_os("ZERON_OPENCODE_TEST_EXE").expect("set ZERON_OPENCODE_TEST_EXE");
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("OpenCode O'Brien 日本語 &! isolated");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    // Strip inherited OpenCode/provider configuration before assigning private
+    // roots, including credential-bearing config/inline auth overrides.
+    for (key, _) in std::env::vars_os() {
+        if [
+            "OPENCODE_",
+            "XDG_",
+            "OPENAI_",
+            "ANTHROPIC_",
+            "GOOGLE_",
+            "GEMINI_",
+            "GITHUB_",
+            "COPILOT_",
+            "AWS_",
+            "AZURE_",
+        ]
+        .iter()
+        .any(|prefix| key.to_string_lossy().starts_with(prefix))
+        {
+            command.env_remove(key);
+        }
+    }
+    command
+        .args(["--exact", NAME, "--ignored", "--nocapture"])
+        .env("ZERON_OPENCODE_TEST_ROOT", &root)
+        .env("OPENCODE_EXECUTABLE", exe)
+        .env("HOME", &root)
+        .env("USERPROFILE", &root)
+        .env("XDG_DATA_HOME", root.join("native-data"))
+        .env("XDG_CONFIG_HOME", root.join("native-config"))
+        .env("XDG_CACHE_HOME", root.join("native-cache"))
+        .env("XDG_STATE_HOME", root.join("native-state"))
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
+        .env("ZERON_OPENCODE_STARTUP_TIMEOUT_SECS", "30");
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -780,11 +915,13 @@ async fn pi_swaps_under_its_lockfile_and_groups_rows_per_provider() {
     // A lock held by pi makes the swap wait, then give up — never write
     // underneath it.
     std::fs::create_dir(config.pi_agent_dir.join("auth.json.lock")).unwrap();
-    let blocked = accounts.write_keyed_entry(
-        HarnessId::Pi,
-        "openai-codex",
-        Some(&openai_entry("b@example.com", "acct-b")),
-    );
+    let blocked = accounts
+        .write_keyed_entry(
+            HarnessId::Pi,
+            "openai-codex",
+            Some(&openai_entry("b@example.com", "acct-b")),
+        )
+        .await;
     assert!(blocked.unwrap_err().to_string().contains("locked"));
     let written: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();

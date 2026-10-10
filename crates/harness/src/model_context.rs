@@ -25,13 +25,12 @@ pub(crate) fn context(
         }
         HarnessId::Cursor => vec![home.join(".cursor/sdk/auth.json")],
         HarnessId::Opencode => {
-            let data = root("XDG_DATA_HOME", home.join(".local/share"));
-            let config = root("XDG_CONFIG_HOME", home.join(".config"));
-            let cwd = std::env::current_dir()?;
+            let paths = crate::opencode::paths::Paths::detect();
+            let cwd = &paths.home;
             let mut files = vec![
-                data.join("opencode/auth.json"),
-                config.join("opencode/opencode.json"),
-                config.join("opencode/opencode.jsonc"),
+                paths.auth_file(),
+                paths.config.join("opencode.json"),
+                paths.config.join("opencode.jsonc"),
             ];
             for dir in cwd.ancestors() {
                 for name in [
@@ -96,6 +95,12 @@ pub(crate) fn context(
         );
     }
     hash_files(&mut hash, files.iter().chain(extra))?;
+    if id == HarnessId::Opencode {
+        // Read through SQLite so uncheckpointed WAL credentials count too.
+        // Hash only credentials: new chat rows must not invalidate the picker.
+        let db = crate::opencode::paths::Paths::detect().database();
+        hash_opencode_credentials(&mut hash, &db)?;
+    }
     let prefixes: &[&str] = match id {
         HarnessId::Codex => &["CODEX_", "OPENAI_"],
         HarnessId::ClaudeCode => &["CLAUDE_", "ANTHROPIC_", "AWS_"],
@@ -131,6 +136,58 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update((bytes.len() as u64).to_le_bytes());
     hash.update(bytes);
 }
+
+fn hash_opencode_credentials(hash: &mut Sha256, path: &Path) -> Result<(), HarnessError> {
+    field(hash, path.as_os_str().as_encoded_bytes());
+    if !path.exists() {
+        field(hash, b"missing");
+        return Ok(());
+    }
+    let error = |error: rusqlite::Error| {
+        HarnessError::Protocol(format!("OpenCode credential fingerprint: {error}"))
+    };
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(error)?;
+    db.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(error)?;
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !exists {
+        field(hash, b"legacy");
+        return Ok(());
+    }
+    let mut query = db
+        .prepare("SELECT id,integration_id,value,active FROM credential ORDER BY id")
+        .map_err(error)?;
+    let rows = query
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .map_err(error)?;
+    for row in rows {
+        let (id, provider, value, active) = row.map_err(error)?;
+        for bytes in [
+            id.as_bytes(),
+            provider.as_deref().unwrap_or("").as_bytes(),
+            value.as_bytes(),
+        ] {
+            field(hash, bytes);
+        }
+        field(hash, format!("{active:?}").as_bytes());
+    }
+    Ok(())
+}
 fn hash_files<'a>(
     hash: &mut Sha256,
     files: impl Iterator<Item = &'a PathBuf>,
@@ -161,6 +218,26 @@ impl ModelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sqlite_credentials_in_wal_invalidate_but_chat_rows_do_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("opencode.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE credential(id TEXT, integration_id TEXT, value TEXT, active INTEGER); CREATE TABLE chat(id INTEGER); INSERT INTO credential VALUES('cred','openai','secret-one',1);").unwrap();
+        let fingerprint = || {
+            let mut hash = Sha256::new();
+            hash_opencode_credentials(&mut hash, &path).unwrap();
+            format!("{:x}", hash.finalize())
+        };
+        let first = fingerprint();
+        db.execute("UPDATE credential SET value='secret-two'", [])
+            .unwrap();
+        let changed = fingerprint();
+        assert_ne!(first, changed);
+        db.execute("INSERT INTO chat VALUES(1)", []).unwrap();
+        assert_eq!(fingerprint(), changed);
+        assert!(!changed.contains("secret"));
+    }
     #[test]
     fn content_changes_and_missing_files_invalidate_without_exposing_secrets() {
         let dir = tempfile::tempdir().unwrap();
