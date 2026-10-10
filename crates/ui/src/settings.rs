@@ -813,6 +813,7 @@ pub struct UiSettings {
     /// follows the system default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dictation_input: Option<String>,
+    pub dictation_accelerated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
@@ -1012,6 +1013,7 @@ impl Default for UiSettings {
         Self {
             dictation_enabled: false,
             dictation_input: None,
+            dictation_accelerated: false,
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
@@ -1658,6 +1660,7 @@ impl UiSettings {
         merge!(
             dictation_enabled,
             dictation_input,
+            dictation_accelerated,
             window_geometry,
             composer_send_behavior,
             skills_in_slash_menu,
@@ -2686,6 +2689,7 @@ mod tests {
         let settings = UiSettings {
             dictation_enabled: false,
             dictation_input: Some("coreaudio:usb-mic".into()),
+            dictation_accelerated: true,
             window_geometry: None,
             codex_voice: Some("ember".into()),
             codex_voice_device: Some("fedora".into()),

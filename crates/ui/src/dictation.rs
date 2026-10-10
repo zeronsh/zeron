@@ -70,6 +70,7 @@ struct Native {
     origin_window: usize,
     dir: std::path::PathBuf,
     device: Option<String>,
+    accelerated: bool,
     session: Option<zeron_voice::Session>,
     finished: bool,
 }
@@ -98,7 +99,11 @@ impl Transcriber for Native {
                     self.finished = true;
                     return Some(Event::Cancelled);
                 }
-                _ => match zeron_voice::Session::start(self.dir.clone(), self.device.clone()) {
+                _ => match zeron_voice::Session::start(
+                    self.dir.clone(),
+                    self.device.clone(),
+                    self.accelerated,
+                ) {
                     Ok(s) => self.session = Some(s),
                     Err(e) => {
                         self.finished = true;
@@ -110,6 +115,7 @@ impl Transcriber for Native {
         self.session.as_mut()?.poll().map(|event| match event {
             zeron_voice::Event::Listening => Event::Listening,
             zeron_voice::Event::Finalizing => Event::Finalizing,
+            zeron_voice::Event::Partial(t) => Event::Partial(t),
             zeron_voice::Event::Final(t) => Event::Final(t),
             zeron_voice::Event::Failed(e) => Event::Failed(e),
         })
@@ -142,6 +148,7 @@ pub(crate) fn start(cx: &gpui::App) -> Option<Box<dyn Transcriber>> {
         origin_window,
         dir: model::directory(cx),
         device: crate::settings::current(cx).dictation_input.clone(),
+        accelerated: crate::settings::current(cx).dictation_accelerated,
         session: None,
         finished: false,
     }))
@@ -275,6 +282,10 @@ impl Dictation {
         self.phase = phase;
         send
     }
+
+    pub fn preview(&self) -> Option<Range<usize>> {
+        (self.phase.active() && self.has_partial).then(|| self.range.clone())
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +299,7 @@ mod tests {
             origin_window: 0,
             dir: std::path::PathBuf::new(),
             device: None,
+            accelerated: false,
             session: None,
             finished: false,
         };

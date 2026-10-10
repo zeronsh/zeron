@@ -11,18 +11,46 @@ const WAIT: Duration = Duration::from_secs(5);
 struct FakeCapture {
     closed: SyncSender<()>,
     ended: Arc<AtomicBool>,
+    audio: Arc<Audio>,
 }
 impl Recording for FakeCapture {
+    fn live(&self) -> (Arc<Audio>, u32) {
+        (self.audio.clone(), 16_000)
+    }
     fn ended(&self) -> bool {
         self.ended.load(Ordering::Acquire)
     }
-    fn finish(self) -> Result<(Vec<f32>, u32)> {
-        Ok((vec![0.25; 3200], 16_000))
+    fn finish(self) -> Result<()> {
+        Ok(())
     }
 }
 impl Drop for FakeCapture {
     fn drop(&mut self) {
         self.closed.try_send(()).unwrap();
+    }
+}
+
+fn retained() -> Arc<Audio> {
+    let audio = Arc::new(Audio::with_capacity(3200));
+    append(&[0.25_f32; 3200], 1, &audio);
+    audio
+}
+
+fn job(
+    stop: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
+    events: SyncSender<Event>,
+) -> Job {
+    Job {
+        dir: Default::default(),
+        stop,
+        cancel,
+        level,
+        device: None,
+        accelerated: false,
+        events,
+        partial: Default::default(),
     }
 }
 
@@ -46,20 +74,15 @@ impl Fixture {
         let stop = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
-        let job = Job {
-            dir: Default::default(),
-            stop: stop.clone(),
-            cancel: cancel.clone(),
-            level: level.clone(),
-            device: None,
-            events: events_tx,
-        };
+        let job = job(stop.clone(), cancel.clone(), level.clone(), events_tx);
+        let partial = job.partial.clone();
         let (load, ready) = mpsc::sync_channel::<Result<()>>(1);
         let (loading, started) = mpsc::sync_channel(1);
         let (closed_tx, closed) = mpsc::sync_channel(1);
         let (result_tx, result) = mpsc::sync_channel(1);
         let ended = Arc::new(AtomicBool::new(false));
         let end_capture = ended.clone();
+        let audio = retained();
         let worker = std::thread::spawn(move || {
             let _admission = admission;
             let outcome = run_job(
@@ -72,16 +95,19 @@ impl Fixture {
                     Ok(FakeCapture {
                         closed: closed_tx,
                         ended: end_capture,
+                        audio,
                     })
                 },
                 || {
                     loading.send(()).unwrap();
                     ready.recv_timeout(WAIT).unwrap()?;
-                    Ok(|samples, rate| {
+                    Ok(|window: &[f32]| {
                         // Stop during load must retain the exact recording.
-                        assert_eq!(samples, vec![0.25; 3200]);
-                        assert_eq!(rate, 16_000);
-                        Ok("retained speech".into())
+                        assert_eq!(window, &[0.25; 3200][..]);
+                        Ok(TranscriptionResult {
+                            text: "retained speech".into(),
+                            tokens: Vec::new(),
+                        })
                     })
                 },
             );
@@ -94,6 +120,7 @@ impl Fixture {
                 cancel,
                 level,
                 events,
+                partial,
             },
             load,
             closed,
@@ -224,7 +251,7 @@ fn cancelled_load_keeps_start_and_model_removal_guarded_until_native_work_return
     f.session.cancel.store(true, Ordering::Release);
     f.closed.recv_timeout(WAIT).unwrap();
     assert!(busy(), "Settings must refuse model removal during loading");
-    assert!(Session::start(Default::default(), None).is_err());
+    assert!(Session::start(Default::default(), None, false).is_err());
     assert_eq!(f.release(Ok(())).unwrap(), None);
     assert!(!busy());
     // Admission is reusable and releases even when a queued command is dropped.
@@ -237,18 +264,16 @@ fn cancelled_load_keeps_start_and_model_removal_guarded_until_native_work_return
 #[test]
 fn stop_before_capture_start_never_opens_the_microphone() {
     let (events, _) = mpsc::sync_channel(4);
-    let job = Job {
-        dir: Default::default(),
-        stop: Arc::new(AtomicBool::new(true)),
-        cancel: Arc::new(AtomicBool::new(false)),
-        level: Arc::new(AtomicU32::new(0)),
-        device: None,
+    let job = job(
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU32::new(0)),
         events,
-    };
+    );
     let result = run_job::<FakeCapture, _>(
         &job,
         || panic!("microphone must not open"),
-        || Ok(|_, _| -> Result<String> { panic!("no audio to transcribe") }),
+        || Ok(|_: &[f32]| -> Result<TranscriptionResult> { panic!("no audio to transcribe") }),
     )
     .unwrap();
     assert_eq!(result.as_deref(), Some(""));
@@ -285,14 +310,9 @@ fn ready_model_waits_for_stop_and_transcribes_only_once() {
 
 #[test]
 fn audio_buffer_still_caps_recording_at_sixty_seconds() {
-    let audio = Audio::with_capacity(0);
     let rate = 8_000;
-    append(
-        &vec![0.25_f32; rate as usize * MAX_SECONDS + 1],
-        1,
-        rate,
-        &audio,
-    );
-    assert_eq!(audio.samples.lock().unwrap().len(), rate as usize * 60);
+    let audio = Audio::with_capacity(rate as usize * MAX_SECONDS);
+    append(&vec![0.25_f32; rate as usize * MAX_SECONDS + 1], 1, &audio);
+    assert_eq!(audio.len.load(Ordering::Acquire), rate as usize * 60);
     assert!(audio.full.load(Ordering::Acquire));
 }

@@ -4,42 +4,118 @@ use rubato::{FftFixedInOut, Resampler};
 
 pub(crate) const MODEL_RATE: u32 = 16_000;
 
-pub(crate) fn for_model(samples: Vec<f32>, rate: u32) -> Result<Vec<f32>> {
-    ensure!(
-        (8_000..=192_000).contains(&rate),
-        "Unsupported microphone sample rate"
-    );
-    if rate == MODEL_RATE || samples.is_empty() {
-        return Ok(samples);
+pub(crate) struct Converter {
+    inner: Option<FftFixedInOut<f32>>,
+    input: Vec<Vec<f32>>,
+    output: Vec<Vec<f32>>,
+    fill: usize,
+    skip: usize,
+    pushed: usize,
+    rate: u32,
+}
+
+impl Converter {
+    pub(crate) fn new(rate: u32) -> Result<Self> {
+        ensure!(
+            (8_000..=192_000).contains(&rate),
+            "Unsupported microphone sample rate"
+        );
+        let inner = (rate != MODEL_RATE)
+            .then(|| FftFixedInOut::<f32>::new(rate as usize, MODEL_RATE as usize, 1024, 1))
+            .transpose()?;
+        let (input, output, skip) = match &inner {
+            Some(r) => (
+                vec![vec![0.0; r.input_frames_next()]],
+                r.output_buffer_allocate(true),
+                r.output_delay(),
+            ),
+            None => (Vec::new(), Vec::new(), 0),
+        };
+        Ok(Self {
+            inner,
+            input,
+            output,
+            fill: 0,
+            skip,
+            pushed: 0,
+            rate,
+        })
     }
-    let length = (samples.len() as u64 * MODEL_RATE as u64 / rate as u64) as usize;
-    let mut resampler = FftFixedInOut::<f32>::new(rate as usize, MODEL_RATE as usize, 1024, 1)?;
-    let delay = resampler.output_delay();
-    let chunk = resampler.input_frames_next();
-    let mut input = vec![vec![0.0; chunk]];
-    let mut output = resampler.output_buffer_allocate(true);
-    let mut converted = Vec::with_capacity(length + delay + resampler.output_frames_max());
-    let mut offset = 0;
+
+    pub(crate) fn push(&mut self, samples: &[f32], out: &mut Vec<f32>) -> Result<()> {
+        self.pushed += samples.len();
+        let Some(resampler) = &mut self.inner else {
+            out.extend_from_slice(samples);
+            return Ok(());
+        };
+        let chunk = self.input[0].len();
+        let mut rest = samples;
+        while !rest.is_empty() {
+            let take = (chunk - self.fill).min(rest.len());
+            self.input[0][self.fill..self.fill + take].copy_from_slice(&rest[..take]);
+            self.fill += take;
+            rest = &rest[take..];
+            if self.fill == chunk {
+                convert(
+                    resampler,
+                    &self.input,
+                    &mut self.output,
+                    &mut self.skip,
+                    out,
+                )?;
+                self.fill = 0;
+            }
+        }
+        Ok(())
+    }
+
     // Zero padding also flushes the filter tail. Remove its delay so short
     // utterances keep both their beginning and end and retain their duration.
-    while converted.len() < length + delay {
-        input[0].fill(0.0);
-        let end = (offset + chunk).min(samples.len());
-        if offset < end {
-            input[0][..end - offset].copy_from_slice(&samples[offset..end]);
+    pub(crate) fn finish(&mut self, out: &mut Vec<f32>) -> Result<()> {
+        let length = (self.pushed as u64 * MODEL_RATE as u64 / self.rate as u64) as usize;
+        if let Some(resampler) = &mut self.inner {
+            self.input[0][self.fill..].fill(0.0);
+            while self.fill > 0 || out.len() < length {
+                convert(
+                    resampler,
+                    &self.input,
+                    &mut self.output,
+                    &mut self.skip,
+                    out,
+                )?;
+                self.input[0].fill(0.0);
+                self.fill = 0;
+            }
         }
-        let (_, written) = resampler.process_into_buffer(&input, &mut output, None)?;
-        converted.extend_from_slice(&output[0][..written]);
-        offset = end;
+        out.truncate(length);
+        Ok(())
     }
-    converted.drain(..delay);
-    converted.truncate(length);
-    Ok(converted)
+}
+
+fn convert(
+    resampler: &mut FftFixedInOut<f32>,
+    input: &[Vec<f32>],
+    output: &mut [Vec<f32>],
+    skip: &mut usize,
+    out: &mut Vec<f32>,
+) -> Result<()> {
+    let (_, written) = resampler.process_into_buffer(input, output, None)?;
+    let dropped = (*skip).min(written);
+    *skip -= dropped;
+    out.extend_from_slice(&output[0][dropped..written]);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn for_model(samples: Vec<f32>, rate: u32) -> Result<Vec<f32>> {
+        let mut converter = Converter::new(rate)?;
+        let mut out = Vec::new();
+        converter.push(&samples, &mut out)?;
+        converter.finish(&mut out)?;
+        Ok(out)
+    }
     fn tone(rate: u32, hz: f32) -> Vec<f32> {
         (0..rate)
             .map(|i| (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin())

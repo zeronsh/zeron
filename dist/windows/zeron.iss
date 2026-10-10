@@ -69,6 +69,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#PackageDir}\zeron.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\DirectML.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\zeron-update.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion

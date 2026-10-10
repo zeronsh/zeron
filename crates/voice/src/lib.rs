@@ -1,20 +1,46 @@
 //! Desktop-local Parakeet v3. No engine, document, RPC or audio persistence.
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use parakeet_rs::{ParakeetTDT, Transcriber};
+use parakeet_rs::{
+    ExecutionConfig, ExecutionProvider, ParakeetTDT, Transcriber, TranscriptionResult,
+};
 use sha2::{Digest, Sha256};
 use std::{
     io::Write,
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+        mpsc::SyncSender,
     },
+    time::Duration,
 };
 
 mod resample;
+mod stream;
+pub use stream::Stream;
 
 pub const MAX_SECONDS: usize = 60;
+const IDLE_UNLOAD: Duration = Duration::from_secs(60);
+#[cfg(target_os = "windows")]
+const ACCELERATION: Option<(&str, ExecutionProvider)> =
+    Some(("DirectML", ExecutionProvider::DirectML));
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+const ACCELERATION: Option<(&str, ExecutionProvider)> = Some(("WebGPU", ExecutionProvider::WebGPU));
+#[cfg(not(any(
+    target_os = "windows",
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
+const ACCELERATION: Option<(&str, ExecutionProvider)> = None;
+pub const ACCELERATOR: Option<&str> = match ACCELERATION {
+    Some((name, _)) => Some(name),
+    None => None,
+};
+
 #[derive(serde::Deserialize)]
 pub struct Artifact {
     pub name: String,
@@ -34,11 +60,11 @@ pub fn download_size() -> u64 {
     manifest().files.iter().map(|f| f.size).sum()
 }
 pub fn installed(dir: &Path) -> bool {
-    manifest()
-        .files
+    let m = manifest();
+    m.files
         .iter()
-        .all(|f| std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.len() == f.size))
-        && std::fs::read_to_string(dir.join("verified")).is_ok_and(|r| r == manifest().revision)
+        .all(|f| std::fs::metadata(dir.join(&f.name)).is_ok_and(|md| md.len() == f.size))
+        && std::fs::read_to_string(dir.join("verified")).is_ok_and(|r| r == m.revision)
 }
 
 /// Called only on a worker. Temporary files never establish readiness.
@@ -82,53 +108,59 @@ async fn cancelled(cancel: &AtomicBool) {
 
 pub struct Recognizer(ParakeetTDT);
 impl Recognizer {
-    pub fn load(dir: &Path) -> Result<Self> {
-        // Verify before handing bytes to the native runtime, including after restart.
-        for f in manifest().files {
-            let mut input = std::fs::File::open(dir.join(&f.name))?;
-            let mut hash = Sha256::new();
-            std::io::copy(&mut input, &mut hash)?;
-            if format!("{:x}", hash.finalize()) != f.sha256 {
-                bail!("Model is damaged. Remove it in Settings and download again.")
-            }
+    pub fn load(dir: &Path, accelerated: bool) -> Result<Self> {
+        if !installed(dir) {
+            bail!("Model is damaged. Remove it in Settings and download again.")
         }
-        Ok(Self(ParakeetTDT::from_pretrained(dir, None).map_err(
-            |_| anyhow::anyhow!("Could not load Parakeet v3"),
-        )?))
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(4));
+        let mut encoder = ExecutionConfig::new().with_intra_threads(threads);
+        if let Some((_, provider)) = ACCELERATION.filter(|_| accelerated) {
+            encoder = encoder
+                .with_execution_provider(provider)
+                .with_custom_configure(|builder| Ok(builder.with_memory_pattern(false)?));
+        }
+        let joint = ExecutionConfig::new().with_intra_threads(1);
+        ParakeetTDT::from_pretrained_with_joint_config(dir, Some(encoder), Some(joint))
+            .map(Self)
+            .map_err(|_| anyhow::anyhow!("Could not load Parakeet v3"))
     }
     pub fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String> {
-        if !(8_000..=192_000).contains(&rate) {
-            bail!("Unsupported microphone sample rate")
-        }
-        if samples.len() > rate as usize * MAX_SECONDS {
-            bail!("Recording exceeds one minute")
-        }
-        if samples.len() < rate as usize / 5 || samples.iter().all(|s| s.abs() < 0.0001) {
-            return Ok(String::new());
-        }
-        let samples = resample::for_model(samples, rate)?;
+        let mut stream = Stream::new(rate)?;
+        stream.push(&samples)?;
+        stream.finish(self)
+    }
+    pub fn decode(&mut self, window: &[f32]) -> Result<TranscriptionResult> {
         self.0
-            .transcribe_samples(samples, resample::MODEL_RATE, 1, None)
-            .map(|r| r.text)
+            .transcribe_samples(window.to_vec(), resample::MODEL_RATE, 1, None)
             .map_err(|_| anyhow::anyhow!("Could not transcribe this recording"))
     }
 }
 
 struct Audio {
-    /// Only the audio callback touches this until the stream is dropped.
-    samples: Mutex<Vec<f32>>,
-    // Outside the lock: the capture loop polls these every 10 ms and must
-    // never make the real-time callback's `try_lock` drop a buffer.
+    buf: Box<[AtomicU32]>,
+    len: AtomicUsize,
     failed: AtomicBool,
     full: AtomicBool,
 }
 impl Audio {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            samples: Mutex::new(Vec::with_capacity(capacity)),
+            buf: std::iter::repeat_with(|| AtomicU32::new(0))
+                .take(capacity)
+                .collect(),
+            len: AtomicUsize::new(0),
             failed: AtomicBool::new(false),
             full: AtomicBool::new(false),
         }
+    }
+    fn read(&self, from: usize, into: &mut Vec<f32>) -> usize {
+        let to = self.len.load(Ordering::Acquire);
+        into.extend(
+            self.buf[from..to]
+                .iter()
+                .map(|s| f32::from_bits(s.load(Ordering::Relaxed))),
+        );
+        to
     }
 }
 /// Loudest RMS since the UI last read it. Non-negative `f32` bit patterns sort
@@ -153,19 +185,21 @@ where
         level.fetch_max(rms.to_bits(), Ordering::Relaxed);
     }
 }
-fn append<T: cpal::Sample>(data: &[T], channels: usize, rate: u32, a: &Audio)
+fn append<T: cpal::Sample>(data: &[T], channels: usize, a: &Audio)
 where
     f32: cpal::FromSample<T>,
 {
-    if let Ok(mut samples) = a.samples.try_lock() {
-        for frame in data.chunks_exact(channels) {
-            if samples.len() >= rate as usize * MAX_SECONDS {
-                a.full.store(true, Ordering::Release);
-                break;
-            }
-            samples.push(frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32);
+    let mut len = a.len.load(Ordering::Relaxed);
+    for frame in data.chunks_exact(channels) {
+        if len == a.buf.len() {
+            a.full.store(true, Ordering::Release);
+            break;
         }
+        let s = frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32;
+        a.buf[len].store(s.to_bits(), Ordering::Relaxed);
+        len += 1;
     }
+    a.len.store(len, Ordering::Release);
 }
 /// A microphone the user can choose: a stable identifier and a display name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,7 +268,7 @@ impl Capture {
                     &config.into(),
                     move |d: &[$sample], _| {
                         meter(d, channels, &level);
-                        append(d, channels, rate, &a)
+                        append(d, channels, &a)
                     },
                     err,
                     None,
@@ -263,23 +297,13 @@ impl Capture {
             rate,
         })
     }
-    pub fn ended(&self) -> bool {
-        self.audio.full.load(Ordering::Acquire) || self.audio.failed.load(Ordering::Acquire)
-    }
-    pub fn finish(mut self) -> Result<(Vec<f32>, u32)> {
-        self.stream.take();
-        if self.audio.failed.load(Ordering::Acquire) {
-            bail!("Microphone disconnected. Your draft is safe.")
-        }
-        let mut samples = self.audio.samples.lock().unwrap_or_else(|e| e.into_inner());
-        Ok((std::mem::take(&mut *samples), self.rate))
-    }
 }
 
 #[derive(Debug)]
 pub enum Event {
     Listening,
     Finalizing,
+    Partial(String),
     Final(String),
     Failed(String),
 }
@@ -289,35 +313,47 @@ struct Job {
     cancel: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     device: Option<String>,
-    events: std::sync::mpsc::SyncSender<Event>,
+    accelerated: bool,
+    events: SyncSender<Event>,
+    partial: Arc<Mutex<Option<String>>>,
 }
 // Capture owns its stream on a separate thread. Model loading and inference
 // remain serialized on WORKER, including after the user cancels native work.
 trait Recording {
+    fn live(&self) -> (Arc<Audio>, u32);
     fn ended(&self) -> bool;
-    fn finish(self) -> Result<(Vec<f32>, u32)>;
+    fn finish(self) -> Result<()>;
 }
 impl Recording for Capture {
-    fn ended(&self) -> bool {
-        self.ended()
+    fn live(&self) -> (Arc<Audio>, u32) {
+        (self.audio.clone(), self.rate)
     }
-    fn finish(self) -> Result<(Vec<f32>, u32)> {
-        self.finish()
+    fn ended(&self) -> bool {
+        self.audio.full.load(Ordering::Acquire) || self.audio.failed.load(Ordering::Acquire)
+    }
+    fn finish(mut self) -> Result<()> {
+        self.stream.take();
+        if self.audio.failed.load(Ordering::Acquire) {
+            bail!("Microphone disconnected. Your draft is safe.")
+        }
+        Ok(())
     }
 }
 
 fn record<C: Recording>(
     job: &Job,
     start: impl FnOnce() -> Result<C>,
-) -> Result<Option<(Vec<f32>, u32)>> {
+    live: SyncSender<(Arc<Audio>, u32)>,
+) -> Result<()> {
     if job.cancel.load(Ordering::Acquire) || job.stop.load(Ordering::Acquire) {
-        return Ok(None);
+        return Ok(());
     }
     let capture = start()?;
     // Stop/cancel may arrive while the audio device is opening.
     if job.cancel.load(Ordering::Acquire) {
-        return Ok(None);
+        return Ok(());
     }
+    let _ = live.send(capture.live());
     if !job.stop.load(Ordering::Acquire) {
         let _ = job.events.try_send(Event::Listening);
     }
@@ -327,14 +363,20 @@ fn record<C: Recording>(
         && !capture.ended()
         && started.elapsed().as_secs() < MAX_SECONDS as u64
     {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10));
     }
     if job.cancel.load(Ordering::Acquire) {
-        return Ok(None);
+        return Ok(());
     }
-    let audio = capture.finish()?; // Close the microphone before waiting for the model.
+    capture.finish()?; // Close the microphone before waiting for the model.
     let _ = job.events.try_send(Event::Finalizing);
-    Ok(Some(audio))
+    Ok(())
+}
+
+fn joined(capture: std::thread::ScopedJoinHandle<'_, Result<()>>) -> Result<()> {
+    capture
+        .join()
+        .map_err(|_| anyhow::anyhow!("Microphone worker failed"))?
 }
 
 fn run_job<C, F>(
@@ -344,15 +386,16 @@ fn run_job<C, F>(
 ) -> Result<Option<String>>
 where
     C: Recording,
-    F: FnOnce(Vec<f32>, u32) -> Result<String>,
+    F: FnMut(&[f32]) -> Result<TranscriptionResult>,
 {
     if job.cancel.load(Ordering::Acquire) {
         return Ok(None);
     }
     std::thread::scope(|scope| {
+        let (live_tx, live) = std::sync::mpsc::sync_channel(1);
         let capture = std::thread::Builder::new()
             .name("dictation-capture".into())
-            .spawn_scoped(scope, || record(job, start))?;
+            .spawn_scoped(scope, || record(job, start, live_tx))?;
         // If native loading unwinds, scope teardown still has to close capture
         // before joining it. Normal cancellation uses the same signal.
         struct CancelOnDrop<'a>(&'a AtomicBool);
@@ -368,17 +411,43 @@ where
         if model.is_err() {
             job.cancel.store(true, Ordering::Release);
         }
-        let audio = capture
-            .join()
-            .map_err(|_| anyhow::anyhow!("Microphone worker failed"))?;
-        let transcribe = model?;
+        let live = live.recv().ok();
+        let mut decode = match model {
+            Ok(decode) => decode,
+            Err(e) => {
+                joined(capture)?;
+                return Err(e);
+            }
+        };
+        let Some((audio, rate)) = live else {
+            joined(capture)?;
+            return Ok((!job.cancel.load(Ordering::Acquire)).then(String::new));
+        };
+        let mut stream = Stream::new(rate)?;
+        let mut scratch = Vec::new();
+        let (mut read, mut shown) = (0, String::new());
+        loop {
+            let done = capture.is_finished();
+            scratch.clear();
+            read = audio.read(read, &mut scratch);
+            stream.push(&scratch)?;
+            if done || job.cancel.load(Ordering::Acquire) {
+                break;
+            }
+            match stream.tick_with(&mut decode)? {
+                Some(text) if text != shown => {
+                    shown = text;
+                    *job.partial.lock().unwrap_or_else(|e| e.into_inner()) = Some(shown.clone());
+                }
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        joined(capture)?;
         if job.cancel.load(Ordering::Acquire) {
             return Ok(None);
         }
-        let Some((samples, rate)) = audio? else {
-            return Ok(Some(String::new()));
-        };
-        let text = transcribe(samples, rate)?;
+        let text = stream.finish_with(&mut decode)?;
         Ok((!job.cancel.load(Ordering::Acquire)).then_some(text))
     })
 }
@@ -407,25 +476,29 @@ enum Command {
     Transcribe(Job, BusyGuard),
     Unload,
 }
-static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Command>> =
-    std::sync::OnceLock::new();
+static WORKER: std::sync::OnceLock<SyncSender<Command>> = std::sync::OnceLock::new();
 pub struct Session {
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     events: std::sync::mpsc::Receiver<Event>,
+    partial: Arc<Mutex<Option<String>>>,
 }
 impl Session {
     /// `device` is an [`InputDevice::id`]; `None` or a disconnected device
     /// records from the system default.
-    pub fn start(dir: std::path::PathBuf, device: Option<String>) -> Result<Self> {
+    pub fn start(
+        dir: std::path::PathBuf,
+        device: Option<String>,
+        accelerated: bool,
+    ) -> Result<Self> {
         let admission = BusyGuard::acquire()?;
         let sender = WORKER.get_or_init(|| {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Command>(1);
             std::thread::spawn(move || {
-                let mut cached: Option<(std::path::PathBuf, Recognizer)> = None;
+                let mut cached: Option<(std::path::PathBuf, bool, Recognizer)> = None;
                 loop {
-                    let (job, _admission) = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                    let (job, _admission) = match rx.recv_timeout(IDLE_UNLOAD) {
                         Ok(Command::Transcribe(j, admission)) => (j, admission),
                         Ok(Command::Unload) => {
                             cached = None;
@@ -443,14 +516,16 @@ impl Session {
                         &job,
                         || Capture::start(job.device.as_deref(), job.level.clone()),
                         || {
-                            if cached.as_ref().is_none_or(|(path, _)| *path != job.dir) {
-                                let model = Recognizer::load(&job.dir).context(
+                            if cached.as_ref().is_none_or(|(path, accelerated, _)| {
+                                (path, *accelerated) != (&job.dir, job.accelerated)
+                            }) {
+                                let model = Recognizer::load(&job.dir, job.accelerated).context(
                                     "Could not load the model. Remove it in Settings and download again.",
                                 )?;
-                                cached = Some((job.dir.clone(), model));
+                                cached = Some((job.dir.clone(), job.accelerated, model));
                             }
-                            let model = &mut cached.as_mut().unwrap().1;
-                            Ok(move |samples, rate| model.transcribe(samples, rate))
+                            let model = &mut cached.as_mut().unwrap().2;
+                            Ok(move |window: &[f32]| model.decode(window))
                         },
                     )))
                     .unwrap_or_else(|_| {
@@ -475,6 +550,7 @@ impl Session {
         let stop = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
+        let partial = Arc::new(Mutex::new(None));
         let (tx, events) = std::sync::mpsc::sync_channel(4);
         if sender
             .try_send(Command::Transcribe(
@@ -484,7 +560,9 @@ impl Session {
                     cancel: cancel.clone(),
                     level: level.clone(),
                     device,
+                    accelerated,
                     events: tx,
+                    partial: partial.clone(),
                 },
                 admission,
             ))
@@ -497,10 +575,17 @@ impl Session {
             cancel,
             level,
             events,
+            partial,
         })
     }
     pub fn poll(&mut self) -> Option<Event> {
-        self.events.try_recv().ok()
+        self.events.try_recv().ok().or_else(|| {
+            self.partial
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .map(Event::Partial)
+        })
     }
     pub fn finish(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -537,13 +622,15 @@ mod tests {
         where
             f32: cpal::FromSample<T>,
         {
-            let audio = Audio::with_capacity(0);
+            let audio = Audio::with_capacity(3);
             let input: Vec<T> = [-0.5_f32, 0.5, 0.25, 0.75, 0.0, 0.0]
                 .into_iter()
                 .map(|s| s.to_sample::<T>())
                 .collect();
-            append(&input, 2, 16_000, &audio);
-            assert_eq!(*audio.samples.lock().unwrap(), vec![0.0, 0.5, 0.0]);
+            append(&input, 2, &audio);
+            let mut stored = Vec::new();
+            audio.read(0, &mut stored);
+            assert_eq!(stored, vec![0.0, 0.5, 0.0]);
             let level = AtomicU32::new(0);
             meter(&input, 2, &level);
             let rms = f32::from_bits(level.load(Ordering::Relaxed));
@@ -594,7 +681,7 @@ mod tests {
         let f = &manifest().files[0];
         std::fs::write(dir.path().join(&f.name), b"corrupt").unwrap();
         assert!(!installed(dir.path()));
-        assert!(Recognizer::load(dir.path()).is_err());
+        assert!(Recognizer::load(dir.path(), false).is_err());
     }
 }
 

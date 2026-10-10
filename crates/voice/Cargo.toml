@@ -16,6 +16,12 @@ sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+parakeet-rs = { version = "=0.3.8", features = ["directml"] }
+
+[target.'cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", target_arch = "x86_64")))'.dependencies]
+parakeet-rs = { version = "=0.3.8", features = ["webgpu"] }
+
 [dev-dependencies]
 hound = "3.5"
 tempfile.workspace = true
