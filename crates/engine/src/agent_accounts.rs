@@ -481,6 +481,8 @@ struct UsageSnapshot {
     windows: Vec<AgentUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plan_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    available_resets: Option<u32>,
 }
 
 /// Why a usage probe produced no windows. Drives the backoff and the reason
@@ -1008,6 +1010,7 @@ impl AgentAccounts {
                         .map(|usage| usage.windows.clone())
                         .unwrap_or_default(),
                     usage_fetched_at: entry.and_then(|entry| entry.fetched_at),
+                    available_resets: snapshot.and_then(|usage| usage.available_resets),
                     usage_error: entry.and_then(|entry| {
                         usage_error_message(
                             harness,
@@ -1040,6 +1043,7 @@ impl AgentAccounts {
                     plan_label: u.profile.plan.clone(),
                     active: true,
                     usage_windows: Vec::new(),
+                    available_resets: None,
                     usage_fetched_at: None,
                     usage_error: None,
                     display_name: u.profile.display_name.clone(),
@@ -2806,6 +2810,7 @@ impl AgentAccounts {
             .map(|window| UsageSnapshot {
                 windows: vec![window],
                 plan_label: None,
+                available_resets: None,
             })
             .ok_or_else(|| schema_error("cursor", &body))
     }
@@ -3031,6 +3036,7 @@ impl AntigravityLogin {
             plan_label: plan.map(str::to_string),
             active: true,
             usage_windows: Vec::new(),
+            available_resets: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: Some(label.to_string()),
@@ -3582,10 +3588,16 @@ fn short_duration(ms: i64) -> String {
 
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.
 fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let rl = body.get("rate_limit")?;
+    let rl = body.get("rate_limit");
+    // https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets_tests.rs
+    let available_resets = body
+        .get("rate_limit_reset_credits")
+        .and_then(|credits| credits.get("available_count"))
+        .and_then(|count| count.as_u64())
+        .and_then(|count| u32::try_from(count).ok());
     let mut windows = Vec::new();
     for key in ["primary_window", "secondary_window"] {
-        if let Some(w) = rl.get(key)
+        if let Some(w) = rl.and_then(|rl| rl.get(key))
             && let Some(used) = w.get("used_percent").and_then(|v| v.as_f64())
         {
             let span = w
@@ -3599,7 +3611,7 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
             });
         }
     }
-    if windows.is_empty() {
+    if windows.is_empty() && available_resets.is_none() {
         return None;
     }
     // Live plan ("free"/"plus"/"pro"…) — beats the login-time JWT claim,
@@ -3609,6 +3621,9 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
     Some(UsageSnapshot {
         windows,
         plan_label,
+        // Same summary read by Codex's backend client. No extra request, and
+        // never infer zero when an older backend omits the summary.
+        available_resets,
     })
 }
 
@@ -3630,6 +3645,7 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     (!windows.is_empty()).then_some(UsageSnapshot {
         windows,
         plan_label: None,
+        available_resets: None,
     })
 }
 
@@ -4229,6 +4245,57 @@ mod tests {
     }
 
     #[test]
+    fn codex_banked_resets_preserve_unknown_zero_and_positive_counts() {
+        let base = serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": { "used_percent": 25, "limit_window_seconds": 18000, "reset_at": 2000000000 },
+                "secondary_window": { "used_percent": 60, "limit_window_seconds": 604800, "reset_at": 2000100000 }
+            }
+        });
+        let snapshot = codex_usage_snapshot(&base).unwrap();
+        assert_eq!(snapshot.available_resets, None);
+        assert!(
+            snapshot
+                .windows
+                .iter()
+                .all(|window| window.resets_at.is_some())
+        );
+        for (count, expected) in [
+            (serde_json::json!(0), Some(0)),
+            (serde_json::json!(3), Some(3)),
+            (serde_json::json!(-1), None),
+            (serde_json::json!(1.5), None),
+            (serde_json::json!(4294967296_u64), None),
+            (serde_json::Value::Null, None),
+        ] {
+            let mut body = base.clone();
+            body["rate_limit_reset_credits"] = serde_json::json!({ "available_count": count });
+            let snapshot = codex_usage_snapshot(&body).unwrap();
+            assert_eq!(snapshot.available_resets, expected);
+            let cached = serde_json::to_value(&snapshot).unwrap();
+            assert_eq!(
+                serde_json::from_value::<UsageSnapshot>(cached).unwrap(),
+                snapshot
+            );
+        }
+        let old_cache = serde_json::json!({ "windows": [] });
+        assert_eq!(
+            serde_json::from_value::<UsageSnapshot>(old_cache)
+                .unwrap()
+                .available_resets,
+            None
+        );
+        let credits_only = serde_json::json!({ "rate_limit": null, "rate_limit_reset_credits": { "available_count": 2 } });
+        assert_eq!(
+            codex_usage_snapshot(&credits_only)
+                .unwrap()
+                .available_resets,
+            Some(2)
+        );
+    }
+
+    #[test]
     fn cursor_usage_window_derives_percent_from_spend_not_total_percent() {
         // Real payload flavor (observed shape): proto3 JSON with string int64
         // cycle bounds. `totalPercentUsed` (11.53) contradicts the derived
@@ -4475,6 +4542,7 @@ mod probe_tests {
                 resets_at: None,
             }],
             plan_label: None,
+            available_resets: None,
         }
     }
 
