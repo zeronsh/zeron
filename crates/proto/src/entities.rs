@@ -444,6 +444,35 @@ pub struct FolderListing {
     pub truncated: bool,
 }
 
+/// `SearchHomeFolders`: folders anywhere under the host's home whose names
+/// match `query`, for the new-project picker. An empty query only starts the
+/// host's home search index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHomeFoldersRequest {
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeFolderMatch {
+    /// Absolute path on the host.
+    pub path: String,
+    /// Home-relative, `/`-separated (what the picker shows).
+    pub relative: String,
+    pub is_repo: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeFolderSearchResult {
+    pub matches: Vec<HomeFolderMatch>,
+    /// The host's home index was still scanning; results may be incomplete.
+    pub indexing: bool,
+}
+
 /// A browse root beyond home: a mounted drive/volume (or the system root).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -553,6 +582,68 @@ pub struct WorkspaceFileSearchMatch {
     pub name: String,
     pub kind: WorkspaceEntryKind,
     pub score: i64,
+}
+
+/// Plain-text search over a workspace's file contents (smart case). Binary
+/// and oversized files are skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchWorkspaceContentRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_file_limit: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceContentMatch {
+    /// Workspace-relative, `/`-separated.
+    pub path: String,
+    /// 1-based.
+    pub line: u64,
+    /// 0-based byte column of the first match in the original line.
+    pub column: u64,
+    /// The matched line, leading whitespace trimmed, at most 512 bytes.
+    pub preview: String,
+    /// `[start, end)` byte ranges of the matches within `preview`.
+    pub ranges: Vec<(u32, u32)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceContentSearchResult {
+    pub matches: Vec<WorkspaceContentMatch>,
+    /// More matches exist, or the host's time budget ran out.
+    pub truncated: bool,
+    /// The host's index was still scanning; results may be incomplete.
+    pub indexing: bool,
+}
+
+/// Start (or keep alive) the host's search index for a workspace, so the
+/// chat's first search finds it built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmWorkspaceSearchRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceSearchIndexState {
+    /// The initial scan is still running; searches may be incomplete.
+    Building,
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmWorkspaceSearchResult {
+    pub state: WorkspaceSearchIndexState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1680,6 +1771,21 @@ mod tests {
             .unwrap(),
         ];
         assert!(requests.iter().all(|value| value["chatId"] == "chat-1"));
+    }
+
+    #[test]
+    fn warm_workspace_search_flattens_its_target() {
+        // Early clients also sent a `pin` flag; it is ignored now.
+        let request: WarmWorkspaceSearchRequest =
+            serde_json::from_value(serde_json::json!({ "chatId": "chat-1", "pin": true })).unwrap();
+        assert_eq!(request.target.chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(
+            serde_json::to_value(WarmWorkspaceSearchResult {
+                state: WorkspaceSearchIndexState::Building,
+            })
+            .unwrap(),
+            serde_json::json!({ "state": "building" })
+        );
     }
 
     #[test]

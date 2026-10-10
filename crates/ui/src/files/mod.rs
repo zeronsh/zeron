@@ -44,6 +44,15 @@ use model::{DirectoryLoadState, FileTreeModel};
 use preview::FilePreviewState;
 use search::FileSearchState;
 
+/// File links use character columns; content search reports UTF-8 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileColumn {
+    /// One-based character column from a file link.
+    Character(u32),
+    /// Zero-based UTF-8 byte column from a content search match.
+    Byte(u64),
+}
+
 static NEXT_REVIEW_COMMENT_FLUSH_SOURCE: AtomicU64 = AtomicU64::new(1);
 use crate::surface_chrome::{
     CONTROL_RADIUS as TOOLBAR_BUTTON_RADIUS, CONTROL_SIZE as TOOLBAR_BUTTON_SIZE, toolbar,
@@ -291,7 +300,7 @@ pub struct FilesSurface {
     watch_error: Option<SharedString>,
     preview: FilePreviewState,
     tree_context_menu: crate::popover::Popup<context_menu::TreeContextMenu>,
-    pending_line_navigation: Option<(u32, Option<u32>)>,
+    pending_line_navigation: Option<(u32, Option<FileColumn>)>,
     line_navigation_generation: u64,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
     loads: HashMap<(String, Option<String>), Task<()>>,
@@ -881,6 +890,18 @@ impl FilesSurface {
         }
         self.started = true;
         self.load_directory(String::new(), None, cx);
+        // Opening the tree is a strong hint a search follows; start the
+        // host's index now.
+        if let (Some(engine), Some(context)) = (
+            self.state.read(cx).engine().cloned(),
+            self.request_context.clone(),
+        ) {
+            let client = WorkspaceFilesClient::new(engine, context);
+            cx.spawn(async move |_, _| {
+                client.hint_search_warm().await;
+            })
+            .detach();
+        }
     }
 
     pub fn retry_root(&mut self, cx: &mut Context<Self>) {

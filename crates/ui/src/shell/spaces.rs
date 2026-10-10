@@ -9,10 +9,16 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
-use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
+use crate::pickers::{
+    breadcrumbs, browser_rows, completion_prefix_len, folder_path_key, parent_path,
+    same_folder_path,
+};
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
-use zeron_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
+use zeron_proto::{
+    ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
+    HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
+};
 
 /// Promote the user's ordered pins above the untouched activity projection.
 /// Every unpinned id keeps exactly the relative order supplied by recency.
@@ -2318,7 +2324,237 @@ pub(super) struct AddSpaceFlow {
     load_task: Option<Task<()>>,
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
+    /// Folders matching the query anywhere under the device's home (Home
+    /// location only).
+    home_search: HomeFolderSearch,
     _search_events: Subscription,
+}
+
+/// Shorter queries match nearly every folder under home; they are not sent.
+const HOME_FOLDER_MIN_QUERY_CHARS: usize = 2;
+const HOME_FOLDER_RESULTS: u16 = 20;
+const HOME_FOLDER_INDEX_RETRY: Duration = Duration::from_millis(500);
+const HOME_FOLDER_INDEX_RETRY_MAX: Duration = Duration::from_secs(2);
+
+/// The new-project picker's search over the device's home, answered by the
+/// host's home search index (the one projectless chats use). Entering Home
+/// starts the index; leaving Home or closing the picker releases it unless a
+/// projectless chat warmed it.
+#[derive(Default)]
+struct HomeFolderSearch {
+    /// Bumped per request; an answer to an older one is dropped.
+    generation: u64,
+    loading: bool,
+    /// The host's index was still scanning at the last answer.
+    indexing: bool,
+    results: Vec<HomeFolderMatch>,
+    /// A request reached the host, so it may hold an index to release.
+    started: bool,
+    /// The host predates `SearchHomeFolders`; the section stays hidden.
+    unsupported: bool,
+    task: Option<Task<()>>,
+    /// The request that started the host's index.
+    warm_task: Option<Task<()>>,
+}
+
+/// Refresh `SearchHomeFolders` until indexing finishes, backing off between
+/// replies. `generation` identifies the query; `None` is a one-shot warm-up
+/// whose answer only tells whether the host supports the method.
+fn request_home_folders(
+    engine: crate::state::EngineHandle,
+    device_id: Option<String>,
+    local: Option<String>,
+    query: String,
+    generation: Option<u64>,
+    cx: &mut Context<Shell>,
+) -> Task<()> {
+    let request = SearchHomeFoldersRequest {
+        query,
+        limit: Some(HOME_FOLDER_RESULTS),
+    };
+    cx.spawn(async move |this, cx| {
+        let mut params = match serde_json::to_value(&request) {
+            Ok(serde_json::Value::Object(params)) => params,
+            _ => return,
+        };
+        add_space_target(&mut params, device_id.as_deref(), local.as_deref());
+        let params = serde_json::Value::Object(params);
+        let mut delay = HOME_FOLDER_INDEX_RETRY;
+        loop {
+            let result = engine
+                .client()
+                .call(methods::SEARCH_HOME_FOLDERS, params.clone())
+                .await;
+            let retry = this
+                .update(cx, |shell, cx| {
+                    let selected = shell
+                        .add_space
+                        .as_ref()
+                        .and_then(|flow| shell.add_space_folder_rows(cx).get(flow.active).cloned());
+                    let Some(search) = shell.add_space.as_mut().map(|flow| &mut flow.home_search)
+                    else {
+                        return false;
+                    };
+                    if generation.is_some() && generation != Some(search.generation) {
+                        return false;
+                    }
+                    if let Err(zeron_rpc::RpcError::UnknownMethod(_)) = &result {
+                        search.unsupported = true;
+                        search.started = false;
+                        search.loading = false;
+                        search.indexing = false;
+                        cx.notify();
+                        return false;
+                    }
+                    if generation.is_none() || search.unsupported {
+                        return false;
+                    }
+                    search.loading = false;
+                    search.indexing = false;
+                    match result.map(serde_json::from_value::<HomeFolderSearchResult>) {
+                        Ok(Ok(found)) => {
+                            search.indexing = found.indexing;
+                            search.results = found.matches;
+                        }
+                        Ok(Err(error)) => {
+                            tracing::debug!(%error, "home folder search answer did not decode");
+                        }
+                        Err(error) => tracing::debug!(%error, "home folder search failed"),
+                    }
+                    let retry = search.indexing;
+                    // New partial results may reorder the rows under the cursor.
+                    if let Some(selected) = selected
+                        && let Some(active) = shell
+                            .add_space_folder_rows(cx)
+                            .iter()
+                            .position(|row| row == &selected)
+                        && let Some(flow) = shell.add_space.as_mut()
+                    {
+                        flow.active = active;
+                    }
+                    cx.notify();
+                    retry
+                })
+                .unwrap_or(false);
+            if !retry {
+                break;
+            }
+            // The stored task is dropped on edits, navigation or close. Wait
+            // after the reply so slow hosts never accumulate parallel calls.
+            cx.background_executor().timer(delay).await;
+            delay = (delay * 2).min(HOME_FOLDER_INDEX_RETRY_MAX);
+            let current = this
+                .update(cx, |shell, _| {
+                    shell.add_space_in_home()
+                        && shell.add_space.as_ref().is_some_and(|flow| {
+                            generation == Some(flow.home_search.generation)
+                                && !flow.home_search.unsupported
+                        })
+                })
+                .unwrap_or(false);
+            if !current {
+                break;
+            }
+        }
+    })
+}
+
+/// One row of the Folders step, in navigation order.
+#[derive(Clone, Debug, PartialEq)]
+enum FolderRow {
+    /// A subfolder of the open folder, matched by name.
+    Local(zeron_proto::FolderEntry),
+    /// A folder anywhere under home.
+    Home(HomeFolderMatch),
+}
+
+/// `targetDeviceId` for a remote device; local calls skip the relay.
+fn add_space_target(
+    params: &mut serde_json::Map<String, serde_json::Value>,
+    device_id: Option<&str>,
+    local: Option<&str>,
+) {
+    if let Some(target) = device_id
+        && local != Some(target)
+    {
+        params.insert(
+            "targetDeviceId".into(),
+            serde_json::Value::String(target.to_owned()),
+        );
+    }
+}
+
+/// The title over the picker's matches from under home, with the host's
+/// search status trailing.
+fn home_folders_header(theme: &Theme, status: Option<&'static str>) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pt(px(2.0))
+        .pb(px(4.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .child("In Home")
+        .when_some(status, |header, status| {
+            header.child(div().opacity(0.7).child(status))
+        })
+}
+
+/// A folder from under home: its name (query highlighted), then where it
+/// lives (`~/…`), marked when it is a repository.
+fn home_folder_row(
+    row: gpui::Stateful<gpui::Div>,
+    found: &HomeFolderMatch,
+    query: &str,
+    theme: &Theme,
+    cx: &Context<Shell>,
+) -> gpui::Stateful<gpui::Div> {
+    let (name, parent) = match found.relative.rsplit_once('/') {
+        Some((parent, name)) => (name, format!("~/{parent}")),
+        None => (found.relative.as_str(), "~".to_owned()),
+    };
+    let (path, is_repo) = (found.path.clone(), found.is_repo);
+    row.aria_label(SharedString::from(format!("{name} in {parent}")))
+        .child(
+            icon(icons::FOLDER)
+                .size(px(16.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .overflow_hidden()
+                .child(div().flex_none().child(popover::search_highlight(
+                    SharedString::from(name.to_owned()),
+                    Some(query),
+                    theme,
+                )))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(parent)),
+                ),
+        )
+        .when(is_repo, |el| {
+            el.child(
+                icon(icons::GIT_BRANCH)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+        })
+        .on_click(
+            cx.listener(move |this, _, _, cx| this.add_space_descend(path.clone(), is_repo, cx)),
+        )
 }
 
 /// Folder crumbs shown before the middle folds into `…`, and how many of the
@@ -2366,6 +2602,8 @@ fn device_glyph(platform: &str) -> &'static str {
 /// `/media/ab`); a root base covers everything. Either separator counts, so
 /// Windows drive paths (`D:\` under `D:\`) work too.
 fn path_under(path: &str, base: &str) -> bool {
+    let path = folder_path_key(path);
+    let base = folder_path_key(base);
     let base = base.trim_end_matches(['/', '\\']);
     base.is_empty()
         || path
@@ -5706,6 +5944,7 @@ impl Shell {
     }
 
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
+        self.release_home_folder_search(cx);
         self.command_palette = None;
         self.project_crumb_menu = popover::Popup::default();
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
@@ -5726,6 +5965,7 @@ impl Shell {
                     flow.active = 0;
                     flow.list_scroll.set_offset(gpui::Point::default());
                 }
+                this.search_home_folders(cx);
                 cx.notify();
             }
         });
@@ -5750,9 +5990,107 @@ impl Shell {
             load_task: None,
             drives_task: None,
             submit_task: None,
+            home_search: HomeFolderSearch::default(),
             _search_events: search_events,
         });
         cx.notify();
+    }
+
+    /// Close the new-project picker, releasing the host's home index.
+    pub(super) fn close_add_space(&mut self, cx: &mut Context<Self>) {
+        self.release_home_folder_search(cx);
+        self.add_space = None;
+        cx.notify();
+    }
+
+    /// Whether the picker browses the Home location, where the query also
+    /// searches every folder under home.
+    fn add_space_in_home(&self) -> bool {
+        self.add_space.as_ref().is_some_and(|flow| {
+            flow.step == ProjectStep::Folders
+                && flow
+                    .location
+                    .as_ref()
+                    .is_some_and(|(_, path)| path.is_none())
+        })
+    }
+
+    /// Look the query up under the device's home. The first call in Home
+    /// also starts the host's index, so the first real query is fast.
+    fn search_home_folders(&mut self, cx: &mut Context<Self>) {
+        let in_home = self.add_space_in_home();
+        let engine = self.state.read(cx).engine().cloned();
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        let query = flow.search.read(cx).text().trim().to_owned();
+        let device_id = flow.device.as_ref().map(|d| d.id.clone());
+        let search = &mut flow.home_search;
+        search.generation += 1;
+        search.loading = false;
+        search.indexing = false;
+        search.task = None;
+        search.results.clear();
+        let Some(engine) = engine.filter(|_| in_home && !search.unsupported) else {
+            return;
+        };
+        if !search.started {
+            // Its own task: typing must not cancel it.
+            search.started = true;
+            search.warm_task = Some(request_home_folders(
+                engine.clone(),
+                device_id.clone(),
+                local.clone(),
+                String::new(),
+                None,
+                cx,
+            ));
+        }
+        if query.chars().count() < HOME_FOLDER_MIN_QUERY_CHARS
+            || crate::pickers::is_typed_path(&query)
+        {
+            return;
+        }
+        search.loading = true;
+        let generation = Some(search.generation);
+        search.task = Some(request_home_folders(
+            engine, device_id, local, query, generation, cx,
+        ));
+    }
+
+    /// Tell the host the picker is done with its home index (it stays when a
+    /// projectless chat warmed it).
+    fn release_home_folder_search(&mut self, cx: &mut Context<Self>) {
+        let engine = self.state.read(cx).engine().cloned();
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        let search = std::mem::take(&mut flow.home_search);
+        flow.home_search.unsupported = search.unsupported;
+        let (true, Some(engine)) = (search.started, engine) else {
+            return;
+        };
+        let mut params = serde_json::Map::new();
+        add_space_target(
+            &mut params,
+            flow.device.as_ref().map(|d| d.id.as_str()),
+            local.as_deref(),
+        );
+        cx.spawn(async move |_, _| {
+            if let Err(error) = engine
+                .client()
+                .call(
+                    methods::RELEASE_HOME_FOLDER_SEARCH,
+                    serde_json::Value::Object(params),
+                )
+                .await
+            {
+                tracing::debug!(%error, "home folder search release failed");
+            }
+        })
+        .detach();
     }
 
     /// Selecting a device advances to its locations.
@@ -5789,6 +6127,9 @@ impl Shell {
         path: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if path.is_some() {
+            self.release_home_folder_search(cx);
+        }
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
@@ -5802,9 +6143,12 @@ impl Shell {
             input.set_text("", cx);
         });
         self.load_space_folders(path, cx);
+        // Entering Home starts the host's index (an empty query only warms).
+        self.search_home_folders(cx);
     }
 
     fn add_space_back_to(&mut self, step: ProjectStep, cx: &mut Context<Self>) {
+        self.release_home_folder_search(cx);
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
@@ -5936,6 +6280,41 @@ impl Shell {
             .collect()
     }
 
+    /// The Folders step's rows: the open folder's matching subfolders, then
+    /// matches from anywhere under home not already listed.
+    fn add_space_folder_rows(&self, cx: &App) -> Vec<FolderRow> {
+        let local = self.add_space_filtered(cx);
+        let Some(flow) = self.add_space.as_ref() else {
+            return Vec::new();
+        };
+        let open = flow.browser.ready().map(|listing| listing.path.as_str());
+        let listed: HashSet<String> = open
+            .map(|open| {
+                local
+                    .iter()
+                    .map(|entry| crate::pickers::child_path(open, &entry.name))
+                    .chain(std::iter::once(open.to_owned()))
+                    .map(|path| folder_path_key(&path))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let home = if self.add_space_in_home() {
+            flow.home_search.results.as_slice()
+        } else {
+            &[]
+        };
+        local
+            .into_iter()
+            .map(FolderRow::Local)
+            .chain(
+                home.iter()
+                    .filter(|found| !listed.contains(&folder_path_key(&found.path)))
+                    .cloned()
+                    .map(FolderRow::Home),
+            )
+            .collect()
+    }
+
     /// Descend into the highlighted (filtered) folder; clears the query.
     /// A path-shaped query with no matching rows browses the typed path
     /// instead — `/disk2⏎` must work, not sit on "No folders match" (an
@@ -5959,7 +6338,7 @@ impl Shell {
             }
             ProjectStep::Folders => {}
         }
-        let rows = self.add_space_filtered(cx);
+        let rows = self.add_space_folder_rows(cx);
         let Some(flow) = self.add_space.as_ref() else {
             return;
         };
@@ -5970,10 +6349,16 @@ impl Shell {
             }
             return;
         }
-        let Some(listing) = flow.browser.ready() else {
-            return;
+        let entry = match rows.get(flow.active) {
+            Some(FolderRow::Local(entry)) => entry,
+            Some(FolderRow::Home(found)) => {
+                let (path, is_repo) = (found.path.clone(), found.is_repo);
+                self.add_space_descend(path, is_repo, cx);
+                return;
+            }
+            None => return,
         };
-        let Some(entry) = rows.get(flow.active) else {
+        let Some(listing) = flow.browser.ready() else {
             return;
         };
         let full = crate::pickers::child_path(&listing.path, &entry.name);
@@ -6187,10 +6572,10 @@ impl Shell {
             .read(cx)
             .spaces
             .iter()
-            .find(|s| s.device_id == device.id && s.path == path)
+            .find(|s| s.device_id == device.id && same_folder_path(&s.path, &path))
             .map(|s| s.id.clone())
         {
-            self.add_space = None;
+            self.close_add_space(cx);
             self.land_in_space(existing, cx);
             return;
         }
@@ -6232,7 +6617,7 @@ impl Shell {
             this.update(cx, |shell, cx| {
                 match result {
                     Ok(_) => {
-                        shell.add_space = None;
+                        shell.close_add_space(cx);
                         shell.land_in_space(submit_id.clone(), cx);
                     }
                     Err(err) => {
@@ -6273,7 +6658,7 @@ impl Shell {
                     .and_then(|(_, path)| path.as_deref())
                     .or(flow.home.as_deref());
                 let parent = listing
-                    .filter(|l| Some(l.path.as_str()) != root)
+                    .filter(|l| !root.is_some_and(|root| same_folder_path(&l.path, root)))
                     .and_then(|l| parent_path(&l.path));
                 if let Some(parent) = parent {
                     self.add_space_descend(parent, false, cx);
@@ -6317,15 +6702,14 @@ impl Shell {
         );
         match key {
             popover::MenuKey::Escape => {
-                self.add_space = None;
-                cx.notify();
+                self.close_add_space(cx);
                 cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
                     Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
-                    _ => self.add_space_filtered(cx).len(),
+                    _ => self.add_space_folder_rows(cx).len(),
                 };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(flow) = self.add_space.as_mut() {
@@ -6435,6 +6819,14 @@ impl Shell {
         let active = flow.active;
         let loading = matches!(flow.browser, Loadable::Idle | Loadable::Loading);
         let drives_loading = matches!(flow.drives, Loadable::Loading);
+        let home_loading = flow.home_search.loading;
+        let home_status = if flow.home_search.indexing {
+            Some("Indexing…")
+        } else if home_loading {
+            Some("Searching…")
+        } else {
+            None
+        };
         let ghost = self
             .add_space_completion(cx)
             .map(|(_, suffix)| SharedString::from(suffix));
@@ -6523,8 +6915,27 @@ impl Shell {
             }
             ProjectStep::Folders => {
                 if !loading && load_error.is_none() {
-                    for (ix, entry) in self.add_space_filtered(cx).into_iter().enumerate() {
-                        let base = listing.as_ref().map(|l| l.path.as_str()).unwrap_or("");
+                    let base = listing.as_ref().map(|l| l.path.as_str()).unwrap_or("");
+                    let mut first_home = true;
+                    for (ix, folder) in self.add_space_folder_rows(cx).into_iter().enumerate() {
+                        let entry = match folder {
+                            FolderRow::Local(entry) => entry,
+                            FolderRow::Home(found) => {
+                                let el = home_folder_row(row(ix), &found, &query, &theme, cx);
+                                rows.push(if std::mem::take(&mut first_home) {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .when(ix > 0, |el| el.pt(px(6.0)))
+                                        .child(home_folders_header(&theme, home_status))
+                                        .child(el)
+                                        .into_any_element()
+                                } else {
+                                    el.into_any_element()
+                                });
+                                continue;
+                            }
+                        };
                         let full = crate::pickers::child_path(base, &entry.name);
                         let is_repo = entry.is_repo;
                         rows.push(
@@ -6604,6 +7015,14 @@ impl Shell {
                         crate::settings::badge_combo("mod-enter")
                     ),
                 ),
+                ProjectStep::Folders if home_loading => (
+                    "Searching Home…",
+                    "Looking for matching folders anywhere under Home.".to_string(),
+                ),
+                ProjectStep::Folders if home_status == Some("Indexing…") => (
+                    "No folders match yet",
+                    "Home is still being indexed — keep typing or try again.".to_string(),
+                ),
                 ProjectStep::Folders => (
                     "No folders match",
                     "Type a path like ~/code or /mnt to jump there.".to_string(),
@@ -6652,7 +7071,11 @@ impl Shell {
                 .map(|l| l.path.clone())
                 .or(browser_path)
                 .or(root.clone());
-            let at_root = open_path.is_none() || open_path == root;
+            let at_root = open_path.is_none()
+                || open_path
+                    .as_deref()
+                    .zip(root.as_deref())
+                    .is_some_and(|(open, root)| same_folder_path(open, root));
             crumb_key.push_str(&name);
             specs.push(Crumb {
                 name: name.clone().into(),
@@ -6683,7 +7106,7 @@ impl Shell {
                     specs.push(Crumb {
                         name: name.into(),
                         glyph: None,
-                        current: full == open_path,
+                        current: same_folder_path(&full, &open_path),
                         target: CrumbTarget::Folder(full),
                     });
                 }
@@ -6845,7 +7268,7 @@ impl Shell {
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.add_space.as_ref().map(|f| f.step) == Some(ProjectStep::Devices) {
-                            this.add_space = None;
+                            this.close_add_space(cx);
                             this.toggle_command_palette(window, cx);
                         } else {
                             this.add_space_go_up(cx);
@@ -6936,8 +7359,7 @@ impl Shell {
                     if this.project_crumb_menu.get().is_some() {
                         return;
                     }
-                    this.add_space = None;
-                    cx.notify();
+                    this.close_add_space(cx);
                 }))
                 .child(command_palette::palette_header(
                     &theme,
@@ -7335,6 +7757,13 @@ mod project_flow_tests {
         assert!(path_under(r"D:\Random", r"D:\"));
         assert!(!path_under(r"D:\Random2", r"D:\Random"));
         assert!(!path_under(r"C:\Random", r"D:\"));
+        assert!(path_under(r"c:\Random\repo", r"C:\Random"));
+        assert!(!path_under(r"C:\random\repo", r"C:\Random"));
+        assert!(path_under(r"\\?\D:\Random", r"D:\"));
+        assert!(path_under(r"D:\Random", r"\\?\D:\"));
+        assert!(path_under(r"\\?\UNC\server\share\repo", r"\\server\share\"));
+        assert!(!path_under(r"\\server\share2\repo", r"\\server\share\"));
+        assert!(!path_under(r"\\other\share\repo", r"\\server\share\"));
     }
 
     #[gpui::test]
@@ -7411,5 +7840,582 @@ mod project_flow_tests {
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
         });
+    }
+}
+
+#[cfg(test)]
+mod home_folder_search_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    /// The engine side of a shell under test. ListFolders answers with
+    /// `listing`; methods not being awaited answer `{}`.
+    struct FakeEngine {
+        runtime: tokio::runtime::Runtime,
+        requests: tokio::sync::mpsc::Receiver<String>,
+        replies: tokio::sync::mpsc::Sender<String>,
+        listing: serde_json::Value,
+    }
+
+    impl FakeEngine {
+        fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+            let mut found = Vec::new();
+            loop {
+                cx.run_until_parked();
+                let Ok(request) = self.requests.try_recv() else {
+                    return found;
+                };
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                if request["method"] == method {
+                    found.push(request);
+                } else if request["method"] == methods::LIST_FOLDERS {
+                    let mut listing = self.listing.clone();
+                    if let Some(path) = request["params"]["path"].as_str() {
+                        listing["path"] = path.into();
+                        listing["entries"] = serde_json::json!([]);
+                    }
+                    self.reply(&request, listing);
+                } else {
+                    self.reply(&request, serde_json::json!({}));
+                }
+            }
+        }
+
+        fn reply(&self, request: &serde_json::Value, ok: serde_json::Value) {
+            self.send(serde_json::json!({ "id": request["id"], "ok": ok }));
+        }
+
+        fn fail(&self, request: &serde_json::Value, err: &str) {
+            self.send(serde_json::json!({ "id": request["id"], "err": err }));
+        }
+
+        fn send(&self, reply: serde_json::Value) {
+            // The client's reader task runs on this runtime: let it drain.
+            self.runtime.block_on(async {
+                self.replies.send(reply.to_string()).await.unwrap();
+                while self.replies.capacity() < self.replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+    }
+
+    fn device(id: &str) -> Device {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "platform": "linux", "lastSeenAt": null,
+        }))
+        .unwrap()
+    }
+
+    /// A shell with the new-project picker open on `device` (local: "local").
+    fn picker(
+        cx: &mut TestAppContext,
+        device_id: &str,
+    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (out, requests) = tokio::sync::mpsc::channel(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel(64);
+        let engine = {
+            let _guard = runtime.enter();
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let data_dir = dir.path().to_path_buf();
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            Shell::new(
+                state,
+                crate::EngineBootConfig {
+                    data_dir,
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let picked = device(device_id);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.devices = vec![picked.clone()];
+                    state.set_test_engine(engine);
+                });
+                shell.open_add_space(cx);
+                shell.add_space_pick_device(picked, cx);
+            })
+            .unwrap();
+        let fake = FakeEngine {
+            runtime,
+            requests,
+            replies,
+            listing: serde_json::json!({
+                "path": "/home/me",
+                "entries": [{ "name": "code", "isDir": true, "isRepo": false }],
+            }),
+        };
+        (window, dir, fake)
+    }
+
+    fn go_home(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) {
+        window
+            .update(cx, |shell, _, cx| {
+                shell.add_space_goto_location("Home".into(), None, cx)
+            })
+            .unwrap();
+    }
+
+    fn type_query(window: gpui::WindowHandle<Shell>, query: &str, cx: &mut TestAppContext) {
+        window
+            .update(cx, |shell, _, cx| {
+                let search = shell.add_space.as_ref().unwrap().search.clone();
+                search.update(cx, |input, cx| input.set_text(query, cx));
+            })
+            .unwrap();
+    }
+
+    fn rows(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Vec<FolderRow> {
+        window
+            .read_with(cx, |shell, cx| shell.add_space_folder_rows(cx))
+            .unwrap()
+    }
+
+    fn found(path: &str, relative: &str, is_repo: bool) -> serde_json::Value {
+        serde_json::json!({ "path": path, "relative": relative, "isRepo": is_repo })
+    }
+
+    fn begin_home_search(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<Shell>,
+        tempfile::TempDir,
+        FakeEngine,
+        serde_json::Value,
+    ) {
+        let (window, dir, mut engine) = picker(cx, "remote");
+        go_home(window, cx);
+        let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(warm.len(), 1);
+        engine.reply(
+            &warm[0],
+            serde_json::json!({ "matches": [], "indexing": true }),
+        );
+        cx.run_until_parked();
+        // Merely warming Home must not start polling an empty query.
+        cx.executor().advance_clock(Duration::from_secs(10));
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        type_query(window, "comet", cx);
+        let request = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(request.len(), 1);
+        (window, dir, engine, request.into_iter().next().unwrap())
+    }
+
+    #[gpui::test]
+    fn home_search_refreshes_with_capped_backoff_and_no_overlapping_requests(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, _dir, mut engine, first) = begin_home_search(cx);
+        engine.reply(
+            &first,
+            serde_json::json!({ "matches": [], "indexing": true }),
+        );
+        cx.run_until_parked();
+        assert!(rows(window, cx).is_empty());
+        let comet = found("/home/me/dev/comet", "dev/comet", true);
+        for (round, millis) in [500, 1000, 2000, 2000].into_iter().enumerate() {
+            cx.executor()
+                .advance_clock(Duration::from_millis(millis - 1));
+            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+            cx.executor().advance_clock(Duration::from_millis(1));
+            let requests = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["params"], first["params"]);
+            assert_eq!(requests[0]["params"]["targetDeviceId"], "remote");
+            // A slow response does not queue more requests or erase rows.
+            let partial = rows(window, cx);
+            cx.executor().advance_clock(Duration::from_secs(10));
+            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+            assert_eq!(rows(window, cx), partial);
+            let matches = if round == 0 {
+                vec![comet.clone()]
+            } else {
+                vec![
+                    found("/home/me/new/comet", "new/comet", true),
+                    comet.clone(),
+                ]
+            };
+            engine.reply(
+                &requests[0],
+                serde_json::json!({
+                    "matches": matches, "indexing": round < 3,
+                }),
+            );
+            cx.run_until_parked();
+            window
+                .read_with(cx, |shell, cx| {
+                    let flow = shell.add_space.as_ref().unwrap();
+                    assert_eq!(flow.home_search.indexing, round < 3);
+                    assert!(!flow.home_search.loading);
+                    // The original selected folder survives result reordering.
+                    assert!(matches!(
+                        &shell.add_space_folder_rows(cx)[flow.active],
+                        FolderRow::Home(found) if found.relative == "dev/comet"
+                    ));
+                })
+                .unwrap();
+        }
+        assert_eq!(rows(window, cx).len(), 2);
+        cx.executor().advance_clock(Duration::from_secs(10));
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn home_search_cancels_retries_on_edits_navigation_and_close(cx: &mut TestAppContext) {
+        for action in ["clear", "short", "path", "drive", "device", "close"] {
+            let (window, _dir, mut engine, first) = begin_home_search(cx);
+            engine.reply(
+                &first,
+                serde_json::json!({ "matches": [], "indexing": true }),
+            );
+            cx.run_until_parked();
+            match action {
+                "clear" => type_query(window, "", cx),
+                "short" => type_query(window, "c", cx),
+                "path" => type_query(window, "/mnt/data", cx),
+                _ => window
+                    .update(cx, |shell, _, cx| match action {
+                        "drive" => shell.add_space_goto_location(
+                            "Data".into(),
+                            Some("/mnt/data".into()),
+                            cx,
+                        ),
+                        "device" => {
+                            shell.add_space_back_to(ProjectStep::Devices, cx);
+                            shell.add_space_pick_device(device("local"), cx);
+                        }
+                        "close" => shell.close_add_space(cx),
+                        _ => unreachable!(),
+                    })
+                    .unwrap(),
+            }
+            cx.executor().advance_clock(Duration::from_secs(10));
+            assert!(
+                engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(),
+                "{action}"
+            );
+            window
+                .read_with(cx, |shell, _| {
+                    assert!(
+                        !shell
+                            .add_space
+                            .as_ref()
+                            .is_some_and(|flow| flow.home_search.indexing)
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn new_home_query_resets_backoff_and_ignores_in_flight_answers(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine, first) = begin_home_search(cx);
+        engine.reply(
+            &first,
+            serde_json::json!({ "matches": [], "indexing": true }),
+        );
+        cx.run_until_parked();
+        cx.executor().advance_clock(HOME_FOLDER_INDEX_RETRY);
+        let stale = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(stale.len(), 1);
+        type_query(window, "updated", cx);
+        let updated = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0]["params"]["query"], "updated");
+        engine.reply(
+            &updated[0],
+            serde_json::json!({ "matches": [], "indexing": true }),
+        );
+        engine.reply(
+            &stale[0],
+            serde_json::json!({
+                "matches": [found("/home/me/dev/comet", "dev/comet", true)], "indexing": true,
+            }),
+        );
+        cx.run_until_parked();
+        assert!(rows(window, cx).is_empty());
+        cx.executor()
+            .advance_clock(HOME_FOLDER_INDEX_RETRY - Duration::from_millis(1));
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        cx.executor().advance_clock(Duration::from_millis(1));
+        let retry = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0]["params"], updated[0]["params"]);
+        engine.reply(
+            &retry[0],
+            serde_json::json!({ "matches": [], "indexing": false }),
+        );
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(10));
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn home_search_stops_retrying_after_errors(cx: &mut TestAppContext) {
+        for error in ["failed", "unsupported", "decode"] {
+            let (window, _dir, mut engine, first) = begin_home_search(cx);
+            engine.reply(
+                &first,
+                serde_json::json!({ "matches": [], "indexing": true }),
+            );
+            cx.run_until_parked();
+            cx.executor().advance_clock(HOME_FOLDER_INDEX_RETRY);
+            let retry = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+            assert_eq!(retry.len(), 1);
+            match error {
+                "failed" => engine.fail(&retry[0], "search failed"),
+                "unsupported" => engine.fail(&retry[0], "unknown method: SearchHomeFolders"),
+                "decode" => engine.reply(&retry[0], serde_json::json!({})),
+                _ => unreachable!(),
+            }
+            cx.run_until_parked();
+            window
+                .read_with(cx, |shell, _| {
+                    let search = &shell.add_space.as_ref().unwrap().home_search;
+                    assert!(!search.indexing);
+                    assert!(!search.loading);
+                })
+                .unwrap();
+            cx.executor().advance_clock(Duration::from_secs(10));
+            assert!(
+                engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(),
+                "{error}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn home_warms_on_entry_and_lists_matches_below_the_open_folder(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_home(window, cx);
+        let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(warm.len(), 1);
+        assert_eq!(warm[0]["params"]["query"], "");
+        assert!(warm[0]["params"].get("targetDeviceId").is_none());
+        engine.reply(
+            &warm[0],
+            serde_json::json!({ "matches": [], "indexing": true }),
+        );
+
+        type_query(window, "c", cx);
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        type_query(window, "co", cx);
+        let search = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(search[0]["params"]["query"], "co");
+        engine.reply(
+            &search[0],
+            serde_json::json!({
+                "matches": [
+                    found("/home/me/code", "code", false),
+                    found("/home/me/dev/comet", "dev/comet", true),
+                ],
+                "indexing": false,
+            }),
+        );
+        cx.run_until_parked();
+        // The open folder's own `code` is listed once, as a local row.
+        let rows = rows(window, cx);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(&rows[0], FolderRow::Local(entry) if entry.name == "code"));
+        assert!(matches!(&rows[1], FolderRow::Home(m) if m.relative == "dev/comet" && m.is_repo));
+    }
+
+    #[gpui::test]
+    fn remote_windows_home_matches_navigate_and_reuse_existing_spaces(cx: &mut TestAppContext) {
+        for (home, extended_home) in [
+            (r"C:\Users\Ana", r"\\?\C:\Users\Ana"),
+            (r"\\server\share\Ana", r"\\?\UNC\server\share\Ana"),
+        ] {
+            let (window, _dir, mut engine) = picker(cx, "remote");
+            cx.update(|cx| {
+                crate::history::init(
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    cx,
+                );
+            });
+            engine.listing["path"] = home.into();
+            go_home(window, cx);
+            let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+            engine.reply(
+                &warm[0],
+                serde_json::json!({ "matches": [], "indexing": false }),
+            );
+            type_query(window, "co", cx);
+            let search = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+            let code = format!("{extended_home}\\code");
+            let comet = format!("{code}\\comet");
+            engine.reply(
+                &search[0],
+                serde_json::json!({
+                    "matches": [found(&code, "code", false), found(&comet, "code/comet", true)],
+                    "indexing": false,
+                }),
+            );
+            cx.run_until_parked();
+            // Plain ListFolders and extended SearchHomeFolders paths refer
+            // to the same local row; only the nested match is added.
+            let listed = rows(window, cx);
+            assert_eq!(listed.len(), 2);
+            assert!(matches!(&listed[0], FolderRow::Local(entry) if entry.name == "code"));
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.add_space.as_mut().unwrap().active = 1;
+                    shell.add_space_open_active(cx);
+                })
+                .unwrap();
+            let browse = engine.take(methods::LIST_FOLDERS, cx);
+            assert_eq!(browse[0]["params"]["path"], comet);
+            assert_eq!(browse[0]["params"]["targetDeviceId"], "remote");
+            engine.reply(
+                &browse[0],
+                serde_json::json!({
+                    "path": comet,
+                    "entries": [{ "name": "src", "isDir": true, "isRepo": false }],
+                }),
+            );
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
+                .unwrap();
+            let child = engine.take(methods::LIST_FOLDERS, cx);
+            assert_eq!(child[0]["params"]["path"], format!("{comet}\\src"));
+            engine.reply(
+                &child[0],
+                serde_json::json!({ "path": format!("{comet}\\src"), "entries": [] }),
+            );
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, _, cx| shell.add_space_go_up(cx))
+                .unwrap();
+            let parent = engine.take(methods::LIST_FOLDERS, cx);
+            assert_eq!(parent[0]["params"]["path"], comet);
+            engine.reply(
+                &parent[0],
+                serde_json::json!({ "path": comet, "entries": [] }),
+            );
+            cx.run_until_parked();
+            window.update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.spaces.push(serde_json::from_value(serde_json::json!({
+                        "id": "existing", "deviceId": "remote", "path": format!("{home}\\code\\comet"),
+                        "gitDetected": true, "createdAt": "2026-09-20T00:00:00Z",
+                    })).unwrap());
+                });
+                shell.submit_add_space(cx);
+                assert!(shell.add_space.is_none());
+                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("existing"));
+                assert_eq!(shell.state.read(cx).spaces.len(), 1);
+            }).unwrap();
+            assert!(engine.take(methods::MUTATE, cx).is_empty());
+        }
+    }
+
+    #[gpui::test]
+    fn opening_a_home_match_browses_it(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_home(window, cx);
+        engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        type_query(window, "comet", cx);
+        let search = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        engine.reply(
+            &search[0],
+            serde_json::json!({
+                "matches": [found("/home/me/dev/comet", "dev/comet", true)],
+                "indexing": false,
+            }),
+        );
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
+            .unwrap();
+        let browse = engine.take(methods::LIST_FOLDERS, cx);
+        assert_eq!(browse[0]["params"]["path"], "/home/me/dev/comet");
+        window
+            .read_with(cx, |shell, _| {
+                let flow = shell.add_space.as_ref().unwrap();
+                assert!(flow.browser_repo);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn closing_or_leaving_home_releases_the_index(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "remote");
+        go_home(window, cx);
+        let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        assert_eq!(warm[0]["params"]["targetDeviceId"], "remote");
+        // A drive location neither searches nor keeps the home index.
+        window
+            .update(cx, |shell, _, cx| {
+                shell.add_space_goto_location("Data".into(), Some("/mnt/data".into()), cx)
+            })
+            .unwrap();
+        let released = engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0]["params"]["targetDeviceId"], "remote");
+        type_query(window, "comet", cx);
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+
+        go_home(window, cx);
+        engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        window
+            .update(cx, |shell, _, cx| shell.close_add_space(cx))
+            .unwrap();
+        assert_eq!(
+            engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).len(),
+            1
+        );
+        // Nothing left to release.
+        window
+            .update(cx, |shell, _, cx| shell.close_add_space(cx))
+            .unwrap();
+        assert!(
+            engine
+                .take(methods::RELEASE_HOME_FOLDER_SEARCH, cx)
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn an_older_host_is_not_asked_again(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_home(window, cx);
+        let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        engine.fail(&warm[0], "unknown method: SearchHomeFolders");
+        cx.run_until_parked();
+        type_query(window, "comet", cx);
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        window
+            .update(cx, |shell, _, cx| shell.close_add_space(cx))
+            .unwrap();
+        assert!(
+            engine
+                .take(methods::RELEASE_HOME_FOLDER_SEARCH, cx)
+                .is_empty()
+        );
     }
 }

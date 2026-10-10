@@ -163,12 +163,20 @@ pub mod methods {
     pub const LIST_FOLDERS: &str = "ListFolders";
     /// The device's browse roots: home plus mounted drives/volumes.
     pub const LIST_DRIVES: &str = "ListDrives";
+    /// Folders under the host's home by name (new-project picker).
+    pub const SEARCH_HOME_FOLDERS: &str = "SearchHomeFolders";
+    /// The new-project picker closed: drop the host's home index if unpinned.
+    pub const RELEASE_HOME_FOLDER_SEARCH: &str = "ReleaseHomeFolderSearch";
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
     pub const SEARCH_FILES: &str = "SearchFiles";
     // Device-local workspace filesystem operations. All are relay-forwardable;
     // WatchWorkspaceFiles is the only streaming method in this group.
     pub const LIST_WORKSPACE_DIRECTORY: &str = "ListWorkspaceDirectory";
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
+    /// Start or keep alive a workspace's search index (fire-and-forget warm).
+    pub const WARM_WORKSPACE_SEARCH: &str = "WarmWorkspaceSearch";
+    /// Plain-text search over a workspace's file contents.
+    pub const SEARCH_WORKSPACE_CONTENT: &str = "SearchWorkspaceContent";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";

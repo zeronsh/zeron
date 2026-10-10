@@ -5,6 +5,27 @@ use crate::settings::{FILES_PANEL_DEFAULT, FILES_PANEL_MAX, FILES_PANEL_MIN};
 
 pub(super) struct FilesPanelResize;
 
+/// Files kept per chat for the command palette's Recent Files.
+const RECENT_FILES_PER_CHAT: usize = 20;
+
+impl Shell {
+    /// Record `path` as the chat's most recently opened file.
+    pub(super) fn note_recent_file(&mut self, chat_id: &str, path: &str) {
+        if chat_id.is_empty() {
+            return;
+        }
+        let recent = self.recent_files.entry(chat_id.to_owned()).or_default();
+        recent.retain(|candidate| candidate != path);
+        recent.push_front(path.to_owned());
+        recent.truncate(RECENT_FILES_PER_CHAT);
+    }
+
+    /// The chat's opened files, most recent first.
+    pub(super) fn recent_files(&self, chat_id: &str) -> impl Iterator<Item = &String> {
+        self.recent_files.get(chat_id).into_iter().flatten()
+    }
+}
+
 /// Allocate a real column to Files. Reduce its preferred width before taking
 /// space from the chat/editor minima; below those minima, share the shortage
 /// proportionally so no open panel covers another.

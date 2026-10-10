@@ -2471,10 +2471,21 @@ pub(crate) fn search_highlight(
         return text.into_any_element();
     };
     let ranges = search_match_ranges(&text, query);
-    if ranges.is_empty() {
+    search_highlight_ranges(text, ranges, theme)
+}
+
+/// [`search_highlight`] over byte ranges the caller already knows (a
+/// content search's matches). Ranges that are empty, out of bounds or off
+/// a character boundary are skipped.
+pub(crate) fn search_highlight_ranges(
+    text: SharedString,
+    ranges: Vec<std::ops::Range<usize>>,
+    theme: &Theme,
+) -> AnyElement {
+    let badges = valid_highlight_ranges(&text, ranges);
+    if badges.is_empty() {
         return text.into_any_element();
     }
-    let badges = ranges;
     let styled = gpui::StyledText::new(text).with_highlights(badges.iter().cloned().map(|range| {
         (
             range,
@@ -2517,6 +2528,21 @@ pub(crate) fn search_highlight(
         .into_any_element()
 }
 
+fn valid_highlight_ranges(
+    text: &str,
+    ranges: Vec<std::ops::Range<usize>>,
+) -> Vec<std::ops::Range<usize>> {
+    ranges
+        .into_iter()
+        .filter(|range| {
+            range.start < range.end
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end)
+        })
+        .collect()
+}
+
 fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let folded = text.to_lowercase();
     let mut original = Vec::with_capacity(folded.len());
@@ -2548,7 +2574,16 @@ fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
 
 #[cfg(test)]
 mod search_highlight_tests {
-    use super::search_match_ranges;
+    use super::{search_match_ranges, valid_highlight_ranges};
+
+    #[test]
+    fn explicit_ranges_skip_empty_out_of_bounds_and_split_characters() {
+        let text = "café needle";
+        assert_eq!(
+            valid_highlight_ranges(text, vec![6..12, 4..4, 3..4, 6..40, 0..3]),
+            vec![6..12, 0..3]
+        );
+    }
 
     #[test]
     fn inline_matches_keep_adjacent_word_boundaries() {

@@ -12,7 +12,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::{StreamExt, stream};
@@ -20,11 +19,13 @@ use sha2::{Digest, Sha256};
 
 use zeron_proto::{
     DriveEntry, FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit,
-    GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, Repo, RepoRef,
-    Worktree,
+    GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, HomeFolderMatch,
+    HomeFolderSearchResult, Repo, RepoRef, Worktree,
 };
 
 use crate::EngineError;
+use crate::WorkspaceSearch;
+use crate::workspace_search::{NameKinds, normalize_name_query};
 
 /// Existence probe timeout for user-chosen / remembered paths, which can point at
 /// dead network mounts where a bare `stat` hangs for minutes.
@@ -41,10 +42,14 @@ const DRIVE_LIST_MAX_ENTRIES: usize = 50;
 const FILE_SEARCH_MAX_RESULTS: usize = 8;
 /// A dead network mount must not leave the composer search spinning forever.
 const FILE_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
+/// Folders `SearchHomeFolders` returns by default, and at most.
+pub const HOME_FOLDER_RESULTS: usize = 20;
+pub const HOME_FOLDER_MAX_RESULTS: usize = 50;
+/// Candidates taken from the index before re-ranking by name; more for a
+/// `/` query, which searches only its last segment.
+const HOME_FOLDER_CANDIDATES: usize = 300;
+const HOME_FOLDER_PATH_CANDIDATES: usize = 2_000;
 const GITHUB_AVATAR_TIMEOUT: Duration = Duration::from_secs(6);
-const FILE_INDEX_TTL: Duration = Duration::from_secs(10);
-const FILE_INDEX_MAX_ENTRIES: usize = 250_000;
-const RANK_BUFFER: usize = 1_024;
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
 
@@ -133,29 +138,16 @@ struct ReposInner {
     data_dir: PathBuf,
     device_id: String,
     worktrees_root: PathBuf,
-    file_searches: std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     http: reqwest::Client,
     github_avatars: std::sync::Mutex<HashMap<String, String>>,
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
-    file_index: FileIndexCache,
+    /// The engine's one workspace search index set (`@`, file tree, cmd+K).
+    workspace_search: WorkspaceSearch,
     /// HEAD commit → its trunk's root commit. History behind a commit never
     /// changes, so the full first-parent walk runs once per HEAD, not on
     /// every spaces repair pass.
     trunk_roots: std::sync::Mutex<HashMap<String, String>>,
 }
-
-struct IndexedPath {
-    path: String,
-    haystack: nucleo_matcher::Utf32String,
-    is_dir: bool,
-}
-
-struct FileIndex {
-    entries: Vec<IndexedPath>,
-    built: std::time::Instant,
-}
-
-type FileIndexCache = std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<FileIndex>>>;
 
 #[derive(Clone)]
 pub struct Repos {
@@ -165,6 +157,10 @@ pub struct Repos {
 impl Repos {
     pub(crate) fn data_dir(&self) -> &Path {
         &self.inner.data_dir
+    }
+
+    pub fn workspace_search(&self) -> &WorkspaceSearch {
+        &self.inner.workspace_search
     }
 
     /// `data_dir` holds `repos.json` + cloned/created repos; the worktree root
@@ -180,7 +176,6 @@ impl Repos {
                 data_dir: data_dir.to_path_buf(),
                 device_id: device_id.to_string(),
                 worktrees_root,
-                file_searches: std::sync::Mutex::new(HashMap::new()),
                 http: reqwest::Client::builder()
                     .timeout(GITHUB_AVATAR_TIMEOUT)
                     .user_agent("Comet-Git-History")
@@ -189,7 +184,7 @@ impl Repos {
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
                 trunk_roots: std::sync::Mutex::new(HashMap::new()),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
-                file_index: std::sync::Mutex::new(HashMap::new()),
+                workspace_search: WorkspaceSearch::new(),
             }),
         }
     }
@@ -1421,54 +1416,53 @@ impl Repos {
             .await
     }
 
-    /// Search a checkout's files and directories by fuzzy relative path. The
-    /// `ignore` walker honors `.gitignore`, `.ignore`, and global git excludes.
-    /// Dotfiles remain searchable; only repository metadata is always pruned.
+    // ── SearchHomeFolders ───────────────────────────────────────────────────
+
+    /// Folders anywhere under home whose names match `query`, from the home
+    /// workspace search index — the one projectless chats use, so it skips
+    /// dot folders, dependency and cache folders, and each repository's
+    /// ignored paths. An empty query only starts the index.
+    pub async fn search_home_folders(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> Result<HomeFolderSearchResult, EngineError> {
+        let search = self.inner.workspace_search.clone();
+        let worker = disposable_worker("home-folder-search", move || {
+            search_home_folders_blocking(&search, &query, limit)
+        });
+        match tokio::time::timeout(FILE_SEARCH_TIMEOUT, worker).await {
+            Ok(Some(result)) => result,
+            Ok(None) => Err(EngineError::Other("folder search worker exited".into())),
+            Err(_) => Err(EngineError::Other("folder search timed out".into())),
+        }
+    }
+
+    /// The new-project picker is done with the home index: drop it now
+    /// unless a projectless chat warmed it.
+    pub fn release_home_folder_search(&self) {
+        if let Ok(home) = home_search_root() {
+            self.inner.workspace_search.release_unless_warmed(&home);
+        }
+    }
+
+    /// Search a checkout's files and directories by fuzzy relative path,
+    /// from the workspace search index (fff), which honors `.gitignore`,
+    /// `.ignore`, and global git excludes. An empty query lists the chat's
+    /// featured paths first, then recently changed files.
     pub async fn search_files(
         &self,
         root: PathBuf,
         query: String,
         featured_paths: Vec<String>,
     ) -> Result<Vec<FileSearchMatch>, EngineError> {
-        let deadline = tokio::time::Instant::now() + FILE_SEARCH_TIMEOUT;
-        let gate = {
-            let mut searches = self
-                .inner
-                .file_searches
-                .lock()
-                .map_err(|_| EngineError::Other("file search registry poisoned".into()))?;
-            if let Some(gate) = searches.get(&root).and_then(std::sync::Weak::upgrade) {
-                gate
-            } else {
-                let gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-                searches.insert(root.clone(), std::sync::Arc::downgrade(&gate));
-                gate
-            }
-        };
-        let gate = tokio::time::timeout_at(deadline, gate.lock_owned())
-            .await
-            .map_err(|_| EngineError::Other("file search timed out".into()))?;
-        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
-        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
-        let worker_cancelled = cancelled.clone();
-        let cache = self.inner.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::Builder::new()
-            .name("file-search".into())
-            .spawn(move || {
-                let _gate = gate;
-                let _ = tx.send(search_files_cached(
-                    &cache.file_index,
-                    &root,
-                    &query,
-                    &featured_paths,
-                    || worker_cancelled.load(Ordering::Relaxed),
-                ));
-            })
-            .map_err(|e| EngineError::Other(format!("file search failed: {e}")))?;
-        match tokio::time::timeout_at(deadline, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(EngineError::Other("file search worker exited".into())),
+        let search = self.inner.workspace_search.clone();
+        let worker = disposable_worker("file-search", move || {
+            search_files_blocking(&search, &root, &query, &featured_paths)
+        });
+        match tokio::time::timeout(FILE_SEARCH_TIMEOUT, worker).await {
+            Ok(Some(result)) => result,
+            Ok(None) => Err(EngineError::Other("file search worker exited".into())),
             Err(_) => Err(EngineError::Other("file search timed out".into())),
         }
     }
@@ -1532,14 +1526,6 @@ impl Repos {
     }
 }
 
-struct CancelOnDrop(std::sync::Arc<AtomicBool>);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-}
-
 async fn disposable_worker<T: Send + 'static>(
     name: &'static str,
     work: impl FnOnce() -> T + Send + 'static,
@@ -1586,7 +1572,7 @@ fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let truncated = entries.len() > FOLDER_LIST_MAX_ENTRIES;
     entries.truncate(FOLDER_LIST_MAX_ENTRIES);
     Ok(FolderListing {
-        path: target.to_string_lossy().to_string(),
+        path: folder_browser_path(target),
         entries,
         truncated,
     })
@@ -1920,246 +1906,200 @@ fn compact_history_commits(
         .collect()
 }
 
-type RankedFileMatch = (Option<usize>, u32, String, bool);
-
-fn compare_file_matches(
-    query: &str,
-    (featured_a, score_a, path_a, dir_a): &RankedFileMatch,
-    (featured_b, score_b, path_b, dir_b): &RankedFileMatch,
-) -> std::cmp::Ordering {
-    let empty_query = query.trim().is_empty();
-    featured_a
-        .is_none()
-        .cmp(&featured_b.is_none())
-        .then_with(|| featured_a.cmp(featured_b))
-        .then_with(|| score_b.cmp(score_a))
-        .then_with(|| {
-            empty_query
-                .then(|| path_a.split('/').count().cmp(&path_b.split('/').count()))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .then_with(|| {
-            empty_query
-                .then(|| dir_a.cmp(dir_b))
-                .unwrap_or_else(|| dir_b.cmp(dir_a))
-        })
-        .then_with(|| path_a.len().cmp(&path_b.len()))
-        .then_with(|| path_a.cmp(path_b))
-}
-
-#[cfg(test)]
 fn search_files_blocking(
+    search: &WorkspaceSearch,
     root: &Path,
     query: &str,
     featured_paths: &[String],
-) -> Result<Vec<FileSearchMatch>, EngineError> {
-    search_files_blocking_with_cancel(root, query, featured_paths, || false)
-}
-
-#[cfg(test)]
-fn search_files_blocking_with_cancel<F: Fn() -> bool + Sync>(
-    root: &Path,
-    query: &str,
-    featured_paths: &[String],
-    cancelled: F,
 ) -> Result<Vec<FileSearchMatch>, EngineError> {
     let root = canonical_search_root(root)?;
-    let index = walk_file_index(&root, &cancelled)?;
-    Ok(rank_file_matches(&index, &root, query, featured_paths))
-}
-
-fn search_files_cached<F: Fn() -> bool + Sync>(
-    cache: &FileIndexCache,
-    root: &Path,
-    query: &str,
-    featured_paths: &[String],
-    cancelled: F,
-) -> Result<Vec<FileSearchMatch>, EngineError> {
-    let root = canonical_search_root(root)?;
-    let fresh = cache
-        .lock()
-        .ok()
-        .and_then(|indexes| indexes.get(&root).cloned())
-        .filter(|index| index.built.elapsed() < FILE_INDEX_TTL);
-    let index = match fresh {
-        Some(index) => index,
-        None => {
-            let index = std::sync::Arc::new(FileIndex {
-                entries: walk_file_index(&root, &cancelled)?,
-                built: std::time::Instant::now(),
-            });
-            if let Ok(mut indexes) = cache.lock() {
-                indexes.retain(|_, index| index.built.elapsed() < FILE_INDEX_TTL);
-                indexes.insert(root.clone(), index.clone());
+    let mut matches: Vec<FileSearchMatch> = Vec::with_capacity(FILE_SEARCH_MAX_RESULTS);
+    if query.trim().is_empty() {
+        for path in featured_paths {
+            if matches.len() == FILE_SEARCH_MAX_RESULTS {
+                break;
             }
-            index
-        }
-    };
-    if cancelled() {
-        return Err(EngineError::Other("file search cancelled".into()));
-    }
-    Ok(rank_file_matches(
-        &index.entries,
-        &root,
-        query,
-        featured_paths,
-    ))
-}
-
-fn canonical_search_root(root: &Path) -> Result<PathBuf, EngineError> {
-    std::fs::canonicalize(root)
-        .map_err(|e| EngineError::Other(format!("could not search workspace: {e}")))
-}
-
-fn walk_file_index<F: Fn() -> bool + Sync>(
-    root: &Path,
-    cancelled: &F,
-) -> Result<Vec<IndexedPath>, EngineError> {
-    if cancelled() {
-        return Err(EngineError::Other("file search cancelled".into()));
-    }
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get().min(12))
-        .unwrap_or(4);
-    let collected: std::sync::Mutex<Vec<IndexedPath>> = std::sync::Mutex::new(Vec::new());
-    let was_cancelled = AtomicBool::new(false);
-    ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .threads(threads)
-        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
-        .build_parallel()
-        .run(|| {
-            const BATCH: usize = 512;
-            struct Batch<'a> {
-                items: Vec<IndexedPath>,
-                sink: &'a std::sync::Mutex<Vec<IndexedPath>>,
-            }
-            impl Drop for Batch<'_> {
-                fn drop(&mut self) {
-                    if self.items.is_empty() {
-                        return;
-                    }
-                    if let Ok(mut all) = self.sink.lock() {
-                        all.append(&mut self.items);
-                    }
-                }
-            }
-            let mut batch = Batch {
-                items: Vec::with_capacity(BATCH),
-                sink: &collected,
-            };
-            let was_cancelled = &was_cancelled;
-            Box::new(move |entry| {
-                if was_cancelled.load(Ordering::Relaxed) {
-                    return ignore::WalkState::Quit;
-                }
-                if cancelled() {
-                    was_cancelled.store(true, Ordering::Relaxed);
-                    return ignore::WalkState::Quit;
-                }
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(err) => {
-                        tracing::debug!(%err, "file mention index skipped entry");
-                        return ignore::WalkState::Continue;
-                    }
-                };
-                let path = entry.path();
-                if path == root {
-                    return ignore::WalkState::Continue;
-                }
-                let Ok(relative) = path.strip_prefix(root) else {
-                    return ignore::WalkState::Continue;
-                };
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                if relative == ".git" || relative.starts_with(".git/") {
-                    return ignore::WalkState::Continue;
-                }
-                batch.items.push(IndexedPath {
-                    haystack: nucleo_matcher::Utf32String::from(relative.as_str()),
-                    path: relative,
-                    is_dir: entry.file_type().is_some_and(|kind| kind.is_dir()),
-                });
-                if batch.items.len() >= BATCH
-                    && let Ok(mut all) = batch.sink.lock()
-                {
-                    all.append(&mut batch.items);
-                    if all.len() >= FILE_INDEX_MAX_ENTRIES {
-                        return ignore::WalkState::Quit;
-                    }
-                }
-                ignore::WalkState::Continue
-            })
-        });
-    if was_cancelled.load(Ordering::Relaxed) || cancelled() {
-        return Err(EngineError::Other("file search cancelled".into()));
-    }
-    let mut entries = collected
-        .into_inner()
-        .map_err(|_| EngineError::Other("file index poisoned".into()))?;
-    entries.truncate(FILE_INDEX_MAX_ENTRIES);
-    Ok(entries)
-}
-
-fn rank_file_matches(
-    entries: &[IndexedPath],
-    root: &Path,
-    query: &str,
-    featured_paths: &[String],
-) -> Vec<FileSearchMatch> {
-    let featured: HashMap<String, usize> = featured_paths
-        .iter()
-        .filter_map(|path| {
             let path = Path::new(path);
             let full = if path.is_absolute() {
                 path.to_path_buf()
             } else {
                 root.join(path)
             };
-            let canonical = std::fs::canonicalize(full).ok()?;
-            let relative = canonical.strip_prefix(root).ok()?;
-            Some(relative.to_string_lossy().replace('\\', "/"))
-        })
-        .enumerate()
-        .fold(HashMap::new(), |mut paths, (rank, path)| {
-            paths.entry(path).or_insert(rank);
-            paths
-        });
-    let mut matcher = nucleo_matcher::Matcher::new({
-        let mut config = nucleo_matcher::Config::DEFAULT;
-        config.set_match_paths();
-        config
-    });
-    let pattern = nucleo_matcher::pattern::Pattern::parse(
-        query,
-        nucleo_matcher::pattern::CaseMatching::Smart,
-        nucleo_matcher::pattern::Normalization::Smart,
-    );
-    let mut matches: Vec<RankedFileMatch> = Vec::new();
-    for entry in entries {
-        let Some(score) = pattern.score(entry.haystack.slice(..), &mut matcher) else {
-            continue;
-        };
-        matches.push((
-            featured.get(&entry.path).copied(),
-            score,
-            entry.path.clone(),
-            entry.is_dir,
-        ));
-        if matches.len() >= RANK_BUFFER {
-            matches.sort_by(|a, b| compare_file_matches(query, a, b));
-            matches.truncate(FILE_SEARCH_MAX_RESULTS);
+            let Ok(canonical) = std::fs::canonicalize(full) else {
+                continue;
+            };
+            let Ok(relative) = canonical.strip_prefix(&root) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative.is_empty()
+                || is_git_metadata(&relative)
+                || matches.iter().any(|found| found.path == relative)
+            {
+                continue;
+            }
+            matches.push(FileSearchMatch {
+                is_dir: canonical.is_dir(),
+                path: relative,
+            });
         }
     }
-    matches.sort_by(|a, b| compare_file_matches(query, a, b));
-    matches.truncate(FILE_SEARCH_MAX_RESULTS);
-    matches
+    let found = search
+        .search_names(
+            &root,
+            query,
+            FILE_SEARCH_MAX_RESULTS + matches.len(),
+            NameKinds::FilesAndDirectories,
+        )
+        .map_err(|e| EngineError::Other(e.to_string()))?;
+    for found in found.matches {
+        if matches.len() == FILE_SEARCH_MAX_RESULTS {
+            break;
+        }
+        if is_git_metadata(&found.path) || matches.iter().any(|known| known.path == found.path) {
+            continue;
+        }
+        matches.push(FileSearchMatch {
+            path: found.path,
+            is_dir: found.is_dir,
+        });
+    }
+    Ok(matches)
+}
+
+/// The home folder as the workspace search index keys it.
+fn home_search_root() -> Result<PathBuf, EngineError> {
+    let home = session_home_dir().map_err(|error| EngineError::Other(error.to_string()))?;
+    canonical_search_root(&home)
+}
+
+fn search_home_folders_blocking(
+    search: &WorkspaceSearch,
+    query: &str,
+    limit: usize,
+) -> Result<HomeFolderSearchResult, EngineError> {
+    search_folders_under(search, &home_search_root()?, query, limit)
+}
+
+/// `SearchHomeFolders` against an already-resolved (canonical) root.
+fn search_folders_under(
+    search: &WorkspaceSearch,
+    home: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<HomeFolderSearchResult, EngineError> {
+    let query = normalize_name_query(query);
+    let query = query.as_ref();
+    // fff scores a `/` query against whole paths, where a folder loses to
+    // its many descendants; ask for the last segment's folders instead and
+    // let `rank_home_folders` check the leading segments.
+    let (index_query, candidates) = match query.trim().trim_end_matches('/').rsplit_once('/') {
+        Some((_, last)) if !last.is_empty() => (last, HOME_FOLDER_PATH_CANDIDATES),
+        _ => (query, HOME_FOLDER_CANDIDATES),
+    };
+    let found = search
+        .search_names(home, index_query, candidates, NameKinds::Directories)
+        .map_err(|e| EngineError::Other(e.to_string()))?;
+    // A `.git` probe per candidate (a few hundred stats) lets repositories
+    // rank first.
+    let candidates = found
+        .matches
         .into_iter()
-        .map(|(_, _, path, is_dir)| FileSearchMatch { path, is_dir })
-        .collect()
+        .filter(|found| !is_git_metadata(&found.path))
+        .map(|found| {
+            let is_repo = home.join(&found.path).join(".git").exists();
+            (found.path, is_repo)
+        })
+        .collect();
+    let matches = rank_home_folders(query, candidates)
+        .into_iter()
+        .take(limit)
+        .map(|(relative, is_repo)| HomeFolderMatch {
+            path: folder_browser_path(&home.join(&relative)),
+            relative,
+            is_repo,
+        })
+        .collect();
+    Ok(HomeFolderSearchResult {
+        matches,
+        indexing: found.indexing,
+    })
+}
+
+/// Keep canonical index keys internal. Ordinary Windows paths are easier for
+/// browser clients to compare with Home and existing spaces; retain extended
+/// paths when their length or names require them, and for UNC shares.
+fn folder_browser_path(path: &Path) -> String {
+    #[cfg(windows)]
+    let path = dunce::simplified(path);
+    path.to_string_lossy().into_owned()
+}
+
+/// Re-rank fuzzy folder candidates `(relative path, is a repository)`, given
+/// in index order, by how well the folder itself matches: an exact name,
+/// then a name starting with the query, then one containing it. A query
+/// with `/` matches the path's last segments instead, each query segment a
+/// prefix of its path segment (`dev/com` → `…/development/comet`). Within a
+/// tier repositories go first, then shallower folders. Candidates matching
+/// only through a typo or a parent's name are kept only when nothing better
+/// matched, ordered the same way.
+fn rank_home_folders(query: &str, candidates: Vec<(String, bool)>) -> Vec<(String, bool)> {
+    let query = query.trim().to_lowercase();
+    let segments: Vec<&str> = query.split('/').filter(|s| !s.is_empty()).collect();
+    let tier = |relative: &str| -> u8 {
+        let relative = relative.to_lowercase();
+        let path: Vec<&str> = relative.split('/').collect();
+        if query.contains('/') {
+            if segments.is_empty() || segments.len() > path.len() {
+                return 0;
+            }
+            let tail = &path[path.len() - segments.len()..];
+            if !tail
+                .iter()
+                .zip(&segments)
+                .all(|(seg, q)| seg.starts_with(q))
+            {
+                return 0;
+            }
+            return if tail.last() == segments.last() { 3 } else { 2 };
+        }
+        let name = path.last().copied().unwrap_or_default();
+        if name == query {
+            3
+        } else if name.starts_with(&query) {
+            2
+        } else {
+            u8::from(name.contains(&query))
+        }
+    };
+    let mut ranked: Vec<(u8, usize, usize, (String, bool))> = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(order, (relative, is_repo))| {
+            let depth = relative.matches('/').count();
+            (tier(&relative), depth, order, (relative, is_repo))
+        })
+        .collect();
+    if ranked.iter().any(|(tier, ..)| *tier > 0) {
+        ranked.retain(|(tier, ..)| *tier > 0);
+    }
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.3.1.cmp(&a.3.1))
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    ranked.into_iter().map(|(.., found)| found).collect()
+}
+
+/// Repository metadata is never offered, even if an index surfaced it.
+fn is_git_metadata(relative: &str) -> bool {
+    relative.split('/').any(|component| component == ".git")
+}
+
+fn canonical_search_root(root: &Path) -> Result<PathBuf, EngineError> {
+    std::fs::canonicalize(root)
+        .map_err(|e| EngineError::Other(format!("could not search workspace: {e}")))
 }
 
 /// Turn a generated chat title into the semantic portion of a Zeron branch
@@ -2371,23 +2311,6 @@ mod tests {
         }
     }
 
-    fn score(query: &str, candidate: &str) -> Option<u32> {
-        let mut matcher = nucleo_matcher::Matcher::new({
-            let mut config = nucleo_matcher::Config::DEFAULT;
-            config.set_match_paths();
-            config
-        });
-        nucleo_matcher::pattern::Pattern::parse(
-            query,
-            nucleo_matcher::pattern::CaseMatching::Smart,
-            nucleo_matcher::pattern::Normalization::Smart,
-        )
-        .score(
-            nucleo_matcher::Utf32String::from(candidate).slice(..),
-            &mut matcher,
-        )
-    }
-
     #[test]
     fn expand_home_rewrites_tilde_and_leaves_other_paths() {
         let home = session_home_dir().unwrap();
@@ -2537,13 +2460,6 @@ tmpfs /run tmpfs rw 0 0
     }
 
     #[test]
-    fn fuzzy_score_matches_a_path_subsequence() {
-        assert!(score("cmp rs", "crates/ui/src/composer.rs").is_some());
-        assert!(score("composer crates", "crates/ui/src/composer.rs").is_some());
-        assert!(score("xyzq", "crates/ui/src/composer.rs").is_none());
-    }
-
-    #[test]
     fn git_history_matches_unicode_case_insensitively() {
         let mut candidate = history_commit("a1b2c3d4".into(), None);
         candidate.subject = "RÉPARER la recherche".into();
@@ -2577,9 +2493,212 @@ tmpfs /run tmpfs rw 0 0
     }
 
     #[test]
+    fn home_folder_search_finds_nested_repositories() {
+        let home = tempfile::tempdir().unwrap();
+        for dir in [
+            "work/clients/comet/.git",
+            "work/clients/comet/src",
+            "notes/comet-ideas",
+            "notes/other",
+        ] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        std::fs::write(home.path().join("notes/comet-ideas/todo.md"), b"").unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let search = WorkspaceSearch::new();
+        // The first call starts the index; wait out its scan.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let result = loop {
+            let result = search_folders_under(&search, &home, "comet", 20).unwrap();
+            if !result.indexing && !result.matches.is_empty() {
+                break result;
+            }
+            assert!(std::time::Instant::now() < deadline, "index never finished");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let found: Vec<_> = result
+            .matches
+            .iter()
+            .map(|m| (m.relative.as_str(), m.is_repo))
+            .collect();
+        // The exact name outranks the shallower prefix match.
+        assert_eq!(
+            found,
+            [("work/clients/comet", true), ("notes/comet-ideas", false)]
+        );
+        assert_eq!(
+            result.matches[0].path,
+            folder_browser_path(&home.join("work/clients/comet"))
+        );
+        assert!(
+            search_folders_under(&search, &home, "", 20)
+                .unwrap()
+                .matches
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn home_folder_search_accepts_both_windows_separators() {
+        let home = tempfile::tempdir().unwrap();
+        for dir in ["aa/bb/cc/dd/src", "aa/bb/cc/dd-other", "elsewhere/dd"] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let search = WorkspaceSearch::new();
+        search.warm(&home).unwrap();
+        assert!(search.wait_until_indexed(&home, Duration::from_secs(20)));
+
+        let forward = search_folders_under(&search, &home, "aa/bb/cc/dd", 20).unwrap();
+        assert_eq!(forward.matches[0].relative, "aa/bb/cc/dd");
+        assert!(
+            forward
+                .matches
+                .iter()
+                .any(|m| m.relative == "aa/bb/cc/dd-other")
+        );
+        for query in [r"aa\bb\cc\dd", r"aa\bb/cc\dd", r"aa\bb\cc\dd\"] {
+            let found = search_folders_under(&search, &home, query, 20).unwrap();
+            assert_eq!(found.matches, forward.matches);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn home_folder_search_preserves_literal_posix_backslashes() {
+        let home = tempfile::tempdir().unwrap();
+        let literal = r"aa\bb\cc\dd";
+        for dir in [literal, "aa/bb/cc/dd"] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let search = WorkspaceSearch::new();
+        search.warm(&home).unwrap();
+        assert!(search.wait_until_indexed(&home, Duration::from_secs(20)));
+
+        let found = search_folders_under(&search, &home, literal, 20).unwrap();
+        assert_eq!(found.matches.len(), 1);
+        assert_eq!(found.matches[0].relative, literal);
+        let forward = search_folders_under(&search, &home, "aa/bb/cc/dd", 20).unwrap();
+        assert_eq!(forward.matches.len(), 1);
+        assert_eq!(forward.matches[0].relative, "aa/bb/cc/dd");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn browser_paths_preserve_native_posix_spelling() {
+        for path in [
+            "/home/ana/code",
+            "/Users/Ana/code",
+            r"/tmp/name\with\backslashes",
+        ] {
+            assert_eq!(folder_browser_path(Path::new(path)), path);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn browser_paths_simplify_only_safe_windows_drive_paths() {
+        assert_eq!(
+            folder_browser_path(Path::new(r"\\?\C:\Users\Ana\repo")),
+            r"C:\Users\Ana\repo"
+        );
+        for path in [
+            r"\\?\C:\repo.",
+            r"\\?\C:\NUL.txt",
+            r"\\?\UNC\server\share\repo",
+        ] {
+            assert_eq!(folder_browser_path(Path::new(path)), path);
+        }
+        let long = format!(r"\\?\C:\{}\{}", "a".repeat(150), "b".repeat(150));
+        assert_eq!(folder_browser_path(Path::new(&long)), long);
+    }
+
+    fn ranked(query: &str, candidates: &[(&str, bool)]) -> Vec<String> {
+        let candidates = candidates
+            .iter()
+            .map(|(path, is_repo)| ((*path).to_owned(), *is_repo))
+            .collect();
+        rank_home_folders(query, candidates)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    #[test]
+    fn home_folders_rank_by_their_own_name() {
+        let candidates = [
+            ("Drive/notes about comet launch", false),
+            ("dev/comet/apps/ios", false),
+            ("old/comet-archive", false),
+            ("dev/comet", false),
+            ("dev/mycomet", false),
+        ];
+        assert_eq!(
+            ranked("Comet", &candidates),
+            [
+                "dev/comet",
+                "old/comet-archive",
+                // Same tier, repo flag and depth: the index's order decides.
+                "Drive/notes about comet launch",
+                "dev/mycomet",
+            ]
+        );
+    }
+
+    #[test]
+    fn home_folders_put_repositories_first_within_a_tier() {
+        let candidates = [("a/comet-docs", false), ("b/c/comet-app", true)];
+        assert_eq!(
+            ranked("comet", &candidates),
+            ["b/c/comet-app", "a/comet-docs"]
+        );
+        // Typo matches survive only when nothing contains the query, and
+        // order the same way.
+        let candidates = [
+            ("Models/Comfy/comfy_types", false),
+            ("dev/comet", true),
+            ("dev/tools", false),
+        ];
+        assert_eq!(
+            ranked("comt", &candidates),
+            ["dev/comet", "dev/tools", "Models/Comfy/comfy_types"]
+        );
+    }
+
+    #[test]
+    fn slash_queries_match_trailing_segment_prefixes() {
+        let candidates = [
+            ("Documentos/development/comet/apps", false),
+            ("Documentos/development/comet", true),
+            ("Documentos/dev/tools", false),
+            ("dev/com", false),
+        ];
+        assert_eq!(
+            ranked("dev/com", &candidates),
+            ["dev/com", "Documentos/development/comet"]
+        );
+    }
+
+    fn search_files_blocking(
+        root: &Path,
+        query: &str,
+        featured_paths: &[String],
+    ) -> Result<Vec<FileSearchMatch>, EngineError> {
+        super::search_files_blocking(&WorkspaceSearch::new(), root, query, featured_paths)
+    }
+
+    #[test]
     fn search_files_obeys_gitignore_and_returns_directories() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join(".git")).unwrap();
+        // Dotfiles are indexed only inside a real repository.
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
         std::fs::create_dir(root.path().join("src")).unwrap();
         std::fs::write(root.path().join("src/composer.rs"), "").unwrap();
         std::fs::write(root.path().join(".secret"), "").unwrap();
@@ -2641,33 +2760,6 @@ tmpfs /run tmpfs rw 0 0
             .position(|entry| entry.path == "composer/docs/readme.md")
             .unwrap();
         assert!(composer < path_only);
-    }
-
-    #[test]
-    fn cached_search_reuses_one_walk_within_the_ttl() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("alpha.rs"), "").unwrap();
-        let cache: FileIndexCache = std::sync::Mutex::new(HashMap::new());
-
-        let first = search_files_cached(&cache, root.path(), "alpha", &[], || false).unwrap();
-        assert_eq!(first.first().map(|m| m.path.as_str()), Some("alpha.rs"));
-        std::fs::write(root.path().join("beta.rs"), "").unwrap();
-        let second = search_files_cached(&cache, root.path(), "beta", &[], || false).unwrap();
-        assert!(second.is_empty(), "{second:?}");
-    }
-
-    #[test]
-    fn cancelled_search_stops_before_walking() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("README.md"), "").unwrap();
-        let cancelled = AtomicBool::new(true);
-
-        let err = search_files_blocking_with_cancel(root.path(), "", &[], || {
-            cancelled.load(Ordering::Relaxed)
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("cancelled"));
     }
 
     #[tokio::test]

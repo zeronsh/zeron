@@ -29,7 +29,9 @@ use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
-use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
+use crate::files::{
+    FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag,
+};
 use crate::icons::{self, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
@@ -76,7 +78,9 @@ pub(crate) mod project_icon;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
+mod search_warm;
 pub(crate) mod spaces;
+mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
 mod voice_stage;
@@ -294,6 +298,13 @@ fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
 
+/// Show the command palette's tab at this (zero-based) position. Bound to
+/// mod-1…4 inside the palette's key context only, where it outranks the
+/// session jumps on the same keys while the palette is open.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct SelectPaletteTab(pub usize);
+
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------
@@ -496,6 +507,21 @@ pub fn apply_keymap(
             JumpSession(slot),
             None,
         ))
+    }));
+    // Context-free bindings (the jumps above) match at the full focus depth,
+    // so a palette binding must too: one for the palette's focused search
+    // input, one for the card itself. Bound after the jumps, they win the tie.
+    let palette_input = format!("{} > PaletteSearch", command_palette::KEY_CONTEXT);
+    cx.bind_keys((0..command_palette::Tab::ALL.len()).flat_map(|ix| {
+        let combo = platform_combo(&format!("mod-{}", ix + 1));
+        [
+            KeyBinding::new(&combo, SelectPaletteTab(ix), Some(&palette_input)),
+            KeyBinding::new(
+                &combo,
+                SelectPaletteTab(ix),
+                Some(command_palette::KEY_CONTEXT),
+            ),
+        ]
     }));
 }
 
@@ -2040,6 +2066,10 @@ pub struct Shell {
     /// The New project palette's collapsed-breadcrumbs (`…`) menu.
     project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
+    /// The focus whose workspace search index was last warmed (see `search_warm`).
+    search_warm: Option<search_warm::SearchWarm>,
+    /// Per chat, the files opened in editor tabs, most recent first.
+    recent_files: std::collections::HashMap<String, std::collections::VecDeque<String>>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
@@ -2496,6 +2526,8 @@ impl Shell {
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
             command_palette: None,
+            search_warm: None,
+            recent_files: std::collections::HashMap::new(),
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
@@ -2661,6 +2693,7 @@ impl Shell {
         }
         self.prune_file_explorers(cx);
         self.refresh_harness_update_watch(cx);
+        self.sync_search_warm(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -3426,6 +3459,10 @@ impl Shell {
             RightSurface::File(id) => {
                 if let Some(file) = self.file_surfaces.get(&id).cloned() {
                     file.update(cx, |file, cx| file.ensure_loaded(cx));
+                    if let Some(path) = self.file_surface_paths.get(&id).cloned() {
+                        let chat_id = file.read(cx).chat_id().to_owned();
+                        self.note_recent_file(&chat_id, &path);
+                    }
                 }
             }
             RightSurface::Terminal(tab) => {
@@ -3715,7 +3752,7 @@ impl Shell {
         &mut self,
         owner: (String, Entity<AppState>),
         path: String,
-        location: Option<(u32, Option<u32>)>,
+        location: Option<(u32, Option<FileColumn>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3917,7 +3954,8 @@ impl Shell {
         self.add_file_surface_at(
             owner,
             link.path,
-            link.line.map(|line| (line, link.column)),
+            link.line
+                .map(|line| (line, link.column.map(FileColumn::Character))),
             window,
             cx,
         );
@@ -10195,8 +10233,7 @@ impl Shell {
             return true;
         }
         if self.add_space.is_some() {
-            self.add_space = None;
-            cx.notify();
+            self.close_add_space(cx);
             return true;
         }
         if self.spaces_menu.is_open() {
@@ -13502,8 +13539,7 @@ impl Render for Shell {
                     return;
                 }
                 if this.add_space.is_some() {
-                    this.add_space = None;
-                    cx.notify();
+                    this.close_add_space(cx);
                 } else {
                     this.open_add_space(cx);
                 }
@@ -13830,8 +13866,7 @@ impl Render for Shell {
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
-        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active()
-        {
+        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
             window.request_animation_frame();
         }
 

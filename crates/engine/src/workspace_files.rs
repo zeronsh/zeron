@@ -14,17 +14,20 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::{
-    ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceFilesRequest,
-    WatchWorkspaceFilesRequest, WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind,
-    WorkspaceFileChange, WorkspaceFileChangeKind, WorkspaceFileChanges,
-    WorkspaceFileConflictReason, WorkspaceFileSearchMatch, WorkspaceFileText,
-    WorkspaceFileWriteResult, WorkspaceLineEnding, WorkspaceReadOnlyReason, WorkspaceTarget,
-    WorkspaceTextEncoding, WorkspaceWritableEncoding, WorkspaceWritableLineEnding,
-    WriteWorkspaceFileOutcome, WriteWorkspaceFileRequest,
+    ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceContentRequest,
+    SearchWorkspaceFilesRequest, WarmWorkspaceSearchRequest, WarmWorkspaceSearchResult,
+    WatchWorkspaceFilesRequest, WorkspaceContentMatch, WorkspaceContentSearchResult,
+    WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind, WorkspaceFileChange,
+    WorkspaceFileChangeKind, WorkspaceFileChanges, WorkspaceFileConflictReason,
+    WorkspaceFileSearchMatch, WorkspaceFileText, WorkspaceFileWriteResult, WorkspaceLineEnding,
+    WorkspaceReadOnlyReason, WorkspaceSearchIndexState, WorkspaceTarget, WorkspaceTextEncoding,
+    WorkspaceWritableEncoding, WorkspaceWritableLineEnding, WriteWorkspaceFileOutcome,
+    WriteWorkspaceFileRequest,
 };
 use zeron_rpc::RpcError;
 
-use crate::{Repos, WorkspaceHost};
+use crate::workspace_search::{IndexState, NameKinds, normalize_name_query};
+use crate::{Repos, WorkspaceHost, WorkspaceSearch};
 
 mod mutations;
 
@@ -35,6 +38,9 @@ pub const DIRECTORY_PAGE_SIZE: usize = 500;
 pub const MAX_DIRECTORY_ENTRIES: usize = 50_000;
 pub const MAX_SEARCH_QUERY_CHARS: usize = 256;
 pub const MAX_SEARCH_RESULTS: usize = 200;
+pub const MAX_CONTENT_RESULTS: usize = 200;
+pub const DEFAULT_CONTENT_RESULTS: usize = 100;
+pub const DEFAULT_CONTENT_RESULTS_PER_FILE: usize = 3;
 pub const WORKSPACE_FILE_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 pub const MAX_EDITABLE_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_PREVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -416,8 +422,10 @@ impl WorkspaceFiles {
             usize::from(request.limit.unwrap_or(MAX_SEARCH_RESULTS as u16)).min(MAX_SEARCH_RESULTS);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
+        let search = self.inner.repos.workspace_search().clone();
         let result = tokio::task::spawn_blocking(move || {
             search_workspace_blocking(
+                &search,
                 &workspace.root,
                 &request.query,
                 request.include_ignored,
@@ -429,6 +437,38 @@ impl WorkspaceFiles {
         .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?;
         cancel_on_drop.disarm();
         result
+    }
+
+    pub async fn search_content(
+        &self,
+        request: SearchWorkspaceContentRequest,
+    ) -> Result<WorkspaceContentSearchResult, WorkspaceFilesError> {
+        validate_workspace_search_query(&request.query)?;
+        let workspace = self.resolve_target(&request.target).await?;
+        let search = self.inner.repos.workspace_search().clone();
+        tokio::task::spawn_blocking(move || {
+            search_content_blocking(&search, &workspace.root, &request)
+        })
+        .await
+        .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?
+    }
+
+    pub async fn warm_search(
+        &self,
+        request: WarmWorkspaceSearchRequest,
+    ) -> Result<WarmWorkspaceSearchResult, WorkspaceFilesError> {
+        let workspace = self.resolve_target(&request.target).await?;
+        let search = self.inner.repos.workspace_search().clone();
+        let state = tokio::task::spawn_blocking(move || search.warm(&workspace.root))
+            .await
+            .map_err(|error| WorkspaceFilesError::Io(format!("search worker failed: {error}")))?
+            .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        Ok(WarmWorkspaceSearchResult {
+            state: match state {
+                IndexState::Building => WorkspaceSearchIndexState::Building,
+                IndexState::Ready => WorkspaceSearchIndexState::Ready,
+            },
+        })
     }
 
     pub async fn read_file(
@@ -1196,7 +1236,31 @@ fn filtered_directory_paths(root: &Path, target: &Path) -> HashSet<String> {
         .collect()
 }
 
+/// `SearchWorkspaceFiles` against an already-resolved root, for
+/// `examples/workspace_search_bench.rs`.
+#[doc(hidden)]
+pub fn bench_search_root(
+    search: &WorkspaceSearch,
+    root: &Path,
+    query: &str,
+    include_ignored: bool,
+    limit: usize,
+) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
+    search_workspace_blocking(
+        search,
+        root,
+        query,
+        include_ignored,
+        limit,
+        &AtomicBool::new(false),
+    )
+}
+
+/// Names come from the workspace search index (fff), which skips ignored
+/// files. "Show ignored" has no index, so it walks the folder directly with a
+/// plain substring match — see [`search_including_ignored`].
 fn search_workspace_blocking(
+    search: &WorkspaceSearch,
     root: &Path,
     query: &str,
     include_ignored: bool,
@@ -1207,20 +1271,99 @@ fn search_workspace_blocking(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut builder = ignore::WalkBuilder::new(root);
-    builder.follow_links(false).hidden(false);
     if include_ignored {
-        builder.standard_filters(false);
+        return search_including_ignored(root, query, limit, cancel);
     }
-    let query_lower = query.to_lowercase();
-    let mut matches = Vec::new();
+    let found = search
+        .search_names(root, query, limit, NameKinds::FilesAndDirectories)
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
+    }
+    Ok(found
+        .matches
+        .into_iter()
+        .filter(|found| {
+            !is_internal_temp_wire_path(&found.path)
+                && !contains_git_component(Path::new(&found.path))
+        })
+        .map(|found| {
+            let is_symlink = std::fs::symlink_metadata(root.join(&found.path))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink());
+            let kind = if is_symlink {
+                WorkspaceEntryKind::Symlink
+            } else if found.is_dir {
+                WorkspaceEntryKind::Directory
+            } else {
+                WorkspaceEntryKind::File
+            };
+            WorkspaceFileSearchMatch {
+                name: found
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&found.path)
+                    .to_owned(),
+                path: found.path,
+                kind,
+                score: found.score,
+            }
+        })
+        .collect())
+}
+
+/// Case-insensitive substring match over every entry, ignored ones included.
+/// Names starting with the query rank first, then other name matches, then
+/// path-only matches, shorter paths first; only the best `limit` are kept
+/// while walking.
+fn search_including_ignored(
+    root: &Path,
+    query: &str,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
+    struct Ranked(WorkspaceFileSearchMatch);
+    impl Ranked {
+        fn key(&self) -> (std::cmp::Reverse<i64>, usize, &str) {
+            (
+                std::cmp::Reverse(self.0.score),
+                self.0.path.len(),
+                &self.0.path,
+            )
+        }
+    }
+    impl PartialEq for Ranked {
+        fn eq(&self, other: &Self) -> bool {
+            self.key() == other.key()
+        }
+    }
+    impl Eq for Ranked {}
+    impl PartialOrd for Ranked {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Ranked {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.key().cmp(&other.key())
+        }
+    }
+
+    let query = normalize_name_query(query).trim().to_lowercase();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .standard_filters(false);
+    // Max-heap on rank: the worst kept match sits on top, ready to go.
+    let mut best = std::collections::BinaryHeap::with_capacity(limit + 1);
     for result in builder.build() {
         if cancel.load(Ordering::Relaxed) {
             return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
         }
         let entry = match result {
             Ok(entry) => entry,
-            Err(error) if matches.is_empty() => {
+            Err(error) if best.is_empty() => {
                 return Err(WorkspaceFilesError::Io(error.to_string()));
             }
             Err(_) => continue,
@@ -1232,9 +1375,8 @@ fn search_workspace_blocking(
             Ok(relative) if !contains_git_component(relative) => relative,
             _ => continue,
         };
-        let file_type = match entry.file_type() {
-            Some(file_type) => file_type,
-            None => continue,
+        let Some(file_type) = entry.file_type() else {
+            continue;
         };
         let kind = if file_type.is_symlink() {
             WorkspaceEntryKind::Symlink
@@ -1245,27 +1387,77 @@ fn search_workspace_blocking(
         } else {
             continue;
         };
+        let name = entry.file_name().to_string_lossy();
+        let lower_name = name.to_lowercase();
+        let score = if lower_name.starts_with(&query) {
+            2
+        } else if lower_name.contains(&query) {
+            1
+        } else if normalize_name_query(&relative.to_string_lossy())
+            .to_lowercase()
+            .contains(&query)
+        {
+            0
+        } else {
+            continue;
+        };
         let path = path_to_wire(relative)?;
         if is_internal_temp_wire_path(&path) {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(score) = workspace_search_score(&name, &path, &query_lower) else {
-            continue;
-        };
-        matches.push(WorkspaceFileSearchMatch {
+        best.push(Ranked(WorkspaceFileSearchMatch {
+            name: name.into_owned(),
             path,
-            name,
             kind,
             score,
-        });
-        if matches.len() > limit {
-            matches.sort_by(compare_workspace_search_matches);
-            matches.truncate(limit);
+        }));
+        if best.len() > limit {
+            best.pop();
         }
     }
-    matches.sort_by(compare_workspace_search_matches);
-    Ok(matches)
+    Ok(best
+        .into_sorted_vec()
+        .into_iter()
+        .map(|ranked| ranked.0)
+        .collect())
+}
+
+fn search_content_blocking(
+    search: &WorkspaceSearch,
+    root: &Path,
+    request: &SearchWorkspaceContentRequest,
+) -> Result<WorkspaceContentSearchResult, WorkspaceFilesError> {
+    validate_workspace_search_query(&request.query)?;
+    let limit = request
+        .limit
+        .map_or(DEFAULT_CONTENT_RESULTS, usize::from)
+        .min(MAX_CONTENT_RESULTS);
+    let per_file = request
+        .per_file_limit
+        .map_or(DEFAULT_CONTENT_RESULTS_PER_FILE, usize::from)
+        .min(limit);
+    let found = search
+        .search_content(root, &request.query, limit, per_file)
+        .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+    Ok(WorkspaceContentSearchResult {
+        matches: found
+            .matches
+            .into_iter()
+            .filter(|found| {
+                !is_internal_temp_wire_path(&found.path)
+                    && !contains_git_component(Path::new(&found.path))
+            })
+            .map(|found| WorkspaceContentMatch {
+                path: found.path,
+                line: found.line,
+                column: found.column,
+                preview: found.preview,
+                ranges: found.ranges,
+            })
+            .collect(),
+        truncated: found.truncated,
+        indexing: found.indexing,
+    })
 }
 
 fn validate_workspace_search_query(query: &str) -> Result<(), WorkspaceFilesError> {
@@ -1280,17 +1472,6 @@ fn validate_workspace_search_query(query: &str) -> Result<(), WorkspaceFilesErro
         )));
     }
     Ok(())
-}
-
-fn compare_workspace_search_matches(
-    left: &WorkspaceFileSearchMatch,
-    right: &WorkspaceFileSearchMatch,
-) -> std::cmp::Ordering {
-    right
-        .score
-        .cmp(&left.score)
-        .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
-        .then_with(|| left.path.cmp(&right.path))
 }
 
 fn read_image_blocking(
@@ -2127,40 +2308,6 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn workspace_search_score(name: &str, path: &str, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let name = name.to_lowercase();
-    let path = path.to_lowercase();
-    if name == query {
-        return Some(10_000);
-    }
-    if name.starts_with(query) {
-        return Some(8_000 - name.len() as i64);
-    }
-    if let Some(index) = name.find(query) {
-        return Some(6_000 - index as i64 - name.len() as i64);
-    }
-    if let Some(index) = path.find(query) {
-        return Some(4_000 - index as i64 - path.len() as i64);
-    }
-    let mut query_chars = query.chars();
-    let mut wanted = query_chars.next()?;
-    let mut gaps = 0i64;
-    for character in path.chars() {
-        if character == wanted {
-            match query_chars.next() {
-                Some(next) => wanted = next,
-                None => return Some(2_000 - gaps - path.len() as i64),
-            }
-        } else {
-            gaps += 1;
-        }
-    }
-    None
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -2340,6 +2487,23 @@ mod tests {
         );
     }
 
+    fn search_workspace_blocking(
+        root: &Path,
+        query: &str,
+        include_ignored: bool,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
+        super::search_workspace_blocking(
+            &WorkspaceSearch::new(),
+            root,
+            query,
+            include_ignored,
+            limit,
+            cancel,
+        )
+    }
+
     #[test]
     fn search_ranks_filename_and_nested_path_matches() {
         let root = tempfile::tempdir().unwrap();
@@ -2349,7 +2513,10 @@ mod tests {
         std::fs::write(root.path().join("README.md"), b"").unwrap();
         let root = std::fs::canonicalize(root.path()).unwrap();
 
-        let matches = search_workspace_blocking(&root, "config", false, 200, &no_cancel()).unwrap();
+        // fff ranks the shallower `configuration.rs` first for "config"; an
+        // exact file name still beats depth.
+        let matches =
+            search_workspace_blocking(&root, "config.rs", false, 200, &no_cancel()).unwrap();
         assert_eq!(matches[0].path, "src/deep/config.rs");
         assert!(
             matches
@@ -2385,11 +2552,250 @@ mod tests {
         }
         let root = std::fs::canonicalize(root.path()).unwrap();
 
-        let matches = search_workspace_blocking(&root, "query", false, 2, &no_cancel()).unwrap();
+        let matches = search_workspace_blocking(&root, "query", true, 2, &no_cancel()).unwrap();
 
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].path, "query");
         assert_eq!(matches[1].path, "query-reference.txt");
+        assert_eq!(
+            search_workspace_blocking(&root, "query", false, 2, &no_cancel())
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn search_including_ignored_matches_nested_paths() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".ignore"), b"aa\n").unwrap();
+        std::fs::create_dir_all(root.path().join("aa/bb/cc/dd")).unwrap();
+        std::fs::write(root.path().join("aa/bb/cc/dd/file.rs"), b"").unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let forward =
+            search_workspace_blocking(&root, "aa/bb/cc/dd", true, 20, &no_cancel()).unwrap();
+        let paths: Vec<_> = forward.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, ["aa/bb/cc/dd", "aa/bb/cc/dd/file.rs"]);
+        #[cfg(windows)]
+        for query in [r"aa\bb\cc\dd", r"aa\bb/cc\dd"] {
+            let found = search_workspace_blocking(&root, query, true, 20, &no_cancel()).unwrap();
+            assert_eq!(found, forward);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn search_including_ignored_preserves_literal_posix_backslashes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(r"aa\bb/cc\dd")).unwrap();
+        std::fs::create_dir_all(root.path().join("aa/bb/cc/dd")).unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let found =
+            search_workspace_blocking(&root, r"aa\bb/cc\dd", true, 20, &no_cancel()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, r"aa\bb/cc\dd");
+        let forward =
+            search_workspace_blocking(&root, "aa/bb/cc/dd", true, 20, &no_cancel()).unwrap();
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].path, "aa/bb/cc/dd");
+    }
+
+    #[test]
+    fn search_finds_ignored_entries_only_when_asked() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".ignore"), b"target\n").unwrap();
+        std::fs::create_dir_all(root.path().join("target/debug")).unwrap();
+        std::fs::write(root.path().join("target/debug/build.log"), b"").unwrap();
+        std::fs::write(root.path().join("lib.rs"), b"").unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let indexed = search_workspace_blocking(&root, "build", false, 200, &no_cancel()).unwrap();
+        assert!(
+            indexed
+                .iter()
+                .all(|entry| !entry.path.starts_with("target"))
+        );
+        let walked = search_workspace_blocking(&root, "build", true, 200, &no_cancel()).unwrap();
+        assert_eq!(walked[0].path, "target/debug/build.log");
+        assert_eq!(walked[0].name, "build.log");
+        assert_eq!(walked[0].kind, WorkspaceEntryKind::File);
+    }
+
+    fn content(
+        root: &Path,
+        query: &str,
+        per_file: Option<u16>,
+    ) -> Result<WorkspaceContentSearchResult, WorkspaceFilesError> {
+        let search = WorkspaceSearch::new();
+        search.warm(root).unwrap();
+        let request = SearchWorkspaceContentRequest {
+            target: WorkspaceTarget {
+                chat_id: Some("chat".into()),
+                space_id: None,
+                checkout_path: None,
+            },
+            query: query.into(),
+            limit: None,
+            per_file_limit: per_file,
+        };
+        // Wait out the initial scan so the result is never `indexing`.
+        for _ in 0..200 {
+            let result = search_content_blocking(&search, root, &request)?;
+            if !result.indexing {
+                return Ok(result);
+            }
+        }
+        panic!("workspace search index never finished scanning");
+    }
+
+    fn content_fixture() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let files: [(&str, &[u8]); 4] = [
+            (
+                "src/lib.rs",
+                b"fn main() {}\n    let needle = 1;\nneedle();\nneedle!();\nneedle?\n",
+            ),
+            ("README.md", b"A Needle in the docs\n"),
+            ("utf8.txt", "café — needle ñ\n".as_bytes()),
+            ("image.bin", b"needle\0\0\0\x01\x02 needle"),
+        ];
+        for (path, bytes) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        (dir, root)
+    }
+
+    #[test]
+    fn content_search_finds_literal_lines_with_their_location() {
+        let (_dir, root) = content_fixture();
+        let result = content(&root, "let needle", None).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        let found = &result.matches[0];
+        assert_eq!(found.path, "src/lib.rs");
+        assert_eq!(found.line, 2);
+        assert_eq!(found.column, 4);
+        assert_eq!(found.preview, "let needle = 1;");
+        assert_eq!(found.ranges, vec![(0, 10)]);
+    }
+
+    #[test]
+    fn content_search_preserves_spaces_and_tabs_in_the_query() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("literal.txt"),
+            "let  needle = 1;\nlet\tneedle = 2;\nlet needle = 3;\n",
+        )
+        .unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        for (query, line) in [("let  needle", 1), ("let\tneedle", 2)] {
+            let result = content(&root, query, None).unwrap();
+            assert_eq!(result.matches.len(), 1, "query: {query:?}");
+            let found = &result.matches[0];
+            assert_eq!(found.path, "literal.txt");
+            assert_eq!(found.line, line, "query: {query:?}");
+            assert_eq!(found.column, 0);
+            assert_eq!(found.ranges, vec![(0, query.len() as u32)]);
+            assert!(found.preview.starts_with(query));
+        }
+    }
+
+    #[test]
+    fn content_search_treats_exclamation_marks_as_literal_text() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("literal.txt"), "if !ready {\nif ready {\n").unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        let result = content(&root, "if !ready", None).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        let found = &result.matches[0];
+        assert_eq!(found.path, "literal.txt");
+        assert_eq!(found.line, 1);
+        assert_eq!(found.column, 0);
+        assert_eq!(found.preview, "if !ready {");
+        assert_eq!(found.ranges, vec![(0, 9)]);
+    }
+
+    #[test]
+    fn content_search_preserves_literal_backslashes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("literal.txt"),
+            "\\n\nn\n\\!ready\n!ready\n",
+        )
+        .unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+
+        for (query, line) in [(r"\n", 1), (r"\!ready", 3)] {
+            let result = content(&root, query, None).unwrap();
+            assert_eq!(result.matches.len(), 1, "query: {query:?}");
+            let found = &result.matches[0];
+            assert_eq!(found.path, "literal.txt");
+            assert_eq!(found.line, line);
+            assert_eq!(found.column, 0);
+            assert_eq!(found.preview, query);
+            assert_eq!(found.ranges, vec![(0, query.len() as u32)]);
+        }
+    }
+
+    #[test]
+    fn content_search_uses_smart_case() {
+        let (_dir, root) = content_fixture();
+        let insensitive = content(&root, "needle", Some(10)).unwrap();
+        assert!(insensitive.matches.iter().any(|m| m.path == "README.md"));
+        let sensitive = content(&root, "Needle", Some(10)).unwrap();
+        assert!(sensitive.matches.iter().all(|m| m.path == "README.md"));
+        assert_eq!(sensitive.matches.len(), 1);
+    }
+
+    #[test]
+    fn content_search_skips_binary_files_and_caps_matches_per_file() {
+        let (_dir, root) = content_fixture();
+        let result = content(&root, "needle", None).unwrap();
+        assert!(!result.matches.iter().any(|m| m.path == "image.bin"));
+        assert_eq!(
+            result
+                .matches
+                .iter()
+                .filter(|m| m.path == "src/lib.rs")
+                .count(),
+            DEFAULT_CONTENT_RESULTS_PER_FILE
+        );
+        let one = content(&root, "needle", Some(1)).unwrap();
+        assert_eq!(
+            one.matches
+                .iter()
+                .filter(|m| m.path == "src/lib.rs")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn content_search_ranges_are_utf8_byte_offsets_into_the_preview() {
+        let (_dir, root) = content_fixture();
+        let result = content(&root, "needle ñ", None).unwrap();
+        let found = &result.matches[0];
+        assert_eq!(found.path, "utf8.txt");
+        let (start, end) = found.ranges[0];
+        assert_eq!(&found.preview[start as usize..end as usize], "needle ñ");
+        assert_eq!(start as usize, "café — ".len());
+    }
+
+    #[test]
+    fn content_search_rejects_empty_and_oversized_queries() {
+        let (_dir, root) = content_fixture();
+        for query in ["", "   "] {
+            let error = content(&root, query, None).unwrap_err();
+            assert!(error.to_string().contains("query must not be empty"));
+        }
+        let long = "x".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+        assert!(content(&root, &long, None).is_err());
     }
 
     fn read_fixture(bytes: &[u8]) -> WorkspaceFileText {

@@ -153,7 +153,9 @@ ttf-parser = "0.25.1"
 # Windows system proxy for provider usage probes and other HTTP clients.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy"] }
 ignore = "0.4"
-nucleo-matcher = "0.3"
+# Workspace file/content search index (@ mentions, file tree, cmd+K).
+# Pinned exactly: crates.io also carries `0.11.1-nightly.*` prereleases.
+fff-search = "=0.11.0"
 
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
