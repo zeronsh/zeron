@@ -3250,8 +3250,7 @@ pub struct Transcript {
     highlights: HighlightStore,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
-    /// tick) — restick and escape are direction-aware
-    /// (see [`Transcript::should_restick`]).
+    /// tick).
     last_scroll_distance: f32,
     /// The stick-to-bottom pin. Broken only by user input (wheel/touch up);
     /// re-engaged inside the 70px band, after an own-send first overflows, and
@@ -3280,6 +3279,8 @@ pub struct Transcript {
     /// One `on_next_frame` callback in flight at most.
     spring_scheduled: bool,
     scroll_anim: Option<Task<()>>,
+    /// Vertical delta of the latest wheel event; positive scrolls toward the top.
+    wheel_dy: Pixels,
     /// Last pointer sample while markdown selection owns a left-button drag.
     selection_drag_position: Option<Point<Pixels>>,
     /// One-shot timer rescheduled only while the pointer remains in an edge
@@ -3607,6 +3608,7 @@ impl Transcript {
             spring_kick: false,
             spring_scheduled: false,
             scroll_anim: None,
+            wheel_dy: px(0.0),
             selection_drag_position: None,
             selection_scroll_task: None,
             rail_enabled,
@@ -3832,8 +3834,8 @@ impl Transcript {
     /// stick band *and* moving toward the bottom. Direction matters — a small
     /// wheel-up notch near the bottom stays inside the band, and re-sticking
     /// on it would snap the view straight back, making the pin unbreakable.
-    pub fn should_restick(distance: f32, previous_distance: f32) -> bool {
-        distance <= STICK_THRESHOLD_PX && distance < previous_distance
+    pub fn should_restick(distance: f32, wheel_dy: Pixels) -> bool {
+        distance <= STICK_THRESHOLD_PX && wheel_dy < px(0.0)
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
@@ -3859,18 +3861,18 @@ impl Transcript {
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
                 this.discard_pending_viewport();
+                let wheel_dy = this.wheel_dy;
                 // Input owns the viewport immediately, including wheel-down
                 // after background streaming. A held turn can be stale while
                 // frame callbacks are paused; reasserting its old prompt here
                 // made scrolling down impossible until an upward gesture.
                 if this.own_turn.is_some() {
                     let distance = this.distance_from_bottom();
-                    let previous = this.last_scroll_distance;
                     this.last_scroll_distance = distance;
                     // Reaching the end preserves normal tail-follow intent
                     // without reasserting a possibly stale prompt hold.
                     this.pinned =
-                        distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous);
+                        distance <= AT_BOTTOM_PX || Self::should_restick(distance, wheel_dy);
                     this.spring.reset();
                     this.spring_last_tick = None;
                     // Re-stick only when returning to a short turn's actual
@@ -3882,7 +3884,7 @@ impl Transcript {
                                 >= Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
                         })
                     });
-                    if !released_own_turn && at_hold && Self::should_restick(distance, previous) {
+                    if !released_own_turn && at_hold && Self::should_restick(distance, wheel_dy) {
                         if let Some(anchor) = this.own_turn.as_mut() {
                             anchor.held = true;
                             anchor.positioned = false;
@@ -3899,9 +3901,10 @@ impl Transcript {
                     return;
                 }
                 let distance = this.distance_from_bottom();
-                let previous = this.last_scroll_distance;
                 this.last_scroll_distance = distance;
-                if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
+                // The wheel's direction decides, not the distance moved: the
+                // last distance can predate streaming growth by a layout.
+                if wheel_dy > px(0.0) && distance > AT_BOTTOM_PX {
                     // User input moving away from the bottom breaks the pin.
                     // Content growth never lands here — it doesn't fire the
                     // scroll handler (mugen §1e: interrupt from input, not
@@ -3909,7 +3912,7 @@ impl Transcript {
                     this.pinned = false;
                     this.spring.reset();
                     this.spring_last_tick = None;
-                } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous) {
+                } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, wheel_dy) {
                     // Returning toward the bottom inside the 70px band (or
                     // arriving at it) re-engages the pin with a glide.
                     if !this.pinned {
@@ -10210,6 +10213,10 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
+            // Read by the deferred half of `handle_scroll`; only the sign matters.
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, _| {
+                this.wheel_dy = event.delta.pixel_delta(px(16.0)).y;
+            }))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
             // elements re-register (document paint order = selection order;
@@ -11343,15 +11350,14 @@ mod tests {
     fn restick_is_direction_aware() {
         // Scrolling away from the bottom never resticks, even inside the band
         // (a 20px wheel notch from the pinned bottom must break the pin).
-        assert!(!Transcript::should_restick(20.0, 0.0));
-        assert!(!Transcript::should_restick(69.0, 30.0));
+        assert!(!Transcript::should_restick(20.0, px(20.0)));
         // Returning toward the bottom resticks once inside the 70px band…
-        assert!(Transcript::should_restick(69.0, 120.0));
-        assert!(Transcript::should_restick(0.0, 30.0));
+        assert!(Transcript::should_restick(69.0, px(-40.0)));
+        assert!(Transcript::should_restick(0.0, px(-40.0)));
         // …but not while still outside it.
-        assert!(!Transcript::should_restick(200.0, 300.0));
-        // No movement — leave the pin alone.
-        assert!(!Transcript::should_restick(50.0, 50.0));
+        assert!(!Transcript::should_restick(200.0, px(-40.0)));
+        // No vertical movement — leave the pin alone.
+        assert!(!Transcript::should_restick(50.0, px(0.0)));
     }
 
     #[test]
@@ -13354,6 +13360,34 @@ mod tests {
                         assert!(transcript.read(cx).distance_from_bottom() <= 0.5);
                     }
                 }
+            });
+        }
+
+        #[test]
+        fn wheel_direction_not_a_stale_distance_decides_the_pin() {
+            with_window(|transcript, window, cx| {
+                let entries: Vec<_> = (0..40).map(|ix| prompt(&format!("prompt-{ix}"))).collect();
+                transcript.update(cx, |this, cx| {
+                    this.rail_enabled = false;
+                    feed(this, entries, cx);
+                });
+                draw(window, cx);
+                // Pinned well above the end, with a distance baseline from
+                // before the growth: a stream outran the last layout.
+                transcript.update(cx, |this, _| {
+                    this.pinned = true;
+                    this.list.scroll_to(ListOffset {
+                        item_ix: 20,
+                        offset_in_item: px(0.0),
+                    });
+                    this.last_scroll_distance = 0.0;
+                });
+                draw(window, cx);
+                assert!(transcript.read(cx).distance_from_bottom() > STICK_THRESHOLD_PX);
+                wheel(window, -40.0, cx);
+                assert!(transcript.read(cx).pinned, "a wheel down keeps the pin");
+                wheel(window, 40.0, cx);
+                assert!(!transcript.read(cx).pinned, "a wheel up breaks it");
             });
         }
 
