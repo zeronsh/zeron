@@ -921,6 +921,8 @@ impl Client {
         self.section_change(SidebarSectionChange::Assign {
             session_id: chat_id.to_owned(),
             section_id,
+            after: None,
+            before: None,
         })
     }
 

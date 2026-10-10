@@ -331,7 +331,35 @@ impl Shell {
             .chats
             .iter()
             .find(|chat| chat.id == chat_id)
-            .and_then(|chat| state.space_for_chat(chat));
+            .and_then(|chat| state.space_for_chat(chat))
+            .cloned();
+        self.project_icons.render(
+            &self.state,
+            space.as_ref(),
+            self.active_sidebar_pin_profile_key(cx),
+            selected,
+            cx,
+        )
+    }
+}
+
+/// Shared artwork pipeline for sidebar and repository picker. Each owner keeps
+/// the entities alive; loading stays off the render thread and has a deadline.
+#[derive(Default)]
+pub(crate) struct ProjectIcons {
+    entries: std::cell::RefCell<std::collections::HashMap<String, Entity<ProjectIcon>>>,
+}
+
+impl ProjectIcons {
+    pub(crate) fn render<V: 'static>(
+        &self,
+        state: &Entity<AppState>,
+        space: Option<&zeron_proto::Space>,
+        profile: Option<String>,
+        selected: bool,
+        cx: &mut Context<V>,
+    ) -> AnyElement {
+        let state = state.read(cx);
         let representative = space.map(|space| state.representative_space(space));
         let name = representative
             .map(|space| space.display_name().to_string())
@@ -362,27 +390,21 @@ impl Shell {
         };
         let key = format!(
             "{:?}:{:?}:{}:{:?}:{}",
-            self.active_sidebar_pin_profile_key(cx),
-            context.target_device_id,
-            context.cwd,
-            context.checkout_id,
-            name
+            profile, context.target_device_id, context.cwd, context.checkout_id, name
         );
         let engine = state.engine().cloned();
         // Don't cache a remote miss before a connection exists.
         if context.target_device_id.is_some() && engine.is_none() {
             return monogram(&name, &seed, selected, Theme::of(cx));
         }
-        let mut cache = self.project_icons.borrow_mut();
+        let mut cache = self.entries.borrow_mut();
         cache.retain(|_, entity| entity.read(cx).refreshed.elapsed() < Duration::from_secs(300));
         let entity = cache
             .entry(key)
             .or_insert_with(|| {
                 let entity =
                     cx.new(|cx| ProjectIcon::new(name.clone(), seed.clone(), context, engine, cx));
-                // The monogram below is drawn by the shell (it needs the row's
-                // selected state, which the shared entity can't hold), so the
-                // shell must redraw when artwork lands.
+                // The owner draws the selected monogram and redraws when artwork lands.
                 cx.observe(&entity, |_, _, cx| cx.notify()).detach();
                 entity
             })

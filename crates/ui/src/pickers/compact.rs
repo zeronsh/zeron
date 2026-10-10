@@ -216,10 +216,10 @@ impl Pickers {
             .gap(px(8.0))
             .cursor_pointer()
             .text_color(theme.text)
-            // Every row reserves the glass rim so selection doesn't shift content.
-            .border_1()
-            .border_color(gpui::transparent_black())
-            .when(selected, |el| crate::glass::light(el, &theme, 1.0))
+            .when(selected, |el| {
+                el.bg(crate::theme::card_selected_bg())
+                    .shadow(crate::theme::card_selected_shadows())
+            })
             .when(!selected && self.active == ix, |el| {
                 el.bg(crate::theme::ink(0.05))
             })

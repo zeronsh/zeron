@@ -262,6 +262,7 @@ pub fn short_id(id: &str) -> String {
 
 impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
         let (devices, local_id, workspace_scope) = {
@@ -423,22 +424,6 @@ impl Render for DevicesPage {
                                     &theme,
                                     devices_subtitle(workspace_scope),
                                 ))
-                                .when_some(self.error.clone(), |el, message| {
-                                    el.child(
-                                        widgets::error_strip(&theme, message)
-                                            .id("devices-error")
-                                            .cursor_pointer()
-                                            .tab_index(0)
-                                            .role(gpui::Role::Button)
-                                            .focus_visible(|s| {
-                                                s.border_2().border_color(theme.accent).opacity(1.0)
-                                            })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.error = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                })
                                 .child(card),
                         ),
                 )

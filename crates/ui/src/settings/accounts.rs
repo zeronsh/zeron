@@ -1837,21 +1837,6 @@ impl AccountsPage {
                             ),
                     ),
             )
-            .when_some(self.error.clone(), |el, message| {
-                el.child(
-                    widgets::error_strip(theme, message)
-                        .mt(px(4.0))
-                        .id("accounts-action-error")
-                        .role(gpui::Role::Button)
-                        .aria_label("Dismiss account error")
-                        .tab_index(0)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|page, _, _, cx| {
-                            page.error = None;
-                            cx.notify();
-                        })),
-                )
-            })
             .children(match &self.snapshot {
                 Loadable::Ready(snapshot) => snapshot
                     .warnings
@@ -1880,6 +1865,7 @@ impl AccountsPage {
 
 impl Render for AccountsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
@@ -2186,20 +2172,6 @@ impl Render for AccountsPage {
                                     )
                                     .child(self.render_device_switcher(&theme, cx)),
                             )
-                            .when_some(self.error.clone(), |el, message| {
-                                el.child(
-                                    widgets::error_strip(&theme, message)
-                                        .id("accounts-action-error")
-                                        .cursor_pointer()
-                                        .tab_index(0)
-.role(gpui::Role::Button)
-.focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
-.on_click(cx.listener(|this, _, _, cx| {
-                                            this.error = None;
-                                            cx.notify();
-                                        })),
-                                )
-                            })
                             .children(sections)
                             // Footer note (zeron: `mt-6 text-[12px] leading-relaxed
                             // text-muted-foreground/60`).

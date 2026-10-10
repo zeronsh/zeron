@@ -263,7 +263,8 @@ impl TodoCache {
 
 const HEADER_HEIGHT: f32 = 32.0;
 const ROW_PAD_X: f32 = 8.0;
-const ROW_RADIUS: f32 = 8.0;
+/// Rows sit in the queue tray's surface, so they share its concentric radius.
+const ROW_RADIUS: f32 = crate::queue::ROW_RADIUS;
 const TEXT_SIZE: f32 = 12.5;
 const TEXT_LINE: f32 = 17.0;
 const GLYPH_SLOT: f32 = 14.0;
@@ -307,7 +308,8 @@ impl Composer {
         // Dismissable whenever the turn is idle, finished or not.
         let header = self.todo_header(&chat_id, &items, summary, expanded, !live, &theme, cx);
 
-        let surface = crate::queue::queue_panel_surface(&theme).child(header);
+        let surface =
+            crate::queue::queue_panel_surface(&theme, cx.has_active_drag()).child(header);
         let surface = if expanded {
             let list = div().flex().flex_col().children(
                 rows(&items, show_earlier, show_later)
@@ -332,8 +334,8 @@ impl Composer {
                     .track_scroll(&self.todo_scroll)
                     .child(list),
             )
-            .fade_overflow_y(&self.todo_scroll)
-            .outset_bottom(TEXT_SIZE);
+            // The ramp ends at the clip edge; glyphs fade per pixel.
+            .fade_overflow_y(&self.todo_scroll);
             surface.child(
                 div()
                     .mt(px(2.0))

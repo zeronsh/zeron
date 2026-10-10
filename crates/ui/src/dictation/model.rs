@@ -598,13 +598,7 @@ impl Render for VoiceCard {
                     ),
             )
         });
-        let error = self.error.as_ref().map(|e| {
-            div()
-                .id("voice-error")
-                .role(gpui::Role::Status)
-                .aria_label(e.clone())
-                .child(widgets::error_strip(&theme, e.clone()))
-        });
+        crate::toast::take_error(&mut self.error, cx);
         let scrollbar = popover::rail(self, "voice-page-scrollbar", &theme, cx);
         div()
             .id("voice-page-host")
@@ -635,7 +629,6 @@ impl Render for VoiceCard {
                                         .children(microphone_row)
                                         .child(shortcut_row),
                                 )
-                                .children(error)
                                 .children(model_card),
                         ),
                 )

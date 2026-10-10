@@ -101,6 +101,7 @@ impl ThreadNamingCard {
 
 impl Render for ThreadNamingCard {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let follows_session = self
             .settings
@@ -157,10 +158,5 @@ impl Render for ThreadNamingCard {
                     )
                     .child(control),
             )
-            .when_some(self.error.clone(), |card, error| {
-                card.child(
-                    widgets::card_row(&theme, false).child(widgets::error_strip(&theme, error)),
-                )
-            })
     }
 }

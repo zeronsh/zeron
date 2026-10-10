@@ -1157,19 +1157,98 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_string()))
 }
 
-/// The search/text input frame at the top of a picker popover (zeron
-/// `searchInput`: `w-full rounded-lg bg-white/[0.04] px-2.5 py-1.5
-/// text-[13px]` + `mb-1`, borderless — full width inside the card's own
-/// p-1, only a 4px bottom margin).
-pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
+/// The search row's height, hairline included.
+pub const SEARCH_ROW_HEIGHT: f32 = 40.0;
+
+/// The model picker's search row, shared by every searchable picker: a
+/// magnifier and a borderless input over a full-bleed hairline, in the
+/// card's own tone. Mount it as the card's FIRST child — it cancels the
+/// card's inset to run edge to edge, then restores the inset above the list.
+pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
+    search_row(theme).child(div().flex_1().min_w_0().child(input))
+}
+
+/// [`search_input_frame`] without the input, for rows that carry their own
+/// trailing controls. Children follow the magnifier.
+pub fn search_row(theme: &Theme) -> gpui::Div {
     div()
-        .mb(px(4.0))
+        .flex_none()
+        .h(px(SEARCH_ROW_HEIGHT))
+        .mx(px(-CARD_INSET))
+        .mt(px(-CARD_INSET))
+        .mb(px(CARD_INSET))
         .px(px(10.0))
-        .py(px(6.0))
-        .rounded(px(MENU_ITEM_RADIUS))
-        .bg(ink(0.04))
+        .border_b_1()
+        .border_color(hairline(0.08))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
         .text_size(crate::typography::ui_rems(13.0))
-        .child(input)
+        .child(
+            crate::icons::icon(crate::icons::MAGNIFER)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+}
+
+/// A searchable picker's row height, matching the model picker's rows.
+pub const PICKER_ROW_HEIGHT: f32 = 32.0;
+
+/// One row of a searchable picker, drawn like the model picker's: selection
+/// is the card's selected wash and ring, and the keyboard cursor and hover
+/// share one faint ink wash. The caller adds the id and listeners; `fade_key`
+/// keys the hover fade, as in [`menu_row`].
+pub fn picker_row(
+    theme: &Theme,
+    selected: bool,
+    highlighted: bool,
+    fade_key: impl Into<SharedString>,
+) -> gpui::Div {
+    let row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .min_h(px(PICKER_ROW_HEIGHT))
+        .px(px(8.0))
+        .rounded(px(MENU_ITEM_RADIUS))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text)
+        .cursor_pointer();
+    if selected {
+        return row
+            .bg(crate::theme::card_selected_bg())
+            .shadow(crate::theme::card_selected_shadows());
+    }
+    let fade_key = fade_key.into();
+    let mut row = row.bg(motion::hover_blend(&fade_key, ink(0.0), ink(0.05)));
+    row.interactivity()
+        .on_hover(motion::hover_listener(fade_key));
+    if highlighted { row.bg(ink(0.05)) } else { row }
+}
+
+/// A picker row's leading slot: a project's artwork, or a glyph centred in
+/// the same square, so every label starts at one edge.
+pub fn picker_icon_slot(art: AnyElement) -> gpui::Div {
+    div()
+        .size(px(16.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(art)
+}
+
+/// A full-bleed hairline between a picker's list and its pinned action rows.
+pub fn picker_divider() -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(1.0))
+        .my(px(2.0))
+        .mx(px(-CARD_INSET))
+        .bg(hairline(0.08))
 }
 
 /// A bordered trailing menu section (zeron picker action groups /

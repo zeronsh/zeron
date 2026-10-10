@@ -6,7 +6,7 @@ use zeron_proto::{
 
 use crate::project_actions::{
     ACTION_ICONS, ProjectActionEditor, ProjectActionsKey, ProjectActionsStatus, action_icon,
-    draft_from_action, preferred_action, show_action_label,
+    draft_from_action,
 };
 
 #[derive(Clone)]
@@ -16,20 +16,6 @@ struct ProjectActionContext {
     target_device_id: Option<String>,
 }
 
-/// Reserve the titlebar, trigger gap and window margin even on short windows.
-fn project_actions_menu_surface(
-    theme: &Theme,
-    viewport_height: Pixels,
-    scroll: &gpui::ScrollHandle,
-) -> gpui::Stateful<gpui::Div> {
-    popover::popover_card(theme)
-        .id("project-actions-scroll")
-        .w(px(280.0))
-        .max_h((viewport_height - px(Theme::TITLEBAR_HEIGHT + 6.0 + 16.0)).max(px(0.0)))
-        .overflow_y_scroll()
-        .track_scroll(scroll)
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-}
 
 impl Shell {
     pub(super) fn attach_worktree_setup(
@@ -41,7 +27,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(error) = setup_error {
-            self.sidebar_notice = Some(format!("Setup action failed: {error}").into());
+            self.show_notice(crate::toast::ToastKind::Error, format!("Setup action failed: {error}"), cx);
         }
         let Some(run) = setup_action else {
             cx.notify();
@@ -57,8 +43,7 @@ impl Shell {
             panel.attach_reserved_session(&chat_id, tab, run.terminal, target_device_id, cx)
         });
         if !attached {
-            self.sidebar_notice =
-                Some("Setup action started, but its terminal could not be attached".into());
+            self.show_notice(crate::toast::ToastKind::Error, "Setup action started, but its terminal could not be attached", cx);
         }
 
         let selected = self.active_chat == chat_id;
@@ -147,22 +132,8 @@ impl Shell {
         cx.notify();
     }
 
-    fn toggle_project_actions_menu(&mut self, cx: &mut Context<Self>) {
-        if self.project_actions.menu.take_press_was_open() {
-            self.close_project_actions_menu(cx);
-            return;
-        }
-        self.project_actions.menu.open(());
-        self.project_actions
-            .menu_scroll
-            .set_offset(gpui::point(px(0.0), px(0.0)));
-        if let Some(context) = self.project_action_context(cx) {
-            self.refresh_project_actions(context, cx);
-        }
-        cx.notify();
-    }
 
-    fn open_project_action_editor(
+    pub(super) fn open_project_action_editor(
         &mut self,
         action: Option<ProjectAction>,
         import: Option<ProjectActionDraft>,
@@ -420,7 +391,14 @@ impl Shell {
         cx.notify();
     }
 
-    fn run_project_action(
+    /// Reload the active project's actions (the card's retry).
+    pub(super) fn retry_project_actions(&mut self, cx: &mut Context<Self>) {
+        if let Some(context) = self.project_action_context(cx) {
+            self.refresh_project_actions(context, cx);
+        }
+    }
+
+    pub(super) fn run_project_action(
         &mut self,
         key: &ProjectActionsKey,
         action: ProjectAction,
@@ -525,340 +503,7 @@ impl Shell {
         .detach();
     }
 
-    pub(super) fn render_project_actions_control(
-        &mut self,
-        available_titlebar_width: f32,
-        viewport_height: Pixels,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        self.ensure_project_actions(cx);
-        let status = self.project_actions.active_status()?.clone();
-        let snapshot = self.project_actions.visible_snapshot()?;
-        let key = self.project_actions.active.clone()?;
-        let loading = matches!(
-            status,
-            ProjectActionsStatus::Idle | ProjectActionsStatus::Loading
-        );
-        let can_run = status.can_run();
-        let unavailable = matches!(status, ProjectActionsStatus::Unavailable { .. });
-        let theme = Theme::of(cx).clone();
-        let preferred = preferred_action(
-            &snapshot.actions,
-            self.settings
-                .last_project_action_by_space_id
-                .get(&snapshot.space_id)
-                .map(String::as_str),
-        )
-        .cloned();
-        let has_imports = !snapshot.importable_actions.is_empty();
-        let has_actions = !snapshot.actions.is_empty();
-        let show_label = show_action_label(available_titlebar_width);
-        let menu_mounted = self.project_actions.menu.get().is_some();
-        let menu_closing = self.project_actions.menu.closing_since();
 
-        // A solid frosted pill in the composer's material and edge —
-        // with the frost on its own back layer so the dropdown menu (a
-        // deferred child) never lands inside the blur.
-        let mut control = div()
-            .relative()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(ACTION_CONTROL_HEIGHT))
-            .rounded(px(ACTION_CONTROL_RADIUS))
-            .occlude()
-            .child(
-                div().absolute().inset_0().child(crate::frost::frosted(
-                    ACTION_CONTROL_RADIUS,
-                    crate::frost::MENU_BLUR,
-                    div()
-                        .size_full()
-                        .rounded(px(ACTION_CONTROL_RADIUS))
-                        .border_1()
-                        .border_color(theme.composer_surface_border())
-                        .bg(action_fill(&theme, false))
-                        .when(!theme.is_frost(), |el| el.shadow_sm()),
-                )),
-            );
-
-        if loading {
-            control = control
-                .child(
-                    action_segment(&theme, "project-action-loading", false)
-                        .rounded_l(px(ACTION_CONTROL_RADIUS))
-                        .opacity(0.45)
-                        .child(
-                            div()
-                                .size(px(13.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(crate::loaders::mini_mono_spinner(
-                                    "project-actions-loading",
-                                    2.0,
-                                    theme.text_muted,
-                                    cx.entity_id(),
-                                    cx,
-                                )),
-                        )
-                        .when(show_label, |el| el.child("Loading…")),
-                )
-                .child(action_divider(&theme))
-                .child(action_chevron(&theme, false, |_, _, _| {}));
-        } else if let Some(action) = preferred.clone() {
-            let run_action = action.clone();
-            let run_key = key.clone();
-            let main = action_segment(&theme, "project-action-main", can_run)
-                .rounded_l(px(ACTION_CONTROL_RADIUS))
-                .when(!can_run, |el| el.opacity(0.45))
-                .when(can_run, |el| {
-                    el.cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.run_project_action(&run_key, run_action.clone(), cx)
-                        }))
-                })
-                // Without its label the segment is a bare glyph.
-                .when(!show_label, |el| {
-                    el.tooltip(crate::settings::widgets::text_tooltip(format!(
-                        "Run {}",
-                        action.name
-                    )))
-                })
-                .child(
-                    icon(action_icon(action.icon))
-                        .size(px(13.0))
-                        .flex_none()
-                        .text_color(theme.text_muted),
-                )
-                .when(show_label, |el| {
-                    el.child(
-                        div()
-                            .max_w(px(150.0))
-                            .truncate()
-                            .child(SharedString::from(action.name)),
-                    )
-                });
-            control = control.child(main).child(action_divider(&theme)).child(
-                action_chevron(
-                    &theme,
-                    true,
-                    cx.listener(|this, _, _, cx| this.toggle_project_actions_menu(cx)),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| {
-                        this.project_actions.menu.note_trigger_press();
-                    }),
-                ),
-            );
-        } else if unavailable {
-            let retry = action_segment(&theme, "project-actions-unavailable", true)
-                .rounded(px(ACTION_CONTROL_RADIUS))
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| {
-                        this.project_actions.menu.note_trigger_press();
-                    }),
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_project_actions_menu(cx)))
-                .child(
-                    icon(icons::DANGER_TRIANGLE)
-                        .size(px(13.0))
-                        .text_color(theme.danger),
-                )
-                .when(show_label, |el| {
-                    el.child(SharedString::from("Actions unavailable"))
-                });
-            control = control.child(retry);
-        } else {
-            let add = action_segment(&theme, "project-action-add", true)
-                .rounded_l(px(ACTION_CONTROL_RADIUS))
-                .when(!has_imports, |el| el.rounded_r(px(ACTION_CONTROL_RADIUS)))
-                .cursor_pointer()
-                .on_click(
-                    cx.listener(|this, _, _, cx| this.open_project_action_editor(None, None, cx)),
-                )
-                .child(
-                    icon(icons::PLUS)
-                        .size(px(13.0))
-                        .text_color(theme.text_muted),
-                )
-                .child("Add action");
-            control = control.child(add);
-            if has_imports {
-                control = control.child(action_divider(&theme)).child(
-                    action_chevron(
-                        &theme,
-                        true,
-                        cx.listener(|this, _, _, cx| this.toggle_project_actions_menu(cx)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, _| {
-                            this.project_actions.menu.note_trigger_press();
-                        }),
-                    ),
-                );
-            }
-        }
-
-        if !loading && menu_mounted && (has_actions || has_imports || !can_run) {
-            let menu =
-                self.render_project_actions_menu(&key, &status, &snapshot, viewport_height, cx);
-            control = control.child(popover::anchored_menu_below(
-                "project-actions-menu",
-                menu,
-                menu_closing,
-            ));
-        }
-        Some(control.into_any_element())
-    }
-
-    fn render_project_actions_menu(
-        &mut self,
-        key: &ProjectActionsKey,
-        status: &ProjectActionsStatus,
-        snapshot: &ProjectActionsSnapshot,
-        viewport_height: Pixels,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let mut card = project_actions_menu_surface(
-            &theme,
-            viewport_height,
-            &self.project_actions.menu_scroll,
-        )
-        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_actions_menu(cx)))
-        .child(popover::menu_heading(&theme, "Project actions"));
-        if let ProjectActionsStatus::Unavailable { message, .. } = status {
-            let retry = self.project_action_context(cx);
-            card = card
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .text_size(px(12.0))
-                        .text_color(theme.danger)
-                        .child(SharedString::from(message.clone())),
-                )
-                .when_some(retry, |card, context| {
-                    card.child(
-                        popover::menu_row(&theme, false, "project-actions-retry")
-                            .id("project-actions-retry")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.refresh_project_actions(context.clone(), cx)
-                            }))
-                            .child(icon(icons::REFRESH).size(px(15.0)))
-                            .child(SharedString::from("Retry")),
-                    )
-                });
-        }
-        for action in snapshot.actions.clone() {
-            let key = key.clone();
-            let run = action.clone();
-            let edit = action.clone();
-            let row_id = SharedString::from(format!("project-action-row-{}", action.id));
-            card = card.child(
-                popover::menu_row(&theme, false, row_id.clone())
-                    .id(row_id)
-                    .when(status.can_run(), |row| {
-                        row.on_click(cx.listener(move |this, _, _, cx| {
-                            this.run_project_action(&key, run.clone(), cx)
-                        }))
-                    })
-                    .child(
-                        icon(action_icon(action.icon))
-                            .size(px(15.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(if action.run_on_worktree_create {
-                                format!("{} (setup)", action.name)
-                            } else {
-                                action.name
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "edit-project-action-{}",
-                                edit.id
-                            )))
-                            .size(px(22.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(5.0))
-                            .hover(|style| style.bg(crate::theme::ink(0.08)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.open_project_action_editor(Some(edit.clone()), None, cx)
-                            }))
-                            .child(
-                                icon(icons::SETTINGS_MINIMALISTIC)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            ),
-                    ),
-            );
-        }
-        if !snapshot.importable_actions.is_empty() {
-            card = card
-                .child(popover::menu_separator())
-                .child(popover::menu_heading(&theme, "Import from zeron.json"));
-            for draft in snapshot.importable_actions.clone() {
-                let import = draft.clone();
-                let row_id = SharedString::from(format!("import-project-action-{}", draft.name));
-                card = card.child(
-                    popover::menu_row(&theme, false, row_id.clone())
-                        .id(row_id)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_project_action_editor(None, Some(import.clone()), cx)
-                        }))
-                        .child(
-                            icon(action_icon(draft.icon))
-                                .size(px(15.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from(draft.name)),
-                );
-            }
-        }
-        if let Some(issue) = snapshot.project_file_issue.clone() {
-            card = card.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(issue)),
-            );
-        }
-        card.child(popover::menu_separator())
-            .child(
-                popover::menu_row(&theme, false, "project-actions-add-row")
-                    .id("project-actions-add-row")
-                    .on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.open_project_action_editor(None, None, cx)
-                        }),
-                    )
-                    .child(
-                        icon(icons::PLUS)
-                            .size(px(15.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child(SharedString::from("Add action")),
-            )
-            .into_any_element()
-    }
 
     pub(super) fn render_project_action_overlay(
         &mut self,
@@ -1083,82 +728,10 @@ fn project_action_params(
     params
 }
 
-const ACTION_CONTROL_HEIGHT: f32 = 24.0;
-const ACTION_CONTROL_RADIUS: f32 = 7.0;
 
-/// The pill's fill (or its hover): the composer's own material and edge, so
-/// the two read as one family. Hover is a faint wash over that dark fill —
-/// the titlebar's hover role reads far too bright on it.
-fn action_fill(theme: &Theme, hover: bool) -> gpui::Hsla {
-    if hover {
-        theme.wash(0.04)
-    } else {
-        theme.composer_surface_bg()
-    }
-}
 
-fn action_segment(theme: &Theme, id: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
-    // Hover tints on top of the fill, so both halves stay one piece.
-    let hover = action_fill(theme, true);
-    div()
-        .id(id)
-        .relative()
-        .h_full()
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(5.0))
-        .text_size(px(11.5))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text)
-        .when(enabled, |el| el.hover(move |style| style.bg(hover)))
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-}
 
-/// The split's seam: an inset hairline, not a full-height border, so the
-/// pill still reads as one solid piece.
-fn action_divider(theme: &Theme) -> gpui::Div {
-    div()
-        .relative()
-        .flex_none()
-        .w(px(1.0))
-        .h(px(ACTION_CONTROL_HEIGHT - 10.0))
-        .bg(theme.text.opacity(0.14))
-}
 
-fn action_chevron(
-    theme: &Theme,
-    enabled: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = action_fill(theme, true);
-    div()
-        .id("project-actions-chevron")
-        .h_full()
-        .relative()
-        .flex_none()
-        .w(px(22.0))
-        .rounded_r(px(ACTION_CONTROL_RADIUS))
-        .flex()
-        .items_center()
-        .justify_center()
-        .when(!enabled, |el| el.opacity(0.45))
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .when(enabled, |el| {
-            el.cursor_pointer()
-                .hover(move |style| style.bg(hover))
-                .on_click(move |event, window, cx| {
-                    cx.stop_propagation();
-                    on_click(event, window, cx)
-                })
-                .tooltip(crate::settings::widgets::text_tooltip("Project actions"))
-        })
-        .child(
-            icon(icons::ALT_ARROW_DOWN)
-                .size(px(11.0))
-                .text_color(theme.text_muted),
-        )
-}
 
 fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
     div()
@@ -1170,121 +743,3 @@ fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_string()))
 }
 
-#[cfg(test)]
-mod project_actions_scroll_tests {
-    use super::*;
-    use gpui::{ScrollHandle, TestAppContext, point};
-
-    struct MenuTestView {
-        scroll: ScrollHandle,
-        background: ScrollHandle,
-        count: usize,
-        added: bool,
-    }
-
-    impl Render for MenuTestView {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let theme = Theme::of(cx);
-            let mut menu =
-                project_actions_menu_surface(theme, window.viewport_size().height, &self.scroll)
-                    .child(popover::menu_heading(theme, "Project actions"));
-            for index in 0..self.count {
-                let id = SharedString::from(format!("action-{index}"));
-                menu = menu.child(
-                    popover::menu_row(theme, false, id.clone())
-                        .id(id)
-                        .child(format!("Action {index}"))
-                        .child(div().size(px(22.0))),
-                );
-            }
-            menu = menu
-                .child(popover::menu_separator())
-                .child(popover::menu_heading(theme, "Import from zeron.json"))
-                .child(
-                    popover::menu_row(theme, false, "import")
-                        .id("import")
-                        .child("Import action"),
-                )
-                .child(popover::menu_separator())
-                .child(
-                    popover::menu_row(theme, false, "add")
-                        .id("add")
-                        .debug_selector(|| "add-action".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.added = true;
-                            cx.notify();
-                        }))
-                        .child("Add action"),
-                );
-            div()
-                .size_full()
-                .child(
-                    div()
-                        .id("background")
-                        .absolute()
-                        .inset_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.background)
-                        .child(div().h(px(3000.0))),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(Theme::TITLEBAR_HEIGHT + 6.0))
-                        .child(menu),
-                )
-        }
-    }
-
-    #[gpui::test]
-    fn fifty_actions_scroll_to_add_without_leaving_the_window(cx: &mut TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::default()));
-        let (view, cx) = cx.add_window_view(|_, _| MenuTestView {
-            scroll: ScrollHandle::new(),
-            background: ScrollHandle::new(),
-            count: 50,
-            added: false,
-        });
-        let (scroll, background) =
-            view.read_with(cx, |view, _| (view.scroll.clone(), view.background.clone()));
-        for height in [760.0, 300.0, 200.0] {
-            cx.simulate_resize(gpui::size(px(1100.0), px(height)));
-            cx.run_until_parked();
-            assert!(scroll.bounds().bottom() <= px(height - 8.0));
-            assert!(scroll.max_offset().y > px(0.0));
-            for _ in 0..2 {
-                cx.simulate_event(gpui::ScrollWheelEvent {
-                    position: scroll.bounds().center(),
-                    delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-10_000.0))),
-                    ..Default::default()
-                });
-                cx.run_until_parked();
-            }
-            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
-            assert_eq!(
-                background.offset().y,
-                px(0.0),
-                "menu wheel must not scroll the background"
-            );
-            let add = cx.debug_bounds("add-action").unwrap();
-            assert!(add.top() >= scroll.bounds().top());
-            assert!(add.bottom() <= scroll.bounds().bottom());
-            view.update(cx, |view, _| view.added = false);
-            cx.simulate_click(add.center(), Default::default());
-            cx.run_until_parked();
-            assert!(view.read_with(cx, |view, _| view.added));
-        }
-        view.update(cx, |view, cx| {
-            view.count = 1;
-            cx.notify();
-        });
-        cx.simulate_resize(gpui::size(px(1100.0), px(760.0)));
-        cx.run_until_parked();
-        assert_eq!(scroll.max_offset().y, px(0.0));
-        assert_eq!(scroll.offset().y, px(0.0));
-        assert!(
-            scroll.bounds().size.height < px(300.0),
-            "short menus should stay compact"
-        );
-    }
-}

@@ -94,6 +94,7 @@ impl popover::ScrollRailHost for ArchivedPage {
 
 impl Render for ArchivedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let now = chrono::Utc::now();
         let (rows, device_names, count): (
@@ -385,22 +386,6 @@ impl Render for ArchivedPage {
                                     &theme,
                                     "Hidden from the sidebar until restored.",
                                 ))
-                                .when_some(self.error.clone(), |el, message| {
-                                    el.child(
-                                        widgets::error_strip(&theme, message)
-                                            .id("archived-error")
-                                            .cursor_pointer()
-                                            .tab_index(0)
-                                            .role(gpui::Role::Button)
-                                            .focus_visible(|s| {
-                                                s.border_2().border_color(theme.accent).opacity(1.0)
-                                            })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.error = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                })
                                 .child(body)
                                 .children(pagination),
                         ),

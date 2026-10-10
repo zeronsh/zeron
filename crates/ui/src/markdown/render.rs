@@ -1456,6 +1456,17 @@ thread_local! {
 }
 
 #[cfg(test)]
+pub(crate) fn selection_test_entry_count(prefix: &str) -> usize {
+    REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .iter()
+            .filter(|entry| entry.key.starts_with(prefix))
+            .count()
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
     REGISTRY.with(|r| {
         r.borrow()
@@ -1546,6 +1557,9 @@ pub(crate) fn clear_selection_surface(prefix: &str) {
             .retain(|entry| !entry.key.starts_with(prefix))
     });
     if let Some(anchor) = super::selection::anchor_key().filter(|key| key.starts_with(prefix)) {
+        // Closing a surface can happen before mouse-up. Retire its active
+        // drag too, without disturbing a selection owned by another view.
+        super::selection::end_active_drag();
         super::selection::clear_if_owner(&anchor);
     }
 }

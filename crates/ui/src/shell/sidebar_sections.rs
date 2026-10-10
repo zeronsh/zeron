@@ -41,6 +41,8 @@ impl Shell {
             SidebarSectionChange::Assign {
                 session_id: chat.to_owned(),
                 section_id: target.map(str::to_owned),
+                after: None,
+                before: None,
             },
             cx,
         );
@@ -58,6 +60,7 @@ impl Shell {
             if let SidebarSectionChange::Assign {
                 session_id,
                 section_id,
+                ..
             } = &change
             {
                 if section_id
@@ -88,7 +91,7 @@ impl Shell {
             true
         } else {
             if !self.state.read(cx).sidebar_preferences.can_edit() {
-                self.sidebar_notice = Some("Sidebar is still syncing. Try again shortly.".into());
+                self.show_notice(crate::toast::ToastKind::Error, "Sidebar is still syncing. Try again shortly.", cx);
                 cx.notify();
                 return false;
             }
@@ -221,7 +224,7 @@ impl Shell {
             return;
         }
         let Some(engine) = state.engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected".into());
+            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
             cx.notify();
             return;
         };
@@ -235,7 +238,7 @@ impl Shell {
             if failed > 0 {
                 let _ = this.update(cx, |this, cx| {
                     if this.state.read(cx).engine().is_some_and(|current| current.same_connection(&engine)) {
-                        this.sidebar_notice = Some(format!("Could not archive {failed} sessions. Try again.").into());
+                        this.show_notice(crate::toast::ToastKind::Error, format!("Could not archive {failed} sessions. Try again."), cx);
                         cx.notify();
                     }
                 });
@@ -273,70 +276,61 @@ impl Shell {
         let show_menu = self.section_header_hover.as_ref() == Some(&id)
             || self.section_menu.as_ref().is_some_and(|(s, _)| s == &id);
         let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
-        let header = div()
-            .id(SharedString::from(format!("section-header-{id}")))
-            .h(px(spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
-            .px(px(Theme::SPACE_SM))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                this.section_header_hover = hovered.then(|| hover_id.clone());
-                cx.notify();
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.begin_sidebar_disclosure_motion(
-                    &toggle_motion,
-                    if open { height } else { 0.0 },
-                    if open { 0.0 } else { height },
-                );
-                this.change_sidebar_section(
-                    SidebarSectionChange::Collapse {
-                        id: toggle_id.clone(),
-                        collapsed: open,
-                    },
-                    cx,
-                );
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .child(section.name),
-            )
-            .when(show_menu, |el| {
-                el.child(
-                    div()
-                        .id(SharedString::from(format!("section-menu-{menu_id}")))
-                        .size(px(20.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .hover(|el| el.bg(theme.glass_hover()))
-                        .on_click(
-                            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                                this.section_menu = Some((menu_id.clone(), event.position()));
-                                this.section_menu_active = None;
-                                window.focus(&this.section_menu_focus, cx);
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        )
-                        .tooltip(crate::settings::widgets::text_tooltip("Section options"))
-                        .child(
-                            icon(icons::MORE_HORIZONTAL)
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                        ),
+        let session_count = rows.len();
+        let menu_button = show_menu.then(|| {
+            div()
+                .id(SharedString::from(format!("section-menu-{menu_id}")))
+                .size(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .hover(|el| el.bg(theme.glass_hover()))
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        this.section_menu = Some((menu_id.clone(), event.position()));
+                        this.section_menu_active = None;
+                        window.focus(&this.section_menu_focus, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
                 )
-            })
-            .child(chevron);
+                .tooltip(crate::settings::widgets::text_tooltip("Section options"))
+                .child(
+                    icon(icons::MORE_HORIZONTAL)
+                        .size(px(14.0))
+                        .text_color(spaces::sidebar_header_glyph(theme)),
+                )
+                .into_any_element()
+        });
+        let header = spaces::sidebar_disclosure_header(
+            theme,
+            None,
+            section.name.clone().into(),
+            (!open).then_some(session_count),
+            menu_button,
+            chevron,
+        )
+        .id(SharedString::from(format!("section-header-{id}")))
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            this.section_header_hover = hovered.then(|| hover_id.clone());
+            cx.notify();
+        }))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.begin_sidebar_disclosure_motion(
+                &toggle_motion,
+                if open { height } else { 0.0 },
+                if open { 0.0 } else { height },
+            );
+            this.change_sidebar_section(
+                SidebarSectionChange::Collapse {
+                    id: toggle_id.clone(),
+                    collapsed: open,
+                },
+                cx,
+            );
+            cx.notify();
+        }));
         let content = div()
             .w_full()
             .flex()
@@ -720,6 +714,127 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_session_card_docks_beside_a_wide_transcript_and_floats_over_a_narrow_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                shell.debug_gate = Some(super::GatePhase::Ready);
+                shell.settings.sidebar_collapsed = true;
+                shell
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("regular".into()));
+                shell.toggle_session_info(cx);
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        for (width, docked) in [(1600.0, true), (700.0, false)] {
+            cx.simulate_resize(gpui::size(px(width), px(900.0)));
+            cx.run_until_parked();
+            let card = cx
+                .debug_bounds("session-info")
+                .expect("the card shows for a selected chat");
+            assert!(card.right() <= px(width), "{width}: inside the window");
+            let actions = cx.debug_bounds("session-info-side-chat").unwrap();
+            assert!(card.contains(&actions.center()));
+            if docked {
+                // Docked, the transcript keeps the card's room clear.
+                assert!(card.left() > px(width / 2.0));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn copying_from_the_copy_submenu_shows_a_toast(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                shell.debug_gate = Some(super::GatePhase::Ready);
+                shell.chat_menu.open(super::ChatMenuState {
+                    chat_id: "regular".into(),
+                    tab: None,
+                    position: gpui::point(px(40.0), px(120.0)),
+                    page: super::ChatMenuPage::Copy,
+                });
+                cx.notify();
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        // The item sits in the submenu, outside the menu card: pressing it
+        // must copy rather than dismiss the menu first.
+        let item = cx
+            .debug_bounds("chat-copy-zeron")
+            .expect("the Copy submenu is open");
+        cx.simulate_click(item.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(crate::toast::messages(cx).len(), 1, "one toast");
+        });
+        assert!(cx.debug_bounds("toaster").is_some(), "the shell paints it");
+    }
+
+    #[gpui::test]
+    fn sections_keep_placed_order_and_drags_reorder_them(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                prepare(shell, cx);
+                shell.assign_sidebar_section("regular", Some("a"), cx);
+                shell.assign_sidebar_section("other", Some("a"), cx);
+                let members = |shell: &Shell, cx: &mut Context<Shell>| {
+                    shell.active_sidebar_sections(cx)[0].session_ids.clone()
+                };
+                // Appends keep arrival order, and the sidebar lists the section
+                // in that order rather than by activity.
+                assert_eq!(members(shell, cx), ["regular", "other"]);
+                assert_eq!(shell.sidebar_visible_order(cx), ["pin", "regular", "other"]);
+                let drop = |shell: &mut Shell,
+                            index: usize,
+                            window: &mut Window,
+                            cx: &mut Context<Shell>| {
+                    let payload = SidebarSessionDrag {
+                        chat_id: "other".into(),
+                        visible_ids: std::sync::Arc::new(shell.active_sidebar_pins(cx)),
+                        filter: None,
+                        profile_key: "local".into(),
+                    };
+                    shell.begin_sidebar_session_transfer(
+                        &payload,
+                        gpui::point(px(10.0), px(10.0)),
+                        window,
+                        cx,
+                    );
+                    shell.sidebar_session_transfer.as_mut().unwrap().preview =
+                        Some(SidebarSessionGap {
+                            group: "regular:section:a".into(),
+                            index,
+                            pinned: false,
+                            top: 0.0,
+                        });
+                    shell.finish_sidebar_session_transfer(
+                        &payload,
+                        SidebarSessionDrop::Section("a".into()),
+                        cx,
+                    );
+                };
+                // Dropping a member on its own slot changes nothing.
+                drop(shell, 1, window, cx);
+                assert_eq!(members(shell, cx), ["regular", "other"]);
+                drop(shell, 0, window, cx);
+                assert_eq!(members(shell, cx), ["other", "regular"]);
+                assert_eq!(shell.sidebar_visible_order(cx), ["pin", "other", "regular"]);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn sections_dialog_persistence_deletion_and_profile_isolation(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let window = test_shell(cx, dir.path());
@@ -928,6 +1043,8 @@ mod tests {
                             change: SidebarSectionChange::Assign {
                                 session_id: "regular".into(),
                                 section_id: Some("a".into()),
+                                after: None,
+                                before: None,
                             },
                         },
                     ]),

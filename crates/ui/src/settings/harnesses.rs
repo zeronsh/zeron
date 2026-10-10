@@ -1147,10 +1147,7 @@ impl Render for HarnessesPage {
                     .into_any_element()
             }
         };
-        let error = self
-            .error
-            .clone()
-            .map(|message| widgets::error_strip(&theme, message).into_any_element());
+        crate::toast::take_error(&mut self.error, cx);
         let update_error = match &self.updates {
             Loadable::Error(message) => Some(
                 div()
@@ -1226,7 +1223,6 @@ impl Render for HarnessesPage {
                                                 .child(switcher),
                                         ),
                                 )
-                                .children(error)
                                 .children(update_error)
                                 .child(body),
                         ),

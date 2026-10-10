@@ -239,12 +239,6 @@ pub const ACTION_ICONS: [(ProjectActionIcon, &str); 6] = [
     (ProjectActionIcon::Debug, "Debug"),
 ];
 
-const ACTION_LABEL_MIN_TITLEBAR_WIDTH: f32 = 420.0;
-
-pub fn show_action_label(available_titlebar_width: f32) -> bool {
-    available_titlebar_width >= ACTION_LABEL_MIN_TITLEBAR_WIDTH
-}
-
 pub fn draft_from_action(action: &ProjectAction) -> ProjectActionDraft {
     ProjectActionDraft {
         name: action.name.clone(),
@@ -282,8 +276,6 @@ mod tests {
         );
         assert_eq!(preferred_action(&actions, Some("gone")).unwrap().id, "dev");
         assert_eq!(preferred_action(&actions, None).unwrap().id, "dev");
-        assert!(!show_action_label(419.0));
-        assert!(show_action_label(420.0));
     }
 
     #[test]

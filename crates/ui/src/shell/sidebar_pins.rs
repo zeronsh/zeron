@@ -22,9 +22,9 @@ pub(super) fn preferences_reply(
 }
 
 impl Shell {
-    fn set_pin_write_notice(&mut self, message: SharedString) {
+    fn set_pin_write_notice(&mut self, message: SharedString, cx: &mut App) {
         self.sidebar_pin_write_notice = Some(message.clone());
-        self.sidebar_notice = Some(message);
+        self.show_notice(crate::toast::ToastKind::Error, message, cx);
     }
 
     fn clear_pin_write_notice(&mut self) {
@@ -78,15 +78,14 @@ impl Shell {
     ) -> bool {
         self.discard_stale_sidebar_pin_writes(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.set_pin_write_notice("Engine not connected. Sidebar was not changed.".into());
+            self.set_pin_write_notice("Engine not connected. Sidebar was not changed.".into(), cx);
             cx.notify();
             return false;
         };
         if let Some(pending) = &mut self.sidebar_pin_write {
             if pending.unconfirmed {
                 self.set_pin_write_notice(
-                    "Waiting for the engine to confirm the previous sidebar change.".into(),
-                );
+                    "Waiting for the engine to confirm the previous sidebar change.".into(), cx);
                 cx.notify();
                 return false;
             }
@@ -185,7 +184,7 @@ impl Shell {
                 });
             }
             Err(error) => {
-                self.set_pin_write_notice(format!("Couldn't save sidebar changes: {error}").into());
+                self.set_pin_write_notice(format!("Couldn't save sidebar changes: {error}").into(), cx);
             }
         }
         if let Some(profile) = imported_profile {
@@ -215,7 +214,7 @@ impl Shell {
             let pending = self.sidebar_pin_write.as_mut().unwrap();
             pending.queue.clear();
             pending.unconfirmed = true;
-            self.set_pin_write_notice("Couldn't confirm sidebar changes. Queued edits were cancelled; waiting for the engine before allowing more changes.".into());
+            self.set_pin_write_notice("Couldn't confirm sidebar changes. Queued edits were cancelled; waiting for the engine before allowing more changes.".into(), cx);
             cx.notify();
         }
     }

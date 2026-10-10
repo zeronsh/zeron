@@ -149,10 +149,17 @@ pub enum SidebarSectionChange {
     Delete {
         id: String,
     },
+    /// Move a session into a section (or out of every section). `after` and
+    /// `before` place it among the section's members, as pins are placed; an
+    /// engine that predates them appends.
     #[serde(rename_all = "camelCase")]
     Assign {
         session_id: String,
         section_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
     },
     Import {
         sections: Vec<crate::SidebarSection>,
@@ -200,11 +207,14 @@ impl SidebarSectionChange {
             Self::Assign {
                 session_id,
                 section_id,
+                after,
+                before,
             } => {
                 for s in sections {
                     s.session_ids.retain(|id| id != session_id);
                     if section_id.as_ref() == Some(&s.id) {
-                        s.session_ids.push(session_id.clone());
+                        let index = section_insert_index(&s.session_ids, after, before);
+                        s.session_ids.insert(index, session_id.clone());
                         s.collapsed = false;
                     }
                 }
@@ -213,6 +223,24 @@ impl SidebarSectionChange {
             Self::Import { .. } => {}
         }
     }
+}
+
+/// Where a placed member lands: before a surviving right anchor, else after
+/// the left one, else at the end — the pin rule.
+pub fn section_insert_index(
+    ids: &[String],
+    after: &Option<String>,
+    before: &Option<String>,
+) -> usize {
+    before
+        .as_ref()
+        .and_then(|v| ids.iter().position(|i| i == v))
+        .or_else(|| {
+            after
+                .as_ref()
+                .and_then(|v| ids.iter().position(|i| i == v).map(|i| i + 1))
+        })
+        .unwrap_or(ids.len())
 }
 
 #[cfg(test)]
@@ -244,6 +272,44 @@ mod tests {
     fn rejects_invalid_keys_and_bounds() {
         assert!(pin_order_key_between(Some("80"), None, "x").is_err());
         assert!(pin_order_key_between(Some("8"), Some("8"), "x").is_err());
+    }
+    #[test]
+    fn section_assign_places_members_and_legacy_payloads_append() {
+        let mut sections = vec![crate::SidebarSection {
+            id: "s".into(),
+            name: "S".into(),
+            session_ids: vec!["a".into(), "b".into(), "c".into()],
+            collapsed: true,
+        }];
+        SidebarSectionChange::Assign {
+            session_id: "c".into(),
+            section_id: Some("s".into()),
+            after: Some("a".into()),
+            before: Some("b".into()),
+        }
+        .project(&mut sections);
+        assert_eq!(sections[0].session_ids, ["a", "c", "b"]);
+        assert!(!sections[0].collapsed);
+        // An older client's payload has no anchors and appends.
+        let legacy: SidebarPinChange = serde_json::from_value(serde_json::json!({
+            "action": "section",
+            "change": {"action": "assign", "sessionId": "a", "sectionId": "s"}
+        }))
+        .unwrap();
+        legacy.project_sections(&mut sections);
+        assert_eq!(sections[0].session_ids, ["c", "b", "a"]);
+        // Anchorless assigns stay wire-identical to the old shape.
+        let json = serde_json::to_value(SidebarSectionChange::Assign {
+            session_id: "a".into(),
+            section_id: None,
+            after: None,
+            before: None,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"action": "assign", "sessionId": "a", "sectionId": null})
+        );
     }
     #[test]
     fn pending_move_does_not_revive_unpinned_item() {

@@ -1247,6 +1247,17 @@ impl TextProjection {
                 }),
         );
         links.extend(
+            zeron_proto::chat_mentions::chat_mention_links(raw)
+                .into_iter()
+                .map(|link| FileMentionLink {
+                    range: link.range,
+                    basename: link.title,
+                    path: link.chat_id,
+                    kind: ChipKind::Chat,
+                    attachment: None,
+                }),
+        );
+        links.extend(
             zeron_proto::attachment_mentions::attachment_mentions(raw)
                 .into_iter()
                 .map(|mention| FileMentionLink {
@@ -1420,7 +1431,8 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
                         .iter()
                         .filter(|other| other.path != link.path)
                         .collect();
-                    if duplicates.is_empty() {
+                    // A chat's "path" is its id: always show its title.
+                    if duplicates.is_empty() || link.kind == ChipKind::Chat {
                         return link.basename.clone();
                     }
                     let parts: Vec<_> = link.path.split('/').collect();
@@ -1474,6 +1486,7 @@ fn has_mention_scheme(raw: &str) -> bool {
         || raw.contains(zeron_proto::invocation::INVOCATION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
+        || raw.contains(zeron_proto::chat_mentions::CHAT_MENTION_SCHEME)
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -1515,7 +1528,7 @@ enum EditKind {
 }
 
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
-const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
+pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2135,8 +2148,22 @@ impl ComposerInput {
     }
 
     /// Keep compact fields on one row and reveal the caret horizontally.
+    /// Bound a standalone multiline composer while preserving caret scrolling.
+    pub(crate) fn with_viewport_height(mut self, height: f32) -> Self {
+        let height = height.max(self.configured_line_height);
+        self.viewport_height = Some(height);
+        self.settled_viewport_height = Some(height);
+        self
+    }
+
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    /// Join the window's Tab order, for a field the keyboard must reach.
+    pub(crate) fn with_tab_stop(mut self) -> Self {
+        self.focus_handle = self.focus_handle.tab_stop(true);
         self
     }
 
@@ -5359,9 +5386,9 @@ pub enum ComposerEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MentionToken {
-    range: Range<usize>,
-    query: String,
+pub(crate) struct MentionToken {
+    pub(crate) range: Range<usize>,
+    pub(crate) query: String,
 }
 
 /// Refine a locally identified token using Markdown source ranges. This is
@@ -5481,7 +5508,7 @@ fn completion_markdown_end(
 
 /// The `@` must begin a token. This intentionally excludes `name@example.com`
 /// and ordinary words while allowing punctuation such as `(@src`.
-fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
+pub(crate) fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
         return None;
     }
@@ -5833,7 +5860,9 @@ fn mention_error_message(err: &RpcError) -> SharedString {
             "The session's device runs an older zeron — update it to search its files".into()
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
-        RpcError::BadParams(_) | RpcError::Failed(_) => "File search failed".into(),
+        RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
+            "File search failed".into()
+        }
     }
 }
 
@@ -5938,7 +5967,7 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
             }
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
-        RpcError::BadParams(_) | RpcError::Failed(_) => {
+        RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
             if skill {
                 "Couldn't load this agent's skills".into()
             } else {
@@ -6661,6 +6690,30 @@ impl Composer {
         let inserted = self.input.update(cx, |input, cx| {
             input.insert_dropped_mention(path, is_directory, cx)
         });
+        if inserted {
+            self.reset_mention(None, cx);
+            self.reset_slash(None, cx);
+            let focus = self.input.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Mention another chat at the caret: a chip the agent receives as a
+    /// reference it can read (dragged in from the sidebar).
+    pub(crate) fn add_chat_mention(
+        &mut self,
+        chat_id: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(link) = zeron_proto::chat_mentions::chat_mention_link(chat_id, title) else {
+            return;
+        };
+        let inserted = self
+            .input
+            .update(cx, |input, cx| input.insert_reference(&link, cx));
         if inserted {
             self.reset_mention(None, cx);
             self.reset_slash(None, cx);
@@ -10500,21 +10553,9 @@ impl Composer {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
-                div()
-                    .id("composer-send")
-                    .debug_selector(|| "composer-send".into())
-                    .size(px(28.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(blocked, |el| el.opacity(0.35))
+                send_circle("composer-send", blocked, theme)
                     .when(!blocked, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
+                        el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .tooltip(crate::settings::widgets::text_tooltip(
                         if mode == SendButtonMode::Queue {
@@ -10523,15 +10564,39 @@ impl Composer {
                             "Send message"
                         },
                     ))
-                    .child(
-                        crate::icons::icon(crate::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(theme.bg),
-                    )
                     .into_any_element()
             }
         }
     }
+}
+
+/// The composer's send control: a size-7 filled circle with an up arrow,
+/// dimmed and inert while `blocked`. Other message composers reuse it so
+/// sending looks the same everywhere.
+pub(crate) fn send_circle(
+    id: &'static str,
+    blocked: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .size(px(28.0))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.text)
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(blocked, |el| el.opacity(0.35))
+        .when(!blocked, |el| {
+            el.cursor_pointer().hover(|s| s.opacity(0.85))
+        })
+        .child(
+            crate::icons::icon(crate::icons::ARROW_UP)
+                .size(px(14.0))
+                .text_color(theme.bg),
+        )
 }
 
 /// The completion popups' floating rails run through
@@ -15050,6 +15115,26 @@ mod tests {
 
     /// Ordinary prompts must stay on the zero-cost path, including ones that
     /// merely *talk about* the scheme without containing a valid mention.
+    #[test]
+    fn chat_mentions_show_as_chat_chips_with_their_title() {
+        let link =
+            zeron_proto::chat_mentions::chat_mention_link("0fd51606", "Brief Hello").unwrap();
+        let raw = format!("compare {link} and {link}");
+        let (display, spans) = sent_mention_display(&raw).expect("chat chips");
+        assert_eq!(spans.len(), 2);
+        for span in &spans {
+            assert_eq!(span.kind, ChipKind::Chat);
+            assert_eq!(span.path.as_ref(), "0fd51606");
+            assert!(display[span.range.clone()].contains("Brief\u{00A0}Hello"));
+        }
+        // Two chats with one title keep their titles, never their ids.
+        let other =
+            zeron_proto::chat_mentions::chat_mention_link("a2c4", "Brief Hello").unwrap();
+        let (display, spans) = sent_mention_display(&format!("{link} {other}")).unwrap();
+        assert!(spans.iter().all(|span| display[span.range.clone()].contains("Brief")));
+        assert!(!display.contains("a2c4"));
+    }
+
     #[test]
     fn sent_mention_display_leaves_plain_prompts_untouched() {
         assert_eq!(sent_mention_display("fix the composer"), None);

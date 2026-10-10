@@ -352,6 +352,8 @@ fn rename_expands_a_collapsed_custom_section(cx: &mut TestAppContext) {
             SidebarSectionChange::Assign {
                 session_id: "older".into(),
                 section_id: Some("work".into()),
+                after: None,
+                before: None,
             },
             SidebarSectionChange::Collapse {
                 id: "work".into(),

@@ -686,6 +686,9 @@ pub struct Pickers {
     /// device) — the popups are mutually exclusive, so only one mounts at a
     /// time and a fresh open resets the offset.
     menu_scroll: gpui::ScrollHandle,
+    /// Artwork for the project picker's rows, shared with the sidebar's
+    /// loader; each owner keeps its own entries alive.
+    project_icons: crate::shell::project_icon::ProjectIcons,
     /// Shared search / URL / name input, reused across popovers.
     search: Entity<ComposerInput>,
     /// One-shot mute for the next Edited event's highlight reset — armed by
@@ -925,6 +928,7 @@ impl Pickers {
             catalog_rev: 0,
             menu_bar: popover::MenuScrollbarState::default(),
             menu_scroll: gpui::ScrollHandle::new(),
+            project_icons: Default::default(),
             search,
             search_reset_muted: false,
             focus: cx.focus_handle(),
@@ -2691,7 +2695,7 @@ impl Pickers {
                                     None => effective.as_deref() == Some(row.device_id.as_str()),
                                 };
                                 let detail = row.detail.clone().map(SharedString::from);
-                                popover::menu_row_nav(
+                                popover::picker_row(
                                     &theme,
                                     is_selected,
                                     ix == active,
@@ -2756,7 +2760,7 @@ impl Pickers {
     }
 
     /// The project popover: search + one row per project across devices
-    /// (check on the current pick), then "New project…" and the opt-out rows.
+    /// (check on the current pick), then "New project" and the opt-out rows.
     /// No per-row `@ device` tag — the device chip next door picks the host.
     fn render_space_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
@@ -2769,6 +2773,39 @@ impl Pickers {
         let active = self.active;
         let no_project_index = rows.len();
         let scrollbar = popover::rail(self, "space-scrollbar", &theme, cx);
+        let (spaces, profile): (Vec<Option<zeron_proto::Space>>, Option<String>) = {
+            let state = self.state.read(cx);
+            (
+                rows.iter()
+                    .map(|row| {
+                        state
+                            .spaces
+                            .iter()
+                            .find(|space| zeron_proto::view::project_key(space) == row.key)
+                            .cloned()
+                    })
+                    .collect(),
+                match &state.auth {
+                    Some(zeron_proto::AuthState::SignedIn { user, org_id }) => {
+                        Some(format!("{}:{org_id:?}", user.id))
+                    }
+                    _ => None,
+                },
+            )
+        };
+        let icons: Vec<AnyElement> = rows
+            .iter()
+            .zip(&spaces)
+            .map(|(row, space)| {
+                self.project_icons.render(
+                    &self.state,
+                    space.as_ref(),
+                    profile.clone(),
+                    selected.as_deref() == Some(row.key.as_str()),
+                    cx,
+                )
+            })
+            .collect();
         let body: AnyElement = if rows.is_empty() {
             // Distinguish "the filter ate everything" from "no projects yet".
             let empty: &str = if self.search.read(cx).text().is_empty() {
@@ -2792,27 +2829,30 @@ impl Pickers {
                         .flex_col()
                         .gap(px(2.0))
                         .max_h(px(self.list_budget(152.0)))
-                        .children(rows.into_iter().enumerate().map(|(ix, row)| {
-                            let label: SharedString = row.name.into();
-                            let is_selected = selected.as_deref() == Some(row.key.as_str());
-                            let key = row.key;
-                            popover::menu_row_nav(
-                                &theme,
-                                is_selected,
-                                ix == active,
-                                format!("space-row-{ix}"),
-                            )
-                            .id(("space-row", ix))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.pick_project(key.clone(), cx);
-                            }))
-                            .child(div().flex_1().min_w_0().truncate().child(label))
-                        })),
+                        .children(rows.into_iter().zip(icons).enumerate().map(
+                            |(ix, (row, art))| {
+                                let label: SharedString = row.name.into();
+                                let is_selected = selected.as_deref() == Some(row.key.as_str());
+                                let key = row.key;
+                                popover::picker_row(
+                                    &theme,
+                                    is_selected,
+                                    ix == active,
+                                    format!("space-row-{ix}"),
+                                )
+                                .id(("space-row", ix))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.pick_project(key.clone(), cx);
+                                }))
+                                .child(popover::picker_icon_slot(art))
+                                .child(div().flex_1().min_w_0().truncate().child(label))
+                            },
+                        )),
                 ))
                 .children(scrollbar)
                 .into_any_element()
         };
-        let no_project = popover::menu_row_nav(
+        let no_project = popover::picker_row(
             &theme,
             self.state.read(cx).no_project,
             active == no_project_index,
@@ -2820,12 +2860,12 @@ impl Pickers {
         )
         .id("project-none")
         .on_click(cx.listener(|this, _, _, cx| this.pick_no_project(cx)))
-        .child(
+        .child(popover::picker_icon_slot(
             crate::icons::icon(crate::icons::CLOSE)
                 .size(px(12.0))
-                .flex_none()
-                .text_color(theme.text_muted),
-        )
+                .text_color(theme.text_muted)
+                .into_any_element(),
+        ))
         .child(
             div()
                 .flex_1()
@@ -2834,45 +2874,41 @@ impl Pickers {
                 .child("Don't work in a project"),
         );
         // Action row under a hairline: mint a project.
-        let new_project = popover::menu_row_nav(&theme, false, false, "project-new".to_string())
+        let new_project = popover::picker_row(&theme, false, false, "project-new".to_string())
             .id("project-new")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.dismiss(cx);
                 window.dispatch_action(Box::new(crate::shell::AddSpacePalette), cx);
             }))
-            .child(
+            .child(popover::picker_icon_slot(
                 crate::icons::icon(crate::icons::PLUS)
                     .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+            ))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(SharedString::from("New project…")),
+                    .child(SharedString::from("New project")),
             );
         div()
             .flex()
             .flex_col()
-            // Same 2px rhythm as the list's own row gap — the action rows
-            // sat flush while list rows breathed (user report).
-            .gap(px(2.0))
             .child(self.search_box(&theme))
-            .child(body)
             .child(
-                // Full-bleed through the card's shared inset — a divider
-                // stopping short of the edges read as a mistake.
                 div()
-                    .my(px(2.0))
-                    .mx(px(-popover::CARD_INSET))
-                    .h(px(1.0))
-                    .flex_none()
-                    .bg(theme.border.opacity(0.6)),
+                    .flex()
+                    .flex_col()
+                    // Same 2px rhythm as the list's own row gap — the action
+                    // rows sat flush while list rows breathed (user report).
+                    .gap(px(2.0))
+                    .child(body)
+                    .child(popover::picker_divider())
+                    .child(new_project)
+                    .child(no_project),
             )
-            .child(new_project)
-            .child(no_project)
             .into_any_element()
     }
 
@@ -3664,6 +3700,7 @@ impl Pickers {
                                 "composer-pull-request".into(),
                                 summary,
                                 crate::change_requests::ChangeRequestBadgeSurface::Composer,
+                                Some(chat.device_id.clone()),
                                 &theme,
                             ),
                         ))
@@ -3977,7 +4014,7 @@ impl Pickers {
                                     };
                                     let is_switching =
                                         switching.as_deref() == Some(row.name.as_str());
-                                    popover::menu_row_nav(
+                                    popover::picker_row(
                                         &theme,
                                         is_selected,
                                         ix == active,

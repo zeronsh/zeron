@@ -30,8 +30,11 @@ pub mod wallpaper;
 pub mod wallpaper_colors;
 pub mod widgets;
 
-/// Sidebar drag-resize bounds (px).
-pub const SIDEBAR_MIN: f32 = 224.0;
+/// Sidebar drag-resize bounds (px). The minimum keeps the sidebar options
+/// button inside the sidebar beside the titlebar controls: 88 (past the
+/// traffic lights) + 82 (toggle, back, forward) + 32 (new session) + 8 gap
+/// + 24 (options) + 8 inset.
+pub const SIDEBAR_MIN: f32 = 242.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
@@ -284,6 +287,24 @@ pub fn set_transcript_width(width: f32, cx: &mut App) {
 pub enum SavePolicy {
     Debounced,
     Immediate,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PullRequestDestination {
+    #[default]
+    Native,
+    External,
+}
+
+impl PullRequestDestination {
+    pub const ALL: [Self; 2] = [Self::Native, Self::External];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Native => "Pull request view",
+            Self::External => "Default browser",
+        }
+    }
 }
 
 /// The sole in-process owner and writer of `ui-settings.json`.
@@ -819,6 +840,8 @@ pub struct UiSettings {
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
     pub sidebar_show_pull_request: bool,
+    /// The project filter row at the top of the sidebar.
+    pub sidebar_show_project_filter: bool,
     /// The sidebar's "Star on GitHub" banner was dismissed (its close button
     /// or following the link). Device-local; never shown again once set.
     pub github_star_banner_dismissed: bool,
@@ -937,6 +960,13 @@ pub struct UiSettings {
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
+    /// Destination shared by PR badges and the pull-request board.
+    pub pull_request_destination: PullRequestDestination,
+    /// Last explicitly selected PR scope, restored when no project is selected.
+    pub last_pull_request_repository: Option<String>,
+    pub last_pull_request_device: Option<String>,
+    /// Device-local bookmarks, keyed by provider/repository/PR, never GitHub mutations.
+    pub pull_request_stars: Vec<String>,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -945,6 +975,9 @@ pub struct UiSettings {
     pub files_word_wrap: bool,
     /// Include hidden and ignored entries in workspace file trees.
     pub files_show_all: bool,
+    /// The session card (project, device, side chats, actions) beside the
+    /// transcript.
+    pub session_info_open: bool,
     /// Interactive identity overlay; imported themes default to their own accent.
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
@@ -994,6 +1027,7 @@ impl Default for UiSettings {
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             sidebar_show_pull_request: true,
+            sidebar_show_project_filter: true,
             github_star_banner_dismissed: false,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
@@ -1043,10 +1077,15 @@ impl Default for UiSettings {
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
             transcript_compact_mode: false,
+            pull_request_destination: PullRequestDestination::Native,
+            last_pull_request_repository: None,
+            last_pull_request_device: None,
+            pull_request_stars: Vec::new(),
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
             files_show_all: false,
+            session_info_open: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
@@ -1639,6 +1678,7 @@ impl UiSettings {
             sidebar_show_harness,
             sidebar_show_branch,
             sidebar_show_pull_request,
+            sidebar_show_project_filter,
             github_star_banner_dismissed,
             last_space_id,
             last_project_action_by_space_id,
@@ -1688,6 +1728,7 @@ impl UiSettings {
             files_autosave_delay_ms,
             files_word_wrap,
             files_show_all,
+            session_info_open,
             accent,
             surface,
             new_thread_composer_background,
@@ -1702,6 +1743,10 @@ impl UiSettings {
             codex_voice,
             codex_voice_device,
             legacy_accent_color,
+            pull_request_destination,
+            last_pull_request_repository,
+            last_pull_request_device,
+            pull_request_stars,
         );
         current
     }
@@ -1975,6 +2020,25 @@ mod tests {
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
         assert!(!loaded.compact_model_picker);
+    }
+
+    #[test]
+    fn pull_request_destination_defaults_to_the_native_view_and_round_trips() {
+        let existing: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
+        assert_eq!(
+            existing.pull_request_destination,
+            PullRequestDestination::Native
+        );
+        for destination in PullRequestDestination::ALL {
+            let settings = UiSettings {
+                pull_request_destination: destination,
+                ..existing.clone()
+            };
+            let loaded: UiSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(loaded.pull_request_destination, destination);
+            assert_eq!(loaded.sidebar_width, 300.0);
+        }
     }
 
     #[test]
@@ -2641,6 +2705,7 @@ mod tests {
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             sidebar_show_pull_request: false,
+            sidebar_show_project_filter: false,
             github_star_banner_dismissed: true,
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
@@ -2726,6 +2791,10 @@ mod tests {
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
             transcript_compact_mode: true,
+            pull_request_destination: PullRequestDestination::External,
+            last_pull_request_repository: Some("acme/zeron".into()),
+            last_pull_request_device: Some("remote-device".into()),
+            pull_request_stars: vec!["https://github.com/acme/zeron/pull/123".into()],
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,
@@ -2734,6 +2803,7 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
+            session_info_open: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {
@@ -2861,10 +2931,12 @@ mod tests {
         assert!(settings.sidebar_compact);
         assert!(settings.sidebar_show_project_icon);
         assert!(settings.sidebar_show_project_label);
+        assert!(settings.sidebar_show_project_filter);
         let customized = UiSettings {
             sidebar_compact: false,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
+            sidebar_show_project_filter: false,
             sidebar_organization: SidebarOrganization::ByProject,
             ..settings
         };

@@ -194,6 +194,14 @@ pub mod methods {
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
+    /// One page of a repository's open pull requests (`filter`, `after`
+    /// cursor), with the total count.
+    pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";
+    /// Resolve a selected checkout through local Git metadata only.
+    pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
+    pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
+    pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
+    pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.
@@ -230,12 +238,25 @@ pub mod methods {
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
 }
 
+/// Stable capability error codes transported without provider stderr.
+pub mod capability_errors {
+    pub const PULL_REQUESTS_CLI_UNAVAILABLE: &str = "pull_requests.cli_unavailable";
+    pub const PULL_REQUESTS_AUTHENTICATION: &str = "pull_requests.authentication";
+    pub const PULL_REQUESTS_RATE_LIMITED: &str = "pull_requests.rate_limited";
+    pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
+    pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
+    pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
     #[error("unknown method: {0}")]
     UnknownMethod(String),
     #[error("bad params: {0}")]
     BadParams(String),
+    /// Stable machine-readable capability failure preserved across transports.
+    #[error("capability error: {0}")]
+    Capability(String),
     #[error("{0}")]
     Failed(String),
     #[error("transport: {0}")]
@@ -260,7 +281,13 @@ pub struct ClientFrame {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerFrame {
     pub id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `"ok": null` is a reply whose value is `null` (for example an absent
+    /// `Option`), distinct from a frame without `ok`.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ok: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub err: Option<String>,
@@ -268,6 +295,13 @@ pub struct ServerFrame {
     pub item: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+}
+
+fn present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// What a service returns for one invocation.
@@ -381,6 +415,9 @@ mod tests {
                 }
                 "Never" => Ok(RpcReply::Stream(futures::stream::pending().boxed())),
                 "Boom" => Err(RpcError::Failed("boom".into())),
+                "Capability" => Err(RpcError::Capability(
+                    capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
+                )),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -418,6 +455,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::Failed(m) if m == "boom"));
+
+        let err = client
+            .call("Capability", serde_json::Value::Null)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RpcError::Capability(code)
+                if code == capability_errors::PULL_REQUESTS_AUTHENTICATION
+        ));
     }
 
     #[tokio::test]
@@ -521,6 +568,23 @@ mod tests {
             .await
             .expect("second device's quiet stream cancelled")
             .expect("second drop signal");
+    }
+
+    #[tokio::test]
+    async fn unary_null_reply_resolves_the_call() {
+        let client = memory_client(Arc::new(TestService));
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.call("Echo", serde_json::Value::Null),
+        )
+        .await
+        .expect("a null reply is a reply")
+        .unwrap();
+        assert_eq!(reply, serde_json::Value::Null);
+        let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"ok":null}"#).unwrap();
+        assert_eq!(frame.ok, Some(serde_json::Value::Null));
+        let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"done":true}"#).unwrap();
+        assert_eq!(frame.ok, None);
     }
 
     #[tokio::test]

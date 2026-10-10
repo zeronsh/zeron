@@ -491,6 +491,8 @@ pub(crate) fn seed(
                 change: SidebarSectionChange::Assign {
                     session_id: (*member).into(),
                     section_id: Some(section.into()),
+                    after: None,
+                    before: None,
                 },
             })?;
         }

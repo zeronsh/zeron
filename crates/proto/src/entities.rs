@@ -826,6 +826,26 @@ pub enum ChangeRequestState {
     Merged,
 }
 
+/// Whether a change request can be merged without resolving conflicts first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestMergeability {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+/// Aggregate review decision reported for a change request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    #[default]
+    Unknown,
+}
+
 /// Compact provider-neutral change request metadata for checkout surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -837,6 +857,177 @@ pub struct ChangeRequestSummary {
     pub state: ChangeRequestState,
     pub base_ref: String,
     pub head_ref: String,
+}
+
+/// Relationship filter for one repository; never widens repository scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestFilter {
+    #[default]
+    Authored,
+    All,
+    Reviewing,
+}
+
+/// Provider-neutral change request metadata for global listing surfaces.
+///
+/// Unlike [`ChangeRequestSummary`], this contract is not tied to a checkout
+/// and therefore identifies the repository instead of requiring branch refs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestListItem {
+    pub provider: String,
+    #[serde(default)]
+    pub author: ChangeRequestActor,
+    pub repository: String,
+    /// Current source commit, captured with the CI rollup in one provider request.
+    #[serde(default)]
+    pub head_ref_oid: String,
+    #[serde(default)]
+    pub ci: crate::change_request_assessment::ChangeRequestCi,
+    /// None means an older host or unavailable viewer relationship metadata.
+    #[serde(default)]
+    pub viewer_did_author: Option<bool>,
+    #[serde(default)]
+    pub viewer_review_requested: Option<bool>,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: ChangeRequestState,
+    pub is_draft: bool,
+    /// `Unknown` when the provider reports no decision.
+    #[serde(default)]
+    pub review_decision: ChangeRequestReviewDecision,
+    pub additions: u64,
+    pub deletions: u64,
+    pub mergeability: ChangeRequestMergeability,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One page of a repository-scoped listing, newest updates first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestPage {
+    pub items: Vec<ChangeRequestListItem>,
+    /// Opaque provider cursor for the following page; `None` on the last one.
+    pub next_cursor: Option<String>,
+    /// Every match for the query, when the provider reports it.
+    pub total_count: Option<u64>,
+    /// When the engine fetched this page from the provider. A page served
+    /// from the engine's on-disk copy carries its original time, so clients
+    /// can show it at once and refresh it when it has aged. Absent from
+    /// engines that predate the copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<DateTime<Utc>>,
+}
+
+/// Read-only GitHub detail response. Optional collections tolerate absent provider data.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestDetail {
+    pub title: String,
+    pub body: String,
+    pub url: String,
+    pub number: u64,
+    pub author: ChangeRequestActor,
+    pub base_ref_name: String,
+    pub base_ref_oid: String,
+    pub head_ref_name: String,
+    pub head_ref_oid: String,
+    pub ci: crate::change_request_assessment::ChangeRequestCi,
+    pub viewer_did_author: Option<bool>,
+    pub viewer_review_requested: Option<bool>,
+    pub state: String,
+    pub is_draft: bool,
+    pub review_decision: String,
+    pub mergeable: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub comments: Vec<ChangeRequestComment>,
+    pub reviews: Vec<ChangeRequestComment>,
+    /// None means unavailable (including an older engine), not no feedback.
+    pub review_threads: Option<Vec<ChangeRequestReviewThread>>,
+    pub files: Vec<ChangeRequestFile>,
+    pub status_check_rollup: Vec<ChangeRequestCheck>,
+    /// The signed-in GitHub account, so clients can tell which comments and
+    /// reviews are the viewer's. Absent from older engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_login: Option<String>,
+}
+
+impl ChangeRequestDetail {
+    pub fn activity_comments(&self) -> impl Iterator<Item = &ChangeRequestComment> {
+        self.comments.iter().chain(&self.reviews).chain(
+            self.review_threads
+                .iter()
+                .flatten()
+                .flat_map(|thread| &thread.comments),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestReviewThread {
+    pub id: String,
+    pub is_resolved: bool,
+    pub is_outdated: bool,
+    pub path: String,
+    pub line: Option<u64>,
+    pub start_line: Option<u64>,
+    pub original_line: Option<u64>,
+    pub original_start_line: Option<u64>,
+    pub diff_side: String,
+    pub start_diff_side: Option<String>,
+    pub comments: Vec<ChangeRequestComment>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestActor {
+    pub login: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestComment {
+    pub id: String,
+    pub url: String,
+    pub reply_to: Option<ChangeRequestCommentReference>,
+    /// Provided by GitHub for the authenticated viewer, independent of PR authorship.
+    pub viewer_did_author: bool,
+    pub author: ChangeRequestActor,
+    pub body: String,
+    pub state: String,
+    pub created_at: String,
+    pub submitted_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestCommentReference {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestFile {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestCheck {
+    pub name: String,
+    pub context: String,
+    pub status: String,
+    pub conclusion: String,
+    pub state: String,
+    pub details_url: String,
+    pub target_url: String,
 }
 
 /// Latest successful change request resolution for one checkout and branch.
@@ -1283,6 +1474,121 @@ mod tests {
                 status
             );
         }
+    }
+
+    #[test]
+    fn change_request_list_item_round_trips_all_states_as_camel_case() {
+        for (state, encoded_state) in [
+            (ChangeRequestState::Open, "open"),
+            (ChangeRequestState::Closed, "closed"),
+            (ChangeRequestState::Merged, "merged"),
+        ] {
+            let item = ChangeRequestListItem {
+                provider: "github".into(),
+                author: Default::default(),
+                head_ref_oid: String::new(),
+                ci: Default::default(),
+                viewer_did_author: None,
+                viewer_review_requested: None,
+                repository: "private-owner/private-repo".into(),
+                number: 123,
+                title: "Add pull request dashboard".into(),
+                url: "https://github.com/private-owner/private-repo/pull/123".into(),
+                state,
+                is_draft: true,
+                review_decision: ChangeRequestReviewDecision::ChangesRequested,
+                additions: 42,
+                deletions: 7,
+                mergeability: ChangeRequestMergeability::Conflicting,
+                created_at: Utc.with_ymd_and_hms(2026, 8, 10, 9, 30, 0).unwrap(),
+                updated_at: Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap(),
+            };
+
+            let value = serde_json::to_value(&item).unwrap();
+            assert_eq!(value["repository"], "private-owner/private-repo");
+            assert_eq!(value["state"], encoded_state);
+            assert_eq!(value["isDraft"], true);
+            assert_eq!(value["reviewDecision"], "changesRequested");
+            assert_eq!(value["additions"], 42);
+            assert_eq!(value["deletions"], 7);
+            assert_eq!(value["mergeability"], "conflicting");
+            assert_eq!(value["createdAt"], "2026-08-10T09:30:00Z");
+            assert_eq!(value["updatedAt"], "2026-08-19T12:00:00Z");
+            assert!(value.get("baseRef").is_none());
+            assert!(value.get("headRef").is_none());
+            assert_eq!(
+                serde_json::from_value::<ChangeRequestListItem>(value).unwrap(),
+                item
+            );
+        }
+    }
+
+    #[test]
+    fn change_request_mergeability_round_trips_all_states() {
+        for (state, encoded) in [
+            (ChangeRequestMergeability::Mergeable, "mergeable"),
+            (ChangeRequestMergeability::Conflicting, "conflicting"),
+            (ChangeRequestMergeability::Unknown, "unknown"),
+        ] {
+            let value = serde_json::to_value(state).unwrap();
+            assert_eq!(value, encoded);
+            assert_eq!(
+                serde_json::from_value::<ChangeRequestMergeability>(value).unwrap(),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn change_request_review_decision_round_trips_and_defaults_when_absent() {
+        for (decision, encoded) in [
+            (ChangeRequestReviewDecision::Approved, "approved"),
+            (
+                ChangeRequestReviewDecision::ChangesRequested,
+                "changesRequested",
+            ),
+            (
+                ChangeRequestReviewDecision::ReviewRequired,
+                "reviewRequired",
+            ),
+            (ChangeRequestReviewDecision::Unknown, "unknown"),
+        ] {
+            let value = serde_json::to_value(decision).unwrap();
+            assert_eq!(value, encoded);
+            assert_eq!(
+                serde_json::from_value::<ChangeRequestReviewDecision>(value).unwrap(),
+                decision
+            );
+        }
+
+        let mut value = serde_json::to_value(ChangeRequestListItem {
+            provider: "github".into(),
+            author: Default::default(),
+            head_ref_oid: String::new(),
+            ci: Default::default(),
+            viewer_did_author: None,
+            viewer_review_requested: None,
+            repository: "acme/zeron".into(),
+            number: 1,
+            title: "No decision".into(),
+            url: "https://github.com/acme/zeron/pull/1".into(),
+            state: ChangeRequestState::Open,
+            is_draft: false,
+            review_decision: ChangeRequestReviewDecision::Approved,
+            additions: 1,
+            deletions: 0,
+            mergeability: ChangeRequestMergeability::Mergeable,
+            created_at: Utc.with_ymd_and_hms(2026, 8, 10, 9, 30, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap(),
+        })
+        .unwrap();
+        value.as_object_mut().unwrap().remove("reviewDecision");
+        assert_eq!(
+            serde_json::from_value::<ChangeRequestListItem>(value)
+                .unwrap()
+                .review_decision,
+            ChangeRequestReviewDecision::Unknown
+        );
     }
 
     #[test]

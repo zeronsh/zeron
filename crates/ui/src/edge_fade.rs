@@ -311,6 +311,88 @@ mod tests {
     use std::rc::Rc;
 
     #[gpui::test]
+    fn menu_fades_follow_scroll_and_disappear_when_content_fits(cx: &mut gpui::TestAppContext) {
+        struct Menu {
+            rows: usize,
+            scroll: ScrollHandle,
+            observed: Rc<RefCell<Vec<(bool, Option<EdgeFade>)>>>,
+        }
+        impl Render for Menu {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let probe = |inside| {
+                    let observed = self.observed.clone();
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |_, _, window, cx| {
+                            observed
+                                .borrow_mut()
+                                .push((inside, active_fade(window, cx)));
+                        },
+                    )
+                    .w(px(100.0))
+                    .h(px(40.0))
+                    .flex_none()
+                };
+                div()
+                    .w(px(300.0))
+                    .flex()
+                    .flex_col()
+                    .child(probe(false))
+                    .child(crate::popover::faded_menu_list(
+                        &self.scroll,
+                        crate::popover::menu_scroll_list("menu", &self.scroll)
+                            .max_h(px(100.0))
+                            .flex()
+                            .flex_col()
+                            .children((0..self.rows).map(|_| probe(true))),
+                    ))
+            }
+        }
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let (menu, cx) = cx.add_window_view(|_, _| Menu {
+            rows: 10,
+            scroll: ScrollHandle::new(),
+            observed: observed.clone(),
+        });
+        cx.run_until_parked();
+        let scroll = menu.read_with(cx, |menu, _| menu.scroll.clone());
+        let max = scroll.max_offset().y;
+        assert!(max > px(100.0));
+        for (offset, top, bottom) in [
+            (px(0.0), false, true),
+            (-max / 2.0, true, true),
+            (-max, true, false),
+        ] {
+            scroll.set_offset(gpui::point(px(0.0), offset));
+            observed.borrow_mut().clear();
+            cx.update(|window, cx| window.draw(cx).clear());
+            let seen = observed.borrow();
+            assert!(seen.iter().any(|(inside, _)| *inside));
+            for (inside, fade) in seen.iter() {
+                if *inside {
+                    let fade = fade.expect("overflow should fade the menu list");
+                    assert_eq!((fade.top, fade.bottom), (top, bottom));
+                    assert_eq!(fade.band, px(12.0));
+                } else {
+                    assert!(fade.is_none(), "the input above the list must stay unfaded");
+                }
+            }
+        }
+        menu.update(cx, |menu, cx| {
+            menu.rows = 1;
+            cx.notify();
+        });
+        observed.borrow_mut().clear();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert_eq!(scroll.max_offset().y, px(0.0));
+        assert_eq!(scroll.offset().y, px(0.0));
+        assert!(
+            observed.borrow().iter().all(|(_, fade)| fade.is_none()),
+            "shrinking content clears both fades in the same paint"
+        );
+    }
+
+    #[gpui::test]
     fn painted_label_retains_scroll_fade_across_overflow_transitions(
         cx: &mut gpui::TestAppContext,
     ) {

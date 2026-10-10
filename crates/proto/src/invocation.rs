@@ -208,7 +208,9 @@ pub fn validate_harness_invocations(text: &str, harness: crate::HarnessId) -> Re
 /// Other providers receive readable Markdown and their advertised command text.
 pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
     let text = crate::file_mentions::file_mention_prompt(
-        &crate::attachment_mentions::attachment_mention_prompt(text),
+        &crate::attachment_mentions::attachment_mention_prompt(
+            &crate::chat_mentions::chat_mention_prompt(text),
+        ),
     );
     if harness == crate::HarnessId::Codex {
         return text;
