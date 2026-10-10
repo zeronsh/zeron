@@ -1208,6 +1208,7 @@ mod rendered_tests {
             chat: Some("chat".into()),
             root: "/repo dir".into(),
             local: true,
+            own: true,
         }]);
         let activated: Rc<RefCell<Vec<LinkActivation>>> = Rc::default();
         let (_view, cx) = cx.add_window_view(|_, _| Fixture {
@@ -1293,6 +1294,7 @@ mod rendered_tests {
             chat: Some("chat".into()),
             root: "/repo".into(),
             local: true,
+            own: true,
         }]);
         let activated: Rc<RefCell<Vec<LinkActivation>>> = Rc::default();
         let (_view, cx) = cx.add_window_view(|_, _| Fixture {
@@ -1354,6 +1356,7 @@ mod rendered_tests {
                     chat: Some("remote".into()),
                     root: "/far/worktree".into(),
                     local: false,
+                    own: true,
                 }])),
                 true,
             ),

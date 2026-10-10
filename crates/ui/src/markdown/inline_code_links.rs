@@ -378,6 +378,7 @@ mod tests {
                 chat: Some("chat".into()),
                 root: self.root.to_string_lossy().into_owned(),
                 local,
+                own: true,
             }]
         }
 
@@ -543,6 +544,33 @@ mod tests {
             fixture.target(&remote_root, "2026-09-28/Some Title/SOURCES.md"),
             None
         );
+    }
+
+    #[test]
+    fn a_bare_name_only_another_project_has_stays_plain() {
+        let fixture = Fixture::new();
+        let own = fixture.root.parent().unwrap().join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        // The linking chat's folder first, then a project that has `top.md`.
+        let mut roots = fixture.roots(true);
+        roots[0].chat = None;
+        roots[0].own = false;
+        roots.insert(
+            0,
+            FileLinkRoot {
+                chat: Some("chat".into()),
+                root: own.to_string_lossy().into_owned(),
+                local: true,
+                own: true,
+            },
+        );
+        let linked = fixture.linked(&fixture.tree("see `top.md`"), &roots, true);
+        assert_eq!(fixture.target(&linked, "top.md"), None);
+        let span = runs(&linked)
+            .into_iter()
+            .find(|run| run.text == "top.md")
+            .unwrap();
+        assert!(span.style.code);
     }
 
     #[cfg(unix)]

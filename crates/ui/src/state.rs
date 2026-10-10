@@ -1258,8 +1258,10 @@ impl AppState {
     }
 
     /// The ordered checkouts a file link from `chat_id` may resolve against:
-    /// the chat's own checkout, its parent chat's, then every project root on
-    /// the linking chat's device — an agent's paths name its own disk, so a
+    /// the chat's own checkout (its project's root when it records none), its
+    /// parent chat's, then every project root on the linking chat's device.
+    /// Only the first is `own`: a bare name resolves there alone, while the
+    /// rest just claim absolute paths. An agent's paths name its own disk, so a
     /// root on another device never owns them. Project roots have no owning
     /// chat — a link that matches one opens by absolute path through the
     /// linking chat. `local` marks roots whose files sit on this disk; a
@@ -1278,7 +1280,7 @@ impl AppState {
                 .is_none_or(|local| device == local)
         };
         let mut roots: Vec<FileLinkRoot> = Vec::new();
-        let mut push = |chat: Option<&Chat>, device: &str, root: Option<&str>| {
+        let mut push = |chat: Option<&Chat>, device: &str, root: Option<&str>, own: bool| {
             let Some(root) = root.filter(|root| !root.is_empty()) else {
                 return;
             };
@@ -1289,6 +1291,7 @@ impl AppState {
                 chat: chat.map(|chat| chat.id.clone()),
                 local: on_this_device(device),
                 root: root.to_owned(),
+                own,
             });
         };
         let chat_row = |id: &str| self.chats.iter().find(|chat| chat.id == id);
@@ -1300,21 +1303,34 @@ impl AppState {
             None => on_this_device(device),
         };
         if let Some(chat) = linking {
-            push(Some(chat), &chat.device_id, chat.cwd.as_deref());
+            match chat.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+                Some(cwd) => push(Some(chat), &chat.device_id, Some(cwd), true),
+                // A chat that records no folder works in its project's root,
+                // so that root, not whichever project sorts first, is its own.
+                None => {
+                    let project = chat
+                        .space_id
+                        .as_deref()
+                        .and_then(|id| self.spaces.iter().find(|space| space.id == id));
+                    if let Some(space) = project {
+                        push(None, &space.device_id, Some(space.path.as_str()), true);
+                    }
+                }
+            }
         }
         if let Some(parent) = linking
             .and_then(|chat| chat.parent_chat_id.as_deref())
             .and_then(chat_row)
             .filter(|parent| on_link_device(&parent.device_id))
         {
-            push(Some(parent), &parent.device_id, parent.cwd.as_deref());
+            push(Some(parent), &parent.device_id, parent.cwd.as_deref(), false);
         }
         for space in self
             .spaces
             .iter()
             .filter(|space| on_link_device(&space.device_id))
         {
-            push(None, &space.device_id, Some(space.path.as_str()));
+            push(None, &space.device_id, Some(space.path.as_str()), false);
         }
         roots
     }
@@ -4742,13 +4758,18 @@ mod tests {
             chat: chat.map(str::to_owned),
             root: root.into(),
             local,
+            own: false,
+        };
+        let own = |chat: &str, root_path: &str, local: bool| FileLinkRoot {
+            own: true,
+            ..root(Some(chat), root_path, local)
         };
 
         let roots = state.file_link_roots("fork");
         assert_eq!(
             roots,
             vec![
-                root(Some("fork"), "/fork/fork", true),
+                own("fork", "/fork/fork", true),
                 root(Some("parent"), "/repo", true),
                 root(None, "/projects/zeron", true),
             ],
@@ -4761,7 +4782,7 @@ mod tests {
         assert_eq!(
             state.file_link_roots("remote"),
             vec![
-                root(Some("remote"), "/far/worktree", false),
+                own("remote", "/far/worktree", false),
                 root(None, "/remote/only", false),
             ]
         );
@@ -4783,6 +4804,26 @@ mod tests {
             },
             Some((Some("parent".into()), "src/lib.rs".into()))
         );
+    }
+
+    #[test]
+    fn file_link_roots_put_a_folderless_chats_own_project_first() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("dev".into());
+        let mut chat_b = chat("chat-b", 0, None);
+        chat_b.space_id = Some("b".into());
+        state.apply_chats(vec![chat_b]);
+        // `a` was created first, so project order alone would put it first.
+        state.apply_spaces(vec![
+            space("a", "dev", "/projects/a", 0),
+            space("b", "dev", "/projects/b", 1),
+        ]);
+        let roots = state.file_link_roots("chat-b");
+        let order: Vec<(&str, bool)> = roots
+            .iter()
+            .map(|root| (root.root.as_str(), root.own))
+            .collect();
+        assert_eq!(order, [("/projects/b", true), ("/projects/a", false)]);
     }
 
     #[test]
