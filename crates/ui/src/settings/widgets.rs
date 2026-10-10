@@ -1501,14 +1501,15 @@ impl<V: 'static> Select<V> {
 
 /// Settings actions share one size, corner radius, and hover language. Use
 /// outlined for selectors, quiet for secondary actions, filled for row
-/// actions on a block (the dropdown trigger's glass wash), and solid for
-/// commits.
+/// actions on a block (the dropdown trigger's glass wash), solid for
+/// commits, and danger for destructive actions behind a confirmation.
 #[derive(Clone, Copy)]
 pub enum ActionTone {
     Quiet,
     Outlined,
     Filled,
     Solid,
+    Danger,
 }
 
 pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
@@ -1544,6 +1545,11 @@ pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
             .bg(theme.solid)
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.on_solid)
+            .hover(|s| s.opacity(0.9)),
+        // The dialogs' destructive fill (`popover::btn_danger`).
+        ActionTone::Danger => button
+            .bg(theme.danger_strong)
+            .text_color(gpui::white())
             .hover(|s| s.opacity(0.9)),
     }
 }
