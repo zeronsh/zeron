@@ -747,6 +747,178 @@ async fn v2_wire_tool_frames_open_and_resolve_chips() {
 }
 
 #[tokio::test]
+async fn v2_wire_v2_tool_names_reach_exec_chips() {
+    // V2 `shell` and Code Mode `execute` must open `Exec` chips end to end
+    // (the unit tests bypass the `tool_names` map that supplies the runtime name).
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a"
+        }),
+    );
+    wire.v2(
+        "session.tool.input.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "name": "shell"
+        }),
+    );
+    wire.v2(
+        "session.tool.called",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "input": {"command": "git status"}
+        }),
+    );
+    wire.v2(
+        "session.tool.input.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_2", "name": "execute"
+        }),
+    );
+    wire.v2(
+        "session.tool.called",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_2",
+            "input": {"code": "return await tools.shell({command: \"git diff\"})"}
+        }),
+    );
+    wire.v2(
+        "session.tool.success",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "content": [{"type": "text", "text": "clean"}]
+        }),
+    );
+    wire.v2(
+        "session.tool.success",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_2", "content": [{"type": "text", "text": "diff..."}]
+        }),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+
+    let calls = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut calls = Vec::new();
+        loop {
+            match wire.events.recv().await.unwrap().unwrap() {
+                AgentEvent::ToolCall { id, call } => calls.push((id, call)),
+                AgentEvent::Done { .. } => return calls,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "fixture:msg_a:call_1".to_owned(),
+                ToolCall::Exec {
+                    command: "git status".to_owned()
+                }
+            ),
+            (
+                "fixture:msg_a:call_2".to_owned(),
+                ToolCall::Exec {
+                    command: "git diff".to_owned()
+                }
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn v2_wire_execute_nested_calls_surface_as_chips() {
+    // An `execute` settling with `metadata.toolCalls` surfaces each nested
+    // call as its own chip; the nested shell is skipped because the outer
+    // chip already shows the command.
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a"
+        }),
+    );
+    wire.v2(
+        "session.tool.input.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "name": "execute"
+        }),
+    );
+    wire.v2(
+        "session.tool.called",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1",
+            "input": {"code": "return await tools.shell({command: \"make beds\"})"}
+        }),
+    );
+    wire.v2(
+        "session.tool.success",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "content": [{"type": "text", "text": "tidy"}],
+            "metadata": {"toolCalls": [
+                {"tool": "shell", "status": "completed",
+                 "input": {"command": "make beds"}},
+                {"tool": "read", "status": "completed",
+                 "input": {"path": "rooms/kitchen.md"}},
+            ]},
+        }),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+
+    let calls = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut calls = Vec::new();
+        loop {
+            match wire.events.recv().await.unwrap().unwrap() {
+                AgentEvent::ToolCall { id, call } => calls.push((id, call)),
+                AgentEvent::Done { .. } => return calls,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "fixture:msg_a:call_1".to_owned(),
+                ToolCall::Exec {
+                    command: "make beds".to_owned()
+                }
+            ),
+            (
+                "fixture:msg_a:call_1#1".to_owned(),
+                ToolCall::ReadFile {
+                    path: "rooms/kitchen.md".to_owned()
+                }
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn v2_execution_failure_and_interrupt_settle_the_turn() {
     let mut wire = TurnWire::start_proto(false, true).await;
     wire.request("/api/model").await;
@@ -1358,6 +1530,256 @@ fn tool_names_type_the_common_calls() {
     let call = oc_tool_call("mystery", &json!({"x": 1}));
     assert!(matches!(&call, ToolCall::Unknown { name, input: Some(_) } if name == "mystery"));
     assert!(!call.is_subagent_spawn());
+}
+
+#[test]
+fn v2_shell_types_like_bash() {
+    // V2 renamed `bash` to `shell` with the same `{command}` input.
+    for name in ["bash", "shell"] {
+        let call = oc_tool_call(name, &json!({"command": "ls -la"}));
+        assert_eq!(
+            call,
+            ToolCall::Exec {
+                command: "ls -la".into()
+            },
+            "{name} should type as Exec"
+        );
+    }
+}
+
+#[test]
+fn codemode_execute_shell_calls_type_as_exec() {
+    // Single nested shell call → the Run chip shows its command.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "return await tools.shell({command: \"echo ok\"})"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "echo ok".into()
+        }
+    );
+    // Namespaced and single-quoted forms work too.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "await tools.ns.shell({command: 'git status'})"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "git status".into()
+        }
+    );
+    // Parallel calls join so no command is hidden.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "await Promise.all([tools.a.shell({command: \"git status\"}), tools.b.shell({command: \"git diff\"})])"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "git status\ngit diff".into()
+        }
+    );
+    // No nested shell call → opaque chip with the source preserved.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "return await tools.read({path: \"a.rs\"})"}),
+    );
+    assert!(matches!(&call, ToolCall::Unknown { name, input: Some(_) } if name == "execute"));
+    assert!(!call.is_subagent_spawn());
+    // Missing `code` → opaque chip, no panic.
+    let call = oc_tool_call("execute", &json!({}));
+    assert!(matches!(&call, ToolCall::Unknown { name, .. } if name == "execute"));
+}
+
+#[test]
+fn codemode_scanner_rejects_lookalikes_and_survives_unicode() {
+    // Identifiers merely containing `shell` must not extract.
+    for code in [
+        "seashell({command: \"whoami\"})",
+        "myshell({command: \"whoami\"})",
+    ] {
+        let call = oc_tool_call("execute", &json!({"code": code}));
+        assert!(
+            matches!(&call, ToolCall::Unknown { name, .. } if name == "execute"),
+            "{code} must not extract a command"
+        );
+    }
+    // Non-string token after `command:` (incl. multibyte) → Unknown, never panic.
+    for code in [
+        "shell({command: é})",
+        "shell({command: 指令})",
+        "shell({command: 42})",
+        "shell({})",
+    ] {
+        let call = oc_tool_call("execute", &json!({"code": code}));
+        assert!(
+            matches!(&call, ToolCall::Unknown { name, .. } if name == "execute"),
+            "{code} must stay opaque"
+        );
+    }
+    // Quoted keys are valid JS — accept them.
+    let call = oc_tool_call("execute", &json!({"code": "shell({\"command\": \"ls\"})"}));
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "ls".into()
+        }
+    );
+    // Escapes and template literals decode for display.
+    let call = oc_tool_call("execute", &json!({"code": "shell({command: \"a\\nb\"})"}));
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "a\nb".into()
+        }
+    );
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "shell({command: `git status`})"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "git status".into()
+        }
+    );
+}
+
+#[test]
+fn execute_completion_surfaces_nested_calls_as_chips() {
+    fn completed_part(input: Value, tool_calls: Value) -> Value {
+        json!({
+            "id": "prt_x", "messageID": "msg_a", "sessionID": "ses_1",
+            "type": "tool", "tool": "execute", "callID": "call-x",
+            "state": {"status": "completed", "input": input,
+                      "output": "done", "metadata": {"toolCalls": tool_calls}},
+        })
+    }
+    // Outer shows the shell command already: nested shell is skipped, the
+    // read surfaces with its own chip + result.
+    let mut feed = feed_with_assistant("msg_a");
+    let events = part_snapshot_events(
+        &mut feed,
+        &completed_part(
+            json!({"code": "await tools.shell({command: \"echo hi\"})"}),
+            json!([
+                {"tool": "shell", "status": "completed", "input": {"command": "echo hi"}},
+                {"tool": "read", "status": "completed", "input": {"path": "a.rs"}},
+            ]),
+        ),
+        true,
+        None,
+    );
+    assert_eq!(
+        events,
+        vec![
+            AgentEvent::ToolCall {
+                id: "call-x".into(),
+                call: ToolCall::Exec {
+                    command: "echo hi".into()
+                },
+            },
+            AgentEvent::ToolResult {
+                id: "call-x".into(),
+                is_error: false,
+                output: Some("done".into()),
+                diff: None,
+            },
+            AgentEvent::ToolCall {
+                id: "call-x#1".into(),
+                call: ToolCall::ReadFile {
+                    path: "a.rs".into()
+                },
+            },
+            AgentEvent::ToolResult {
+                id: "call-x#1".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        ]
+    );
+    // Outer opaque: every nested call surfaces, errors marked.
+    let mut feed = feed_with_assistant("msg_a");
+    let events = part_snapshot_events(
+        &mut feed,
+        &completed_part(
+            json!({"code": "return 1"}),
+            json!([
+                {"tool": "shell", "status": "completed", "input": {"command": "ls"}},
+                {"tool": "read", "status": "error", "input": {"path": "missing.rs"}},
+            ]),
+        ),
+        true,
+        None,
+    );
+    let calls: Vec<_> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            AgentEvent::ToolCall { id, call } => Some((id.clone(), call.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "call-x".into(),
+                ToolCall::Unknown {
+                    name: "execute".into(),
+                    input: Some(json!({"code": "return 1"})),
+                }
+            ),
+            (
+                "call-x#0".into(),
+                ToolCall::Exec {
+                    command: "ls".into()
+                }
+            ),
+            (
+                "call-x#1".into(),
+                ToolCall::ReadFile {
+                    path: "missing.rs".into()
+                }
+            ),
+        ]
+    );
+    let errors: Vec<_> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            AgentEvent::ToolResult { id, is_error, .. } => Some((id.clone(), *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        vec![
+            ("call-x".into(), false),
+            ("call-x#0".into(), false),
+            ("call-x#1".into(), true),
+        ]
+    );
+    // Nameless entries drop; chips are capped so a runaway script can't spam.
+    let mut feed = feed_with_assistant("msg_a");
+    let many: Vec<Value> = (0..30)
+        .map(|i| json!({"tool": "read", "status": "completed", "input": {"path": format!("f{i}.rs")}}))
+        .collect();
+    let events = part_snapshot_events(
+        &mut feed,
+        &completed_part(json!({"code": "return 1"}), Value::Array(many)),
+        true,
+        None,
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|ev| matches!(ev, AgentEvent::ToolCall { .. }))
+            .count(),
+        1 + MAX_NESTED_CODEMODE_CALLS
+    );
 }
 
 #[test]

@@ -1369,6 +1369,10 @@ struct PartState {
     emitted: usize,
     tool_started: bool,
     tool_done: bool,
+    /// The outer chip typed as [`ToolCall::Exec`] at open time. Completion
+    /// frames carry no input, so nested Code Mode calls consult this instead
+    /// of retyping: shell entries already painted on the outer chip skip.
+    outer_exec: bool,
 }
 
 /// Streaming state for one opencode session's feed (ours or a child's).
@@ -3543,9 +3547,11 @@ fn part_snapshot_events(
                 && (has_input || matches!(status, "running" | "completed" | "error"))
             {
                 entry.tool_started = true;
+                let call = oc_tool_call(tool, &input);
+                entry.outer_exec = matches!(call, ToolCall::Exec { .. });
                 events.push(AgentEvent::ToolCall {
                     id: call_id.clone(),
-                    call: oc_tool_call(tool, &input),
+                    call,
                 });
                 // A task spawn on the MAIN feed registers a pending chip so
                 // the child's session.created (or its metadata) can bind.
@@ -3568,11 +3574,23 @@ fn part_snapshot_events(
                     .filter(|t| !t.is_empty())
                     .map(|t| cap_text(t, OUTPUT_CAP));
                 events.push(AgentEvent::ToolResult {
-                    id: call_id,
+                    id: call_id.clone(),
                     is_error: status == "error",
                     output,
                     diff: None,
                 });
+                // A settled Code Mode `execute` names its nested calls in
+                // `state.metadata.toolCalls`: surface each as its own chip so
+                // the transcript shows what actually ran.
+                if tool == "execute" {
+                    events.extend(nested_codemode_events(
+                        &call_id,
+                        entry.outer_exec,
+                        part.get("state")
+                            .and_then(|s| s.get("metadata"))
+                            .and_then(|m| m.get("toolCalls")),
+                    ));
+                }
             }
             events
         }
@@ -3742,7 +3760,249 @@ fn cap_text(text: &str, cap: usize) -> String {
     format!("{}…", &text[..end])
 }
 
+/// Max nested shell commands surfaced from one Code Mode script; each is
+/// display-truncated so a generated script can't build a giant chip.
+const MAX_CODEMODE_COMMANDS: usize = 10;
+const MAX_CODEMODE_COMMAND_LEN: usize = 1024;
+
+/// Extract `command` strings from a Code Mode `execute` script: finds
+/// `shell({…})` object literals (`tools.shell(…)`, `tools.ns.shell(…)`, bare
+/// `shell(…)`) and reads their `command` string. Best-effort display parsing,
+/// not a JS parser: template literals stay raw, escapes are unescaped, and
+/// mentions inside strings or comments can false-positive — never trust it
+/// beyond chip text.
+fn codemode_shell_commands(code: &str) -> Vec<String> {
+    let bytes = code.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while out.len() < MAX_CODEMODE_COMMANDS && i < bytes.len() {
+        let Some(rel) = code[i..].find("shell") else {
+            break;
+        };
+        i += rel;
+        // Skip identifiers that merely contain `shell` (`seashell(…)`).
+        let prev = i.checked_sub(1).and_then(|p| bytes.get(p)).copied();
+        if prev.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
+            i += "shell".len();
+            continue;
+        }
+        // Must be a call: `shell` followed by optional whitespace and `(`.
+        let mut j = i + "shell".len();
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if bytes.get(j) != Some(&b'(') {
+            i = j;
+            continue;
+        }
+        j += 1;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if bytes.get(j) != Some(&b'{') {
+            i = j;
+            continue;
+        }
+        // Scan the balanced `{…}` region for a `command: "<…>"` string.
+        let mut depth = 0usize;
+        let mut k = j;
+        let mut region_end = None;
+        let mut in_str: Option<u8> = None;
+        while k < bytes.len() {
+            let b = bytes[k];
+            if let Some(q) = in_str {
+                if b == b'\\' {
+                    k += 2;
+                    continue;
+                }
+                if b == q {
+                    in_str = None;
+                }
+                k += 1;
+                continue;
+            }
+            match b {
+                b'\'' | b'"' | b'`' => in_str = Some(b),
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        region_end = Some(k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        let Some(end) = region_end else {
+            i = j + 1;
+            continue;
+        };
+        let region = &code[j..=end];
+        if let Some(cmd) = codemode_command_arg(region) {
+            let mut cmd = cmd;
+            // Truncate on a char boundary for display safety.
+            while cmd.len() > MAX_CODEMODE_COMMAND_LEN
+                && !cmd.is_char_boundary(MAX_CODEMODE_COMMAND_LEN)
+            {
+                cmd.pop();
+            }
+            cmd.truncate(MAX_CODEMODE_COMMAND_LEN);
+            if !cmd.is_empty() {
+                out.push(cmd);
+            }
+        }
+        i = end + 1;
+    }
+    out
+}
+
+/// Read the `command` string argument out of a `shell({…})` object literal.
+fn codemode_command_arg(region: &str) -> Option<String> {
+    let bytes = region.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rel = region[i..].find("command")?;
+        i += rel;
+        // Skip matches inside identifiers (`mycommand`). A directly
+        // preceding quote is a *quoted key* (`{"command": …}`) when the byte
+        // before it opens key position (`{`, `,`, whitespace) — accept those.
+        let prev = i.checked_sub(1).and_then(|p| bytes.get(p)).copied();
+        let is_quoted_key = matches!(prev, Some(b'\'' | b'"' | b'`'))
+            && i.checked_sub(2)
+                .and_then(|p| bytes.get(p))
+                .copied()
+                .is_none_or(|b| b == b'{' || b == b',' || b.is_ascii_whitespace());
+        if !is_quoted_key
+            && prev.is_some_and(|b| {
+                b.is_ascii_alphanumeric()
+                    || b == b'_'
+                    || b == b'$'
+                    || b == b'\''
+                    || b == b'"'
+                    || b == b'`'
+            })
+        {
+            i += "command".len();
+            continue;
+        }
+        let mut j = i + "command".len();
+        if is_quoted_key {
+            // Skip the closing quote of `"command"` (same char that opened it).
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if bytes.get(j) != prev.as_ref() {
+                i = j;
+                continue;
+            }
+            j += 1;
+        }
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if bytes.get(j) != Some(&b':') {
+            i = j;
+            continue;
+        }
+        j += 1;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        let quote = *bytes.get(j)?;
+        if !matches!(quote, b'\'' | b'"' | b'`') {
+            // `j` is char-boundary-safe (ASCII steps from a boundary) but
+            // `j + 1` may not be (multibyte token) — hold `j`, which still
+            // advances since `j >= i + "command".len()`.
+            i = j;
+            continue;
+        }
+        // Walk the literal char-by-char so multi-byte contents survive.
+        let mut s = String::new();
+        let tail = &region[j + 1..];
+        let mut chars = tail.chars();
+        let mut closed = false;
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('r') => s.push('\r'),
+                    Some(esc) => s.push(esc),
+                    None => break,
+                }
+                continue;
+            }
+            if c == quote as char {
+                closed = true;
+                break;
+            }
+            s.push(c);
+        }
+        if closed {
+            return Some(s);
+        }
+        return None;
+    }
+    None
+}
+
+/// Max nested Code Mode calls surfaced as chips per `execute`; the outer
+/// result still carries the full outcome, so truncation only costs chips.
+const MAX_NESTED_CODEMODE_CALLS: usize = 20;
+
+/// Chip events for one settled Code Mode `execute`'s nested `toolCalls`
+/// (`[{tool, input?, status?}]` from `state.metadata`).
+///
+/// The outer chip already shows scanner-extracted shell commands, so nested
+/// shell entries are skipped when the outer call typed as [`ToolCall::Exec`] —
+/// otherwise every shell-in-`execute` would paint twice. Everything else (and
+/// everything, when the outer stayed opaque) surfaces as its own typed chip,
+/// each immediately settled: per-nested outputs aren't reported, only status.
+fn nested_codemode_events(
+    call_id: &str,
+    outer_is_exec: bool,
+    tool_calls: Option<&Value>,
+) -> Vec<AgentEvent> {
+    let Some(calls) = tool_calls.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for (ix, entry) in calls.iter().enumerate().take(MAX_NESTED_CODEMODE_CALLS) {
+        let name = entry
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name = name.strip_prefix("tools.").unwrap_or(name);
+        if name.is_empty() {
+            continue;
+        }
+        let nested_input = entry.get("input").cloned().unwrap_or(Value::Null);
+        // Already painted on the outer chip: skip, don't show twice.
+        if outer_is_exec && matches!(oc_tool_call(name, &nested_input), ToolCall::Exec { .. }) {
+            continue;
+        }
+        let id = format!("{call_id}#{ix}");
+        events.push(AgentEvent::ToolCall {
+            id: id.clone(),
+            call: oc_tool_call(name, &nested_input),
+        });
+        events.push(AgentEvent::ToolResult {
+            id,
+            is_error: entry.get("status").and_then(Value::as_str) == Some("error"),
+            output: None,
+            diff: None,
+        });
+    }
+    events
+}
+
 /// Type an opencode-native tool invocation.
+///
+/// V2 renames: `bash` is now `shell` (same `{command}` input); `execute` is
+/// Code Mode — JS calling tools as `tools.*.shell({command})` — whose nested
+/// shell calls are unpacked back into [`ToolCall::Exec`] for display.
 fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
     let s = |keys: &[&str]| {
         keys.iter()
@@ -3752,9 +4012,28 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
             .map(str::to_owned)
     };
     match name {
-        "bash" => ToolCall::Exec {
+        // `bash` is the V1 tool id (kept for V1 servers); V2 renamed it to
+        // `shell` with the same `{command}` input shape.
+        "bash" | "shell" => ToolCall::Exec {
             command: s(&["command"]).unwrap_or_default(),
         },
+        // Code Mode wraps tool calls in JS (`execute({code})`). Surface any
+        // nested shell commands as the chip's command; non-shell-only scripts
+        // stay an opaque `execute` chip with the source preserved.
+        "execute" => {
+            let code = s(&["code"]).unwrap_or_default();
+            let commands = codemode_shell_commands(&code);
+            if commands.is_empty() {
+                ToolCall::Unknown {
+                    name: name.to_owned(),
+                    input: (!input.is_null()).then(|| input.clone()),
+                }
+            } else {
+                ToolCall::Exec {
+                    command: commands.join("\n"),
+                }
+            }
+        }
         "read" => ToolCall::ReadFile {
             path: s(&["filePath", "file_path", "path"]).unwrap_or_default(),
         },
@@ -4040,12 +4319,17 @@ fn normalize_v2_frame_with_session_models(
                         .join("\n")
                 })
                 .unwrap_or_default();
-            vec![v2_tool_part(
-                &data,
-                id,
-                &name,
-                &json!({ "status": "completed", "output": output }),
-            )]
+            let mut state = json!({ "status": "completed", "output": output });
+            // Code Mode settles its nested calls here (`metadata.toolCalls`);
+            // the decoder surfaces each as its own chip.
+            if let Some(tool_calls) = data
+                .get("metadata")
+                .and_then(|m| m.get("toolCalls"))
+                .filter(|tc| tc.is_array())
+            {
+                state["metadata"] = json!({ "toolCalls": tool_calls.clone() });
+            }
+            vec![v2_tool_part(&data, id, &name, &state)]
         }
         "session.tool.failed" | "session.tool.error" => {
             let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -4057,12 +4341,15 @@ fn normalize_v2_frame_with_session_models(
                 .map(str::to_owned)
                 .or_else(|| error.as_str().map(str::to_owned))
                 .unwrap_or_default();
-            vec![v2_tool_part(
-                &data,
-                id,
-                &name,
-                &json!({ "status": "error", "error": message }),
-            )]
+            let mut state = json!({ "status": "error", "error": message });
+            if let Some(tool_calls) = data
+                .get("metadata")
+                .and_then(|m| m.get("toolCalls"))
+                .filter(|tc| tc.is_array())
+            {
+                state["metadata"] = json!({ "toolCalls": tool_calls.clone() });
+            }
+            vec![v2_tool_part(&data, id, &name, &state)]
         }
         "session.step.ended" => {
             let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
