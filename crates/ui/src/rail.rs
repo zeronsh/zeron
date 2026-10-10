@@ -159,6 +159,14 @@ pub fn bucket_of(buckets: &[(usize, usize)], ix: usize) -> Option<usize> {
     buckets.iter().position(|&(s, e)| ix >= s && ix < e)
 }
 
+/// The prompt a bucket's mark stands for: the ACTIVE tick when inside (hover
+/// previews what you're reading), else the newest for the last bucket, the first for the rest.
+fn bucket_representative(start: usize, end: usize, len: usize, active: Option<usize>) -> usize {
+    active
+        .filter(|&a| a >= start && a < end)
+        .unwrap_or(if end == len { end - 1 } else { start })
+}
+
 /// Char-cap a preview with an ellipsis. Whitespace runs (including newlines —
 /// prompts and replies are free text) collapse to single spaces first: the
 /// preview card's title is a one-line surface (message-rail.tsx line-clamp-1).
@@ -480,10 +488,7 @@ impl Transcript {
             .justify_center()
             .gap(px(TICK_GAP))
             .children(buckets.into_iter().enumerate().map(|(ix, (start, end))| {
-                // The bucket's representative prompt: the ACTIVE tick when it
-                // falls inside (hover then previews what you're reading),
-                // the first prompt of the range otherwise.
-                let rep = active.filter(|&a| a >= start && a < end).unwrap_or(start);
+                let rep = bucket_representative(start, end, pairs.len(), active);
                 let (tick, row) = &pairs[rep];
                 let (tick, row) = (tick.clone(), *row);
                 let bucket_len = end - start;
@@ -647,6 +652,16 @@ mod tests {
         // Degenerate inputs.
         assert!(tick_buckets(0, 8).is_empty());
         assert_eq!(tick_buckets(3, 0), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn the_bottom_mark_stands_for_the_newest_prompt() {
+        let b = tick_buckets(10, 3); // [0,3) [3,6) [6,10)
+        let rep = |k: usize, active| bucket_representative(b[k].0, b[k].1, 10, active);
+        assert_eq!(rep(2, None), 9);
+        // Earlier marks keep their first prompt; the one being read wins.
+        assert_eq!(rep(1, None), 3);
+        assert_eq!(rep(2, Some(7)), 7);
     }
 
     #[test]
