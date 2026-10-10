@@ -288,6 +288,16 @@ pub fn child_path(base: &str, name: &str) -> String {
     }
 }
 
+/// Whether two folder paths name the same folder. Drive-rooted paths match
+/// across separators, so a project saved as `C:\Users\me/code` is the folder
+/// the browser lists as `C:\Users\me\code`.
+pub fn same_folder(a: &str, b: &str) -> bool {
+    fn segments(path: &str) -> impl Iterator<Item = &str> {
+        path.split(['/', '\\']).filter(|s| !s.is_empty())
+    }
+    a == b || (is_windows_path(a) && segments(a).eq(segments(b)))
+}
+
 /// Byte length of `name`'s prefix matching `query`, compared char-for-char
 /// case-insensitively; `None` when `query` isn't a prefix of `name`. The
 /// length indexes into `name` (not `query`) so the completion suffix keeps
@@ -9352,6 +9362,14 @@ mod tests {
         assert_eq!(breadcrumbs(r"D:\").len(), 1);
         assert!(!is_windows_path("/D:/x"));
         assert!(!is_windows_path("ab:/x"));
+    }
+
+    #[test]
+    fn same_folder_matches_drive_paths_across_separators() {
+        assert!(same_folder(r"C:\Users\me/code", r"C:\Users\me\code"));
+        assert!(same_folder(r"D:\/Random/zeron/", r"D:\Random\zeron"));
+        assert!(!same_folder(r"C:\Users\me/code", r"C:\Users\me\code-old"));
+        assert!(!same_folder(r"/home/me\code", "/home/me/code"));
     }
 
     #[test]
