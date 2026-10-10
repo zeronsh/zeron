@@ -98,6 +98,13 @@ pub(crate) struct StreamEventBody {
     pub kind: String,
     #[serde(default)]
     pub delta: Delta,
+    /// `message_start` carries the full message envelope, whose `usage` is the
+    /// input-side accounting for that model call.
+    #[serde(default)]
+    pub message: MessageBody,
+    /// `message_delta` carries the call's final usage directly on the event.
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]

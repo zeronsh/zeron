@@ -222,6 +222,29 @@ pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
     }
 }
 
+/// The options a Run carries: the explicit picks plus every offered option's
+/// default choice. The picker renders a default as the selected value, so a
+/// run without it silently runs a different configuration than the one shown
+/// — a folded `<model>[1m]` row displays "1M" while the harness only appends
+/// the `[1m]` suffix when `contextWindow` is present (upstream issue #786's
+/// 200K-vs-1M half). Empty defaults (OpenCode's `agent`) are skipped: they
+/// mean "no value" rather than a choice. Run-only — [`Pickers::resolved`]
+/// stays explicit so chat rows never freeze today's catalog defaults.
+pub fn materialized_options(
+    model: &Model,
+    selections: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut options = selections;
+    for option in &model.options {
+        if !option.default_choice.is_empty() {
+            options
+                .entry(option.id.clone())
+                .or_insert_with(|| serde_json::Value::String(option.default_choice.clone()));
+        }
+    }
+    options
+}
+
 /// Keep only the picks `model` still offers. Remembered picks outlive the
 /// model they were made on, and harnesses apply some options blindly (Claude
 /// appends `[1m]` to any model id when `contextWindow` is "1m").
@@ -1245,6 +1268,18 @@ impl Pickers {
                 .or_else(|| self.effective_model_id(cx).map(str::to_string)),
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
+        }
+    }
+
+    /// The Run payload's options: [`Self::explicit_options`] with the offered
+    /// defaults materialized (see [`materialized_options`]). The catalog is
+    /// the only place the displayed configuration is known; without it the
+    /// explicit picks pass through unchanged.
+    pub fn run_model_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
+        let explicit = self.explicit_options(cx);
+        match self.selected_model(cx) {
+            Some(model) => materialized_options(model, explicit),
+            None => explicit,
         }
     }
 
@@ -9259,6 +9294,100 @@ mod tests {
         // Idempotent over a clean list.
         let clean = vec![bare_model("titan-5", "Titan 5")];
         assert_eq!(normalize_model_rows(HarnessId::Codex, clean.clone()), clean);
+    }
+
+    #[test]
+    fn materialized_options_skip_empty_defaults_and_keep_explicit_picks() {
+        let mut model = bare_model("titan", "Titan");
+        model.options.push(ModelOption {
+            id: "agent".into(),
+            label: "Agent".into(),
+            choices: ["build", "plan"]
+                .map(|id| ModelOptionChoice {
+                    id: id.into(),
+                    label: id.into(),
+                })
+                .into(),
+            // OpenCode's "no agent selected" default — a value, not a choice.
+            default_choice: String::new(),
+        });
+        model.options.push(ModelOption {
+            id: "tier".into(),
+            label: "Tier".into(),
+            choices: ["balanced", "fast"]
+                .map(|id| ModelOptionChoice {
+                    id: id.into(),
+                    label: id.into(),
+                })
+                .into(),
+            default_choice: "balanced".into(),
+        });
+        let options = materialized_options(&model, Default::default());
+        assert_eq!(
+            options.get("tier"),
+            Some(&serde_json::Value::String("balanced".into()))
+        );
+        assert!(!options.contains_key("agent"));
+
+        let explicit = [("tier".to_string(), serde_json::Value::String("fast".into()))]
+            .into_iter()
+            .collect();
+        let options = materialized_options(&model, explicit);
+        assert_eq!(
+            options.get("tier"),
+            Some(&serde_json::Value::String("fast".into()))
+        );
+    }
+
+    /// The folded `[1m]` row displays "1M" (its option default); the Run must
+    /// ask for 1M, or the harness keeps the CLI's 200K default. The explicit
+    /// picks the chat row persists stay default-free.
+    #[gpui::test]
+    fn run_options_materialize_the_displayed_default_without_persisting_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut titan = bare_model("titan", "Titan");
+        titan.options.push(ModelOption {
+            id: "contextWindow".into(),
+            label: "Context Window".into(),
+            choices: ["200k", "1m"]
+                .map(|id| ModelOptionChoice {
+                    id: id.into(),
+                    label: id.into(),
+                })
+                .into(),
+            default_choice: "1m".into(),
+        });
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults.harness = Some(HarnessId::ClaudeCode);
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![titan.clone()]));
+            pickers.pick_model("titan".into(), cx);
+            assert!(
+                pickers.resolved(cx).model_options.is_empty(),
+                "the displayed default is not an explicit pick"
+            );
+            let one_m = serde_json::Value::String("1m".into());
+            assert_eq!(
+                pickers.run_model_options(cx).get("contextWindow"),
+                Some(&one_m)
+            );
+
+            // An explicit pick still wins over the default.
+            pickers.pick_option("contextWindow".into(), "200k".into(), false, cx);
+            let two_hundred_k = serde_json::Value::String("200k".into());
+            assert_eq!(
+                pickers.run_model_options(cx).get("contextWindow"),
+                Some(&two_hundred_k)
+            );
+            assert_eq!(
+                pickers.resolved(cx).model_options.get("contextWindow"),
+                Some(&two_hundred_k)
+            );
+        });
     }
 
     #[test]

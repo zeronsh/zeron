@@ -147,6 +147,46 @@ fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// The `result` frame's `modelUsage` entry for the run's model. With the 1M
+/// context suffix the CLI reports the assistant frame's model WITHOUT it
+/// (`deepseek[1m]` → `deepseek`, live-verified 2.1.289) while `modelUsage`
+/// keeps the suffixed id — so both spellings are tried, by key and by
+/// `canonicalModel`, before any fallback.
+fn model_usage_entry<'a>(
+    entries: &'a std::collections::BTreeMap<String, Value>,
+    model: &str,
+) -> Option<&'a Value> {
+    let suffixed = format!("{model}[1m]");
+    [model, suffixed.as_str()].into_iter().find_map(|key| {
+        entries.get(key).or_else(|| {
+            entries
+                .values()
+                .find(|entry| entry.get("canonicalModel").and_then(Value::as_str) == Some(key))
+        })
+    })
+}
+
+/// Context occupancy of one model call: prompt tokens plus both cache
+/// counters, exactly the sum the context ring reports. `None` when the usage
+/// object carries none of the three counters (so "absent" stays distinct from
+/// a measured zero).
+fn input_token_sum(usage: &Value) -> Option<u64> {
+    const FIELDS: [&str; 3] = [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ];
+    FIELDS
+        .iter()
+        .any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+        .then(|| {
+            FIELDS
+                .iter()
+                .filter_map(|key| usage.get(*key).and_then(Value::as_u64))
+                .fold(0u64, u64::saturating_add)
+        })
+}
+
 /// Wrap an event as subagent-attributed traffic.
 fn tag(parent: &str, event: AgentEvent) -> AgentEvent {
     AgentEvent::Subagent {
@@ -426,6 +466,27 @@ impl Normalizer {
             // `AgentEvent::Subagent` instead — the engine routes them to the
             // subagent's own doc.
             Frame::StreamEvent(f) => {
+                // Streamed usage is the input-side measurement on gateways
+                // whose aggregated `assistant` frame reports all zeros
+                // (upstream issue #786) — and the frame can arrive BEFORE
+                // `message_delta` (live-verified 2.1.289), so this is a source
+                // in its own right, not a fallback for that frame. Only the
+                // parent's own calls count: a subagent's frames must never
+                // move the parent meter, and a zero measurement is dropped so
+                // it cannot replace a real one with a smaller lie.
+                if f.parent_tool_use_id.is_none() {
+                    let usage = match f.event.kind.as_str() {
+                        "message_start" => f.event.message.usage.as_ref(),
+                        "message_delta" => f.event.usage.as_ref(),
+                        _ => None,
+                    };
+                    if let Some(tokens) = usage.and_then(input_token_sum).filter(|n| *n > 0) {
+                        return vec![AgentEvent::ContextUsage {
+                            tokens: Some(tokens),
+                            window: None,
+                        }];
+                    }
+                }
                 if f.event.kind != "content_block_delta" {
                     return Vec::new();
                 }
@@ -567,25 +628,22 @@ impl Normalizer {
                     })
                     .collect();
                 self.last_model = f.message.model.clone().or(self.last_model.take());
-                if let Some(usage) = &f.message.usage {
-                    let fields = [
-                        "input_tokens",
-                        "cache_read_input_tokens",
-                        "cache_creation_input_tokens",
-                    ];
-                    if fields
-                        .iter()
-                        .any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
-                    {
-                        let tokens = fields
-                            .iter()
-                            .filter_map(|key| usage.get(*key).and_then(Value::as_u64))
-                            .fold(0u64, u64::saturating_add);
-                        out.push(AgentEvent::ContextUsage {
-                            tokens: Some(tokens),
-                            window: None,
-                        });
-                    }
+                // Input-side usage of this message: prompt + both cache
+                // counters. All-zero means the provider never populated them
+                // here (some do exactly that, issue #786) — publishing that
+                // zero would ERASE the real measurement the streamed frames
+                // carry, so it is not a measurement at all.
+                if let Some(tokens) = f
+                    .message
+                    .usage
+                    .as_ref()
+                    .and_then(input_token_sum)
+                    .filter(|tokens| *tokens > 0)
+                {
+                    out.push(AgentEvent::ContextUsage {
+                        tokens: Some(tokens),
+                        window: None,
+                    });
                 }
                 // A failed turn (usage limit, billing, auth, overloaded, …)
                 // carries a terse `error` code here — often with empty content
@@ -673,15 +731,8 @@ impl Normalizer {
             Frame::Result(f) => {
                 let model_usage = self
                     .last_model
-                    .as_ref()
-                    .and_then(|model| {
-                        f.model_usage.get(model).or_else(|| {
-                            f.model_usage.values().find(|entry| {
-                                entry.get("canonicalModel").and_then(Value::as_str)
-                                    == Some(model.as_str())
-                            })
-                        })
-                    })
+                    .as_deref()
+                    .and_then(|model| model_usage_entry(&f.model_usage, model))
                     .or_else(|| {
                         (f.model_usage.len() == 1)
                             .then(|| f.model_usage.values().next())
@@ -1444,6 +1495,100 @@ mod tests {
 #[cfg(test)]
 mod context_tests {
     use super::*;
+
+    fn context_tokens(events: &[AgentEvent]) -> Option<Option<u64>> {
+        events.iter().find_map(|event| match event {
+            AgentEvent::ContextUsage { tokens, .. } => Some(*tokens),
+            _ => None,
+        })
+    }
+
+    /// Upstream issue #786's wire, verbatim: the gateway zeroes every input
+    /// counter on the aggregated `assistant` frame (which even arrives BEFORE
+    /// `message_delta` — live-verified 2.1.289) while `message_delta` carries
+    /// the real numbers. The zero must be dropped and the streamed frame must
+    /// publish instead of it, in this order.
+    #[test]
+    fn zeroed_assistant_frames_yield_to_the_streamed_usage() {
+        let mut normalizer = Normalizer::new();
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"model":"deepseek-v4.1-flash","content":[],"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}}"#).unwrap(), false);
+        assert!(
+            events.is_empty(),
+            "an all-zero message_start is not a measurement: {events:?}"
+        );
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"assistant","message":{"model":"deepseek-v4.1-flash","content":[],"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}"#).unwrap(), false);
+        assert_eq!(
+            context_tokens(&events),
+            None,
+            "the zeroed frame must not erase the ring's last real measurement"
+        );
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_delta","delta":{},"usage":{"input_tokens":9515,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":2048}}}"#).unwrap(), false);
+        assert_eq!(context_tokens(&events), Some(Some(11563)));
+
+        // `message_start` is a source too, for providers that populate it
+        // there — but a zero on either streamed frame never replaces a real
+        // measurement.
+        let mut normalizer = Normalizer::new();
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"primary","content":[],"usage":{"input_tokens":87,"cache_read_input_tokens":10496,"cache_creation_input_tokens":0,"output_tokens":1}}}}"#).unwrap(), false);
+        assert_eq!(context_tokens(&events), Some(Some(10583)));
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"stream_event","event":{"type":"message_delta","delta":{},"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":200}}}"#).unwrap(), false);
+        assert!(events.is_empty());
+    }
+
+    /// With the 1M suffix the CLI strips `[1m]` from the assistant frame's
+    /// model while `modelUsage` keeps the suffixed id (both live-verified
+    /// 2.1.289) — the window must still come from the 1M entry when a second
+    /// model (a subagent) also ran, where no single-entry fallback applies.
+    #[test]
+    fn one_m_runs_find_their_suffixed_model_usage_entry() {
+        let mut normalizer = Normalizer::new();
+        normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"assistant","message":{"model":"deepseek-v4.1-flash","content":[],"usage":{"input_tokens":10}}}"#).unwrap(), false);
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"result","subtype":"success","usage":{"input_tokens":1},"modelUsage":{"deepseek-v4.1-flash[1m]":{"contextWindow":1000000},"deepseek-v4.1-flash":{"contextWindow":200000}}}"#).unwrap(), false);
+        assert!(
+            events.contains(&AgentEvent::ContextUsage {
+                tokens: None,
+                window: Some(200000)
+            }),
+            "a bare entry of the same model still wins: {events:?}"
+        );
+        let mut normalizer = Normalizer::new();
+        normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"assistant","message":{"model":"deepseek-v4.1-flash","content":[],"usage":{"input_tokens":10}}}"#).unwrap(), false);
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"result","subtype":"success","usage":{"input_tokens":1},"modelUsage":{"deepseek-v4.1-flash[1m]":{"contextWindow":1000000},"haiku":{"contextWindow":200000}}}"#).unwrap(), false);
+        assert!(events.contains(&AgentEvent::ContextUsage {
+            tokens: None,
+            window: Some(1000000)
+        }));
+
+        // A provider that reports the resolved id: matched via `canonicalModel`.
+        let mut normalizer = Normalizer::new();
+        normalizer.normalize(
+            super::super::wire::parse_frame(
+                r#"{"type":"assistant","message":{"model":"sonnet","content":[]}}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"result","subtype":"success","usage":{"input_tokens":1},"modelUsage":{"claude-sonnet-5-0-20260219":{"canonicalModel":"sonnet","contextWindow":200000},"haiku":{"contextWindow":200000}}}"#).unwrap(), false);
+        assert!(events.contains(&AgentEvent::ContextUsage {
+            tokens: None,
+            window: Some(200000)
+        }));
+    }
+
+    /// A subagent's streamed usage belongs to its own transcript and must not
+    /// reach the parent ring at all.
+    #[test]
+    fn subagent_streamed_usage_never_reaches_the_parent_meter() {
+        let mut normalizer = Normalizer::new();
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"stream_event","parent_tool_use_id":"child","event":{"type":"message_start","message":{"model":"child","content":[],"usage":{"input_tokens":999999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}}"#).unwrap(), false);
+        assert!(
+            events.is_empty(),
+            "child usage is not parent traffic: {events:?}"
+        );
+        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"stream_event","parent_tool_use_id":"child","event":{"type":"message_delta","delta":{},"usage":{"input_tokens":999999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}"#).unwrap(), false);
+        assert!(events.is_empty());
+    }
+
     #[test]
     fn context_counts_cached_prompt_and_matches_primary_model() {
         let mut normalizer = Normalizer::new();
