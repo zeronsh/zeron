@@ -256,7 +256,15 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
         }
         Some(Command::Mcp) => {
-            let runtime = tokio::runtime::Runtime::new()?;
+            // One bridge per agent session, and it only relays: stdio
+            // requests out to the engine over IPC and replies back. Two
+            // workers keep a burst of parallel tool calls (large replies to
+            // encode) close to per-core speed without a worker per core in
+            // every agent's bridge.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
             runtime.block_on(zeron_mcp::run(zeron_mcp::McpConfig::from_env()))
         }
         #[cfg(target_os = "linux")]
