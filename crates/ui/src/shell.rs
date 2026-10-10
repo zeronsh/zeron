@@ -294,6 +294,12 @@ fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
 
+/// Select the right pane tab at `slot` (zero-based) of the current chat, in
+/// tab-strip order; the last slot selects the last tab.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct JumpRightTab(pub usize);
+
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------
@@ -494,6 +500,20 @@ pub fn apply_keymap(
         Some(KeyBinding::new(
             &valid_or_default(combo, id.default_combo()),
             JumpSession(slot),
+            None,
+        ))
+    }));
+    // ⌃1..⌃9 (Alt off macOS) select the current chat's right pane tabs, the
+    // same unbound-means-unbound rule as the session jumps.
+    cx.bind_keys((0..JUMP_SLOTS).filter_map(|slot| {
+        let id = ShortcutId::JumpRightTab(slot);
+        let combo = keymap.get(id);
+        if combo.is_empty() {
+            return None;
+        }
+        Some(KeyBinding::new(
+            &valid_or_default(combo, id.default_combo()),
+            JumpRightTab(slot),
             None,
         ))
     }));
@@ -13485,6 +13505,9 @@ impl Render for Shell {
                     this.jump_to_session(jump.0, cx)
                 }
             }))
+            .on_action(cx.listener(|this, jump: &JumpRightTab, window, cx| {
+                this.jump_to_right_tab(jump.0, window, cx)
+            }))
             .on_modifiers_changed(
                 cx.listener(|this, event, _, cx| this.on_modifiers_changed(event, cx)),
             )
@@ -18185,6 +18208,52 @@ mod settings_modal_regressions {
             (Route::Chat, Some("newer".into()))
         );
         assert_eq!(press(&keymap.new_session), (Route::Chat, None));
+    }
+
+    /// ⌃1…⌃9 (Alt off macOS) select the current chat's right pane tabs in
+    /// strip order — the last slot takes the last tab, a slot past the end
+    /// does nothing, and a closed pane reopens on the chosen tab.
+    #[gpui::test]
+    fn right_tab_jumps_select_by_strip_order(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let keymap = KeymapConfig::default();
+        cx.update(|cx| apply_keymap(cx, &keymap, ComposerSendBehavior::default()));
+        let window = cx.add_window(|_, cx| test_shell(dir.path(), cx));
+        let tabs = window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "owner".into();
+                (0..3)
+                    .map(|_| {
+                        shell.add_browser_surface(None, window, cx);
+                        RightSurface::Browser(shell.browser_seq)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        let press = |cx: &mut TestAppContext, slot: usize| {
+            cx.simulate_keystrokes(
+                window.into(),
+                &platform_combo(keymap.get(ShortcutId::JumpRightTab(slot))),
+            );
+            window
+                .read_with(cx, |shell, cx| {
+                    (shell.resolved_right_active(cx), shell.right_pane_open(cx))
+                })
+                .unwrap()
+        };
+        assert_eq!(press(cx, 1), (tabs[1], true));
+        assert_eq!(press(cx, 0), (tabs[0], true));
+        assert_eq!(
+            press(cx, 8),
+            (tabs[2], true),
+            "the last slot takes the last tab"
+        );
+        assert_eq!(press(cx, 4), (tabs[2], true), "past the end does nothing");
+        window
+            .update(cx, |shell, _, cx| shell.set_surfaces_open(false, cx))
+            .unwrap();
+        assert_eq!(press(cx, 1), (tabs[1], true), "a closed pane reopens");
     }
 
     #[gpui::test]

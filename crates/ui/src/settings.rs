@@ -1124,9 +1124,39 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
     "Jump to session 9",
 ];
 
-/// The rebindable app shortcuts. `JumpSession(slot)` is zero-based; a slot at
-/// or past [`JUMP_SLOTS`] has no combo and no label, so it reads as unbound
-/// rather than panicking.
+/// Default combo per right pane tab slot (cmux's "Select surface 1…9"): Ctrl
+/// on macOS, where ⌘1…⌘9 already jump sessions. Off macOS Ctrl IS the
+/// primary ("mod"), so Ctrl+1…9 is taken by the session jumps and the tabs
+/// take Alt. The last slot always selects the LAST tab, as in browsers.
+const RIGHT_TAB_DEFAULTS_MAC: [&str; JUMP_SLOTS] = [
+    "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8", "ctrl-9",
+];
+const RIGHT_TAB_DEFAULTS: [&str; JUMP_SLOTS] = [
+    "alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9",
+];
+const RIGHT_TAB_LABELS: [&str; JUMP_SLOTS] = [
+    "Jump to right pane tab 1",
+    "Jump to right pane tab 2",
+    "Jump to right pane tab 3",
+    "Jump to right pane tab 4",
+    "Jump to right pane tab 5",
+    "Jump to right pane tab 6",
+    "Jump to right pane tab 7",
+    "Jump to right pane tab 8",
+    "Jump to last right pane tab",
+];
+
+fn right_tab_defaults(mac: bool) -> &'static [&'static str; JUMP_SLOTS] {
+    if mac {
+        &RIGHT_TAB_DEFAULTS_MAC
+    } else {
+        &RIGHT_TAB_DEFAULTS
+    }
+}
+
+/// The rebindable app shortcuts. `JumpSession(slot)` and `JumpRightTab(slot)`
+/// are zero-based; a slot at or past [`JUMP_SLOTS`] has no combo and no
+/// label, so it reads as unbound rather than panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
     ToggleDictation,
@@ -1145,10 +1175,11 @@ pub enum ShortcutId {
     PrevSession,
     ArchiveSession,
     JumpSession(usize),
+    JumpRightTab(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 15 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 15 + 2 * JUMP_SLOTS] = [
         ShortcutId::ToggleDictation,
         ShortcutId::CaptureAppshot,
         ShortcutId::RandomWallpaper,
@@ -1173,6 +1204,15 @@ impl ShortcutId {
         ShortcutId::JumpSession(6),
         ShortcutId::JumpSession(7),
         ShortcutId::JumpSession(8),
+        ShortcutId::JumpRightTab(0),
+        ShortcutId::JumpRightTab(1),
+        ShortcutId::JumpRightTab(2),
+        ShortcutId::JumpRightTab(3),
+        ShortcutId::JumpRightTab(4),
+        ShortcutId::JumpRightTab(5),
+        ShortcutId::JumpRightTab(6),
+        ShortcutId::JumpRightTab(7),
+        ShortcutId::JumpRightTab(8),
     ];
 
     pub fn available(self) -> bool {
@@ -1198,6 +1238,7 @@ impl ShortcutId {
             ShortcutId::PrevSession => "Previous session or right pane tab",
             ShortcutId::ArchiveSession => "Archive session",
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
+            ShortcutId::JumpRightTab(slot) => RIGHT_TAB_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
 
@@ -1242,6 +1283,9 @@ impl ShortcutId {
             // shifted combo.
             ShortcutId::ArchiveSession => "mod-shift-a",
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
+            ShortcutId::JumpRightTab(slot) => {
+                right_tab_defaults(mac).get(slot).copied().unwrap_or("")
+            }
         }
     }
 
@@ -1251,6 +1295,17 @@ impl ShortcutId {
             ShortcutId::JumpSession(slot) if slot < JUMP_SLOTS => Some(slot),
             _ => None,
         }
+    }
+}
+
+/// The right pane tab a jump `slot` selects among `count` tabs: the slot's
+/// own tab, except the last slot, which always takes the LAST tab. `None`
+/// past the end. Pure.
+pub fn right_tab_index(slot: usize, count: usize) -> Option<usize> {
+    if slot + 1 == JUMP_SLOTS {
+        count.checked_sub(1)
+    } else {
+        (slot < count).then_some(slot)
     }
 }
 
@@ -1280,6 +1335,8 @@ pub struct KeymapConfig {
     /// fixed-length array would let one malformed entry reset every unrelated
     /// setting. [`Self::healed`] restores the length instead.
     pub jump_session: Vec<String>,
+    /// One combo per right pane tab slot, a list for the same reason.
+    pub jump_right_tab: Vec<String>,
 }
 
 /// Stable key for device-local preferences that belong to one workspace
@@ -1342,6 +1399,10 @@ impl Default for KeymapConfig {
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
+            jump_right_tab: right_tab_defaults(cfg!(target_os = "macos"))
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
         }
     }
 }
@@ -1366,6 +1427,11 @@ impl KeymapConfig {
             ShortcutId::ArchiveSession => &self.archive_session,
             ShortcutId::JumpSession(slot) => self
                 .jump_session
+                .get(slot)
+                .map(String::as_str)
+                .unwrap_or(""),
+            ShortcutId::JumpRightTab(slot) => self
+                .jump_right_tab
                 .get(slot)
                 .map(String::as_str)
                 .unwrap_or(""),
@@ -1397,6 +1463,14 @@ impl KeymapConfig {
                     self.jump_session[slot] = combo;
                 }
             }
+            ShortcutId::JumpRightTab(slot) => {
+                if slot < JUMP_SLOTS {
+                    if self.jump_right_tab.len() < JUMP_SLOTS {
+                        self.heal_jump_slots();
+                    }
+                    self.jump_right_tab[slot] = combo;
+                }
+            }
         }
     }
 
@@ -1404,14 +1478,20 @@ impl KeymapConfig {
         self.set(id, id.default_combo().to_string());
     }
 
-    /// Restore the jump list to exactly [`JUMP_SLOTS`] entries: a hand-edited
-    /// or older file may carry a short, long or absent list. Surviving entries
-    /// keep their slot; missing ones take the default.
+    /// Restore both jump lists to exactly [`JUMP_SLOTS`] entries: a
+    /// hand-edited or older file may carry a short, long or absent list.
+    /// Surviving entries keep their slot; missing ones take the default.
     pub fn heal_jump_slots(&mut self) {
         self.jump_session.truncate(JUMP_SLOTS);
         while self.jump_session.len() < JUMP_SLOTS {
             self.jump_session
                 .push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
+        }
+        let right_tab = right_tab_defaults(cfg!(target_os = "macos"));
+        self.jump_right_tab.truncate(JUMP_SLOTS);
+        while self.jump_right_tab.len() < JUMP_SLOTS {
+            self.jump_right_tab
+                .push(right_tab[self.jump_right_tab.len()].to_string());
         }
     }
 
@@ -3666,6 +3746,90 @@ mod tests {
         // A write past the last slot is dropped, and grows nothing.
         keymap.set(ShortcutId::JumpSession(9), "mod-0".into());
         assert_eq!(keymap.jump_session.len(), JUMP_SLOTS);
+    }
+
+    #[test]
+    fn right_tab_jumps_default_per_platform_without_conflicts() {
+        // ⌘1…9 jump sessions on macOS, so the tabs take ⌃; off macOS Ctrl IS
+        // the primary (the session jumps), so the tabs take Alt.
+        assert_eq!(ShortcutId::JumpRightTab(0).default_combo_on(true), "ctrl-1");
+        assert_eq!(ShortcutId::JumpRightTab(8).default_combo_on(true), "ctrl-9");
+        assert_eq!(ShortcutId::JumpRightTab(0).default_combo_on(false), "alt-1");
+        assert_eq!(ShortcutId::JumpRightTab(9).default_combo_on(true), "");
+        assert_eq!(
+            ShortcutId::JumpRightTab(8).label(),
+            "Jump to last right pane tab"
+        );
+        // Every default is distinct from every other on both platforms, and
+        // spelled the way that platform's recorder would store it.
+        for mac in [true, false] {
+            let defaults: Vec<&str> = ShortcutId::ALL
+                .into_iter()
+                .map(|id| id.default_combo_on(mac))
+                .collect();
+            let unique: std::collections::HashSet<&str> = defaults.iter().copied().collect();
+            assert_eq!(
+                unique.len(),
+                defaults.len(),
+                "duplicate default (mac: {mac})"
+            );
+            for slot in 0..JUMP_SLOTS {
+                let key = (slot + 1).to_string();
+                assert_eq!(
+                    combo_from_keystroke_on(mac, mac, !mac, false, false, &key).as_deref(),
+                    Some(ShortcutId::JumpRightTab(slot).default_combo_on(mac)),
+                );
+            }
+        }
+        let mut keymap = KeymapConfig::default();
+        keymap.set(ShortcutId::JumpRightTab(2), "mod-alt-3".into());
+        assert_eq!(keymap.get(ShortcutId::JumpRightTab(2)), "mod-alt-3");
+        keymap.reset(ShortcutId::JumpRightTab(2));
+        assert_eq!(
+            keymap.get(ShortcutId::JumpRightTab(2)),
+            ShortcutId::JumpRightTab(2).default_combo()
+        );
+        keymap.set(ShortcutId::JumpRightTab(9), "mod-0".into());
+        assert_eq!(keymap.jump_right_tab.len(), JUMP_SLOTS);
+    }
+
+    #[test]
+    fn right_tab_slots_pick_their_tab_and_the_last_slot_the_last_tab() {
+        assert_eq!(right_tab_index(0, 3), Some(0));
+        assert_eq!(right_tab_index(2, 3), Some(2));
+        assert_eq!(right_tab_index(3, 3), None);
+        assert_eq!(right_tab_index(8, 3), Some(2));
+        assert_eq!(right_tab_index(8, 12), Some(11));
+        assert_eq!(right_tab_index(0, 0), None);
+        assert_eq!(right_tab_index(8, 0), None);
+    }
+
+    #[test]
+    fn older_keymaps_gain_the_right_tab_jumps() {
+        // A keymap saved before these shortcuts existed keeps its own combos
+        // and picks up the right tab defaults; a short list heals by slot.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap": {"toggleSidebar": "mod-shift-x"}}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
+        assert_eq!(
+            loaded.keymap.jump_right_tab,
+            KeymapConfig::default().jump_right_tab
+        );
+        let mut keymap = KeymapConfig {
+            jump_right_tab: vec!["mod-alt-1".into()],
+            ..KeymapConfig::default()
+        };
+        keymap.heal_jump_slots();
+        assert_eq!(keymap.get(ShortcutId::JumpRightTab(0)), "mod-alt-1");
+        assert_eq!(
+            keymap.get(ShortcutId::JumpRightTab(1)),
+            ShortcutId::JumpRightTab(1).default_combo()
+        );
     }
 
     #[test]

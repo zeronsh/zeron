@@ -105,6 +105,27 @@ impl Shell {
         }
     }
 
+    /// ⌃1…⌃9 (Alt off macOS): select one of the current chat's right pane
+    /// tabs by its place in the strip, opening the pane when it is closed.
+    /// Activation moves keyboard focus the way Ctrl+Tab does — a side chat
+    /// lands in its composer. Quiet under the same overlays as the cycle.
+    pub(super) fn jump_to_right_tab(
+        &mut self,
+        slot: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.route, Route::Chat) || self.navigation_overlay_open(cx) {
+            return;
+        }
+        let rows = self.right_surface_rows(cx);
+        let Some(at) = crate::settings::right_tab_index(slot, rows.len()) else {
+            return;
+        };
+        self.set_surfaces_open(true, cx);
+        self.activate_right_surface(rows[at].0, window, cx);
+    }
+
     fn navigation_overlay_open(&self, cx: &App) -> bool {
         self.overlay_owns_keyboard(cx)
             || self.sync_flow.has_visible_overlay()
