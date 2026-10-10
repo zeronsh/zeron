@@ -455,7 +455,7 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens from the card")
     }
 
-    /// Regression: the model chip's menu completed off the main thread.
+    /// The picker completes on the main thread and updates this session at once.
     func testModelPickerInSession() {
         let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
@@ -463,10 +463,14 @@ final class SessionFlowTests: XCTestCase {
         input.tap()
         let chip = app.buttons["composer-chip-model"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertFalse(chip.label.contains("Fable 5.1"))
         chip.tap()
-        let item = app.collectionViews.buttons.element(boundBy: 0)
+        let item = app.collectionViews.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fable 5.1")).firstMatch
         XCTAssertTrue(item.waitForExistence(timeout: 5), "models load")
         item.tap()
+        let updated = app.buttons.matching(identifier: "composer-chip-model")
+            .matching(NSPredicate(format: "label CONTAINS %@", "Fable 5.1")).firstMatch
+        XCTAssertTrue(updated.waitForExistence(timeout: 5), "selected model appears without reopening the session")
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
     }
