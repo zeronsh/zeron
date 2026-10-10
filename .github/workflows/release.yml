@@ -2,7 +2,7 @@ name: release
 
 # Build release artifacts and publish them:
 #   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
-#   - macOS dmg (Apple silicon) via scripts/package-macos.sh
+#   - macOS dmgs (Apple silicon + Intel) via scripts/package-macos.sh
 #   - Windows per-user installer, portable zip, and updater exe (x86_64) via
 #     scripts/package-windows.ps1
 # then create a GitHub Release AND upload everything to the
@@ -11,21 +11,32 @@ name: release
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
-# workflow_dispatch (builds + uploads artifacts, no release/R2 publish).
+# workflow_dispatch (all artifacts or Intel macOS only; no release/R2 publish).
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      target:
+        description: Build all release artifacts or only the Intel Mac build
+        type: choice
+        options:
+          - all
+          - macos-intel
+        default: all
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   cursor-compatibility:
+    if: github.event_name != 'workflow_dispatch' || inputs.target != 'macos-intel'
     uses: ./.github/workflows/cursor-compatibility.yml
 
   linux:
+    if: github.event_name != 'workflow_dispatch' || inputs.target != 'macos-intel'
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +75,11 @@ jobs:
   #     key (raw .p8 contents), for notarytool. All three present → the package
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
-    runs-on: macos-latest # Apple silicon
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.target == 'macos-intel' && '[{"runner":"macos-15-intel","arch":"x86_64"}]' || '[{"runner":"macos-latest","arch":"arm64"},{"runner":"macos-15-intel","arch":"x86_64"}]') }}
+    runs-on: ${{ matrix.runner }}
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -76,6 +91,28 @@ jobs:
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: checkout ONNX Runtime for Intel
+        if: matrix.arch == 'x86_64'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: microsoft/onnxruntime
+          ref: da9b5e364c465de65c49d91e696cd6485270757f # v1.28.0
+          path: onnxruntime
+          submodules: recursive
+      - name: cache Intel ONNX Runtime build
+        if: matrix.arch == 'x86_64'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: onnxruntime/build
+          key: onnxruntime-v1.28.0-macos-x86_64
+      - name: build Intel ONNX Runtime
+        if: matrix.arch == 'x86_64'
+        run: |
+          cd onnxruntime
+          ./build.sh --config Release --update --build --parallel \
+            --skip_submodule_sync \
+            --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=x86_64
+          echo "ORT_LIB_PATH=$GITHUB_WORKSPACE/onnxruntime/build/MacOS/Release" >> "$GITHUB_ENV"
       - name: import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
         run: |
@@ -109,13 +146,14 @@ jobs:
         run: scripts/package-macos.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: macos-${{ runner.arch }}
+          name: macos-${{ matrix.arch }}
           path: |
             target/package/*.dmg
             target/package/*.tar.gz
           if-no-files-found: error
 
   windows:
+    if: github.event_name != 'workflow_dispatch' || inputs.target != 'macos-intel'
     runs-on: windows-2022
     timeout-minutes: 90
     defaults:
@@ -162,6 +200,7 @@ jobs:
           ls dist/
           for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
               macos-arm64.dmg macos-arm64-app.tar.gz \
+              macos-x86_64.dmg macos-x86_64-app.tar.gz \
               windows-x86_64.zip windows-x86_64.exe windows-x86_64-setup.exe; do
             test -f "dist/zeron-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }

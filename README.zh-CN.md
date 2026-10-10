@@ -10,7 +10,8 @@
 
 从 [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest) 下载对应平台的最新版本：
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS (Apple silicon)** — `zeron-<version>-macos-arm64.dmg`
+- **macOS (Intel)** — `zeron-<version>-macos-x86_64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`，解压后运行里面的 `install.sh`
 
