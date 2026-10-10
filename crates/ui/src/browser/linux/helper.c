@@ -1,6 +1,10 @@
+#define _GNU_SOURCE
 // WebKitGTK runs in its own process. Only rendered pixels and explicit browser
 // commands cross the pipe; GPUI owns all visible windows and input routing.
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/file.h>
 #include <glib-unix.h>
 #include <json-glib/json-glib.h>
 #include <signal.h>
@@ -26,6 +30,8 @@ typedef struct {
 static GHashTable *pages;
 static WebKitWebContext *context;
 static GByteArray *input;
+static int profile_lock = -1;
+static gboolean shutting_down;
 
 static gboolean write_all(const void *data, size_t length) {
     const char *p = data;
@@ -470,9 +476,34 @@ static void evaluated(GObject *web, GAsyncResult *result, gpointer data) {
     g_clear_object(&v);
     g_clear_error(&error);
 }
+static void shutdown_ready(GObject *manager, GAsyncResult *result, gpointer unused) {
+    GError *error = NULL;
+    GList *cookies = webkit_cookie_manager_get_cookies_finish(WEBKIT_COOKIE_MANAGER(manager), result, &error);
+    g_list_free_full(cookies, (GDestroyNotify)soup_cookie_free);
+    g_clear_error(&error);
+    gtk_main_quit();
+}
+static void begin_shutdown(void) {
+    if (shutting_down)
+        return;
+    shutting_down = TRUE;
+    g_hash_table_remove_all(pages);
+    // Let WebKit process the pending cookie operations before leaving its loop.
+    // get_cookies is available on older WebKitGTK 4.1 runtimes too (the
+    // get_all_cookies API would require WebKitGTK 2.42).
+    webkit_cookie_manager_get_cookies(webkit_web_context_get_cookie_manager(context),
+                                     "http://localhost/", NULL, shutdown_ready, NULL);
+}
+
 static void command(JsonObject *o) {
     guint id = number(o, "id");
     const char *cmd = string(o, "cmd");
+    if (!strcmp(cmd, "shutdown")) {
+        begin_shutdown();
+        return;
+    }
+    if (shutting_down)
+        return;
     Page *p = g_hash_table_lookup(pages, GUINT_TO_POINTER(id));
     if (!strcmp(cmd, "create")) {
         if (!p)
@@ -579,7 +610,7 @@ static gboolean read_commands(gint fd, GIOCondition condition, gpointer unused) 
     guint8 bytes[65536];
     ssize_t n = read(fd, bytes, sizeof bytes);
     if (n <= 0) {
-        gtk_main_quit();
+        begin_shutdown();
         return G_SOURCE_REMOVE;
     }
     g_byte_array_append(input, bytes, n);
@@ -604,8 +635,71 @@ static gboolean read_commands(gint fd, GIOCondition condition, gpointer unused) 
     }
     return G_SOURCE_CONTINUE;
 }
+static gboolean storage_directory(const gchar *path) {
+    if (g_mkdir_with_parents(path, 0700) < 0)
+        return FALSE;
+    gchar *probe = g_build_filename(path, ".write-test-XXXXXX", NULL);
+    int fd = g_mkstemp(probe);
+    if (fd >= 0) {
+        close(fd);
+        unlink(probe);
+    }
+    g_free(probe);
+    return fd >= 0;
+}
+
+static gboolean configure_storage(int argc, char **argv) {
+    if (argc == 1) {
+        // Explicitly unscoped contexts are used by fixtures/unresolved identity.
+        context = webkit_web_context_new_ephemeral();
+        return TRUE;
+    }
+    if (argc != 3 || strcmp(argv[1], "--profile") || !g_path_is_absolute(argv[2])) {
+        const char *error = "Browser profile requires an absolute storage directory";
+        send_packet('E', 0, error, strlen(error));
+        return FALSE;
+    }
+    if (!storage_directory(argv[2])) {
+        const char *error = "Could not create or write the browser profile directory";
+        send_packet('E', 0, error, strlen(error));
+        return FALSE;
+    }
+    gchar *lock_path = g_build_filename(argv[2], "profile.lock", NULL);
+    profile_lock = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    g_free(lock_path);
+    if (profile_lock < 0 || flock(profile_lock, LOCK_EX | LOCK_NB) < 0) {
+        const char *error = "Browser profile is in use by another process or cannot be locked. Close the other Zeron instance and reopen this tab.";
+        send_packet('E', 0, error, strlen(error));
+        return FALSE;
+    }
+    gchar *data = g_build_filename(argv[2], "data", NULL);
+    gchar *cache = g_build_filename(argv[2], "cache", NULL);
+    gchar *cookies = g_build_filename(argv[2], "cookies.sqlite", NULL);
+    gboolean writable = storage_directory(argv[2]) && storage_directory(data) && storage_directory(cache);
+    int fd = writable ? open(cookies, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
+    if (fd < 0) {
+        gchar *error = g_strdup_printf("Could not open browser profile: %s", g_strerror(errno));
+        send_packet('E', 0, error, strlen(error));
+        g_free(error);
+    } else {
+        close(fd);
+        WebKitWebsiteDataManager *manager = webkit_website_data_manager_new(
+            "base-data-directory", data, "base-cache-directory", cache, NULL);
+        webkit_cookie_manager_set_persistent_storage(
+            webkit_website_data_manager_get_cookie_manager(manager), cookies,
+            WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+        context = webkit_web_context_new_with_website_data_manager(manager);
+        g_object_unref(manager);
+    }
+    g_free(data);
+    g_free(cache);
+    g_free(cookies);
+    return context != NULL;
+}
+
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    umask(0077);
     // Offscreen GTK surfaces need CPU-addressable frames, never native GL child windows.
     g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", TRUE);
     g_setenv("GDK_SCALE", "1", TRUE);
@@ -616,7 +710,9 @@ int main(int argc, char **argv) {
     }
     pages = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_page);
     input = g_byte_array_new();
-    context = webkit_web_context_new_ephemeral();
+    if (!configure_storage(argc, argv))
+        return 1;
+    send_packet('R', 0, "", 0);
     g_signal_connect(context, "download-started", G_CALLBACK(download), NULL);
     g_unix_fd_add(STDIN_FILENO, G_IO_IN | G_IO_HUP | G_IO_ERR, read_commands, NULL);
     g_timeout_add(16, render_frames, NULL);
@@ -624,5 +720,7 @@ int main(int argc, char **argv) {
     g_hash_table_destroy(pages);
     g_byte_array_unref(input);
     g_object_unref(context);
+    if (profile_lock >= 0)
+        close(profile_lock);
     return 0;
 }
