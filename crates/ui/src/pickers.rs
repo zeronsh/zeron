@@ -49,6 +49,7 @@ fn workspace_footer_row() -> gpui::Div {
 }
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::files::{client::FilesRequestContext, git_status::GitStatusSource};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
 use crate::settings::composer::ComposerDefaults;
@@ -660,6 +661,9 @@ pub struct Pickers {
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
+    /// The composer and file explorer share one live checkout status source.
+    git_status: Option<Entity<GitStatusSource>>,
+    git_status_subscription: Option<Subscription>,
     /// The previous project's resolved ref, shown ONLY by the checkout and
     /// branch chip labels until this project's refs land — so a project
     /// switch never blinks them through "Select ref". Never read by the
@@ -836,6 +840,11 @@ impl Pickers {
                 this.model_refresh_errors.clear();
                 this.catalog_rev += 1;
             }
+            // Release or retarget an existing lease even when the new-thread
+            // canvas no longer renders the session footer.
+            if this.git_status.is_some() {
+                this.ensure_git_status(cx);
+            }
             cx.notify();
         });
         // A Settings → Providers toggle changed some device's enabled set:
@@ -921,6 +930,8 @@ impl Pickers {
             revalidating: HashSet::new(),
             refs: Loadable::Idle,
             refs_space: None,
+            git_status: None,
+            git_status_subscription: None,
             held_ref: None,
             active: 0,
             model_scroll: gpui::UniformListScrollHandle::new(),
@@ -2314,6 +2325,55 @@ impl Pickers {
 
     // ---- checkout resolution (the t3code env-mode semantics) ----
 
+    fn ensure_git_status(&mut self, cx: &mut Context<Self>) {
+        let target = {
+            let state = self.state.read(cx);
+            state
+                .selected_space_row()
+                .filter(|space| space.git_detected)
+                .and_then(|space| {
+                    let chat = state.selected_chat_row()?;
+                    let engine = state.engine()?.clone();
+                    let mut context = FilesRequestContext::for_chat(state, &chat.id)?;
+                    // Use the space + checkout so a shared source survives
+                    // the chat that first acquired it being removed.
+                    context.target = zeron_proto::WorkspaceTarget {
+                        chat_id: None,
+                        space_id: Some(space.id.clone()),
+                        checkout_path: Some(context.cwd.clone()),
+                    };
+                    Some((engine, context, chat.device_id.clone()))
+                })
+        };
+        let Some((engine, context, device)) = target else {
+            self.git_status_subscription = None;
+            self.git_status = None;
+            return;
+        };
+        if self
+            .git_status
+            .as_ref()
+            .is_some_and(|source| source.read(cx).matches(&engine, &context, &device))
+        {
+            return;
+        }
+        self.git_status_subscription = None;
+        self.git_status = None;
+        let source = GitStatusSource::acquire(engine, context, device, cx);
+        self.git_status_subscription = Some(cx.observe(&source, |_, _, cx| cx.notify()));
+        self.git_status = Some(source);
+    }
+
+    fn session_ref_label(&self, chat: &zeron_proto::Chat, cx: &App) -> SharedString {
+        self.git_status
+            .as_ref()
+            .and_then(|source| source.read(cx).branch())
+            .or(chat.branch.as_deref())
+            .unwrap_or("No ref")
+            .to_owned()
+            .into()
+    }
+
     /// Index of the highlighted-by-default row in the (filtered) ref list:
     /// the session's branch on an existing chat, the draft pick on a new one,
     /// else the current branch. Capped to the displayed window.
@@ -3618,6 +3678,7 @@ impl Pickers {
     /// the picked (or session's) project has git. New sessions use the floating
     /// chip clusters; sessions name their target in the titlebar.
     pub fn render_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.ensure_git_status(cx);
         let theme = Theme::of(cx).clone();
         // A selected chat whose workspace row hasn't synced yet (the moment
         // right after send mints it) still renders the DRAFT footer — the
@@ -3680,10 +3741,7 @@ impl Pickers {
                 .child(Self::footer_faded_label(
                     "composer-session-branch",
                     crate::icons::GIT_BRANCH,
-                    chat.branch
-                        .clone()
-                        .map(SharedString::from)
-                        .unwrap_or_else(|| SharedString::from("No ref")),
+                    self.session_ref_label(chat, cx),
                     &theme,
                 ));
             // Checkout + branch stay together. PR and usage form the trailing
@@ -7062,6 +7120,180 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[gpui::test]
+    async fn composer_branch_follows_checkout_updates_and_retargets(cx: &mut gpui::TestAppContext) {
+        use futures::StreamExt as _;
+        use std::sync::{Arc, Mutex};
+
+        // The RPC transport runs on Tokio; let it wake the GPUI test executor
+        // before advancing the simulated condition timeout.
+        cx.executor().allow_parking();
+        struct StatusService {
+            updates: tokio::sync::watch::Sender<serde_json::Value>,
+            requests: Mutex<Vec<serde_json::Value>>,
+        }
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for StatusService {
+            async fn handle(
+                &self,
+                method: &str,
+                params: serde_json::Value,
+            ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+                assert_eq!(method, methods::WATCH_WORKSPACE_GIT_STATUS);
+                self.requests.lock().unwrap().push(params);
+                Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::unfold(
+                        (self.updates.subscribe(), true),
+                        |(mut receiver, initial)| async move {
+                            if !initial {
+                                receiver.changed().await.ok()?;
+                            }
+                            let value = receiver.borrow_and_update().clone();
+                            Some((value, (receiver, false)))
+                        },
+                    )
+                    .boxed(),
+                ))
+            }
+        }
+        let frame = |checkout: &str, branch: Option<&str>| {
+            let mut status = serde_json::json!({
+                "checkoutId": checkout, "deviceId": "remote", "revision": branch,
+                "complete": true, "files": []
+            });
+            if let Some(branch) = branch {
+                status["branch"] = branch.into();
+            } else {
+                status["revision"] = "legacy".into();
+            }
+            serde_json::json!({"status": status})
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let service = Arc::new(StatusService {
+            updates: tokio::sync::watch::channel(frame("checkout", Some("main"))).0,
+            requests: Mutex::new(Vec::new()),
+        });
+        let engine = EngineHandle::from_test_client(zeron_rpc::memory_client(service.clone()));
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.set_test_engine(engine);
+            state.spaces.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "project", "deviceId": "remote", "path": "/remote/repo",
+                    "gitDetected": true, "createdAt": chrono::Utc::now()
+                }))
+                .unwrap(),
+            );
+            for (id, cwd, checkout, branch) in [
+                ("chat", "/remote/repo", "checkout", "captured-main"),
+                (
+                    "worktree",
+                    "/remote/worktree",
+                    "worktree-checkout",
+                    "captured-worktree",
+                ),
+            ] {
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "spaceId": "project", "deviceId": "remote", "cwd": cwd,
+                        "checkoutId": checkout, "branch": branch,
+                        "archived": false, "createdAt": chrono::Utc::now()
+                    }))
+                    .unwrap(),
+                );
+            }
+            state.selected_space = Some("project".into());
+            state.selected_chat = Some("chat".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let label = |pickers: &mut Pickers, cx: &mut Context<Pickers>| {
+            let chat = pickers.state.read(cx).selected_chat_row().unwrap();
+            pickers.session_ref_label(chat, cx).to_string()
+        };
+        pickers.update(cx, |pickers, cx| {
+            assert_eq!(label(pickers, cx), "captured-main");
+            assert!(pickers.render_footer(cx).is_some());
+        });
+        cx.condition(&pickers, |pickers, cx| label(pickers, cx) == "main")
+            .await;
+        assert_eq!(service.requests.lock().unwrap().len(), 1);
+        let request = service.requests.lock().unwrap()[0].clone();
+        assert_eq!(request["targetDeviceId"], "remote");
+        assert_eq!(request["spaceId"], "project");
+        assert_eq!(request["checkoutPath"], "/remote/repo");
+
+        // A branch-only frame on a clean checkout must notify the composer.
+        service
+            .updates
+            .send_replace(frame("checkout", Some("feature/live")));
+        cx.condition(&pickers, |pickers, cx| label(pickers, cx) == "feature/live")
+            .await;
+        let original_source = pickers.update(cx, |pickers, cx| {
+            assert_eq!(
+                pickers.state.read(cx).chats[0].branch.as_deref(),
+                Some("captured-main")
+            );
+            pickers.render_footer(cx);
+            let state = pickers.state.read(cx);
+            let explorer_source = GitStatusSource::acquire(
+                state.engine().unwrap().clone(),
+                FilesRequestContext::for_chat(state, "chat").unwrap(),
+                "remote".into(),
+                cx,
+            );
+            assert_eq!(
+                pickers.git_status.as_ref().unwrap().entity_id(),
+                explorer_source.entity_id()
+            );
+            pickers.git_status.as_ref().unwrap().clone()
+        });
+        assert_eq!(service.requests.lock().unwrap().len(), 1);
+
+        state.update(cx, |state, _| state.selected_chat = Some("worktree".into()));
+        pickers.update(cx, |pickers, cx| {
+            pickers.render_footer(cx);
+            assert_ne!(
+                pickers.git_status.as_ref().unwrap().entity_id(),
+                original_source.entity_id()
+            );
+            assert_eq!(label(pickers, cx), "captured-worktree");
+        });
+        // The old checkout's cached frame must not relabel the new target.
+        service
+            .updates
+            .send_replace(frame("worktree-checkout", Some("worktree-live")));
+        cx.condition(&pickers, |pickers, cx| {
+            label(pickers, cx) == "worktree-live"
+        })
+        .await;
+        let requests = service.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["checkoutPath"], "/remote/worktree");
+
+        // Older engines omit the additive branch field; keep the saved label.
+        service
+            .updates
+            .send_replace(frame("worktree-checkout", None));
+        cx.condition(&pickers, |pickers, cx| {
+            label(pickers, cx) == "captured-worktree"
+        })
+        .await;
+        state.update(cx, |state, _| state.selected_chat = None);
+        pickers.update(cx, |pickers, cx| {
+            pickers.ensure_git_status(cx);
+            assert!(pickers.git_status.is_none());
+            assert!(pickers.git_status_subscription.is_none());
+        });
     }
 
     #[gpui::test]

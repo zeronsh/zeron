@@ -890,13 +890,19 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
         Err(err) => {
             tracing::debug!(checkout = %entry.identity.root.display(), error = %err,
                 "diff-sync: capture failed");
-            git_status::publish(inner, entry, Vec::new(), false);
+            git_status::publish(inner, entry, None, Vec::new(), false);
             return;
         }
     };
 
     if let Some((files, complete)) = &snapshot.git_status {
-        git_status::publish(inner, entry, files.clone(), *complete);
+        git_status::publish(
+            inner,
+            entry,
+            Some(&snapshot.branch),
+            files.clone(),
+            *complete,
+        );
     }
     if lock(&entry.checksum).as_deref() == Some(snapshot.checksum.as_str()) {
         return; // unchanged — publish nothing

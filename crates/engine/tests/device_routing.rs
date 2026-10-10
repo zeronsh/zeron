@@ -675,6 +675,21 @@ async fn git_status_is_computed_on_the_checkout_host_through_the_relay() {
         .unwrap()
         .unwrap();
     assert_eq!(actual, expected);
+    git(&root, &["switch", "-c", "feature/remote"]).await;
+    let switched = tokio::time::timeout(Duration::from_secs(15), remote.recv())
+        .await
+        .expect("remote branch update arrives without a chat turn")
+        .unwrap();
+    assert_eq!(switched["status"]["branch"], "feature/remote");
+    assert_eq!(
+        switched["status"]["checkoutId"],
+        expected["status"]["checkoutId"]
+    );
+    assert_eq!(switched["status"]["files"], expected["status"]["files"]);
+    assert_ne!(
+        switched["status"]["revision"],
+        expected["status"]["revision"]
+    );
     drop(remote);
     consumer.shutdown().await;
     host.shutdown().await;

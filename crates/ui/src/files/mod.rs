@@ -23,7 +23,7 @@ pub mod document;
 mod drag;
 pub mod editor;
 pub mod editor_adapter;
-mod git_status;
+pub(crate) mod git_status;
 mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;

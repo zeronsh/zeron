@@ -781,12 +781,17 @@ pub struct GitFileStatus {
 }
 
 /// Latest status only: never contains file content or a patch. `complete = false`
-/// means unavailable/partial, not clean. Revision covers only these statuses.
+/// means unavailable/partial, not clean. Revision covers the live branch and
+/// file statuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckoutGitStatus {
     pub checkout_id: String,
     pub device_id: String,
+    /// Currently checked-out branch (`"HEAD"` when detached). Older engines
+    /// omit this; conversation branch identity remains on the chat row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub revision: String,
     pub complete: bool,
     pub files: Vec<GitFileStatus>,
