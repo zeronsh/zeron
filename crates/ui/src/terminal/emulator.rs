@@ -20,6 +20,7 @@
 //!   [`Emulator::feed`] returns them so the panel can write them back.
 
 use std::cell::RefCell;
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -152,6 +153,81 @@ pub struct CursorSnapshot {
     pub col: usize,
 }
 
+/// A link in the grid: where it goes and the cells it covers, in grid
+/// coordinates (the same space selections anchor in).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalLink {
+    pub uri: String,
+    pub range: RangeInclusive<Point>,
+}
+
+/// Schemes that open on click — for detected plain-text URLs and for OSC 8
+/// targets alike. Anything else (custom app schemes a program could smuggle
+/// into an OSC 8 target) stays inert.
+const LINK_SCHEMES: &[&str] = &["https", "http", "mailto", "file", "ftp"];
+
+/// Plain-text URL prefixes recognized in output.
+const URL_PREFIXES: &[&str] = &["https://", "http://", "mailto:", "file://", "ftp://"];
+
+fn openable_uri(uri: &str) -> bool {
+    url::Url::parse(uri).is_ok_and(|url| LINK_SCHEMES.contains(&url.scheme()))
+}
+
+/// Characters a plain-text URL may contain — alacritty's default hint set:
+/// no whitespace, controls, or the delimiters URLs are usually wrapped in.
+fn is_url_char(c: char) -> bool {
+    !c.is_whitespace()
+        && !c.is_control()
+        && !matches!(
+            c,
+            '<' | '>' | '"' | '`' | '{' | '|' | '}' | '\\' | '^' | '⟨' | '⟩'
+        )
+}
+
+/// Find the plain-text URL spanning char index `target` in `text`, as a char
+/// range. Trailing sentence punctuation and unbalanced closing brackets are
+/// trimmed, so `(see https://x.dev/a).` yields `https://x.dev/a`.
+fn url_span(text: &[char], target: usize) -> Option<std::ops::Range<usize>> {
+    let mut start = 0;
+    while start < text.len() {
+        let prefix = URL_PREFIXES.iter().find(|prefix| {
+            let mut chars = prefix.chars();
+            text[start..].len() >= prefix.len()
+                && text[start..start + prefix.len()]
+                    .iter()
+                    .all(|c| Some(c.to_ascii_lowercase()) == chars.next())
+        });
+        let at_boundary = start == 0 || !text[start - 1].is_alphanumeric();
+        let Some(prefix) = prefix.filter(|_| at_boundary) else {
+            start += 1;
+            continue;
+        };
+        let mut end = start + prefix.len();
+        while end < text.len() && is_url_char(text[end]) {
+            end += 1;
+        }
+        while end > start + prefix.len() {
+            let span = &text[start..end];
+            let unbalanced = |open: char, close: char| {
+                span.last() == Some(&close)
+                    && span.iter().filter(|&&c| c == close).count()
+                        > span.iter().filter(|&&c| c == open).count()
+            };
+            let trailing_punct =
+                matches!(span.last(), Some('.' | ',' | ':' | ';' | '!' | '?' | '\''));
+            if !(trailing_punct || unbalanced('(', ')') || unbalanced('[', ']')) {
+                break;
+            }
+            end -= 1;
+        }
+        if end > start + prefix.len() && (start..end).contains(&target) {
+            return Some(start..end);
+        }
+        start = end.max(start + 1);
+    }
+    None
+}
+
 /// Captures `Term` callbacks. Interior-mutable because `EventListener::send_event`
 /// takes `&self`; single-threaded (the emulator lives inside a gpui entity).
 #[derive(Default, Clone)]
@@ -172,6 +248,8 @@ pub struct Emulator {
     capture: EventCapture,
     title: Option<String>,
     bell: bool,
+    /// Cells of the link under a modifier-held pointer; painted underlined.
+    highlighted_link: Option<RangeInclusive<Point>>,
 }
 
 impl Emulator {
@@ -188,6 +266,7 @@ impl Emulator {
             capture,
             title: None,
             bell: false,
+            highlighted_link: None,
         }
     }
 
@@ -195,6 +274,12 @@ impl Emulator {
     /// terminal wants written back to the PTY (DSR/DA query responses etc.).
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.term, bytes);
+        // Output can scroll the grid under the highlight's anchors; drop it
+        // rather than underline whatever moved into those cells. The next
+        // pointer move re-resolves it.
+        if !bytes.is_empty() {
+            self.highlighted_link = None;
+        }
         let mut responses = Vec::new();
         for event in self.capture.events.borrow_mut().drain(..) {
             match event {
@@ -318,6 +403,59 @@ impl Emulator {
         self.selection_range().is_some()
     }
 
+    // ---- links ----
+
+    /// The link covering `point`, if any: an OSC 8 hyperlink on the cell
+    /// wins, else a plain-text URL found in the cell's logical (soft-wrapped)
+    /// line. Only [`LINK_SCHEMES`] targets are returned.
+    pub fn link_at(&self, point: Point) -> Option<TerminalLink> {
+        let start = self.term.line_search_left(point);
+        let end = self.term.line_search_right(point);
+        let grid = self.term.grid();
+        let cells: Vec<(Point, char, Option<_>)> = (start.line.0..=end.line.0)
+            .flat_map(|line| (0..self.cols()).map(move |col| Point::new(Line(line), Column(col))))
+            .filter_map(|p| {
+                let cell = &grid[p];
+                (!cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER))
+                .then(|| (p, cell.c, cell.hyperlink()))
+            })
+            .collect();
+        // A pointer on a wide char's spacer half belongs to the glyph before it.
+        let target = cells.iter().rposition(|(p, ..)| *p <= point)?;
+
+        if let Some(link) = cells[target].2.clone() {
+            let same = |ix: &usize| cells[*ix].2.as_ref() == Some(&link);
+            let first = (0..=target).rev().take_while(same).last()?;
+            let last = (target..cells.len()).take_while(same).last()?;
+            return openable_uri(link.uri()).then(|| TerminalLink {
+                uri: link.uri().to_string(),
+                range: cells[first].0..=cells[last].0,
+            });
+        }
+
+        let text: Vec<char> = cells.iter().map(|(_, c, _)| *c).collect();
+        let span = url_span(&text, target)?;
+        let uri: String = text[span.clone()].iter().collect();
+        openable_uri(&uri).then(|| TerminalLink {
+            uri,
+            range: cells[span.start].0..=cells[span.end - 1].0,
+        })
+    }
+
+    /// Underline `link`'s cells (or clear with `None`). Returns whether the
+    /// highlight changed, so the caller knows to repaint.
+    pub fn set_highlighted_link(&mut self, link: Option<RangeInclusive<Point>>) -> bool {
+        let changed = self.highlighted_link != link;
+        self.highlighted_link = link;
+        changed
+    }
+
+    pub fn has_highlighted_link(&self) -> bool {
+        self.highlighted_link.is_some()
+    }
+
     fn selection_range(&self) -> Option<SelectionRange> {
         self.term
             .selection
@@ -345,6 +483,7 @@ impl Emulator {
         (0..self.cols())
             .map(|col| {
                 let cell = &row[Column(col)];
+                let point = Point::new(line, Column(col));
                 CellSnapshot {
                     ch: cell.c,
                     fg: map_color(cell.fg),
@@ -352,15 +491,18 @@ impl Emulator {
                     bold: cell.flags.intersects(Flags::BOLD),
                     dim: cell.flags.intersects(Flags::DIM),
                     italic: cell.flags.intersects(Flags::ITALIC),
-                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES)
+                        || self
+                            .highlighted_link
+                            .as_ref()
+                            .is_some_and(|link| link.contains(&point)),
                     inverse: cell.flags.intersects(Flags::INVERSE),
                     hidden: cell.flags.intersects(Flags::HIDDEN),
                     wide: cell.flags.intersects(Flags::WIDE_CHAR),
                     wide_spacer: cell
                         .flags
                         .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-                    selected: selection
-                        .is_some_and(|range| range.contains(Point::new(line, Column(col)))),
+                    selected: selection.is_some_and(|range| range.contains(point)),
                 }
             })
             .collect()
@@ -727,6 +869,68 @@ mod tests {
         e.start_selection(SelectionType::Simple, e.grid_point(0, 2), Side::Left);
         assert_eq!(e.selection_text(), None);
         assert!(!e.has_selection());
+    }
+
+    fn link_uri(e: &Emulator, row: usize, col: usize) -> Option<String> {
+        e.link_at(e.grid_point(row, col)).map(|link| link.uri)
+    }
+
+    #[test]
+    fn plain_url_is_found_under_any_of_its_cells() {
+        let mut e = emu(60, 2);
+        e.feed(b"see https://example.com/a?b=1 now");
+        let link = e.link_at(e.grid_point(0, 10)).unwrap();
+        assert_eq!(link.uri, "https://example.com/a?b=1");
+        assert_eq!(link.range, e.grid_point(0, 4)..=e.grid_point(0, 28));
+        assert_eq!(link_uri(&e, 0, 2), None, "text before the URL");
+        assert_eq!(link_uri(&e, 0, 30), None, "text after the URL");
+    }
+
+    #[test]
+    fn trailing_punctuation_and_unbalanced_brackets_are_trimmed() {
+        let mut e = emu(80, 3);
+        e.feed(b"(see https://x.dev/a). and https://en.wikipedia.org/wiki/Rust_(language),");
+        assert_eq!(link_uri(&e, 0, 8).as_deref(), Some("https://x.dev/a"));
+        assert_eq!(
+            link_uri(&e, 0, 40).as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust_(language)")
+        );
+    }
+
+    #[test]
+    fn soft_wrapped_url_spans_rows() {
+        let mut e = emu(10, 4);
+        e.feed(b"https://abc.dev/xyz");
+        let link = e.link_at(e.grid_point(1, 3)).unwrap();
+        assert_eq!(link.uri, "https://abc.dev/xyz");
+        assert_eq!(link.range, e.grid_point(0, 0)..=e.grid_point(1, 8));
+    }
+
+    #[test]
+    fn osc8_hyperlink_wins_and_unsafe_schemes_are_inert() {
+        let mut e = emu(40, 3);
+        e.feed(b"\x1b]8;;https://zeron.dev/docs\x1b\\docs\x1b]8;;\x1b\\ tail\r\n");
+        let link = e.link_at(e.grid_point(0, 1)).unwrap();
+        assert_eq!(link.uri, "https://zeron.dev/docs");
+        assert_eq!(link.range, e.grid_point(0, 0)..=e.grid_point(0, 3));
+        assert_eq!(link_uri(&e, 0, 6), None);
+
+        e.feed(b"\x1b]8;;javascript:alert(1)\x1b\\click\x1b]8;;\x1b\\");
+        assert_eq!(link_uri(&e, 1, 1), None);
+    }
+
+    #[test]
+    fn highlighted_link_underlines_until_output_arrives() {
+        let mut e = emu(40, 2);
+        e.feed(b"go https://a.dev");
+        let link = e.link_at(e.grid_point(0, 5)).unwrap();
+        assert!(e.set_highlighted_link(Some(link.range.clone())));
+        assert!(!e.set_highlighted_link(Some(link.range)));
+        let line = e.line(0);
+        assert!(!line[2].underline);
+        assert!(line[3..16].iter().all(|c| c.underline));
+        e.feed(b"!");
+        assert!(e.line(0).iter().all(|c| !c.underline));
     }
 
     #[test]
