@@ -21,6 +21,7 @@ if (-not $match.Success) { throw "Unexpected installer name: $Setup" }
 $version = $match.Groups[1].Value
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1'
 $protocolKey = 'HKCU:\Software\Classes\zeron'
+$toastKey = 'HKCU:\Software\Classes\AppUserModelId\sh.zeron.app'
 $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Zeron.lnk'
 $root = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $dir = Join-Path $root "zeron installer test $([guid]::NewGuid().ToString('N'))"
@@ -77,7 +78,11 @@ if ($installed -ne [IO.Path]::GetFullPath($dir).TrimEnd('\')) { throw "InstallLo
 $command = (Get-ItemProperty -LiteralPath "$protocolKey\shell\open\command").'(default)'
 if ($command -ne "`"$exe`" `"%1`"") { throw "zeron:// handler is '$command'" }
 if (-not (Test-Path -LiteralPath $shortcut)) { throw "Start menu shortcut missing: $shortcut" }
-Write-Output 'PASS: uninstall entry, zeron:// handler, Start menu shortcut'
+$link = (New-Object -ComObject Shell.Application).NameSpace((Split-Path $shortcut)).ParseName('Zeron.lnk')
+$appId = $link.ExtendedProperty('System.AppUserModel.ID')
+if ($appId -ne 'sh.zeron.app') { throw "Start menu shortcut AppUserModelID is '$appId'" }
+if (-not (Test-Path -LiteralPath $toastKey)) { throw "Notification registration missing: $toastKey" }
+Write-Output 'PASS: uninstall entry, zeron:// handler, Start menu shortcut, notification registration'
 
 # Leftovers an in-app update can leave behind must go with the uninstall.
 Set-Content -LiteralPath (Join-Path $dir 'zeron.exe.old') -Value 'previous image'
@@ -93,5 +98,6 @@ foreach ($leftover in @('zeron.exe.old', '.zeron-update-test', 'zeron-update.jso
     Wait-Until { -not (Test-Path -LiteralPath (Join-Path $dir $leftover)) } "$leftover to be removed"
 }
 if (Test-Path -LiteralPath $protocolKey) { throw 'zeron:// handler survived uninstall' }
+if (Test-Path -LiteralPath $toastKey) { throw 'Notification registration survived uninstall' }
 if (Test-Path -LiteralPath $shortcut) { throw 'Start menu shortcut survived uninstall' }
 Write-Output 'PASS: uninstall removes the install, update leftovers, and registrations'

@@ -17,8 +17,9 @@
 //!   `osascript`, attributed to Script Editor (cosmetics only).
 //! - Linux: `notify-send` (libnotify's CLI, present on every mainstream
 //!   desktop).
-//! - Windows: no-op for now — toasts require a registered AppUserModelID
-//!   (an installer concern); the chime still covers it.
+//! - Windows: gpui's toasts, attributed to the `sh.zeron.app` AppUserModelID
+//!   `run_app` sets (gpui registers its display name). Toasts are silent, so
+//!   the chime stays the only sound, and each chat's banner replaces its last.
 //! - `ZERON_DISABLE_NOTIFICATIONS` env kill-switch + the
 //!   `notificationsEnabled` ui-setting (checked by the caller);
 //! - failures are logged and swallowed — a missing notifier must never
@@ -35,16 +36,26 @@ pub(crate) const AGENT_UPDATES_TARGET: &str = "__zeron_agent_updates__";
 /// (the macOS native path talks to AppKit); slow paths (spawning a CLI) hop to
 /// a background thread. Silently a no-op when disabled or no notifier is
 /// available.
-pub fn post(title: &str, body: &str, chat_id: Option<&str>) {
+pub fn post(title: &str, body: &str, chat_id: Option<&str>, cx: &gpui::App) {
     if std::env::var_os(DISABLE_ENV).is_some() {
         return;
     }
+    #[cfg(windows)]
+    cx.show_system_notification(gpui::SystemNotification {
+        tag: chat_id.unwrap_or_default().to_string().into(),
+        title: title.to_string().into(),
+        body: body.to_string().into(),
+        actions: Vec::new(),
+    });
+    #[cfg(not(windows))]
+    let _ = cx;
     post_impl(title, body, chat_id);
 }
 
 /// Route banner clicks: `handler` receives the clicked banner's chat id.
 /// Main thread only; replaces any previous handler. Only the native macOS
-/// path reports clicks (osascript and notify-send banners can't).
+/// path reports clicks here (osascript and notify-send banners can't);
+/// Windows toast clicks arrive through gpui, routed in `run_app`.
 pub fn on_click(handler: impl Fn(String) + 'static) {
     #[cfg(target_os = "macos")]
     delegate::CLICK.with_borrow_mut(|slot| *slot = Some(Box::new(handler)));
@@ -351,6 +362,29 @@ mod tests {
         );
         // Raw newlines would end the AppleScript statement mid-literal.
         assert_eq!(applescript_escape("two\nlines\r\n"), "two lines  ");
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    fn windows_banners_replace_per_chat(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_app_identity("sh.zeron.app", "Zeron");
+            post("Fix tests", "Run finished", Some("chat-1"), cx);
+            post("Fix tests", "Waiting on your input", Some("chat-1"), cx);
+            post("Connection unavailable", "Your device is offline", None, cx);
+        });
+        let delivered = cx.delivered_system_notifications();
+        let delivered: Vec<_> = delivered
+            .iter()
+            .map(|banner| (banner.tag.as_ref(), banner.body.as_ref()))
+            .collect();
+        assert_eq!(
+            delivered,
+            [
+                ("chat-1", "Waiting on your input"),
+                ("", "Your device is offline")
+            ]
+        );
     }
 
     #[cfg(target_os = "macos")]

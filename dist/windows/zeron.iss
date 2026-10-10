@@ -75,8 +75,10 @@ Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignorev
 Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\Zeron"; Filename: "{app}\zeron.exe"
-Name: "{autodesktop}\Zeron"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
+; The AppUserModelID the app sets at startup (crates/ui/src/lib.rs), so pins
+; made from these shortcuts group with the running window.
+Name: "{autoprograms}\Zeron"; Filename: "{app}\zeron.exe"; AppUserModelID: "sh.zeron.app"
+Name: "{autodesktop}\Zeron"; Filename: "{app}\zeron.exe"; AppUserModelID: "sh.zeron.app"; Tasks: desktopicon
 
 [Registry]
 ; zeron:// conversation links — the scheme macOS registers in Info.plist and
@@ -85,6 +87,9 @@ Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: ""; 
 Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\zeron\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"",0"
 Root: HKCU; Subkey: "Software\Classes\zeron\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"" ""%1"""
+; Toast identity. The app writes its DisplayName on the first notification
+; (portable copies too); this entry lets uninstall remove it.
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\sh.zeron.app"; ValueType: none; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: nowait postinstall skipifsilent

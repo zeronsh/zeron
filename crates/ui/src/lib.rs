@@ -238,6 +238,18 @@ pub fn run_app(config: UiConfig) {
             }
         })
         .detach();
+        // Windows attributes toasts and taskbar buttons to this AppUserModelID:
+        // the macOS bundle id, also stamped on the installer's shortcuts.
+        // Banners posted without a chat only bring Zeron forward.
+        #[cfg(windows)]
+        {
+            cx.set_app_identity("sh.zeron.app", "Zeron");
+            let click_state = state.clone();
+            cx.on_system_notification_response(move |response, cx| match response.tag.as_ref() {
+                "" => activate_main_window(cx),
+                target => open_notification_target(target.to_string(), &click_state, cx),
+            });
+        }
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
