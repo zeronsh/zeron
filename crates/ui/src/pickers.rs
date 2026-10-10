@@ -490,6 +490,34 @@ fn mark_ambiguous(rows: &mut [ModelRowData]) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderHeader {
+    harness: HarnessId,
+    id: String,
+    name: SharedString,
+    count: usize,
+    collapsed: bool,
+}
+
+#[derive(Debug, Clone)]
+enum ModelListRow {
+    Provider(ProviderHeader),
+    Model {
+        row: ModelRowData,
+        ordinal: usize,
+        under_header: bool,
+    },
+}
+
+impl ModelListRow {
+    fn model_row(&self) -> Option<&ModelRowData> {
+        match self {
+            ModelListRow::Model { row, .. } => Some(row),
+            ModelListRow::Provider(_) => None,
+        }
+    }
+}
+
 /// Which picker popover is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PickerKind {
@@ -675,7 +703,7 @@ pub struct Pickers {
     /// Flattened rows the list/keyboard/⌘N all walk, cached per
     /// [`ModelRowsKey`]: a 7k-model catalog rebuilt+ranked on every
     /// keystroke, arrow press AND render was the picker's open/scroll lag.
-    model_rows_cache: std::cell::RefCell<Option<(ModelRowsKey, std::sync::Arc<Vec<ModelRowData>>)>>,
+    model_rows_cache: std::cell::RefCell<Option<(ModelRowsKey, std::sync::Arc<Vec<ModelListRow>>)>>,
     /// Bumped on every catalog/favorites mutation; invalidates the cache.
     catalog_rev: u64,
     /// Hover/drag state of the floating menu scrollbar. One instance serves
@@ -1307,7 +1335,7 @@ impl Pickers {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             return false;
         }
-        self.activate_model_index(slot, cx);
+        self.activate_model_slot(slot, cx);
         cx.notify();
         true
     }
@@ -2127,7 +2155,7 @@ impl Pickers {
     /// restricts every view to its own harness.
     /// Cached [`Self::visible_model_rows`]: selection/highlight changes and
     /// re-renders share one flattened list until an input actually changes.
-    fn model_rows(&self, cx: &App) -> std::sync::Arc<Vec<ModelRowData>> {
+    fn model_rows(&self, cx: &App) -> std::sync::Arc<Vec<ModelListRow>> {
         let key = ModelRowsKey {
             query: self.search.read(cx).text().trim().to_string(),
             rail: self.model_rail,
@@ -2146,7 +2174,7 @@ impl Pickers {
         rows
     }
 
-    fn visible_model_rows(&self, cx: &App) -> Vec<ModelRowData> {
+    fn visible_model_rows(&self, cx: &App) -> Vec<ModelListRow> {
         let effective = self.effective_harness(cx);
         let descriptors = self.rail_descriptors(cx);
         // Favorite lookups are per-row; the Vec scan made the flatten
@@ -2212,7 +2240,20 @@ impl Pickers {
             }
         }
         mark_ambiguous(&mut rows);
-        rows
+        let grouped = query.is_empty()
+            && self.model_rail == ModelRail::Harness
+            && effective == Some(HarnessId::Opencode);
+        if !grouped {
+            return flat_model_rows(rows);
+        }
+        group_by_provider(
+            rows,
+            |row| row.selected_only || favorites.contains(&(row.harness, row.model.id.as_str())),
+            |provider| {
+                self.defaults
+                    .is_provider_collapsed(HarnessId::Opencode, provider)
+            },
+        )
     }
 
     /// The row the keyboard-nav highlight starts on: the resolved selected
@@ -2226,7 +2267,9 @@ impl Pickers {
         self.model_rows(cx)
             .iter()
             .position(|row| {
-                Some(row.harness) == effective && selected == Some(row.model.id.as_str())
+                matches!(row, ModelListRow::Model { row, .. }
+                    if Some(row.harness) == effective
+                        && selected == Some(row.model.id.as_str()))
             })
             .unwrap_or(0)
     }
@@ -2251,12 +2294,27 @@ impl Pickers {
         }
     }
 
+    fn activate_model_slot(&mut self, slot: usize, cx: &mut Context<Self>) {
+        let ix = self
+            .model_rows(cx)
+            .iter()
+            .position(|row| matches!(row, ModelListRow::Model { ordinal, .. } if *ordinal == slot));
+        if let Some(ix) = ix {
+            self.activate_model_index(ix, cx);
+        }
+    }
+
     /// Pick the visible row at `ix` — a foreign-harness row (favorites /
     /// search) switches the harness first, exactly like clicking its rail
     /// icon and then the model.
     fn activate_model_index(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(row) = self.model_rows(cx).get(ix).cloned() else {
-            return;
+        let row = match self.model_rows(cx).get(ix).cloned() {
+            Some(ModelListRow::Model { row, .. }) => row,
+            Some(ModelListRow::Provider(header)) => {
+                self.toggle_provider_collapsed(header.harness, &header.id, cx);
+                return;
+            }
+            None => return,
         };
         if row.selected_only {
             return;
@@ -2272,6 +2330,19 @@ impl Pickers {
             self.compact_model_list = false;
             self.focus_on_mount = true;
         }
+    }
+
+    fn toggle_provider_collapsed(
+        &mut self,
+        harness: HarnessId,
+        provider: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_defaults();
+        self.defaults.toggle_provider_collapsed(harness, provider);
+        self.persist_defaults();
+        self.catalog_rev += 1;
+        cx.notify();
     }
 
     /// Star/unstar a model and persist it with the sticky defaults.
@@ -3016,7 +3087,7 @@ impl Pickers {
             && let Ok(n) = event.keystroke.key.parse::<usize>()
             && (1..=9).contains(&n)
         {
-            self.activate_model_index(n - 1, cx);
+            self.activate_model_slot(n - 1, cx);
             cx.notify();
             return;
         }
@@ -4374,9 +4445,22 @@ impl Pickers {
                         entity.update(app, |this, cx| {
                             range
                                 .filter_map(|ix| {
-                                    row_data
-                                        .get(ix)
-                                        .map(|row| this.render_model_row(ix, row, cx))
+                                    row_data.get(ix).map(|row| match row {
+                                        ModelListRow::Provider(header) => {
+                                            this.render_provider_header(ix, header, cx)
+                                        }
+                                        ModelListRow::Model {
+                                            row,
+                                            ordinal,
+                                            under_header,
+                                        } => this.render_model_row(
+                                            ix,
+                                            *ordinal,
+                                            *under_header,
+                                            row,
+                                            cx,
+                                        ),
+                                    })
                                 })
                                 .collect::<Vec<AnyElement>>()
                         })
@@ -4501,6 +4585,74 @@ impl Pickers {
             .into_any_element()
     }
 
+    fn render_provider_header(
+        &mut self,
+        ix: usize,
+        header: &ProviderHeader,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let mut el = div()
+            .id(("model-provider", ix))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(popover::MENU_ITEM_RADIUS))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .cursor_pointer();
+        if ix == self.active {
+            el = el.bg(crate::theme::ink(0.05));
+        }
+        let el = el
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered && this.active != ix {
+                    this.active = ix;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.activate_model_index(ix, cx);
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(header.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(header.count.to_string())),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(if header.collapsed {
+                            crate::icons::ALT_ARROW_RIGHT
+                        } else {
+                            crate::icons::ALT_ARROW_DOWN
+                        })
+                        .size(px(13.0))
+                        .text_color(theme.text_muted),
+                    ),
+            );
+        div().pb(px(2.0)).child(el).into_any_element()
+    }
+
     /// One model row for the virtualized list. `ix` is the row's GLOBAL index
     /// (⌘N chips, hover-cursor, and activation all key on it). The 2px
     /// inter-row gap is baked into each item's bottom padding so every item
@@ -4508,6 +4660,8 @@ impl Pickers {
     fn render_model_row(
         &mut self,
         ix: usize,
+        ordinal: usize,
+        under_header: bool,
         row: &ModelRowData,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4536,6 +4690,7 @@ impl Pickers {
             .model
             .description
             .as_deref()
+            .filter(|_| !under_header)
             .map(str::trim)
             .filter(|d| {
                 row.ambiguous && !d.is_empty() && !d.eq_ignore_ascii_case(harness_name.as_ref())
@@ -4666,8 +4821,8 @@ impl Pickers {
                 this.activate_model_index(ix, cx);
             }))
             .child(body);
-        if ix < 9 {
-            el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ix + 1)));
+        if ordinal < 9 {
+            el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ordinal + 1)));
         }
         // A model configured in place opens its settings card on hover.
         // The title picker has no settings, so no card either.
@@ -4923,7 +5078,7 @@ impl Pickers {
     /// configured in place.
     fn card_row(&self, cx: &App) -> Option<ModelRowData> {
         self.config_row
-            .and_then(|ix| self.model_rows(cx).get(ix).cloned())
+            .and_then(|ix| self.model_rows(cx).get(ix)?.model_row().cloned())
             .filter(|row| {
                 self.title.is_none() && !row.selected_only && configured_in_place(&row.model)
             })
@@ -5756,6 +5911,88 @@ fn scoped_model_rows<'a>(
     }
 }
 
+fn flat_model_rows(rows: Vec<ModelRowData>) -> Vec<ModelListRow> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(ordinal, row)| ModelListRow::Model {
+            row,
+            ordinal,
+            under_header: false,
+        })
+        .collect()
+}
+
+fn group_by_provider(
+    rows: Vec<ModelRowData>,
+    is_pinned: impl Fn(&ModelRowData) -> bool,
+    is_collapsed: impl Fn(&str) -> bool,
+) -> Vec<ModelListRow> {
+    struct Group {
+        id: String,
+        name: SharedString,
+        rows: Vec<ModelRowData>,
+    }
+    let mut pinned = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
+    let mut group_at: HashMap<String, usize> = HashMap::new();
+    for row in rows {
+        let provider = row.model.id.split_once('/').map(|(provider, _)| provider);
+        let Some(provider) = provider.filter(|_| !is_pinned(&row)) else {
+            pinned.push(row);
+            continue;
+        };
+        let at = *group_at.entry(provider.to_owned()).or_insert_with(|| {
+            let name = row
+                .model
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(provider);
+            groups.push(Group {
+                id: provider.to_owned(),
+                name: SharedString::from(name.to_owned()),
+                rows: Vec::new(),
+            });
+            groups.len() - 1
+        });
+        groups[at].rows.push(row);
+    }
+    if groups.len() < 2 {
+        return flat_model_rows(
+            pinned
+                .into_iter()
+                .chain(groups.into_iter().flat_map(|group| group.rows))
+                .collect(),
+        );
+    }
+    let mut out = flat_model_rows(pinned);
+    let mut ordinal = out.len();
+    for group in groups {
+        let collapsed = is_collapsed(&group.id);
+        let harness = group.rows[0].harness;
+        out.push(ModelListRow::Provider(ProviderHeader {
+            harness,
+            id: group.id,
+            name: group.name,
+            count: group.rows.len(),
+            collapsed,
+        }));
+        if collapsed {
+            continue;
+        }
+        for row in group.rows {
+            out.push(ModelListRow::Model {
+                row,
+                ordinal,
+                under_header: true,
+            });
+            ordinal += 1;
+        }
+    }
+    out
+}
+
 /// Centered muted note filling an empty model list ("No models found").
 fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
     div()
@@ -6389,8 +6626,9 @@ mod tests {
                     })
                 );
                 let rows = pickers.model_rows(cx);
-                assert_eq!(rows[0].model.id, "saved-model");
-                assert!(rows[0].selected_only);
+                let row = rows[0].model_row().unwrap();
+                assert_eq!(row.model.id, "saved-model");
+                assert!(row.selected_only);
                 assert_eq!(pickers.selected_model_index(cx), 0);
                 assert_eq!(pickers.models[&HarnessId::Codex].ready().unwrap().len(), 1);
                 pickers.activate_model_index(0, cx);
@@ -6400,7 +6638,7 @@ mod tests {
                 pickers.config.model = Some("fresh-default".into());
                 let rows = pickers.model_rows(cx);
                 assert_eq!(rows.len(), 1);
-                assert!(!rows[0].selected_only);
+                assert!(!rows[0].model_row().unwrap().selected_only);
                 assert_eq!(
                     pickers.selected_model_label(cx).as_deref(),
                     Some("Fresh default")
@@ -6508,7 +6746,7 @@ mod tests {
                 pickers.model_rail = ModelRail::Favorites;
                 let rows = pickers.model_rows(cx);
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].harness, HarnessId::Codex);
+                assert_eq!(rows[0].model_row().unwrap().harness, HarnessId::Codex);
                 pickers.activate_model_index(0, cx);
                 pickers.pick_reasoning(ReasoningLevel::Low, cx);
                 let create = state.read(cx).unsaved_side_chat_create("side").unwrap();
@@ -7717,8 +7955,10 @@ mod tests {
                 window.focus(&pickers.focus, cx);
                 // Only Fusion is configured in place.
                 let rows = pickers.model_rows(cx);
-                let configured: Vec<_> =
-                    rows.iter().map(|r| configured_in_place(&r.model)).collect();
+                let configured: Vec<_> = rows
+                    .iter()
+                    .map(|r| configured_in_place(&r.model_row().unwrap().model))
+                    .collect();
                 assert_eq!(configured, [false, true, false]);
 
                 pickers.open_config(1, cx);
@@ -9168,6 +9408,71 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.id, "glm-5.2-b");
+    }
+
+    fn provider_row(id: &str, provider_name: &str) -> ModelRowData {
+        ModelRowData {
+            harness: HarnessId::Opencode,
+            harness_name: "OpenCode".into(),
+            selected_only: false,
+            ambiguous: false,
+            model: Model {
+                description: Some(provider_name.into()),
+                ..bare_model(id, id)
+            },
+        }
+    }
+
+    fn drawn(rows: &[ModelListRow]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row {
+                ModelListRow::Provider(header) => format!(
+                    "#{} {} ({}){}",
+                    header.id,
+                    header.name,
+                    header.count,
+                    if header.collapsed { " -" } else { "" }
+                ),
+                ModelListRow::Model { row, ordinal, .. } => format!("{ordinal} {}", row.model.id),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn provider_groups_pin_stars_fold_and_number_models_only() {
+        let rows = vec![
+            provider_row("openai/gpt-mini", "OpenAI"),
+            provider_row("anthropic/haiku", "Anthropic"),
+            provider_row("anthropic/opus", "Anthropic"),
+            provider_row("openai/gpt-5", "OpenAI"),
+        ];
+        let grouped = group_by_provider(
+            rows,
+            |row| row.model.id == "openai/gpt-mini",
+            |provider| provider == "anthropic",
+        );
+        assert_eq!(
+            drawn(&grouped),
+            [
+                "0 openai/gpt-mini",
+                "#anthropic Anthropic (2) -",
+                "#openai OpenAI (1)",
+                "1 openai/gpt-5",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_provider_gets_no_header() {
+        let rows = vec![
+            provider_row("opencode/big-pickle", "OpenCode Zen"),
+            provider_row("opencode/muse", "OpenCode Zen"),
+        ];
+        let grouped = group_by_provider(rows, |_| false, |_| true);
+        assert_eq!(
+            drawn(&grouped),
+            ["0 opencode/big-pickle", "1 opencode/muse"]
+        );
     }
 
     /// Rows show descriptions only to tell same-named models apart.
