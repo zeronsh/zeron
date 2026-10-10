@@ -1820,6 +1820,7 @@ struct OrgGateUi {
 /// read-only transcript entity whose drop tears the view down.
 struct SubagentTab {
     doc_id: String,
+    harness: Option<zeron_proto::HarnessId>,
     title: SharedString,
     transcript: Entity<Transcript>,
     /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
@@ -4080,6 +4081,29 @@ impl Shell {
         }
         self.subagent_seq += 1;
         let id = self.subagent_seq;
+        let harness = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
+            .or_else(|| {
+                self.side_chats.values().find_map(|tab| {
+                    tab.state
+                        .read(cx)
+                        .selected_chat_row()
+                        .filter(|chat| chat.id == chat_id)
+                        .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
+                })
+            })
+            .or_else(|| {
+                // Nested spawn chips identify their parent subagent doc.
+                self.subagent_tabs
+                    .values()
+                    .find(|tab| tab.doc_id == chat_id)
+                    .and_then(|tab| tab.harness)
+            });
         // A live subagent follows its streaming end (main-transcript feel);
         // a frozen one reads top-down.
         let transcript =
@@ -4100,6 +4124,7 @@ impl Shell {
             id,
             SubagentTab {
                 doc_id,
+                harness,
                 title: title.into(),
                 transcript,
                 _fetch: fetch,
@@ -11815,6 +11840,19 @@ impl Shell {
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
+            let harness_icon = match surface {
+                RightSurface::SideChat(id) => self.side_chats.get(&id).and_then(|tab| {
+                    tab.state
+                        .read(cx)
+                        .selected_chat_row()
+                        .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
+                }),
+                RightSurface::Subagent(id) => {
+                    self.subagent_tabs.get(&id).and_then(|tab| tab.harness)
+                }
+                _ => None,
+            }
+            .map(crate::pickers::harness_brand_icon);
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(id) => self
@@ -11834,10 +11872,8 @@ impl Shell {
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Picker => icons::PLUS,
             };
-            // A live subagent tab swaps its icon for the mini working
-            // spinner (the history fetch button's in-flight recipe) — the
-            // doc's streaming tail entry IS the run's liveness, so the swap
-            // settles by itself when the subagent finishes.
+            // Working chats and subagents swap their harness icon for the
+            // mini spinner; subagent liveness follows the doc's streaming tail.
             let browser_favicon = match surface {
                 RightSurface::Browser(id) => self
                     .browsers
@@ -12009,9 +12045,13 @@ impl Shell {
                             .when(!is_active, |icon| icon.opacity(0.78))
                             .into_any_element()
                         } else {
+                            let (icon_path, brand_color) =
+                                harness_icon.unwrap_or((icon_path, None));
                             icon(icon_path)
                                 .size(px(12.0))
-                                .text_color(if is_active {
+                                .text_color(if let Some(color) = brand_color {
+                                    color.opacity(if is_active { 1.0 } else { 0.7 })
+                                } else if is_active {
                                     theme.text_muted
                                 } else {
                                     theme.text_muted.opacity(0.7)
