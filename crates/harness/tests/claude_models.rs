@@ -82,3 +82,24 @@ async fn failed_or_logged_out_initialize_falls_back_to_curated_catalog() {
         assert!(harness.model_catalog(false).await.is_err());
     }
 }
+
+#[tokio::test]
+async fn command_probe_ends_input_instead_of_waiting_out_the_kill_grace() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude");
+    std::fs::write(&script, include_str!("fixtures/fake-claude-lingering.py")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = ClaudeHarness::new().with_executable(script).with_graces(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(10),
+    );
+    let started = std::time::Instant::now();
+    let commands = harness.commands_for(dir.path()).await.unwrap();
+    assert_eq!(commands[0].name, "compact");
+    // A probe that only signals the CLI waits out the whole grace.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}

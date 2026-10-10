@@ -377,6 +377,10 @@ impl ClaudeHarness {
             ))
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        // End of input is how the CLI leaves stream-json mode. Signalled with
+        // stdin still open it lingers for seconds, and every slash-menu open
+        // waits on that exit.
+        drop(stdin);
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
