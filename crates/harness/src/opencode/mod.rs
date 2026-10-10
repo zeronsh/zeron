@@ -35,7 +35,10 @@
 //!   204); the END of the turn is the terminal execution/status frame for
 //!   THAT session — exactly what the desktop's working-predicate keys on.
 //!   Busy is re-asserted at the top of every agent-loop iteration, so idle
-//!   after busy is authoritative, not a lull.
+//!   after busy is authoritative, not a lull. A busy with NO turn in flight
+//!   is a WAKE execution: the server re-invoked the session on its own (a
+//!   background subagent finished and its completion notice woke the
+//!   parent) — it arms a turn so the wake's idle still settles with a Done.
 //! - reasoning streams as reasoning parts on both wires →
 //!   [`AgentEvent::ReasoningDelta`], the thinking feed.
 //!
@@ -2273,6 +2276,7 @@ async fn run_session(session: Session) {
                             turn: &mut turn,
                             pending_usage: &mut pending_usage,
                             context_windows: &context_windows,
+                            stall,
                         }).await;
                         match outcome {
                             BusOutcome::Continue => maybe_preempt!(),
@@ -2768,6 +2772,9 @@ struct BusCtx<'a> {
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
     context_windows: &'a HashMap<String, u64>,
+    /// The run's startup stall bound, for re-arming a SELF-CONTINUED wake
+    /// turn (one the server starts with no prompt from us).
+    stall: Option<Duration>,
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2802,6 +2809,23 @@ async fn settle_children(
     }
 }
 
+/// A child session's execution terminal, as its chip's `Done` status. The 2.x
+/// normalize path maps execution terminals onto these kinds; 1.x emits them
+/// directly.
+fn child_terminal(kind: &str, props: &Value) -> Option<DoneStatus> {
+    match kind {
+        "session.idle" => Some(DoneStatus::Completed),
+        "session.interrupted" => Some(DoneStatus::Interrupted),
+        "session.error" => Some(DoneStatus::Errored),
+        "session.status"
+            if props.pointer("/status/type").and_then(Value::as_str) == Some("idle") =>
+        {
+            Some(DoneStatus::Completed)
+        }
+        _ => None,
+    }
+}
+
 /// Route one `/global/event` payload. The envelope is
 /// `{directory, payload: {type, properties}}`; `sync` mirror frames drop.
 async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
@@ -2819,6 +2843,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         turn,
         pending_usage,
         context_windows,
+        stall,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
     // /event feed (tests) delivers the payload directly.
@@ -2873,11 +2898,51 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         turn.note_activity();
     }
 
+    // A child session's own execution terminal settles its chip. It is the
+    // ONLY settle a backgrounded spawn ever gets: its `task` part completed
+    // at spawn time, so its content kept the child live instead.
+    if !is_ours
+        && let Some(child_id) = event_session
+        && let Some(status) = child_terminal(kind, props)
+        && let Some(child) = children.get_mut(child_id)
+        && !child.done
+    {
+        child.done = true;
+        let parent = child.parent_tool_use_id.clone();
+        return forward(
+            event_tx,
+            vec![tag(
+                &parent,
+                AgentEvent::Done {
+                    status,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            )],
+        )
+        .await;
+    }
+
     match kind {
         "session.status" if is_ours => {
             let status = props.get("status").unwrap_or(&Value::Null);
             match status.get("type").and_then(Value::as_str) {
-                Some("busy") => turn.idle_ready = true,
+                Some("busy") => {
+                    // A busy on OUR session with no turn in flight is a
+                    // WAKE execution: the server re-invoked the session on
+                    // its own (a background subagent finished and its
+                    // completion notice woke the parent). Re-arm the turn so
+                    // its terminal idle still settles with
+                    // AssistantMessageCompleted + Done — the engine resumed
+                    // the parked transcript on this turn's output and, for
+                    // this deterministic-turn-end driver, keeps no quiesce
+                    // watchdog to rescue a swallowed Done.
+                    if !turn.active {
+                        *turn = TurnState::begin(stall);
+                    }
+                    turn.idle_ready = true;
+                }
                 Some("retry") => {
                     turn.idle_ready = true;
                     let attempt = status.get("attempt").and_then(Value::as_u64).unwrap_or(0);
@@ -3043,8 +3108,13 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 );
                 mark_content(turn, &events);
                 let mut settle: Vec<AgentEvent> = Vec::new();
-                // A completed `task` part settles its child chip.
-                if let Some((child_session, failed)) = task_completion(part) {
+                // A completed `task` part settles its child chip — unless it
+                // only BACKGROUNDED the child (opencode answers the spawn
+                // immediately), in which case the child stays live until its
+                // own execution terminal settles the chip.
+                if let Some((child_session, failed)) = task_completion(part)
+                    && !task_backgrounded(part)
+                {
                     let by_meta = children
                         .get_mut(&child_session)
                         .map(|c| (child_session.clone(), c));
@@ -3351,6 +3421,32 @@ fn task_completion(part: &Value) -> Option<(String, bool)> {
         .unwrap_or_default();
     Some((child.to_owned(), status == "error"))
 }
+
+/// True when a completed `task` part only BACKGROUNDED its subagent. opencode
+/// answers `background: true` immediately: the tool part completes with
+/// `metadata.status == "running"` ("The subagent is working in the background
+/// (sessionID: …)") while the child session keeps working. That is not the
+/// child's end — its own execution terminal is.
+fn task_backgrounded(part: &Value) -> bool {
+    let state = part.get("state").unwrap_or(&Value::Null);
+    if state
+        .get("metadata")
+        .and_then(|m| m.get("status"))
+        .and_then(Value::as_str)
+        == Some("running")
+    {
+        return true;
+    }
+    // Frames from wires/versions that omit the metadata: the background
+    // answer's first line is a stable, tool-owned string.
+    state
+        .get("output")
+        .and_then(Value::as_str)
+        .is_some_and(|output| output.starts_with(BACKGROUND_SPAWN_OUTPUT))
+}
+
+/// First line of opencode's immediate answer to a `background: true` spawn.
+const BACKGROUND_SPAWN_OUTPUT: &str = "The subagent is working in the background";
 
 /// Bind a fresh child session to a spawn chip: description match against the
 /// child title (`"{description} (@{agent} subagent)"`), else FIFO.
@@ -4040,12 +4136,14 @@ fn normalize_v2_frame_with_session_models(
                         .join("\n")
                 })
                 .unwrap_or_default();
-            vec![v2_tool_part(
-                &data,
-                id,
-                &name,
-                &json!({ "status": "completed", "output": output }),
-            )]
+            let mut state = json!({ "status": "completed", "output": output });
+            // The tool's own metadata carries lifecycle nuance the 1.x part
+            // shape has no home for: a `background: true` subagent answers
+            // `{status: "running"}` from an already-completed task part.
+            if let Some(metadata) = data.get("metadata").filter(|m| m.is_object()) {
+                state["metadata"] = metadata.clone();
+            }
+            vec![v2_tool_part(&data, id, &name, &state)]
         }
         "session.tool.failed" | "session.tool.error" => {
             let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -4057,12 +4155,11 @@ fn normalize_v2_frame_with_session_models(
                 .map(str::to_owned)
                 .or_else(|| error.as_str().map(str::to_owned))
                 .unwrap_or_default();
-            vec![v2_tool_part(
-                &data,
-                id,
-                &name,
-                &json!({ "status": "error", "error": message }),
-            )]
+            let mut state = json!({ "status": "error", "error": message });
+            if let Some(metadata) = data.get("metadata").filter(|m| m.is_object()) {
+                state["metadata"] = metadata.clone();
+            }
+            vec![v2_tool_part(&data, id, &name, &state)]
         }
         "session.step.ended" => {
             let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);

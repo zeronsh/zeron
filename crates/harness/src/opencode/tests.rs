@@ -1256,6 +1256,43 @@ fn task_spawn_registers_child_by_metadata_and_completion_settles() {
 }
 
 #[test]
+fn backgrounded_task_completion_is_not_the_childs_end() {
+    let part = |state: Value| {
+        json!({
+            "id": "prt_task", "messageID": "msg_a", "sessionID": "ses_parent",
+            "type": "tool", "tool": "task", "state": state,
+        })
+    };
+    // The 2.x background answer: the part is completed, the child is not.
+    let backgrounded = part(json!({
+        "status": "completed",
+        "output": "The subagent is working in the background (sessionID: ses_child). You will be notified automatically when it finishes.",
+        "metadata": { "sessionID": "ses_child", "status": "running" },
+    }));
+    assert!(task_backgrounded(&backgrounded));
+    // Frames without metadata fall back to the tool-owned first line.
+    let no_metadata = part(json!({
+        "status": "completed",
+        "output": "The subagent is working in the background (sessionID: ses_child). You will be notified automatically when it finishes.",
+    }));
+    assert!(task_backgrounded(&no_metadata));
+    // A real completion is not a backgrounding.
+    let completed = part(json!({
+        "status": "completed",
+        "output": "<task_result>done</task_result>",
+        "metadata": { "sessionID": "ses_child", "status": "completed" },
+    }));
+    assert!(!task_backgrounded(&completed));
+    // A foreground spawn still running is not one either.
+    let running = part(json!({
+        "status": "running",
+        "input": { "description": "Scan crates" },
+        "metadata": { "sessionId": "ses_child" },
+    }));
+    assert!(!task_backgrounded(&running));
+}
+
+#[test]
 fn child_binding_falls_back_to_title_match() {
     let mut children = HashMap::new();
     let mut pending = VecDeque::new();
@@ -1515,6 +1552,24 @@ fn v2_frames_normalize_to_v1_payloads() {
             "sessionID":"ses_1","messageID":"msg_a","id":"ses_1:msg_a:call_1","callID":"ses_1:msg_a:call_1",
             "type":"tool","tool":"read",
             "state":{"status":"running","input":{"path":"/tmp/x"}}}}})]
+    );
+    // The tool's own metadata survives normalization: a `background: true`
+    // subagent answers `{status: "running"}` from an already-completed task
+    // part, and the driver keys the chip's lifecycle on it.
+    let out = normalize_v2_frame(
+        json!({"id":"evt_8b","type":"session.tool.success","data":{
+            "sessionID":"ses_1","assistantMessageID":"msg_a","id":"call_1",
+            "content":[{"text":"working in the background"}],
+            "metadata":{"sessionID":"ses_child","status":"running"}}}),
+        &mut tools,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"message.part.updated","properties":{"part":{
+            "sessionID":"ses_1","messageID":"msg_a","id":"ses_1:msg_a:call_1","callID":"ses_1:msg_a:call_1",
+            "type":"tool","tool":"read",
+            "state":{"status":"completed","output":"working in the background",
+                     "metadata":{"sessionID":"ses_child","status":"running"}}}}})]
     );
     // A step's own usage reaches the engine as an assistant message.updated.
     let out = normalize_v2_frame(
@@ -2496,6 +2551,154 @@ async fn v2_spawn_names_bind_child_traffic_to_the_parent_chip() {
         );
         assert!(child_events.iter().any(|(id, event)| id == &calls[0].0 && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "child answer")), "{name}: {child_events:?}");
     }
+}
+
+/// A `background: true` spawn completes its task part immediately, with the
+/// child still working. The chip must stay live and stream the child's
+/// traffic until the CHILD's own execution terminal (regression: the old
+/// done-at-spawn behavior settled the chip before any child event).
+#[tokio::test]
+async fn v2_backgrounded_spawn_streams_until_the_child_terminal() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID":"fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({"sessionID":"fixture","assistantMessageID":"parent-message"}),
+    );
+    wire.v2("session.tool.input.started", json!({"sessionID":"fixture","assistantMessageID":"parent-message","id":"spawn","name":"task"}));
+    wire.v2("session.tool.called", json!({"sessionID":"fixture","assistantMessageID":"parent-message","id":"spawn","input":{"description":"Viz probe","prompt":"run","background":true}}));
+    wire.v2(
+        "session.created",
+        json!({"sessionID":"child","parentID":"fixture","title":"Viz probe"}),
+    );
+    // The background answer lands: part completed, child still running.
+    wire.v2("session.tool.success", json!({
+        "sessionID":"fixture","assistantMessageID":"parent-message","id":"spawn",
+        "content":[{"text":"The subagent is working in the background (sessionID: child). You will be notified automatically when it finishes."}],
+        "metadata":{"sessionID":"child","status":"running"},
+    }));
+    // The child keeps streaming after its spawn part already resolved.
+    wire.v2(
+        "session.step.started",
+        json!({"sessionID":"child","assistantMessageID":"child-message"}),
+    );
+    wire.v2("session.text.delta", json!({"sessionID":"child","assistantMessageID":"child-message","ordinal":0,"delta":"child answer"}));
+    // The child's OWN terminal is the settle.
+    wire.v2("session.execution.succeeded", json!({"sessionID":"child"}));
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID":"fixture"}),
+    );
+
+    let mut calls = Vec::new();
+    let mut child_events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = wire.events.recv().await {
+            match event.unwrap() {
+                AgentEvent::ToolCall { id, call } => calls.push((id, call)),
+                AgentEvent::Subagent {
+                    parent_tool_use_id,
+                    event,
+                } => child_events.push((parent_tool_use_id, event)),
+                AgentEvent::Done { status, .. } => {
+                    assert_eq!(status, DoneStatus::Completed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(&calls[0].1, ToolCall::Unknown { name, .. } if name == "Agent: Viz probe"));
+    let text_at = child_events.iter().position(|(_, event)| {
+        matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "child answer")
+    });
+    let done_at = child_events.iter().position(|(_, event)| {
+        matches!(
+            event.as_ref(),
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )
+    });
+    let (text_at, done_at) = (
+        text_at.expect("child text streamed"),
+        done_at.expect("child terminal settled the chip"),
+    );
+    assert!(
+        text_at < done_at,
+        "the chip settled before the child's terminal: {child_events:?}"
+    );
+    assert_eq!(
+        child_events
+            .iter()
+            .filter(|(_, e)| matches!(e.as_ref(), AgentEvent::Done { .. }))
+            .count(),
+        1,
+        "exactly one settle: {child_events:?}"
+    );
+    assert!(child_events.iter().all(|(id, _)| id == &calls[0].0));
+}
+
+/// A background subagent's completion notice re-invokes the parent
+/// server-side: an execution starts with NO prompt from us (a wake turn).
+/// Its busy must re-arm the settled turn so the wake's own terminal idle
+/// still settles with a second Done — the engine resumed the parked session
+/// on that output and, since this driver reports a deterministic turn end,
+/// keeps no quiesce watchdog to rescue a swallowed Done. Regression: "after
+/// the subagent finishes the chat keeps pondering".
+#[tokio::test]
+async fn v2_wake_execution_without_a_prompt_settles_with_its_own_done() {
+    let mut wire = TurnWire::start_config(
+        false,
+        true,
+        true,
+        None,
+        "2.0.3",
+        json!({ "keepSteering": true }),
+        false,
+    )
+    .await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    // Turn 1: the prompted turn settles normally.
+    wire.v2("session.execution.started", json!({"sessionID":"fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({"sessionID":"fixture","assistantMessageID":"parent-message"}),
+    );
+    wire.v2("session.text.delta", json!({"sessionID":"fixture","assistantMessageID":"parent-message","ordinal":0,"delta":"Launched it."}));
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID":"fixture"}),
+    );
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(text, "Launched it.");
+    assert!(
+        !wire.run.is_finished(),
+        "the mailbox stays alive between turns"
+    );
+
+    // The child finishes and opencode wakes the parent on its own: busy with
+    // no prompt in flight. The wake turn must settle with its own Done.
+    wire.v2("session.execution.started", json!({"sessionID":"fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({"sessionID":"fixture","assistantMessageID":"wake-message"}),
+    );
+    wire.v2("session.text.delta", json!({"sessionID":"fixture","assistantMessageID":"wake-message","ordinal":0,"delta":"The background subagent finished."}));
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID":"fixture"}),
+    );
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(text, "The background subagent finished.");
 }
 
 #[test]
