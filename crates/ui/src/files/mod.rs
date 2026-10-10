@@ -1269,6 +1269,20 @@ impl FilesSurface {
                     }),
                 ),
             )
+            .child(
+                toolbar_button("files-refresh", "Refresh files")
+                    .debug_selector(|| "files-refresh".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.refresh(cx);
+                        this.reconcile_open_documents(cx);
+                    }))
+                    .child(
+                        crate::icons::icon(crate::icons::REFRESH)
+                            .size(px(crate::surface_chrome::ICON_SIZE))
+                            .text_color(theme.text_muted),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -1323,6 +1337,18 @@ mod explorer_tests {
         let ignored = cx.debug_bounds("files-toggle-ignored").unwrap().center();
         cx.simulate_click(ignored, Modifiers::default());
         assert_eq!(*show_all.borrow(), Some(true));
+
+        // The manual refresh button lives in the same band; clicking it
+        // attempts a reload even without a workspace context.
+        let refresh = cx.debug_bounds("files-refresh").unwrap();
+        assert!(refresh.top() >= header.top() && refresh.bottom() <= header.bottom());
+        cx.simulate_click(refresh.center(), Modifiers::default());
+        files.read_with(cx, |files, _| {
+            assert_eq!(
+                files.error.as_deref(),
+                Some("No workspace available for this chat.")
+            );
+        });
 
         // Escape clears the filter and hands focus back to the tree.
         cx.update(|window, cx| window.focus(&files.read(cx).search.focus_handle(cx), cx));
