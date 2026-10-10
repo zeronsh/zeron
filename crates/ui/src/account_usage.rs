@@ -376,7 +376,7 @@ impl AccountUsage {
                             account
                                 .usage_windows
                                 .iter()
-                                .take(2)
+                                .take(accounts::MAX_USAGE_METERS)
                                 .map(|window| render_usage_meter(window, theme)),
                         ),
                     )

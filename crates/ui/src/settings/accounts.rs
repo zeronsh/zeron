@@ -68,6 +68,8 @@ const USAGE_BAR_WIDTH: f32 = 88.0;
 const USAGE_PERCENT_WIDTH: f32 = 34.0;
 const USAGE_COLUMN_WIDTH: f32 = USAGE_LABEL_WIDTH + USAGE_BAR_WIDTH + USAGE_PERCENT_WIDTH + 16.0;
 const ACCOUNT_ACTION_WIDTH: f32 = 112.0;
+/// Meters per account row: session, week, and one per-model weekly cap.
+pub(crate) const MAX_USAGE_METERS: usize = 3;
 
 pub fn usage_color(level: UsageLevel, theme: &Theme) -> Hsla {
     match level {
@@ -1213,7 +1215,7 @@ impl AccountsPage {
                     account
                         .usage_windows
                         .iter()
-                        .take(2)
+                        .take(MAX_USAGE_METERS)
                         .map(|window| render_usage_meter(window, theme)),
                 )
                 .into_any_element()
