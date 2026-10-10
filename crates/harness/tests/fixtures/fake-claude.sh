@@ -28,6 +28,50 @@ uuid_of() { printf '%s\n' "$1" | sed 's/.*"uuid":"\([^"]*\)".*/\1/'; }
 
 case "$first" in
 
+*scenario:native-fork-*)
+  # Native UUIDs must follow the authoritative lifecycle end, never a result
+  # held for another message or an interrupted reply.
+  fid=$(uuid_of "$first")
+  case "$first" in
+    *native-fork-deferred*) state=queued ;;
+    *) state=started ;;
+  esac
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"$state\"}"
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-native"}'
+  emit '{"type":"assistant","uuid":"original-native-uuid","message":{"content":[{"type":"text","text":"original"}]}}'
+  case "$first" in
+    *native-fork-deferred*)
+      emit '{"type":"result","subtype":"success","result":"original","session_id":"sess-native"}'
+      emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"cancelled\"}"
+      ;;
+    *)
+      read -r steer || exit 1
+      sid=$(uuid_of "$steer")
+      emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"queued\"}"
+      emit '{"type":"result","subtype":"success","result":"original","usage":{"input_tokens":7,"output_tokens":1},"session_id":"sess-native"}'
+      emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"completed\"}"
+      case "$first" in
+        *native-fork-superseded*)
+          emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"started\"}"
+          emit '{"type":"assistant","uuid":"replacement-native-uuid","message":{"content":[{"type":"text","text":"replacement"}]}}'
+          emit '{"type":"result","subtype":"success","result":"replacement","session_id":"sess-native"}'
+          emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"completed\"}"
+          ;;
+        *native-fork-cancelled*)
+          emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"cancelled\"}"
+          ;;
+        *native-fork-stopped*)
+          read -r stop || exit 1
+          rid=$(printf '%s\n' "$stop" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+          emit "{\"type\":\"control_response\",\"response\":{\"request_id\":\"$rid\"}}"
+          emit '{"type":"assistant","uuid":"stopped-native-uuid","message":{"content":[{"type":"text","text":"stopped"}]}}'
+          emit '{"type":"result","subtype":"success","result":"stopped","session_id":"sess-native"}'
+          ;;
+      esac
+      ;;
+  esac
+  ;;
+
 *scenario:command-echo*)
   content=$(printf '%s\n' "$first" | sed 's/.*"content":"\([^"]*\)".*/\1/')
   emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$content\"}}}"

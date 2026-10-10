@@ -45,6 +45,7 @@
 
 pub mod catalog;
 mod discovery;
+mod fork;
 mod normalize;
 mod wire;
 
@@ -553,6 +554,20 @@ impl Harness for ClaudeHarness {
             .await
     }
 
+    async fn native_fork_support(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> zeron_proto::NativeForkAvailability {
+        fork::support().await
+    }
+    async fn fork_native(
+        &self,
+        point: &zeron_proto::NativeForkPoint,
+        controls: crate::NativeForkControls,
+    ) -> Result<zeron_proto::NativeForkResult, crate::NativeForkError> {
+        fork::fork(point, controls).await
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -583,6 +598,29 @@ impl ClaudeHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting {
+            let session = request
+                .resume
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    HarnessError::Protocol(
+                        "Native fork requires its existing Claude session".into(),
+                    )
+                })?;
+            fork::helper(
+                serde_json::json!({"mode":"check","sourceSessionId":session,"dir":request.cwd}),
+                crate::NativeForkControls {
+                    execution_lease: controls.execution_lease.clone(),
+                    interrupt: controls.interrupt.clone(),
+                    timeout: Duration::from_secs(30),
+                    source_idle: true,
+                },
+            )
+            .await
+            .map_err(|e| HarnessError::Protocol(e.to_string()))?;
+        }
+
         let exe = self.resolve_executable()?;
         let mut cmd = self.build_command(&exe, &request);
         if title_only {
@@ -665,6 +703,9 @@ impl ClaudeHarness {
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
+            expected_resume: (request.resume_policy == zeron_proto::ResumePolicy::RequireExisting)
+                .then(|| request.resume.clone())
+                .flatten(),
             normalizer,
             title_only,
             child,
@@ -791,6 +832,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 }
 
 struct Session {
+    expected_resume: Option<String>,
     normalizer: Normalizer,
     title_only: bool,
     child: Child,
@@ -813,6 +855,7 @@ struct Session {
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        expected_resume,
         normalizer: mut norm,
         title_only,
         mut child,
@@ -873,6 +916,10 @@ async fn run_session(session: Session) {
     // starts its own turn, which ends with its own result; it is released
     // as the turn's end if that message is cancelled before it starts.
     let mut held_done: Option<AgentEvent> = None;
+    // A fork candidate belongs to the same result as its held Done. It must
+    // never escape while that result is only a boundary for pending input.
+    let mut held_fork_point: Option<(u64, AgentEvent)> = None;
+    let mut reply_generation = 0u64;
     // Last stdout activity, for the held result's settle fallback.
     let mut last_frame_at = tokio::time::Instant::now();
     let mut done_after_interrupt = false;
@@ -945,6 +992,7 @@ async fn run_session(session: Session) {
                     };
                     if taken_up {
                         held_done = None;
+                        held_fork_point = None;
                         active_since_stop = true;
                     }
                     if let Some(at) = confirmed
@@ -953,10 +1001,19 @@ async fn run_session(session: Session) {
                         for _ in 0..=at {
                             pending_steers.pop_front();
                             let (prev, next) = norm.rotate_for_steer();
+                            reply_generation += 1;
                             if event_tx.send(Ok(AgentEvent::Steered {
                                 assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                             })).await.is_err() { break 'main; }
                         }
+                    }
+                    if let Frame::System(init) = &frame
+                        && init.subtype == "init"
+                        && expected_resume.as_ref().is_some_and(|id| id != &init.session_id)
+                    {
+                        interrupt.cancel();
+                        let _ = event_tx.send(Ok(AgentEvent::Error { message: "Claude resumed an unexpected native session".into() })).await;
+                        break 'main;
                     }
                     // Every waiting message was cancelled before it started:
                     // the held result was the turn's real end after all.
@@ -964,6 +1021,12 @@ async fn run_session(session: Session) {
                         && !commands.waiting()
                         && let Some(done) = held_done.take()
                     {
+                        if !interrupted && stopping.is_none()
+                            && !send_native_fork_point(&event_tx, held_fork_point.take(), reply_generation).await
+                        {
+                            break 'main;
+                        }
+                        held_fork_point = None;
                         if event_tx.send(Ok(done)).await.is_err() {
                             break 'main;
                         }
@@ -985,7 +1048,12 @@ async fn run_session(session: Session) {
                         );
                         continue;
                     }
+                    let mut result_fork_point = None;
                     for ev in norm.normalize(frame, interrupted || stopping.is_some()) {
+                        if matches!(ev, AgentEvent::NativeForkReady { .. }) {
+                            result_fork_point = Some((reply_generation, ev));
+                            continue;
+                        }
                         match &ev {
                             AgentEvent::ToolCall { id, .. } => {
                                 open_tools.insert(id.clone());
@@ -1022,10 +1090,17 @@ async fn run_session(session: Session) {
                         }
                         if is_done && !interrupted && stopping.is_none() && boundary {
                             held_done = Some(ev);
+                            held_fork_point = result_fork_point.take();
                             continue;
                         }
                         if is_done {
                             held_done = None;
+                            held_fork_point = None;
+                            if matches!(&ev, AgentEvent::Done { status: DoneStatus::Completed, .. })
+                                && !send_native_fork_point(&event_tx, result_fork_point.take(), reply_generation).await
+                            {
+                                break 'main;
+                            }
                             // The stopped turn has ended; the runtime lives on.
                             if stopping.take().is_some() {
                                 stopped_end = None;
@@ -1107,6 +1182,7 @@ async fn run_session(session: Session) {
                 pending_steers.clear();
                 commands.cancel_waiting();
                 stopping = Some(id.clone());
+                held_fork_point = None;
                 stop_settle_at = None;
                 stop_done_at = None;
                 if stdin_tx.send(StdinMsg::Line(wire::stop_turn_request_line(&id))).is_err() {
@@ -1148,6 +1224,7 @@ async fn run_session(session: Session) {
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
+                held_fork_point = None;
                 // The runtime is going: so is everything it started.
                 #[cfg(unix)]
                 if let Some(pid) = child.id() {
@@ -1174,11 +1251,17 @@ async fn run_session(session: Session) {
                 commands.cancel_waiting();
                 while pending_steers.pop_front().is_some() {
                     let (prev, next) = norm.rotate_for_steer();
+                    reply_generation += 1;
                     if event_tx.send(Ok(AgentEvent::Steered {
                         assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                     })).await.is_err() { break 'main; }
                 }
                 let done = held_done.take().expect("guarded by if");
+                // Absorbed steers rotated the visible reply. A point captured
+                // before that rotation cannot be reassigned to the new reply.
+                if !send_native_fork_point(&event_tx, held_fork_point.take(), reply_generation).await {
+                    break 'main;
+                }
                 if event_tx.send(Ok(done)).await.is_err() {
                     break 'main;
                 }
@@ -1192,6 +1275,7 @@ async fn run_session(session: Session) {
     // A turn end still held when the CLI exited is the run's real end.
     if let Some(done) = held_done.take()
         && !event_tx.is_closed()
+        && (interrupted || send_native_fork_point(&event_tx, held_fork_point.take(), reply_generation).await)
         && event_tx.send(Ok(done)).await.is_ok()
     {
         any_done = true;
@@ -1226,6 +1310,21 @@ async fn run_session(session: Session) {
     if let Some(handle) = escalation {
         handle.abort();
     }
+}
+
+async fn send_native_fork_point(
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    point: Option<(u64, AgentEvent)>,
+    reply_generation: u64,
+) -> bool {
+    if let Some((generation, event)) = point {
+        // A cancelled or absorbed steer may already have closed this reply.
+        // Preserve its identity; never attach its UUID to a later segment.
+        if generation == reply_generation {
+            return event_tx.send(Ok(event)).await.is_ok();
+        }
+    }
+    true
 }
 
 /// How far the CLI has taken each stdin user message we wrote, by the uuid

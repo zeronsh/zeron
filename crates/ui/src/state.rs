@@ -4105,6 +4105,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }
     }
 
@@ -5515,6 +5516,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         let row = |id: &str| zeron_doc::QueuedMessage {
             id: id.into(),
@@ -5553,6 +5555,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.
@@ -6074,5 +6077,12 @@ impl AppState {
             checkout_id: Some(snapshot.checkout_id.clone()),
         };
         self.change_requests.store(key, snapshot);
+    }
+}
+
+#[cfg(feature = "native-forks-fixture")]
+impl AppState {
+    pub fn fixture_native_fork_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
+        self.attach_engine(handle, cx);
     }
 }

@@ -273,6 +273,7 @@ fn host_answers(edge: &MockEdge, host_doc: &LoroDoc) -> Option<String> {
         status: Some(zeron_doc::MessageStatus::Complete),
         continuation_of: None,
         duration_ms: None,
+        native_fork_point: None,
     };
     session
         .push_message(&entry(&message_id, MessageRole::User, "ios-live", &prompt))

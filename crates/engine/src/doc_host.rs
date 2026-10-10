@@ -861,6 +861,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
     }
 
@@ -5900,6 +5901,7 @@ impl DocHost {
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,
+            resume_policy: Default::default(),
             worktree: None,
         })
     }
@@ -6042,6 +6044,7 @@ mod transfer_progress_tests {
                     status: None,
                     continuation_of: None,
                     duration_ms: None,
+                    native_fork_point: None,
                 })
                 .unwrap();
         }

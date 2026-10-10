@@ -1090,6 +1090,7 @@ impl Tools {
                         .unwrap_or(SandboxLevel::WorkspaceWrite),
                     auto_approve: false,
                     resume: None,
+                    resume_policy: Default::default(),
                     attachments: Vec::new(),
                     worktree: None,
                 };

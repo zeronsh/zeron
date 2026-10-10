@@ -55,6 +55,8 @@ use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
 use zeron_syntax::LanguageId as Lang;
 
+mod native_forks;
+
 // ---------------------------------------------------------------------------
 // Constants (mugen ports)
 // ---------------------------------------------------------------------------
@@ -1716,6 +1718,7 @@ pub fn rows_for_entry(
                 let work_entry = SessionMessageEntry {
                     parts: work_parts,
                     duration_ms: None,
+                    native_fork_point: None,
                     continuation_of: None,
                     ..entry.clone()
                 };
@@ -3112,6 +3115,14 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
+    native_forks: HashMap<String, zeron_proto::NativeForkAvailability>,
+    native_fork_menu: crate::popover::Popup<native_forks::ForkMenu>,
+    native_fork_menu_focus: gpui::FocusHandle,
+    native_fork_key: String,
+    native_fork_availability_task: Option<Task<()>>,
+    native_fork_pending: HashSet<(String, String)>,
+    native_fork_errors: HashMap<(String, String), String>,
+    metadata_focus: HashMap<SharedString, (gpui::FocusHandle, Vec<Subscription>)>,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
@@ -3364,6 +3375,11 @@ enum BlobFetch {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    ForkMessage {
+        chat_id: String,
+        message_id: String,
+        destination: zeron_proto::NativeForkDestination,
+    },
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -3544,6 +3560,14 @@ impl Transcript {
         // wheel-up, and resticks/jumps exactly like the main transcript.
         let pinned = follow;
         let mut this = Self {
+            native_forks: HashMap::new(),
+            native_fork_menu: Default::default(),
+            native_fork_menu_focus: cx.focus_handle(),
+            native_fork_key: String::new(),
+            native_fork_availability_task: None,
+            native_fork_pending: HashSet::new(),
+            native_fork_errors: HashMap::new(),
+            metadata_focus: HashMap::new(),
             state,
             list,
             rows: Vec::new(),
@@ -4627,6 +4651,7 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        self.refresh_native_forks(cx);
         if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -4676,6 +4701,7 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
+            self.metadata_focus.clear();
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
             // exactly the chat the user is reopening.
@@ -7442,7 +7468,7 @@ impl Transcript {
         // entry's last row. Timestamp, copy action, and copied feedback only
         // flip visibility/content, so none of them shifts the virtualizer.
         // User entries align end (under the bubble), assistant entries start.
-        // Both read timestamp first, then the copy action.
+        // Timestamp first, followed by the compact fork/copy action group.
         let is_user_row = matches!(row.kind, RowKind::User { .. });
         let hovered = self
             .hovered_entry
@@ -7452,6 +7478,18 @@ impl Transcript {
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
+            let (focus, _) = self
+                .metadata_focus
+                .entry(row.entry_id.clone())
+                .or_insert_with(|| {
+                    let focus = cx.focus_handle();
+                    let enter = cx.on_focus_in(&focus, window, |_, _, cx| cx.notify());
+                    let leave = cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify());
+                    (focus, vec![enter, leave])
+                });
+            let focus = focus.clone();
+            let revealed = hovered || focus.contains_focused(window, cx);
+            let fork = self.native_fork_button(&row.entry_id, &theme, cx);
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.55))
@@ -7461,6 +7499,10 @@ impl Transcript {
                 let fade_key = format!("copy-message-hover-{entry_id}");
                 div()
                     .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .role(gpui::Role::Button)
+                    .aria_label("Copy message")
+                    .tab_index(0)
+                    .focus_visible(|s| s.border_1().border_color(theme.accent))
                     .size(px(Theme::SPACE_MD * 2.0))
                     .flex()
                     .items_center()
@@ -7494,7 +7536,13 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = metadata.child(timestamp).children(copy);
+            let actions = div()
+                .flex()
+                .items_center()
+                .gap(px(Theme::SPACE_XS))
+                .children(fork)
+                .children(copy);
+            let metadata = metadata.child(timestamp).child(actions);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))
@@ -7509,12 +7557,10 @@ impl Transcript {
                 // text's first-character x, user label's right edge on the
                 // bubble's right edge (user-reported 4px drift).
                 .when(is_user_row, |el| el.justify_end())
-                .when(hovered, |el| {
-                    el.child(motion::fade_quick(
-                        SharedString::from(format!("meta-{}", row.id)),
-                        metadata,
-                    ))
-                })
+                .id(SharedString::from(format!("metadata-{}", row.id)))
+                .track_focus(&focus)
+                .tab_index(-1)
+                .child(metadata.opacity(if revealed { 1.0 } else { 0.0 }))
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
@@ -8249,7 +8295,29 @@ impl Transcript {
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
                 if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
-                    let chat_id = self.chat_id.clone().unwrap_or_default();
+                    // A copied spawn still belongs to the source named by the
+                    // first following fork marker, even across several forks.
+                    let entry_id = self
+                        .rows
+                        .iter()
+                        .find(|r| &r.id == row_id)
+                        .map(|r| r.entry_id.as_ref());
+                    let entries = &self.state.read(cx).transcript;
+                    let owner = entry_id
+                        .and_then(|id| entries.iter().position(|e| e.id == id))
+                        .and_then(|index| {
+                            entries[index + 1..]
+                                .iter()
+                                .flat_map(|e| &e.parts)
+                                .find_map(|p| {
+                                    if let MessagePart::Fork { source_chat_id, .. } = p {
+                                        Some(source_chat_id.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                        });
+                    let chat_id = owner.or_else(|| self.chat_id.clone()).unwrap_or_default();
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
                         tool.subagent_status,
@@ -8927,9 +8995,22 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A quiet fork seam. The source gets its own constrained line so long
+fn fork_marker_labels(source_title: SharedString) -> (&'static str, Option<SharedString>) {
+    // Older native forks persisted an internal reply ID as their display title.
+    // Keep those existing markers consistent with newly created native forks.
+    if source_title.as_ref() == "Conversation"
+        || source_title.starts_with("Conversation through reply ")
+    {
+        ("Forked from conversation", None)
+    } else {
+        ("Forked from", Some(source_title))
+    }
+}
+
+/// A quiet fork seam. Named sources get a constrained second line so long
 /// titles cannot widen a narrow side-chat pane. No message metadata lane.
 fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
+    let (label, source_title) = fork_marker_labels(source_title);
     let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
     div()
         .py(px(14.0))
@@ -8952,21 +9033,23 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                         .flex_none()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.7))
-                        .child("Forked from"),
+                        .child(label),
                 )
                 .child(rule()),
         )
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .truncate()
-                .text_center()
-                .text_size(crate::typography::ui_rems(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted)
-                .child(source_title),
-        )
+        .when_some(source_title, |marker, source_title| {
+            marker.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_center()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(source_title),
+            )
+        })
         .into_any_element()
 }
 
@@ -9941,6 +10024,9 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
     });
     acc.push(pending as u8);
     acc.extend_from_slice(&entry.duration_ms.unwrap_or(0).to_le_bytes());
+    if let Some(point) = &entry.native_fork_point {
+        acc.extend_from_slice(&serde_json::to_vec(point).unwrap_or_default());
+    }
     for part in &entry.parts {
         acc.extend_from_slice(part.id().as_bytes());
         acc.extend_from_slice(&(part.byte_len() as u64).to_le_bytes());
@@ -11676,6 +11762,7 @@ mod tests {
             status: Some(status),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }
     }
 
@@ -15767,6 +15854,275 @@ mod tests {
     }
 
     #[test]
+    fn native_fork_eligibility_and_last_logical_row() {
+        use zeron_proto::HarnessId;
+        let mut entry = assistant(
+            "reply",
+            MessageStatus::Complete,
+            vec![text_part("p", "First paragraph.\n\nSecond paragraph.")],
+        );
+        for provider in [
+            HarnessId::Codex,
+            HarnessId::ClaudeCode,
+            HarnessId::Opencode,
+            HarnessId::Pi,
+        ] {
+            assert!(native_forks::eligible(&entry, provider, false));
+            assert!(!native_forks::eligible(&entry, provider, true));
+        }
+        assert!(!native_forks::eligible(&entry, HarnessId::Cursor, false));
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        assert!(rows.len() > 1);
+        assert_eq!(rows.iter().filter(|r| r.timestamp.is_some()).count(), 1);
+        entry.parts = vec![tool_part("tool", "pwd")];
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        assert_eq!(rows.iter().filter(|r| r.timestamp.is_some()).count(), 1);
+        assert!(rows.last().unwrap().copy_text.is_none());
+        entry.status = Some(MessageStatus::Streaming);
+        assert!(!native_forks::eligible(&entry, HarnessId::Codex, false));
+        entry.status = Some(MessageStatus::Aborted);
+        assert!(!native_forks::eligible(&entry, HarnessId::Codex, false));
+        entry.status = Some(MessageStatus::Complete);
+        entry.role = MessageRole::User;
+        assert!(!native_forks::eligible(&entry, HarnessId::Codex, false));
+    }
+
+    #[gpui::test]
+    fn native_fork_click_uses_emitting_transcript_and_dedupes(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| {
+                let mut view = Transcript::new(state, cx);
+                view.chat_id = Some("side-source".into());
+                view.native_forks.insert(
+                    "answer".into(),
+                    zeron_proto::NativeForkAvailability::available(),
+                );
+                view
+            })
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                captured.borrow_mut().push(event.clone())
+            })
+        });
+        struct ForkFixture(Entity<Transcript>);
+        impl Render for ForkFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                self.0.update(cx, |t, cx| {
+                    t.native_fork_button(&"answer".into(), &theme, cx).unwrap()
+                })
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            cx.observe(&transcript, |_, _, cx| cx.notify()).detach();
+            ForkFixture(transcript.clone())
+        });
+        cx.run_until_parked();
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        assert!(
+            events.borrow().is_empty(),
+            "Opening the menu must not create a fork"
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        }
+        assert_eq!(events.borrow().len(), 1);
+        assert!(
+            matches!(&events.borrow()[0], TranscriptEvent::ForkMessage {chat_id,message_id,destination: zeron_proto::NativeForkDestination::SideChat} if chat_id == "side-source" && message_id == "answer")
+        );
+        transcript.update(cx, |t, cx| {
+            t.native_fork_finished("side-source", "answer", None, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        // Keyboard activation opens the menu; a second Enter chooses a destination.
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(events.borrow().len(), 2);
+        transcript.update(cx, |t, cx| {
+            t.native_fork_finished("side-source", "answer", None, cx);
+            t.native_forks.insert(
+                "answer".into(),
+                zeron_proto::NativeForkAvailability::unavailable(
+                    "Provider fork contract has not been verified",
+                ),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        assert_eq!(
+            events.borrow().len(),
+            2,
+            "Unavailable actions must not emit requests"
+        );
+    }
+
+    #[gpui::test]
+    fn native_fork_menu_selects_main_and_dismisses_without_creating(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.selected_chat = Some("source".into());
+                state.chats = vec![serde_json::from_value(serde_json::json!({
+                    "id":"source", "deviceId":"host", "createdAt":chrono::Utc::now(), "archived":false
+                })).unwrap()];
+                state.devices = vec![serde_json::from_value(serde_json::json!({
+                    "id":"host", "name":"Host", "platform":"linux",
+                    "capabilities":[zeron_proto::capabilities::NATIVE_MESSAGE_FORK_MAIN_V1]
+                })).unwrap()];
+                state
+            });
+            cx.new(|cx| {
+                let mut view = Transcript::new(state, cx);
+                view.chat_id = Some("source".into());
+                view.native_forks.insert("answer".into(), zeron_proto::NativeForkAvailability::available());
+                view
+            })
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+        });
+        struct MenuFixture(Entity<Transcript>);
+        impl Render for MenuFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                self.0.update(cx, |view, cx| {
+                    view.native_fork_button(&"answer".into(), &theme, cx)
+                        .unwrap()
+                })
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            cx.observe(&transcript, |_, _, cx| cx.notify()).detach();
+            MenuFixture(transcript.clone())
+        });
+        cx.run_until_parked();
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty());
+        // Popup exit animations use a wall-clock Instant alongside the
+        // executor timer; let both clocks reach the end before another click.
+        std::thread::sleep(
+            crate::motion::MENU_OUT
+                .total()
+                .mul_f32(crate::motion::speed_scale()),
+        );
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let main_row = cx.debug_bounds("native-fork-main-conversation").unwrap();
+        cx.simulate_click(main_row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(events.borrow().len(), 1);
+        assert!(matches!(&events.borrow()[0], TranscriptEvent::ForkMessage {
+            chat_id, message_id, destination: zeron_proto::NativeForkDestination::MainConversation,
+        } if chat_id == "source" && message_id == "answer"));
+        transcript.update(cx, |view, cx| {
+            view.native_fork_finished("source", "answer", None, cx)
+        });
+        // Popup exit animations use a wall-clock Instant alongside the
+        // executor timer; let both clocks reach the end before another click.
+        std::thread::sleep(
+            crate::motion::MENU_OUT
+                .total()
+                .mul_f32(crate::motion::speed_scale()),
+        );
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(events.borrow().len(), 2);
+        assert!(matches!(
+            &events.borrow()[1],
+            TranscriptEvent::ForkMessage {
+                destination: zeron_proto::NativeForkDestination::MainConversation,
+                ..
+            }
+        ));
+        // A host that only supports side-chat forks must not receive a main fork.
+        transcript.update(cx, |view, cx| {
+            view.native_fork_finished("source", "answer", None, cx);
+            view.state
+                .update(cx, |state, _| state.devices[0].capabilities.clear());
+        });
+        // Popup exit animations use a wall-clock Instant alongside the
+        // executor timer; let both clocks reach the end before another click.
+        std::thread::sleep(
+            crate::motion::MENU_OUT
+                .total()
+                .mul_f32(crate::motion::speed_scale()),
+        );
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let main_row = cx.debug_bounds("native-fork-main-conversation").unwrap();
+        cx.simulate_click(main_row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(events.borrow().len(), 2);
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(events.borrow().len(), 3);
+        assert!(matches!(
+            &events.borrow()[2],
+            TranscriptEvent::ForkMessage {
+                destination: zeron_proto::NativeForkDestination::SideChat,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn native_fork_marker_uses_conversation_label_for_new_and_existing_forks() {
+        for source in [
+            "Conversation",
+            "Conversation through reply a622f54d-cfe1-4be1-9557-dc1df3838239",
+        ] {
+            assert_eq!(
+                fork_marker_labels(source.into()),
+                ("Forked from conversation", None)
+            );
+        }
+        assert_eq!(
+            fork_marker_labels("Main conversation".into()),
+            ("Forked from", Some("Main conversation".into()))
+        );
+    }
+
+    #[test]
     fn timestamp_strip_lands_on_the_last_settled_row() {
         use chrono::FixedOffset;
         // Fixed zone (UTC−4): "Jul 1, 3:45 PM" — the exact formatTimestamp
@@ -15787,6 +16143,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         let rows = rows_for_entry(&user, true, false, &mut parse);
         assert_eq!(rows.len(), 1);
@@ -16065,5 +16422,17 @@ impl Transcript {
         if let Some(action) = action {
             self.dispatch_image_menu(action, cx);
         }
+    }
+}
+
+#[cfg(feature = "native-forks-fixture")]
+impl Transcript {
+    pub fn fixture_native_fork_reveal(&mut self, entry: &str, cx: &mut Context<Self>) {
+        self.hovered_entry = self
+            .rows
+            .iter()
+            .find(|r| r.entry_id.as_ref() == entry && r.timestamp.is_some())
+            .map(|r| (r.id.clone(), r.entry_id.clone()));
+        cx.notify();
     }
 }

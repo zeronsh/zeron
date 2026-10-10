@@ -338,7 +338,7 @@ pub(crate) async fn ensure_installed(
         std::process::id()
     ));
     let cache_dir = root.join(".npm-cache");
-    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name).await;
+    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name, None).await;
     if let Err(e) = install {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
@@ -419,10 +419,35 @@ pub(crate) async fn ensure_installed_shim(
     shim_name: &str,
     contents: &str,
 ) -> Result<PathBuf, HarnessError> {
+    ensure_installed_shim_controlled(pin, display_name, shim_name, contents, None).await
+}
+
+/// Optional deadline/cancellation shares the provider's execution lifecycle.
+pub(crate) async fn ensure_installed_shim_controlled(
+    pin: NpmPin,
+    display_name: &str,
+    shim_name: &str,
+    contents: &str,
+    control: Option<(tokio::time::Instant, &crate::CancellationToken)>,
+) -> Result<PathBuf, HarnessError> {
     if let Some(shim) = installed_shim(&pin, shim_name, contents) {
         return Ok(shim);
     }
-    let _guard = install_lock().lock().await;
+    let cancelled = async {
+        match control {
+            Some((_, token)) => token.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    let deadline = control.map_or_else(
+        || tokio::time::Instant::now() + INSTALL_TIMEOUT,
+        |(deadline, _)| deadline,
+    );
+    let _guard = tokio::select! {
+        guard = install_lock().lock() => guard,
+        _ = cancelled => return Err(HarnessError::Install("SDK preparation cancelled".into())),
+        _ = tokio::time::sleep_until(deadline) => return Err(HarnessError::Install("SDK preparation timed out".into())),
+    };
     if let Some(shim) = installed_shim(&pin, shim_name, contents) {
         return Ok(shim);
     }
@@ -445,7 +470,7 @@ pub(crate) async fn ensure_installed_shim(
         std::process::id()
     ));
     let cache_dir = root.join(".npm-cache");
-    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name).await;
+    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name, control).await;
     if let Err(e) = install {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
@@ -516,6 +541,7 @@ async fn install_into(
     tmp_dir: &Path,
     cache_dir: &Path,
     display_name: &str,
+    control: Option<(tokio::time::Instant, &crate::CancellationToken)>,
 ) -> Result<(), HarnessError> {
     let _ = std::fs::remove_dir_all(tmp_dir);
     std::fs::create_dir_all(tmp_dir)?;
@@ -553,22 +579,31 @@ async fn install_into(
         }
         (out, err)
     };
-    let ((out, err), status) =
-        match tokio::time::timeout(INSTALL_TIMEOUT, async { tokio::join!(drain, child.wait()) })
-            .await
-        {
-            Ok((streams, status)) => (streams, status),
-            Err(_) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err(HarnessError::Install(format!(
-                    "npm install of the {display_name} adapter ({}) timed out after {} minutes — \
-                 check your network and npm registry configuration",
-                    pin.spec(),
-                    INSTALL_TIMEOUT.as_secs() / 60
-                )));
-            }
-        };
+    let deadline = control.map_or_else(
+        || tokio::time::Instant::now() + INSTALL_TIMEOUT,
+        |(deadline, _)| deadline,
+    );
+    let stopped = async {
+        match control {
+            Some((_, token)) => token.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    let result = tokio::select! {
+        result = tokio::time::timeout_at(deadline, async { tokio::join!(drain, child.wait()) }) => result.map_err(|_| "timed out"),
+        _ = stopped => Err("was cancelled"),
+    };
+    let ((out, err), status) = match result {
+        Ok((streams, status)) => (streams, status),
+        Err(reason) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(HarnessError::Install(format!(
+                "npm install of the {display_name} adapter ({}) {reason}",
+                pin.spec()
+            )));
+        }
+    };
     let status = status?;
     if status.success() {
         return Ok(());
@@ -859,5 +894,53 @@ mod shim_stress_tests {
         println!(
             "stress: 800 publications across 8 concurrent build versions, zero corrupt or replaced shims"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_fork_install_tests {
+    use super::*;
+    #[tokio::test]
+    async fn native_fork_install_deadline_and_cancellation_reap_the_process() {
+        use std::os::unix::fs::PermissionsExt;
+        for cancel in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let npm = dir.path().join("fake npm");
+            std::fs::write(&npm, "#!/bin/sh\nprintf '%s' $$ > pid\nexec sleep 30\n").unwrap();
+            std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let token = crate::CancellationToken::new();
+            if cancel {
+                let token = token.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    token.cancel();
+                });
+            }
+            let root = dir.path().join("project with spaces");
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_millis(if cancel { 5000 } else { 500 });
+            let result = install_into(
+                &npm,
+                &NpmPin {
+                    name: "fixture",
+                    version: "1",
+                },
+                &root,
+                &dir.path().join("cache"),
+                "fork fixture",
+                Some((deadline, &token)),
+            )
+            .await;
+            assert!(result.is_err());
+            let pid: i32 = std::fs::read_to_string(root.join("pid"))
+                .unwrap_or_else(|e| panic!("installer did not start: {result:?}; {e}"))
+                .parse()
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::kill(pid, 0) },
+                -1,
+                "installer must be reaped before releasing its lease"
+            );
+        }
     }
 }

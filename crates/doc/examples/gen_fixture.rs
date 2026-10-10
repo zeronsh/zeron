@@ -27,6 +27,7 @@ fn main() {
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         duration_ms: None,
+        native_fork_point: None,
     })
     .expect("push user message");
 

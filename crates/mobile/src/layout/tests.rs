@@ -180,6 +180,7 @@ fn thinking_renders_styled_markdown_not_markers() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })],
         ..Default::default()
     };
@@ -220,6 +221,7 @@ fn thinking_renders_styled_markdown_not_markers() {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             })],
             ..Default::default()
         };
@@ -253,6 +255,7 @@ fn streaming_thought_markdown_settles_to_the_fresh_parse() {
             status: Some(status),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
     };
     let mut live = worker(390.0);
@@ -303,6 +306,7 @@ fn thought_input(text: &str, streaming: bool) -> TranscriptInput {
             status: Some(if streaming { MessageStatus::Streaming } else { MessageStatus::Complete }),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })],
         ..Default::default()
     }
@@ -445,6 +449,7 @@ fn bench_layout_passes() {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }));
         w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true };
         let t = Instant::now();
@@ -578,6 +583,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             })],
             ..Default::default()
         };

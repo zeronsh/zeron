@@ -59,6 +59,25 @@ pub struct SessionMessageEntry {
     /// the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_fork_point: Option<zeron_proto::NativeForkPoint>,
+}
+
+/// Native history is mandatory for this child for its entire lifetime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeForkLineage {
+    pub strategy: HistoryStrategy,
+    pub request_id: String,
+    pub source_chat_id: String,
+    pub source_message_id: String,
+    pub point: zeron_proto::NativeForkPoint,
+    pub child: zeron_proto::NativeForkResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryStrategy {
+    NativeFork,
 }
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
@@ -341,6 +360,61 @@ impl SessionDoc {
     }
 
     /// A single atomic value prevents tokens and capacity from tearing on sync.
+    /// Absence preserves the legacy text bootstrap strategy. Invalid native metadata
+    /// is an error, never permission to start a fresh provider session.
+    pub fn native_fork_lineage(&self) -> Result<Option<NativeForkLineage>, DocError> {
+        match self.doc.get_map("meta").get("nativeForkLineage") {
+            None => Ok(None),
+            Some(loro::ValueOrContainer::Value(LoroValue::String(value))) => {
+                Ok(Some(serde_json::from_str(&value)?))
+            }
+            _ => Err(DocError::Schema("Invalid native fork lineage".into())),
+        }
+    }
+
+    pub fn set_native_fork_lineage(&self, lineage: &NativeForkLineage) -> Result<(), DocError> {
+        self.doc
+            .get_map("meta")
+            .insert("nativeForkLineage", serde_json::to_string(lineage)?)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Stamp the final storage continuation of this explicitly identified response.
+    pub fn set_native_fork_point(
+        &self,
+        message_id: &str,
+        point: &zeron_proto::NativeForkPoint,
+    ) -> Result<(), DocError> {
+        point.validate().map_err(DocError::Schema)?;
+        let entries = self.read_entries()?;
+        let index = entries
+            .iter()
+            .rposition(|entry| {
+                entry.id == message_id || entry.continuation_of.as_deref() == Some(message_id)
+            })
+            .ok_or_else(|| DocError::Schema("Native fork response is missing".into()))?;
+        if entries[index].role != MessageRole::Assistant {
+            return Err(DocError::Schema(
+                "Native fork response is not an assistant".into(),
+            ));
+        }
+        let loro::ValueOrContainer::Container(loro::Container::Map(map)) = self
+            .doc
+            .get_list("messages")
+            .get(index)
+            .ok_or_else(|| DocError::Schema("Native fork entry is missing".into()))?
+        else {
+            return Err(DocError::Schema("Invalid native fork entry".into()));
+        };
+        map.insert(
+            "nativeForkPoint",
+            loro_value_from_json(&serde_json::to_value(point)?),
+        )?;
+        self.doc.commit();
+        Ok(())
+    }
+
     pub fn context_usage(&self) -> Option<zeron_proto::ContextUsage> {
         let loro::ValueOrContainer::Value(LoroValue::String(value)) =
             self.doc.get_map("meta").get("contextUsage")?
@@ -811,6 +885,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     if let Some(continuation_of) = &entry.continuation_of {
         map.insert("continuationOf", continuation_of.as_str())?;
     }
+    if let Some(point) = &entry.native_fork_point {
+        map.insert(
+            "nativeForkPoint",
+            loro_value_from_json(&serde_json::to_value(point)?),
+        )?;
+    }
     if let Some(duration_ms) = entry.duration_ms {
         map.insert("durationMs", duration_ms)?;
     }
@@ -927,6 +1007,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         continuation_of: Option<String>,
         #[serde(default)]
         duration_ms: Option<i64>,
+        #[serde(default)]
+        native_fork_point: Option<zeron_proto::NativeForkPoint>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -938,6 +1020,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             status: raw.status,
             continuation_of: raw.continuation_of,
             duration_ms: raw.duration_ms,
+            native_fork_point: raw.native_fork_point,
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -1003,6 +1086,9 @@ fn salvage_entry(
             .and_then(|s| serde_json::from_value(s.clone()).ok()),
         continuation_of: str_field("continuationOf"),
         duration_ms: obj.get("durationMs").and_then(|x| x.as_i64()),
+        native_fork_point: obj
+            .get("nativeForkPoint")
+            .and_then(|x| serde_json::from_value(x.clone()).ok()),
     })
 }
 
@@ -1088,6 +1174,8 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
             Some(root_id) => {
                 if let Some(&at) = root_index.get(root_id) {
                     out[at].parts.extend(entry.parts);
+                    out[at].status = entry.status;
+                    out[at].native_fork_point = entry.native_fork_point;
                     if entry.duration_ms.is_some() {
                         out[at].duration_ms = entry.duration_ms;
                     }
@@ -1147,6 +1235,7 @@ impl<'a> SegmentWriter<'a> {
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -1421,6 +1510,7 @@ mod tests {
         };
         doc.push_message(&SessionMessageEntry {
             duration_ms: None,
+            native_fork_point: None,
             id: "fork:side".into(),
             role: MessageRole::System,
             parts: vec![seam.clone()],
@@ -1455,6 +1545,7 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: (segment > 0).then(|| "segment-0".into()),
                 duration_ms: None,
+                native_fork_point: None,
             })
             .unwrap();
         }
@@ -1532,6 +1623,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }
     }
 
@@ -1759,6 +1851,7 @@ mod tests {
             status: Some(MessageStatus::Aborted),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
         assert!(!doc.resolve_input("nope").unwrap());
@@ -2027,6 +2120,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
         let entries = doc.read_entries().unwrap();

@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+native-forks-fixture = ["gpui_platform/test-support", "gpui/bench"]
 voice-experimental = [] # Compatibility flag; native subscription voice uses Codex's packaged helper.
 project-palette-fixture = []
 compact-picker-fixture = ["gpui_platform/test-support"]
@@ -144,3 +145,7 @@ windows-core = "0.61"
 raw-window-handle = "0.6"
 reqwest.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[[example]]
+name = "native-forks-fixture"
+required-features = ["native-forks-fixture"]

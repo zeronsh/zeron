@@ -167,6 +167,8 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.role != next.role
         || prev.created_at != next.created_at
         || prev.device_id != next.device_id
+        || prev.native_fork_point != next.native_fork_point
+        || prev.duration_ms != next.duration_ms
         || prev.status != next.status
         || prev.continuation_of != next.continuation_of
         || prev.parts.len() != next.parts.len()
@@ -361,6 +363,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }
     }
 
@@ -545,6 +548,7 @@ mod context_update_tests {
             status: Some(crate::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);
         assert!(baseline.covers(&entry));
