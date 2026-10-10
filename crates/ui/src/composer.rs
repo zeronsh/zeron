@@ -10900,6 +10900,23 @@ impl Render for Composer {
             });
 
         if wizard_active {
+            // The panel hosts the shared input without the pill around it, so
+            // the cap the last composer render left behind (a compact pill
+            // leaves a single line) would clip several rows to one.
+            self.input.update(cx, |input, cx| {
+                let cap = TEXTAREA_MAX - TEXTAREA_PAD_V;
+                if input.viewport_height != Some(cap)
+                    || input.settled_viewport_height != Some(cap)
+                    || input.resizing
+                    || input.overflow_top_padding != 0.0
+                {
+                    input.viewport_height = Some(cap);
+                    input.settled_viewport_height = Some(cap);
+                    input.resizing = false;
+                    input.overflow_top_padding = 0.0;
+                    cx.notify();
+                }
+            });
             let wizard = self.render_wizard(cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
@@ -11975,6 +11992,57 @@ mod tests {
                 })
                 .unwrap();
         });
+    }
+
+    #[gpui::test]
+    fn question_panel_input_grows_past_the_compact_pill_line(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.draw(cx).clear();
+            })
+            .unwrap();
+        };
+        // An established thread's empty composer is the compact pill, which
+        // leaves the shared input capped at one line.
+        handle
+            .update(cx, |composer, _, cx| {
+                composer
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("chat".into()));
+                composer.on_state_changed(cx);
+            })
+            .unwrap();
+        for _ in 0..3 {
+            draw(cx);
+        }
+        // The agent then asks a question; the panel replaces the composer.
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.wizard = Some(Wizard::new(
+                    "req".into(),
+                    vec![question("q", &["a", "b", "c"], false)],
+                ));
+                composer.input.update(cx, |input, cx| {
+                    input.set_text("1\n2\n3\n4\n5\n6\n7\n8", cx);
+                });
+            })
+            .unwrap();
+        for _ in 0..3 {
+            draw(cx);
+        }
+        handle
+            .read_with(cx, |composer, cx| {
+                let input = composer.input.read(cx);
+                let visible = f32::from(input.last_bounds.expect("input painted").size.height);
+                assert!(input.content_height >= 8.0 * INPUT_LINE_HEIGHT - 1.0);
+                assert!(
+                    (visible - input.content_height).abs() <= 1.0,
+                    "all eight rows must be visible in the panel, got {visible} of {}",
+                    input.content_height
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]
