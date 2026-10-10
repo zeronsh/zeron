@@ -1204,6 +1204,15 @@ impl HarnessUpdateCoordinator {
     }
 
     pub fn dismiss(&self, harness: HarnessId, version: Option<String>) -> HarnessUpdateStatus {
+        // A failure has no release to suppress: clearing it only hides the
+        // notice until the next check reports something new.
+        if self.status(harness).phase == HarnessUpdatePhase::Failed {
+            self.mutate(harness, |status| {
+                status.phase = HarnessUpdatePhase::Current;
+                status.error = None;
+            });
+            return self.status(harness);
+        }
         let version = version.or_else(|| {
             self.snapshot()
                 .into_iter()
@@ -2926,6 +2935,26 @@ esac
         assert_eq!(
             std::fs::read_to_string(temp.path().join("version")).unwrap(),
             "1.0.0\n"
+        );
+    }
+
+    #[test]
+    fn dismissing_a_failure_clears_it_without_suppressing_a_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator =
+            super::HarnessUpdateCoordinator::new(temp.path(), Arc::new(HarnessRegistry::new()));
+        coordinator.fail(HarnessId::Codex, "boom".into()).ok();
+        assert_eq!(
+            coordinator.status(HarnessId::Codex).phase,
+            HarnessUpdatePhase::Failed
+        );
+        let status = coordinator.dismiss(HarnessId::Codex, None);
+        assert_eq!(status.phase, HarnessUpdatePhase::Current);
+        assert!(status.error.is_none());
+        assert!(
+            super::lock(&coordinator.inner.prefs)
+                .dismissed_versions
+                .is_empty()
         );
     }
 
