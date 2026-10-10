@@ -300,35 +300,41 @@ impl Shell {
         // header over the empty canvas was noise); the bar keeps its height,
         // drag region, and buttons. A session appends its target as a muted
         // "project @ device" tag right of the title (the composer footer no
-        // longer carries it).
-        let (title, target, harness, on_canvas): (
+        // longer carries it). The tag opens the session's folder (a worktree
+        // session's worktree) in the system file manager when it is on this
+        // device, and the files panel otherwise.
+        let (title, target, folder_path, harness, on_canvas): (
             SharedString,
             Option<SharedString>,
+            Option<PathBuf>,
             Option<zeron_proto::HarnessId>,
             bool,
         ) = {
             let state = self.state.read(cx);
             match state.selected_chat_row() {
                 Some(chat) => {
-                    let folder = chat
-                        .space_id
-                        .as_deref()
-                        .and_then(|id| state.space_row(id))
-                        .map(|s| s.display_name().to_string())
-                        .unwrap_or_else(|| "~".to_string());
+                    let space = chat.space_id.as_deref().and_then(|id| state.space_row(id));
+                    let folder = space.map_or("~", |s| s.display_name());
                     let device = state
                         .device_name(&chat.device_id)
                         .unwrap_or("Unknown device");
+                    let folder_path = chat
+                        .cwd
+                        .as_deref()
+                        .or(space.map(|s| s.path.as_str()))
+                        .filter(|_| state.chat_is_local(&chat.id))
+                        .map(PathBuf::from);
                     (
                         SharedString::from(transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
                         )),
                         Some(SharedString::from(format!("{folder} @ {device}"))),
+                        folder_path,
                         chat.config.as_ref().map(|c| c.harness),
                         false,
                     )
                 }
-                None => (SharedString::from(""), None, None, true),
+                None => (SharedString::from(""), None, None, None, true),
             }
         };
 
@@ -640,10 +646,26 @@ impl Shell {
                         .when_some(target, |el, target| {
                             el.child(
                                 div()
+                                    .id("titlebar-session-target")
+                                    .debug_selector(|| "titlebar-session-target".into())
+                                    // Out of the drag region: on Windows it is
+                                    // the native caption, which takes the click.
+                                    .occlude()
                                     .min_w_0()
                                     .truncate()
+                                    .cursor_pointer()
                                     .text_size(crate::typography::ui_rems(12.0))
                                     .text_color(theme.text_muted.opacity(0.5))
+                                    .hover(|s| s.text_color(theme.text_muted))
+                                    .tooltip(crate::settings::widgets::text_tooltip("Open folder"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        // Folders only: the Windows opener runs files.
+                                        match folder_path.as_ref().filter(|p| p.is_dir()) {
+                                            Some(path) => cx.open_with_system(path),
+                                            None => this.add_files_surface(window, cx),
+                                        }
+                                    }))
                                     .child(target),
                             )
                         }),
@@ -793,4 +815,74 @@ mod cycle_tests {
     // `AppState::sidebar_chats` the sidebar and the jump shortcuts read, and
     // `jump_slots_count_the_rows_the_sidebar_draws` (state.rs) covers the
     // space-filter behaviour for all of them.
+}
+
+#[cfg(test)]
+mod session_target_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    struct TitleBarHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for TitleBarHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell
+                .update(cx, |shell, cx| shell.render_session_title_bar(px(600.), cx))
+        }
+    }
+
+    #[gpui::test]
+    fn the_tag_of_a_remote_session_opens_the_files_panel(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                // The cwd exists here too, so only the device decides.
+                let cwd = dir.path().to_string_lossy().into_owned();
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "remote", "title": "Remote", "deviceId": "other",
+                            "cwd": cwd, "archived": false, "createdAt": Utc::now(),
+                        }))
+                        .unwrap(),
+                    ];
+                    state.selected_chat = Some("remote".into());
+                });
+                shell.active_chat = "remote".into();
+                shell
+            });
+            TitleBarHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let tag = cx.debug_bounds("titlebar-session-target").unwrap().center();
+        cx.simulate_click(tag, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| assert!(shell.files_panel_open(cx)));
+    }
 }
