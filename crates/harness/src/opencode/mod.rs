@@ -38,6 +38,12 @@
 //!   after busy is authoritative, not a lull.
 //! - reasoning streams as reasoning parts on both wires →
 //!   [`AgentEvent::ReasoningDelta`], the thinking feed.
+//! - the agent's `question` tool reaches the engine's input bridge on both
+//!   wires: 1.x emits `question.asked` (reply `POST /question/{id}/reply`),
+//!   while 2.x (2.0.24+) creates a session FORM titled "Questions"
+//!   (`form.created`, reply `POST /api/session/{id}/form/{formID}/reply`
+//!   with `{answer:{q0:..}}`; verified live against 2.0.24), folded into
+//!   the same question flow.
 //!
 //! Failure surfacing (the #169 class): a dying provider is VISIBLE here —
 //! `session.status{type:"retry", attempt, message}` streams per attempt.
@@ -3201,37 +3207,40 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             BusOutcome::Continue
         }
         "question.asked" => {
-            if !event_session.is_some_and(|session| {
-                session == session_id
-                    || children.get(session).is_some_and(|child| !child.done)
-                    || unbound_children.contains_key(session)
-            }) {
+            // A global bus includes unrelated sessions. Never answer their
+            // requests, or a malformed request without an explicit owner.
+            let Some(session) = event_session.filter(|session| {
+                *session == session_id
+                    || children.get(*session).is_some_and(|child| !child.done)
+                    || unbound_children.contains_key(*session)
+            }) else {
                 return BusOutcome::Continue;
-            }
+            };
+            let session = session.to_owned();
             let Some(id) = props.get("id").and_then(Value::as_str) else {
                 return BusOutcome::Continue;
             };
-            let questions = map_questions(props);
-            if questions.is_empty() {
+            // Panel ids are minted per question, like Claude and Codex; the
+            // paired key is what a 2.x form reply addresses.
+            let pairs = map_questions(props);
+            if pairs.is_empty() {
                 return BusOutcome::Continue;
             }
-            if !send(
-                event_tx,
-                AgentEvent::InputRequested {
-                    request_id: id.to_owned(),
-                    questions: questions.clone(),
-                },
-            )
-            .await
-            {
-                return BusOutcome::ConsumerGone;
-            }
-            let rx = (request_input)(questions.clone());
+            // 2.x (2.0.24+) ships the `question` tool as a session form; its
+            // answers ride the session's form route, keyed by field.
+            let is_form = props.get("form").and_then(Value::as_bool).unwrap_or(false);
+            // The engine's input bridge is the SOLE emitter of
+            // `InputRequested`/`InputResolved`: it mints the request id,
+            // parks the resolver for `respond_input`, and surfaces both
+            // events. Emitting our own copy here (keyed by opencode's id)
+            // folded a SECOND, unanswerable input part into the doc whose id
+            // no resolver knew — the QuestionPanel answered that twin and the
+            // run never resumed (the same fix Claude and Codex got).
+            let rx = (request_input)(pairs.iter().map(|(_, question)| question.clone()).collect());
             let base = server.base.clone();
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
             let request_id = id.to_owned();
-            let tx = event_tx.clone();
             let protocol_cell = server.protocol.clone();
             tokio::spawn(async move {
                 let server = Server {
@@ -3244,10 +3253,19 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     version: tokio::sync::OnceCell::new(),
                 };
                 let reply = match rx.await {
+                    Ok(answers) if is_form => {
+                        server
+                            .post_json(
+                                &format!("/api/session/{session}/form/{request_id}/reply"),
+                                dir_owned.as_deref(),
+                                &form_answer_body(&pairs, &answers),
+                            )
+                            .await
+                    }
                     Ok(answers) => {
-                        let ordered: Vec<Vec<String>> = questions
+                        let ordered: Vec<Vec<String>> = pairs
                             .iter()
-                            .map(|q| {
+                            .map(|(_, q)| {
                                 answers
                                     .iter()
                                     .find(|a| a.question_id == q.id)
@@ -3263,6 +3281,12 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                             )
                             .await
                     }
+                    // A dropped resolver means the run — and with it this
+                    // OpenCode child — is already going away. Pending forms
+                    // are instance state and die with it, so there is nothing
+                    // left to cancel; only the 1.x route gets an explicit
+                    // reject.
+                    Err(_) if is_form => Ok(Value::Null),
                     Err(_) => {
                         server
                             .post_json(
@@ -3279,11 +3303,6 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         "question reply failed: {e}"
                     );
                 }
-                let _ = tx
-                    .send(Ok(AgentEvent::InputResolved {
-                        request_id: request_id.clone(),
-                    }))
-                    .await;
             });
             BusOutcome::Continue
         }
@@ -3690,8 +3709,11 @@ fn part_delta_events(
     }]
 }
 
-/// `question.asked` → the input panel's questions (ids are positional).
-fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
+/// `question.asked` → the input panel's questions, each paired with the key a
+/// form reply must address (the form field key; positional `q0`.. when the
+/// payload carries none). Panel ids are minted per question, like Claude and
+/// Codex — wire values never become panel identity.
+fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
     props
         .get("questions")
         .and_then(Value::as_array)
@@ -3700,32 +3722,65 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .enumerate()
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
-                    Some(UserInputQuestion {
-                        id: format!("q{ix}"),
-                        header: q
-                            .get("header")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Question")
-                            .to_owned(),
-                        question: question.to_owned(),
-                        options: q
-                            .get("options")
-                            .and_then(Value::as_array)
-                            .map(|opts| {
-                                opts.iter()
-                                    .filter_map(|o| o.get("label").and_then(Value::as_str))
-                                    .map(str::to_owned)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        prefill: None,
-                        multiline: false,
-                        multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
-                    })
+                    let key = q
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .filter(|key| !key.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("q{ix}"));
+                    Some((
+                        key,
+                        UserInputQuestion {
+                            id: new_message_id(),
+                            header: q
+                                .get("header")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Question")
+                                .to_owned(),
+                            question: question.to_owned(),
+                            options: q
+                                .get("options")
+                                .and_then(Value::as_array)
+                                .map(|opts| {
+                                    opts.iter()
+                                        .filter_map(|o| o.get("label").and_then(Value::as_str))
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            prefill: None,
+                            multiline: false,
+                            multi_select: q
+                                .get("multiple")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        },
+                    ))
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 2.x question forms take answers keyed by field (`q0`..): one label for a
+/// single-select `string` field (empty when unanswered), the label array for
+/// a `multiselect` field.
+fn form_answer_body(pairs: &[(String, UserInputQuestion)], answers: &[UserInputAnswer]) -> Value {
+    let mut answer = serde_json::Map::new();
+    for (key, q) in pairs {
+        let labels = answers
+            .iter()
+            .find(|a| a.question_id == q.id)
+            .map(|a| a.labels.clone())
+            .unwrap_or_default();
+        let value = if q.multi_select {
+            json!(labels)
+        } else {
+            json!(labels.into_iter().next().unwrap_or_default())
+        };
+        answer.insert(key.clone(), value);
+    }
+    json!({ "answer": answer })
 }
 
 /// Cap for tool outputs entering the event stream (journal keeps the rest).
@@ -3872,6 +3927,11 @@ fn normalize_v2_frame_with_session_models(
 ) -> Vec<Value> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let data = event.get("data").cloned().unwrap_or(Value::Null);
+    // Form frames keep their owner inside `data.form` (the question tool's
+    // 2.0.24+ transport); everything else must name a session.
+    if kind == "form.created" {
+        return v2_question_form_payload(data.get("form").unwrap_or(&data));
+    }
     if data
         .get("sessionID")
         .and_then(Value::as_str)
@@ -4128,6 +4188,85 @@ fn normalize_v2_frame_with_session_models(
         }
         _ => Vec::new(),
     }
+}
+
+/// 2.x (2.0.24+) implements the agent's `question` tool as a session FORM:
+/// `form.created` carries `form.metadata.kind == "question"` and one field
+/// per question (`q0`..: `title` = header, `description` = question text,
+/// `options`, `multiselect` for multi-select; observed live against 2.0.24).
+/// Fold it into the 1.x `question.asked` payload — the shared question flow —
+/// carrying each field's key so the reply, which rides the session's form
+/// route, can address it (panel ids are minted downstream). Forms from other
+/// features (metadata kind absent) are not the question panel's to answer.
+fn v2_question_form_payload(form: &Value) -> Vec<Value> {
+    if form.pointer("/metadata/kind").and_then(Value::as_str) != Some("question") {
+        return Vec::new();
+    }
+    let (Some(id), Some(session_id)) = (
+        form.get("id").and_then(Value::as_str),
+        form.get("sessionID").and_then(Value::as_str),
+    ) else {
+        return Vec::new();
+    };
+    let questions: Vec<Value> = form
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|field| {
+                    let question = field
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .filter(|q| !q.trim().is_empty())
+                        .or_else(|| field.get("title").and_then(Value::as_str))
+                        .filter(|q| !q.trim().is_empty())?;
+                    Some(json!({
+                        "key": field
+                            .get("key")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        "header": field
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .filter(|h| !h.is_empty())
+                            .unwrap_or("Question"),
+                        "question": question,
+                        "multiple": field.get("type").and_then(Value::as_str)
+                            == Some("multiselect"),
+                        // The answer is the option's VALUE (the question tool
+                        // sets value == label, so display stays right).
+                        "options": field
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .map(|opts| {
+                                opts.iter()
+                                    .filter_map(|o| {
+                                        o.get("value")
+                                            .and_then(Value::as_str)
+                                            .or_else(|| o.get("label").and_then(Value::as_str))
+                                            .map(|label| json!({ "label": label }))
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if questions.is_empty() {
+        return Vec::new();
+    }
+    vec![json!({
+        "type": "question.asked",
+        "properties": {
+            "id": id,
+            "sessionID": session_id,
+            "form": true,
+            "questions": questions,
+        }
+    })]
 }
 
 /// The 2.x error shape (`{type, message}`) folded into the 1.x
