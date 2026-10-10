@@ -33,6 +33,10 @@ pub const CACHE_BUDGET_BYTES: u64 = 16 * 1024 * 1024;
 /// A search waits this long for the initial scan before answering from
 /// whatever is indexed so far (flagged `indexing`).
 pub const SCAN_WAIT: Duration = Duration::from_millis(300);
+/// The first-scan wait for name searches whose answer can't report that the
+/// index is still building (`SearchFiles`, `SearchWorkspaceFiles`): long
+/// enough for most checkouts, well inside the 6 s RPC timeout.
+pub const NAME_SCAN_WAIT: Duration = Duration::from_millis(2000);
 /// Interactive content searches return partial results past this budget.
 pub const CONTENT_TIME_BUDGET: Duration = Duration::from_secs(2);
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
@@ -171,10 +175,24 @@ impl WorkspaceSearch {
         limit: usize,
         kinds: NameKinds,
     ) -> Result<NameSearch, WorkspaceSearchError> {
+        self.search_names_within(root, query, limit, kinds, SCAN_WAIT)
+    }
+
+    /// [`Self::search_names`], waiting up to `wait` for a first scan. Callers
+    /// whose wire answer cannot say "still indexing" (`@`, the file tree)
+    /// wait longer so a fresh index isn't served half-built.
+    pub fn search_names_within(
+        &self,
+        root: &Path,
+        query: &str,
+        limit: usize,
+        kinds: NameKinds,
+        wait: Duration,
+    ) -> Result<NameSearch, WorkspaceSearchError> {
         let query = normalize_name_query(query);
         let query = query.as_ref();
         let picker = self.acquire(root, false)?;
-        let indexing = !picker.wait_for_scan(SCAN_WAIT);
+        let indexing = !picker.wait_for_scan(wait);
         if limit == 0 {
             return Ok(NameSearch {
                 matches: Vec::new(),
@@ -183,7 +201,11 @@ impl WorkspaceSearch {
         }
         let guard = picker.read().map_err(unavailable)?;
         let Some(fff) = guard.as_ref() else {
-            return Ok(NameSearch::default());
+            // Released under us (capacity eviction): not a final empty answer.
+            return Ok(NameSearch {
+                matches: Vec::new(),
+                indexing: true,
+            });
         };
         let options = FuzzySearchOptions {
             pagination: PaginationArgs { offset: 0, limit },
@@ -261,7 +283,11 @@ impl WorkspaceSearch {
         }
         let guard = picker.read().map_err(unavailable)?;
         let Some(fff) = guard.as_ref() else {
-            return Ok(ContentSearch::default());
+            // Released under us (capacity eviction): not a final empty answer.
+            return Ok(ContentSearch {
+                indexing: true,
+                ..Default::default()
+            });
         };
         let options = GrepSearchOptions {
             max_matches_per_file: per_file,
@@ -378,11 +404,13 @@ impl WorkspaceSearch {
                 entry.warmed |= warm;
                 entry.picker.clone()
             } else {
+                // Create first: a root fff refuses (a filesystem root, a
+                // vanished folder) must not cost a healthy index its place.
+                let picker = create_picker(root, self.inner.watch)?;
                 if entries.len() >= MAX_LIVE {
                     evicted = lru_victim(&entries)
                         .and_then(|victim| entries.remove(&victim).map(|entry| (victim, entry)));
                 }
-                let picker = create_picker(root, self.inner.watch)?;
                 entries.insert(
                     root.to_path_buf(),
                     Entry {
@@ -529,6 +557,31 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn results_reached_through_a_symlink_are_outside_the_root() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "token").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("leak")).unwrap();
+        std::os::unix::fs::symlink(root.join("src/main.rs"), root.join("alias.rs")).unwrap();
+
+        assert!(!escapes_through_symlink(&root, "src/main.rs", false));
+        // Through a symlinked folder: never, names or contents.
+        assert!(escapes_through_symlink(&root, "leak/secret", true));
+        assert!(escapes_through_symlink(&root, "leak/secret", false));
+        // A symlink entry itself may be listed but not read.
+        assert!(!escapes_through_symlink(&root, "alias.rs", true));
+        assert!(escapes_through_symlink(&root, "alias.rs", false));
+        // Gone, or not a plain relative path: not served.
+        assert!(escapes_through_symlink(&root, "src/missing.rs", false));
+        assert!(escapes_through_symlink(&root, "../outside", false));
+    }
+
     use super::*;
 
     struct ManualClock(Mutex<Instant>);
@@ -785,4 +838,28 @@ mod tests {
                 .is_empty()
         );
     }
+}
+
+/// Whether `relative` (an index result under `root`) reaches outside the
+/// root through a symlink. fff's watcher follows links created after the
+/// first scan, so results are re-checked with ReadWorkspaceFile's rule: no
+/// symlinked folder on the way, and for contents, no symlinked file either.
+/// A path that no longer exists is treated as escaping (it can't be served).
+pub fn escapes_through_symlink(root: &Path, relative: &str, allow_final_link: bool) -> bool {
+    let components: Vec<_> = Path::new(relative).components().collect();
+    let mut current = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(component) = component else {
+            return true;
+        };
+        current.push(component);
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            return true;
+        };
+        let last = index + 1 == components.len();
+        if metadata.file_type().is_symlink() && !(last && allow_final_link) {
+            return true;
+        }
+    }
+    false
 }

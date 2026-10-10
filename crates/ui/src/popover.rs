@@ -1142,18 +1142,20 @@ pub fn key_hint_pair(
         .child(key_hint_label(theme, label))
 }
 
-/// A muted kbd hint chip inside menu rows (`⌘↵`-style accelerators).
+/// The face shortcut glyphs are set in. The UI font has no ⇧ ⌥ ↵ (they fell
+/// back to a mismatched face); the system font draws the platform's own.
+pub const KEY_GLYPH_FONT: &str = ".SystemUIFont";
+
+/// A shortcut legend (`⌘N`, `⇧⌘N`, `⌘1`): the sidebar's jump-hint voice
+/// everywhere — plain muted text at the row's subline size, no chip.
 pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
     let theme = &theme.for_popup();
     div()
         .flex_none()
-        .px(px(5.0))
-        .py(px(1.0))
-        .rounded(px(5.0))
-        .bg(ink(0.05))
-        .text_size(crate::typography::ui_rems(10.0))
-        .font_family(theme.font_mono.clone())
-        .text_color(theme.text_muted)
+        .whitespace_nowrap()
+        .font_family(KEY_GLYPH_FONT)
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted.opacity(0.5))
         .child(SharedString::from(label.to_string()))
 }
 

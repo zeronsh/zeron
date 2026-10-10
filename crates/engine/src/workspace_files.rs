@@ -416,7 +416,7 @@ impl WorkspaceFiles {
         &self,
         request: SearchWorkspaceFilesRequest,
     ) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
-        validate_workspace_search_query(&request.query)?;
+        validate_name_search_query(&request.query, request.include_ignored)?;
         let workspace = self.resolve_target(&request.target).await?;
         let limit =
             usize::from(request.limit.unwrap_or(MAX_SEARCH_RESULTS as u16)).min(MAX_SEARCH_RESULTS);
@@ -1267,7 +1267,7 @@ fn search_workspace_blocking(
     limit: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
-    validate_workspace_search_query(query)?;
+    validate_name_search_query(query, include_ignored)?;
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -1275,7 +1275,13 @@ fn search_workspace_blocking(
         return search_including_ignored(root, query, limit, cancel);
     }
     let found = search
-        .search_names(root, query, limit, NameKinds::FilesAndDirectories)
+        .search_names_within(
+            root,
+            query,
+            limit,
+            NameKinds::FilesAndDirectories,
+            crate::workspace_search::NAME_SCAN_WAIT,
+        )
         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     if cancel.load(Ordering::Relaxed) {
         return Err(WorkspaceFilesError::Io("workspace search cancelled".into()));
@@ -1286,6 +1292,9 @@ fn search_workspace_blocking(
         .filter(|found| {
             !is_internal_temp_wire_path(&found.path)
                 && !contains_git_component(Path::new(&found.path))
+                // A symlink entry itself is listed (the tree shows them);
+                // nothing reached through one is.
+                && !crate::workspace_search::escapes_through_symlink(root, &found.path, true)
         })
         .map(|found| {
             let is_symlink = std::fs::symlink_metadata(root.join(&found.path))
@@ -1446,6 +1455,8 @@ fn search_content_blocking(
             .filter(|found| {
                 !is_internal_temp_wire_path(&found.path)
                     && !contains_git_component(Path::new(&found.path))
+                    // Never preview contents reached through a symlink.
+                    && !crate::workspace_search::escapes_through_symlink(root, &found.path, false)
             })
             .map(|found| WorkspaceContentMatch {
                 path: found.path,
@@ -1458,6 +1469,16 @@ fn search_content_blocking(
         truncated: found.truncated,
         indexing: found.indexing,
     })
+}
+
+/// File-name search also takes an empty query, listing the workspace's files
+/// by recency from the index (the palette's default Files list). "Show
+/// ignored" walks the disk with a substring match, so it still needs text.
+fn validate_name_search_query(query: &str, include_ignored: bool) -> Result<(), WorkspaceFilesError> {
+    if query.trim().is_empty() && !include_ignored {
+        return Ok(());
+    }
+    validate_workspace_search_query(query)
 }
 
 fn validate_workspace_search_query(query: &str) -> Result<(), WorkspaceFilesError> {
@@ -2527,13 +2548,19 @@ mod tests {
     }
 
     #[test]
-    fn search_rejects_empty_and_whitespace_queries() {
+    fn an_empty_query_lists_recent_names_but_show_ignored_needs_text() {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("notes.txt"), "x").unwrap();
         let root = std::fs::canonicalize(root.path()).unwrap();
 
         for query in ["", "   ", "\n\t"] {
+            // The index lists files by recency (the palette's default list).
+            let listed = search_workspace_blocking(&root, query, false, 200, &no_cancel()).unwrap();
+            assert!(listed.len() <= 200);
+            // "Show ignored" walks the disk with a substring match: no text,
+            // no walk.
             let error =
-                search_workspace_blocking(&root, query, false, 200, &no_cancel()).unwrap_err();
+                search_workspace_blocking(&root, query, true, 200, &no_cancel()).unwrap_err();
             assert!(error.to_string().contains("query must not be empty"));
         }
     }

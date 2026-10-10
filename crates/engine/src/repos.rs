@@ -1945,18 +1945,22 @@ fn search_files_blocking(
         }
     }
     let found = search
-        .search_names(
+        .search_names_within(
             &root,
             query,
             FILE_SEARCH_MAX_RESULTS + matches.len(),
             NameKinds::FilesAndDirectories,
+            crate::workspace_search::NAME_SCAN_WAIT,
         )
         .map_err(|e| EngineError::Other(e.to_string()))?;
     for found in found.matches {
         if matches.len() == FILE_SEARCH_MAX_RESULTS {
             break;
         }
-        if is_git_metadata(&found.path) || matches.iter().any(|known| known.path == found.path) {
+        if is_git_metadata(&found.path)
+            || matches.iter().any(|known| known.path == found.path)
+            || crate::workspace_search::escapes_through_symlink(&root, &found.path, true)
+        {
             continue;
         }
         matches.push(FileSearchMatch {
@@ -1978,7 +1982,17 @@ fn search_home_folders_blocking(
     query: &str,
     limit: usize,
 ) -> Result<HomeFolderSearchResult, EngineError> {
-    search_folders_under(search, &home_search_root()?, query, limit)
+    let mut found = search_folders_under(search, &home_search_root()?, query, limit)?;
+    // The index keys Home by its canonical path; clients compare results
+    // with Home and existing projects as the folder browser spells them. A
+    // symlinked Home (`/home/me` → `/data/home/me`) must not read as a
+    // second copy of every folder.
+    if let Ok(home) = session_home_dir() {
+        for found in &mut found.matches {
+            found.path = folder_browser_path(&home.join(&found.relative));
+        }
+    }
+    Ok(found)
 }
 
 /// `SearchHomeFolders` against an already-resolved (canonical) root.

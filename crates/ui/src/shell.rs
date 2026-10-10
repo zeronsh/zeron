@@ -5328,7 +5328,8 @@ impl Shell {
         self.set_route(Route::PullRequests, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
-        self.add_space = None;
+        // Through `close_add_space`, so the host's home index is released.
+        self.close_add_space(cx);
         self.close_right_plus(cx);
         if self.spaces_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
@@ -8105,30 +8106,16 @@ impl Shell {
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
-            // is held, cut to the sidebar PR badge's exact cloth
-            // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
-            // rounded 4, borderless 0.08-fill with 0.85 text of one tone —
-            // neutral here — and the label in the badge's mono at 10 MEDIUM.
-            // Any other geometry reads as a second badge system on the row.
-            {
-                let tone = theme.text_muted;
-                div()
-                    .h(px(16.0))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(tone.opacity(0.08))
-                    .whitespace_nowrap()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(tone.opacity(0.85))
-                    .font_family(theme.font_mono.clone())
-                    .child(label)
-                    .into_any_element()
-            }
+            // is held, in the shared legend voice (the compact rows' plain
+            // muted text, `popover::kbd_hint`).
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .font_family(crate::popover::KEY_GLYPH_FONT)
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted.opacity(0.5))
+                .child(label)
+                .into_any_element()
         } else if corner_hovered {
             div()
                 .flex()

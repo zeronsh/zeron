@@ -85,6 +85,18 @@ impl<T: Default> WorkspaceQuery<T> {
         self.generation
     }
 
+    /// [`Self::status`] without failures: a default list that a host can't
+    /// serve (one that predates empty-query search) quietly shows nothing.
+    fn progress(&self) -> Option<SharedString> {
+        if self.indexing {
+            Some("Indexing…".into())
+        } else if self.loading {
+            Some("Searching…".into())
+        } else {
+            None
+        }
+    }
+
     /// Header status while loading, while the host indexes, or after a
     /// failure.
     fn status(&self) -> Option<SharedString> {
@@ -385,6 +397,20 @@ fn child_index(sections: &[PaletteSection], row_ix: usize) -> usize {
     row_ix + sections.len()
 }
 
+/// The child to scroll into view for row `row_ix`: its section header when
+/// it is the section's first row, so the header stays visible with it.
+fn scroll_child_index(sections: &[PaletteSection], row_ix: usize) -> usize {
+    let mut rows_before = 0;
+    for (section_ix, section) in sections.iter().enumerate() {
+        if row_ix < rows_before + section.rows.len() {
+            let child = row_ix + section_ix + 1;
+            return if row_ix == rows_before { child - 1 } else { child };
+        }
+        rows_before += section.rows.len();
+    }
+    child_index(sections, row_ix)
+}
+
 /// Navigation order: every row of every section, headers skipped.
 fn flat_rows(sections: &[PaletteSection]) -> Vec<&PaletteRow> {
     sections.iter().flat_map(|section| &section.rows).collect()
@@ -456,6 +482,8 @@ impl Shell {
             content: WorkspaceQuery::default(),
             _search_events: events,
         });
+        // Load the default Files list (recently changed files) right away.
+        self.search_palette_workspace(cx);
         cx.notify();
     }
 
@@ -488,7 +516,10 @@ impl Shell {
             return;
         };
         let query = palette.search.read(cx).text().trim().to_owned();
-        let Some(client) = workspace.filter(|_| query.chars().count() >= MIN_WORKSPACE_QUERY_CHARS)
+        // An empty query lists the workspace's recent files (the default
+        // Files list); a single character is too broad to search.
+        let Some(client) =
+            workspace.filter(|_| query.is_empty() || query.chars().count() >= MIN_WORKSPACE_QUERY_CHARS)
         else {
             palette.files.clear();
             palette.content.clear();
@@ -504,7 +535,9 @@ impl Shell {
         };
         let names = client.clone();
         let target = client.target().clone();
-        let mut probe = palette.files_ready.as_ref() != Some(&target);
+        // The default list is a plain request: readiness is probed for typed
+        // queries, whose partial answers are worth retrying.
+        let mut probe = !request.query.is_empty() && palette.files_ready.as_ref() != Some(&target);
         palette.files.task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let mut ready = false;
@@ -557,6 +590,10 @@ impl Shell {
             }
         }));
 
+        if query.is_empty() {
+            palette.content.clear();
+            return;
+        }
         let generation = palette.content.begin();
         let request = SearchWorkspaceContentRequest {
             target: client.target().clone(),
@@ -627,16 +664,26 @@ impl Shell {
                     .map(RowKind::Chat),
             )
         };
+        // Files opened here first, then the workspace's recently changed
+        // files (the host's empty-query list), each path once.
         let recent_files = |limit| {
+            let mut seen = std::collections::HashSet::new();
+            let opened = self.recent_files(&self.active_chat).map(|path| (path.clone(), false));
+            let changed = palette
+                .files
+                .results
+                .iter()
+                .filter(|found| found.kind != WorkspaceEntryKind::Directory)
+                .map(|found| (found.path.clone(), false));
             PaletteSection::new(
                 Section::RecentFiles,
-                self.recent_files(&self.active_chat)
+                opened
+                    .chain(changed)
+                    .filter(|(path, _)| seen.insert(path.clone()))
                     .take(limit)
-                    .map(|path| RowKind::File {
-                        path: path.clone(),
-                        is_dir: false,
-                    }),
+                    .map(|(path, is_dir)| RowKind::File { path, is_dir }),
             )
+            .with_status(palette.files.progress())
         };
         let files = |limit| {
             PaletteSection::new(
@@ -780,7 +827,15 @@ impl Shell {
             (current + count - 1) % count
         };
         palette.set_active(&rows, next);
-        palette.scroll.scroll_to_item(child_index(&sections, next));
+        // A section's first row brings its header along, and the very first
+        // row returns to the top, so a header never hides above the edge.
+        if next == 0 {
+            palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        } else {
+            palette
+                .scroll
+                .scroll_to_item(scroll_child_index(&sections, next));
+        }
         cx.notify();
     }
 
@@ -1157,25 +1212,17 @@ impl Shell {
             .border_color(crate::theme::hairline(0.06))
             .children(Tab::ALL.into_iter().map(|tab| {
                 let combo = crate::settings::badge_combo(&format!("mod-{}", tab.index() + 1));
-                popover::menu_row(
-                    &theme,
-                    tab == current_tab,
-                    format!("command-tab-{}", tab.index()),
-                )
-                .id(("command-tab", tab.index()))
-                .role(gpui::Role::Tab)
-                .aria_label(tab.label())
-                .gap(px(6.0))
-                .py(px(3.0))
-                .on_click(cx.listener(move |this, _, _, cx| this.select_palette_tab(tab, cx)))
-                .child(tab.label())
-                .child(popover::kbd_hint(&theme, &combo))
+                // The app's tab chip (right-pane surfaces, PR board), not a
+                // menu row: its height, type and washes.
+                crate::surface_chrome::tab(("command-tab", tab.index()), tab == current_tab, &theme)
+                    .px(px(8.0))
+                    .role(gpui::Role::Tab)
+                    .aria_label(tab.label())
+                    .gap(px(6.0))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_palette_tab(tab, cx)))
+                    .child(tab.label())
+                    .child(popover::kbd_hint(&theme, &combo))
             }));
-        let tab_keys = format!(
-            "{}…{}",
-            crate::settings::badge_combo("mod-1"),
-            Tab::ALL.len()
-        );
         let card = palette_card("command-palette", &focus, viewport, &theme)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, action: &SelectPaletteTab, _, cx| {
@@ -1238,7 +1285,6 @@ impl Shell {
                 palette_footer()
                     .child(command_key_hint(&theme, "↑ ↓", "Navigate"))
                     .child(command_key_hint(&theme, "↵", "Open"))
-                    .child(command_key_hint(&theme, &tab_keys, "Tabs"))
                     .child(command_key_hint(&theme, "Esc", "Close")),
             );
         Some(palette_overlay(viewport, card))
@@ -1382,12 +1428,34 @@ pub(super) fn palette_overlay(
     .into_any_element()
 }
 
+/// A footer legend: the keys on a key cap (footers keep their caps, unlike
+/// the plain inline legends) and the verb after it. Arrow and return keys
+/// are icons, which sit optically centered on the cap where font glyphs
+/// don't; other keys ("Esc") are text.
 pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -> gpui::Div {
+    let glyph = |path: &'static str| {
+        crate::icons::icon(path)
+            .size(px(12.5))
+            .text_color(theme.text_muted)
+    };
+    let cap = popover::key_cap(theme);
+    let cap = match keys {
+        "↵" => cap.child(glyph(crate::icons::RETURN)),
+        "←" => cap.child(glyph(crate::icons::ARROW_LEFT)),
+        "↑ ↓" => cap
+            .child(glyph(crate::icons::ARROW_UP))
+            .child(glyph(crate::icons::ARROW_DOWN)),
+        _ => cap
+            .font_family(popover::KEY_GLYPH_FONT)
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .child(SharedString::from(keys.to_string())),
+    };
     div()
         .flex()
         .items_center()
         .gap(px(5.0))
-        .child(popover::kbd_hint(theme, keys))
+        .child(cap)
         .child(
             div()
                 .text_size(crate::typography::ui_rems(10.0))
@@ -1868,6 +1936,38 @@ mod tests {
                 methods_seen.push(method);
             }
         }
+    }
+
+    #[gpui::test]
+    fn the_files_tab_lists_recently_changed_files_with_no_query(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = engine_palette(cx, true);
+        let listed = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
+        assert_eq!(listed.len(), 1, "opening asks for the default list once");
+        assert_eq!(listed[0]["params"]["query"], "");
+        engine.reply(
+            &listed[0],
+            serde_json::json!([
+                name_match("src/recent.rs", "file"),
+                name_match("src", "directory"),
+                name_match("README.md", "file"),
+            ]),
+        );
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| shell.select_palette_tab(Tab::Files, cx))
+            .unwrap();
+        let recent = palette_section(window, Section::RecentFiles, cx).expect("a default list");
+        let paths: Vec<_> = recent
+            .rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::File { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Files only; no content search runs without a query.
+        assert_eq!(paths, ["src/recent.rs", "README.md"]);
+        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
     }
 
     #[gpui::test]
@@ -2620,6 +2720,11 @@ mod tests {
         // Two headers precede the fourth row in the scroll container.
         assert_eq!(child_index(&after, 3), 5);
         assert_eq!(child_index(&after, 0), 1);
+        // Keyboard scrolling brings a section's header along with its first
+        // row; later rows scroll to themselves.
+        assert_eq!(scroll_child_index(&after, 0), 0);
+        assert_eq!(scroll_child_index(&after, 1), 2);
+        assert_eq!(scroll_child_index(&after, 2), 4);
     }
 
     #[test]
