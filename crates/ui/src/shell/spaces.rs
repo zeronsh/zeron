@@ -4315,7 +4315,8 @@ impl Shell {
     }
 
     /// The dropdown card: search on top, "All projects" + space rows (check on
-    /// the active filter; right-click for rename/remove) + "New project".
+    /// the active filter; hover options button or right-click for
+    /// rename/remove) + "New project".
     fn render_spaces_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let theme = &theme.for_popup();
         let (search, active, focus, list_scroll) = {
@@ -4391,6 +4392,7 @@ impl Shell {
         // The pinned footer's keyboard-nav index: one past the last
         // scrollable row, its permanent place at the end of the nav order.
         let add_index = details.len();
+        let open_space = self.space_menu.as_open().map(|(id, _)| id.clone());
         let profile = self.active_sidebar_pin_profile_key(cx);
         let icons: Vec<AnyElement> = details
             .iter()
@@ -4425,6 +4427,58 @@ impl Shell {
                                 SpacesMenuRow::Space(id) => Some(id.clone()),
                                 _ => None,
                             };
+                            let menu_open = menu_space.is_some() && menu_space == open_space;
+                            let group = SharedString::from(format!("spaces-menu-row-group-{ix}"));
+                            // Right-click alone left the menu undiscoverable, so
+                            // a hover-revealed button opens the same one.
+                            let options_button = menu_space.clone().map(|space_id| {
+                                let press_id = space_id.clone();
+                                div()
+                                    .id(("spaces-menu-row-options", ix))
+                                    .debug_selector(move || format!("spaces-menu-row-options-{ix}"))
+                                    .size(px(20.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.0))
+                                    .cursor_pointer()
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Project options")
+                                    .opacity(0.0)
+                                    .group_hover(group.clone(), |style| style.opacity(1.0))
+                                    .when(menu_open, |el| el.opacity(1.0))
+                                    .hover(|el| el.bg(theme.glass_hover()))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, _| {
+                                            this.space_menu.note_trigger_press_matching(
+                                                |(open, _)| *open == press_id,
+                                            )
+                                        }),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, _, cx| {
+                                            // The row behind selects the project.
+                                            cx.stop_propagation();
+                                            if this.space_menu.take_press_was_open() {
+                                                this.close_space_menu(cx);
+                                            } else {
+                                                this.space_menu
+                                                    .open((space_id.clone(), event.position()));
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .tooltip(crate::settings::widgets::text_tooltip(
+                                        "Project options",
+                                    ))
+                                    .child(
+                                        icon(icons::MORE_HORIZONTAL)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                            });
                             let activate = row;
                             popover::picker_row(
                                 theme,
@@ -4433,6 +4487,7 @@ impl Shell {
                                 format!("spaces-menu-row-{ix}"),
                             )
                             .id(("spaces-menu-row", ix))
+                            .group(group)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.activate_spaces_menu_row(activate.clone(), cx);
                             }))
@@ -4456,6 +4511,7 @@ impl Shell {
                                         .text_color(theme.warning.opacity(0.8)),
                                 )
                             })
+                            .children(options_button)
                             // No check glyph — the selected row's glass plate
                             // is the selection signal.
                         },
@@ -7335,6 +7391,80 @@ mod project_flow_tests {
         assert!(path_under(r"D:\Random", r"D:\"));
         assert!(!path_under(r"D:\Random2", r"D:\Random"));
         assert!(!path_under(r"C:\Random", r"D:\"));
+    }
+
+    /// A project row's options button opens that project's menu, the one
+    /// right-click opens, without also filtering the sidebar to the project.
+    #[gpui::test]
+    fn project_row_options_button_opens_its_menu_without_filtering(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        shell.update_in(cx, |shell, _, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.reduced_motion = true;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.spaces = ["alpha", "beta"]
+                    .into_iter()
+                    .map(|id| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": "local", "path": format!("/tmp/{id}"),
+                            "gitDetected": false, "createdAt": Utc::now(),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+            });
+        });
+        cx.run_until_parked();
+        shell.update_in(cx, |shell, window, cx| shell.open_spaces_menu(window, cx));
+        // Parking paints the frame. A manual `draw` here would reuse the
+        // cached sidebar and drop the selectors this test looks up.
+        cx.run_until_parked();
+        // Rows: "All projects", alpha, beta.
+        let button = cx
+            .debug_bounds("spaces-menu-row-options-2")
+            .expect("beta's options button");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.space_menu.as_open().map(|(id, _)| id.as_str()),
+                Some("beta")
+            );
+            assert_eq!(shell.settings.space_filter, None);
+            assert!(shell.spaces_menu.is_open());
+        });
     }
 
     #[gpui::test]
