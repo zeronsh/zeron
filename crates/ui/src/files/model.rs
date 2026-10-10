@@ -75,7 +75,11 @@ pub struct FileTreeModel {
     nodes: HashMap<String, TreeNode>,
     expanded: HashSet<String>,
     visible_rows: Vec<VisibleTreeRow>,
+    /// The keyboard cursor; it need not be part of `selection`.
     selected: Option<String>,
+    selection: HashSet<String>,
+    /// Where Shift ranges start; follows plain and Ctrl/Cmd clicks.
+    anchor: Option<String>,
     include_ignored: bool,
     generation: u64,
     listing_children: HashMap<String, HashSet<String>>,
@@ -100,6 +104,8 @@ impl FileTreeModel {
             expanded: HashSet::from([String::new()]),
             visible_rows: Vec::new(),
             selected: None,
+            selection: HashSet::new(),
+            anchor: None,
             include_ignored,
             generation: 0,
             listing_children: HashMap::new(),
@@ -120,6 +126,36 @@ impl FileTreeModel {
 
     pub fn selected(&self) -> Option<&str> {
         self.selected.as_deref()
+    }
+
+    pub fn is_selected(&self, path: &str) -> bool {
+        self.selection.contains(path)
+    }
+
+    pub fn selection_len(&self) -> usize {
+        self.selection.len()
+    }
+
+    /// Selected entries in visible order.
+    pub fn selected_paths(&self) -> Vec<String> {
+        self.visible_rows
+            .iter()
+            .filter(|row| row.kind == VisibleRowKind::Entry && self.selection.contains(&row.path))
+            .map(|row| row.path.clone())
+            .collect()
+    }
+
+    /// Selected entries without those already covered by a selected ancestor.
+    pub fn selection_roots(&self) -> Vec<String> {
+        self.selected_paths()
+            .into_iter()
+            .filter(|path| {
+                !self
+                    .selection
+                    .iter()
+                    .any(|other| is_descendant(path, other))
+            })
+            .collect()
     }
 
     pub fn node(&self, path: &str) -> Option<&TreeNode> {
@@ -157,7 +193,7 @@ impl FileTreeModel {
         self.expanded.clear();
         self.expanded.insert(String::new());
         self.visible_rows.clear();
-        self.selected = None;
+        self.set_single(None);
         self.generation
     }
 
@@ -309,7 +345,11 @@ impl FileTreeModel {
             .as_deref()
             .is_some_and(|selected| is_descendant(selected, path))
         {
-            self.selected = (!path.is_empty()).then(|| path.to_string());
+            let folder = (!path.is_empty()).then(|| path.to_string());
+            if let Some(folder) = &folder {
+                self.selection.insert(folder.clone());
+            }
+            self.selected = folder;
         }
         self.rebuild_visible_rows();
         true
@@ -335,7 +375,102 @@ impl FileTreeModel {
         if !self.nodes.contains_key(&path) {
             return false;
         }
+        self.set_single(Some(path));
+        true
+    }
+
+    /// Ctrl/Cmd+click: flip one entry without disturbing the rest.
+    pub fn toggle_selected(&mut self, path: impl Into<String>) -> bool {
+        let path = path.into();
+        if path.is_empty() || !self.nodes.contains_key(&path) {
+            return false;
+        }
+        if !self.selection.remove(&path) {
+            self.selection.insert(path.clone());
+        }
+        self.anchor = Some(path.clone());
         self.selected = Some(path);
+        true
+    }
+
+    /// Shift+click: select the visible entries between the anchor and `path`.
+    pub fn select_range_to(&mut self, path: &str, additive: bool) -> bool {
+        let entries = self
+            .visible_rows
+            .iter()
+            .filter(|row| row.kind == VisibleRowKind::Entry)
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>();
+        let Some(end) = entries.iter().position(|candidate| *candidate == path) else {
+            return false;
+        };
+        let start = self
+            .anchor
+            .as_deref()
+            .or(self.selected.as_deref())
+            .and_then(|anchor| entries.iter().position(|candidate| *candidate == anchor))
+            .unwrap_or(end);
+        let range = entries[start.min(end)..=start.max(end)]
+            .iter()
+            .map(|path| path.to_string())
+            .collect::<Vec<_>>();
+        if !additive {
+            self.selection.clear();
+        }
+        self.selection.extend(range);
+        self.anchor = Some(entries[start].to_string());
+        self.selected = Some(path.to_string());
+        true
+    }
+
+    /// Shift+arrow: move the cursor to the next entry and extend the range.
+    pub fn extend_selection(&mut self, delta: isize) -> Option<&str> {
+        let entries = self
+            .visible_rows
+            .iter()
+            .filter(|row| row.kind == VisibleRowKind::Entry)
+            .map(|row| row.path.clone())
+            .collect::<Vec<_>>();
+        let current = self
+            .selected
+            .as_deref()
+            .and_then(|path| entries.iter().position(|candidate| candidate == path));
+        let next = match current {
+            Some(index) => index
+                .saturating_add_signed(delta)
+                .min(entries.len().checked_sub(1)?),
+            None if delta.is_negative() => entries.len().checked_sub(1)?,
+            None => 0,
+        };
+        let target = entries.get(next)?.clone();
+        if self.anchor.is_none() {
+            self.anchor = Some(entries[current.unwrap_or(next)].clone());
+        }
+        self.select_range_to(&target, false);
+        self.selected.as_deref()
+    }
+
+    /// A click on empty space: nothing stays selected. The cursor goes too,
+    /// so Delete or F2 cannot act on a row that no longer looks selected.
+    pub fn clear_selection(&mut self) -> bool {
+        if self.selection.is_empty() && self.selected.is_none() {
+            return false;
+        }
+        self.set_single(None);
+        true
+    }
+
+    /// Escape: keep only the cursor.
+    pub fn collapse_selection(&mut self) -> bool {
+        if self.selection.len() <= 1
+            && self
+                .selected
+                .as_ref()
+                .is_none_or(|path| self.selection.contains(path))
+        {
+            return false;
+        }
+        self.set_single(self.selected.clone());
         true
     }
 
@@ -353,14 +488,14 @@ impl FileTreeModel {
         if parent.is_empty() {
             return self.selected.as_deref();
         }
-        self.selected = Some(parent);
+        self.set_single(Some(parent));
         self.selected.as_deref()
     }
 
     pub fn select_first_child(&mut self) -> Option<&str> {
         let selected = self.selected.clone()?;
         let first = self.nodes.get(&selected)?.children.first()?.clone();
-        self.selected = Some(first);
+        self.set_single(Some(first));
         self.selected.as_deref()
     }
 
@@ -433,6 +568,8 @@ impl FileTreeModel {
         }
         self.expanded = self.expanded.iter().map(|p| remap(p)).collect();
         self.selected = self.selected.as_deref().map(remap);
+        self.selection = self.selection.iter().map(|p| remap(p)).collect();
+        self.anchor = self.anchor.as_deref().map(remap);
         let mut ancestor = Some(new_parent.clone());
         while let Some(path) = ancestor {
             self.expanded.insert(path.clone());
@@ -482,7 +619,16 @@ impl FileTreeModel {
             .as_deref()
             .is_some_and(|selected| selected == path || is_descendant(selected, path))
         {
-            self.selected = parent_path(path).filter(|parent| !parent.is_empty());
+            let parent = parent_path(path).filter(|parent| !parent.is_empty());
+            self.selected = parent.clone();
+            if let Some(parent) = parent
+                && self
+                    .selection
+                    .iter()
+                    .all(|selected| contains(path, selected))
+            {
+                self.selection.insert(parent);
+            }
         }
         self.rebuild_visible_rows();
         true
@@ -510,7 +656,7 @@ impl FileTreeModel {
             .map(|row| row.path.as_str())
             .collect::<Vec<_>>();
         if selectable.is_empty() {
-            self.selected = None;
+            self.set_single(None);
             return None;
         }
         let current = self
@@ -523,8 +669,15 @@ impl FileTreeModel {
             (None, true) => selectable.len() - 1,
             (None, false) => 0,
         };
-        self.selected = Some(selectable[next].to_string());
+        self.set_single(Some(selectable[next].to_string()));
         self.selected.as_deref()
+    }
+
+    fn set_single(&mut self, path: Option<String>) {
+        self.selection.clear();
+        self.selection.extend(path.clone());
+        self.anchor = path.clone();
+        self.selected = path;
     }
 
     fn remove_subtree(&mut self, path: &str) {
@@ -552,6 +705,22 @@ impl FileTreeModel {
             .is_some_and(|selected| !self.visible_rows.iter().any(|row| row.path == selected))
         {
             self.selected = None;
+        }
+        // Like VS Code, entries hidden by a collapse or removal leave the selection.
+        let visible = self
+            .visible_rows
+            .iter()
+            .filter(|row| row.kind == VisibleRowKind::Entry)
+            .map(|row| row.path.as_str())
+            .collect::<HashSet<_>>();
+        self.selection
+            .retain(|path| visible.contains(path.as_str()));
+        if self
+            .anchor
+            .as_deref()
+            .is_some_and(|anchor| !visible.contains(anchor))
+        {
+            self.anchor = None;
         }
     }
 
@@ -683,6 +852,10 @@ fn is_descendant(candidate: &str, ancestor: &str) -> bool {
     candidate
         .strip_prefix(ancestor)
         .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn contains(ancestor: &str, path: &str) -> bool {
+    path == ancestor || is_descendant(path, ancestor)
 }
 
 fn is_direct_child(candidate: &str, directory: &str) -> bool {
@@ -1258,5 +1431,121 @@ mod tests {
             page("", vec![entry("stale.env", WorkspaceEntryKind::File)], None),
             stale_generation,
         ));
+    }
+
+    fn selection_tree() -> FileTreeModel {
+        let mut tree = FileTreeModel::new();
+        tree.apply_page(
+            page(
+                "",
+                vec![
+                    entry("src", WorkspaceEntryKind::Directory),
+                    entry("a.txt", WorkspaceEntryKind::File),
+                    entry("b.txt", WorkspaceEntryKind::File),
+                    entry("c.txt", WorkspaceEntryKind::File),
+                ],
+                None,
+            ),
+            0,
+        );
+        tree.expand("src");
+        tree.apply_page(
+            page(
+                "src",
+                vec![
+                    entry("src/lib.rs", WorkspaceEntryKind::File),
+                    entry("src/main.rs", WorkspaceEntryKind::File),
+                ],
+                None,
+            ),
+            0,
+        );
+        tree
+    }
+
+    #[test]
+    fn toggles_and_ranges_follow_the_anchor() {
+        let mut tree = selection_tree();
+        tree.select("a.txt");
+        assert_eq!(tree.selected_paths(), ["a.txt"]);
+        tree.toggle_selected("c.txt");
+        assert_eq!(tree.selected_paths(), ["a.txt", "c.txt"]);
+        assert_eq!(tree.selected(), Some("c.txt"));
+        tree.toggle_selected("a.txt");
+        assert_eq!(tree.selected_paths(), ["c.txt"]);
+        assert_eq!(tree.selected(), Some("a.txt"));
+
+        // The last Ctrl/Cmd click anchors the range, upward included.
+        tree.select_range_to("src/lib.rs", false);
+        assert_eq!(
+            tree.selected_paths(),
+            ["src/lib.rs", "src/main.rs", "a.txt"]
+        );
+        // A new Shift target replaces the range from the same anchor.
+        tree.select_range_to("b.txt", false);
+        assert_eq!(tree.selected_paths(), ["a.txt", "b.txt"]);
+        tree.toggle_selected("src");
+        tree.select_range_to("src/lib.rs", true);
+        assert_eq!(
+            tree.selected_paths(),
+            ["src", "src/lib.rs", "a.txt", "b.txt"]
+        );
+        assert_eq!(tree.selection_roots(), ["src", "a.txt", "b.txt"]);
+
+        assert!(tree.collapse_selection());
+        assert_eq!(tree.selected_paths(), ["src/lib.rs"]);
+        assert!(!tree.collapse_selection());
+
+        assert!(tree.clear_selection());
+        assert!(tree.selected_paths().is_empty());
+        assert_eq!(tree.selected(), None);
+        assert!(!tree.clear_selection());
+        // With no cursor or anchor, the next Shift target selects only itself.
+        tree.select_range_to("b.txt", false);
+        assert_eq!(tree.selected_paths(), ["b.txt"]);
+    }
+
+    #[test]
+    fn shift_arrows_extend_and_shrink_from_the_anchor() {
+        let mut tree = selection_tree();
+        tree.select("a.txt");
+        tree.extend_selection(1);
+        tree.extend_selection(1);
+        assert_eq!(tree.selected_paths(), ["a.txt", "b.txt", "c.txt"]);
+        assert_eq!(tree.extend_selection(1), Some("c.txt"));
+        tree.extend_selection(-1);
+        tree.extend_selection(-1);
+        tree.extend_selection(-1);
+        assert_eq!(tree.selected_paths(), ["src/main.rs", "a.txt"]);
+        tree.select_next();
+        assert_eq!(tree.selected_paths(), ["a.txt"]);
+    }
+
+    #[test]
+    fn hidden_removed_and_moved_entries_update_the_selection() {
+        let mut tree = selection_tree();
+        tree.select("src/lib.rs");
+        tree.toggle_selected("src/main.rs");
+        tree.toggle_selected("b.txt");
+        tree.toggle_expanded("src");
+        assert_eq!(tree.selected_paths(), ["b.txt"]);
+        assert_eq!(tree.selected(), Some("b.txt"));
+        // A hidden cursor moves to the collapsed folder, which joins the selection.
+        tree.toggle_expanded("src");
+        tree.toggle_selected("src/lib.rs");
+        tree.toggle_expanded("src");
+        assert_eq!(tree.selected_paths(), ["src", "b.txt"]);
+        assert_eq!(tree.selected(), Some("src"));
+
+        tree.toggle_expanded("src");
+        tree.select("src/lib.rs");
+        tree.toggle_selected("c.txt");
+        tree.relocate_subtree("c.txt", "src/c.txt", None);
+        assert_eq!(tree.selected_paths(), ["src/c.txt", "src/lib.rs"]);
+        tree.remove("src/lib.rs");
+        assert_eq!(tree.selected_paths(), ["src/c.txt"]);
+        tree.remove("src");
+        assert!(tree.selected_paths().is_empty());
+        assert_eq!(tree.selection_len(), 0);
     }
 }

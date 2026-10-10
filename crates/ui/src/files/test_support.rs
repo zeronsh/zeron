@@ -56,7 +56,32 @@ pub(super) fn setup(cx: &mut TestAppContext) -> (Entity<FilesSurface>, &mut Visu
     });
     (files, cx)
 }
-pub(super) fn entry(path: &str, kind: WorkspaceEntryKind) -> WorkspaceEntry {
+/// Replace the root listing, e.g. to give multi-selection tests more rows.
+pub(super) fn set_root_entries(
+    files: &Entity<FilesSurface>,
+    cx: &mut VisualTestContext,
+    entries: Vec<WorkspaceEntry>,
+) {
+    files.update(cx, |files, cx| {
+        files.tree.begin_load("", None, files.tree.generation());
+        files.tree.apply_page(
+            WorkspaceDirectoryPage {
+                directory: "".into(),
+                checkout_id: Some("checkout".into()),
+                mutation_capabilities: files.mutation_capabilities,
+                entries,
+                next_cursor: None,
+                truncated: false,
+            },
+            files.tree.generation(),
+        );
+        files.sync_tree_list();
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+pub(crate) fn entry(path: &str, kind: WorkspaceEntryKind) -> WorkspaceEntry {
     WorkspaceEntry {
         path: path.into(),
         name: path.rsplit('/').next().unwrap().into(),

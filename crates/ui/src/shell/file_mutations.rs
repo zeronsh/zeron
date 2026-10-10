@@ -9,9 +9,35 @@ impl Shell {
     pub(super) fn start_file_mutation(
         &mut self,
         source: Entity<FilesSurface>,
-        mut intent: MutationIntent,
+        intent: MutationIntent,
         cx: &mut Context<Self>,
     ) {
+        self.start_file_mutations(source, vec![intent], cx);
+    }
+
+    /// Run a multi-entry move or delete one entry at a time through the same
+    /// guarded path as a single operation. The filesystem has no transaction,
+    /// so the first failure stops the queue and completed entries stay applied.
+    pub(super) fn start_file_mutations(
+        &mut self,
+        source: Entity<FilesSurface>,
+        intents: Vec<MutationIntent>,
+        cx: &mut Context<Self>,
+    ) {
+        let total = intents.len();
+        self.run_file_mutation_queue(source, intents.into(), total, cx);
+    }
+
+    fn run_file_mutation_queue(
+        &mut self,
+        source: Entity<FilesSurface>,
+        mut queue: std::collections::VecDeque<MutationIntent>,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut intent) = queue.pop_front() else {
+            return;
+        };
         if !source.read(cx).accepts_origin(&intent.origin, cx) {
             return;
         }
@@ -143,12 +169,44 @@ impl Shell {
                 }
             }
             .await;
+            let mut applied = false;
             for surface in &surfaces {
-                let _ = surface.update(cx, |files, cx| files.finish_mutation(&intent, &result, cx));
+                applied |=
+                    surface.update(cx, |files, cx| files.finish_mutation(&intent, &result, cx));
+            }
+            if applied {
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.run_file_mutation_queue(source, queue, total, cx)
+                });
+            } else if total > 1 {
+                let completed = total - queue.len() - 1;
+                source.update(cx, |files, cx| {
+                    if let Some(message) = files.mutation_error() {
+                        let message = batch_failure_message(&intent, completed, total, &message);
+                        files.report_mutation_error(message, cx);
+                    }
+                });
             }
         })
         .detach();
     }
+}
+
+/// Name what already happened: completed entries are not rolled back.
+fn batch_failure_message(
+    intent: &MutationIntent,
+    completed: usize,
+    total: usize,
+    message: &str,
+) -> String {
+    let verb = if intent.destination.is_some() {
+        "Moved"
+    } else {
+        "Deleted"
+    };
+    let path = &intent.entry.path;
+    let name = path.rsplit('/').next().unwrap_or(path);
+    format!("{verb} {completed} of {total} — {name}: {message}")
 }
 
 #[cfg(test)]
@@ -312,5 +370,50 @@ mod tests {
             shell.attach_workspace_drag(&payload, &composer, window, cx);
             assert_eq!(input.read(cx).text(), before);
         });
+    }
+
+    #[gpui::test]
+    fn dropped_selection_adds_one_reference_per_entry(cx: &mut TestAppContext) {
+        let (shell, files, cx) = setup(cx);
+        let origin = files
+            .read_with(cx, |files, cx| files.interaction_origin(cx))
+            .unwrap();
+        let item = |path: &str, is_directory| crate::files::WorkspacePathItem {
+            path: path.into(),
+            is_directory,
+            revision: Some("rev".into()),
+        };
+        let payload = WorkspacePathDrag::new("a.txt".into(), false)
+            .with_origin(
+                Some(origin),
+                crate::files::WorkspacePathSource::Tree,
+                Some("rev".into()),
+            )
+            .with_selection(vec![item("folder", true), item("a.txt", false)]);
+        shell.update_in(cx, |shell, window, cx| {
+            let composer = shell.composer.clone();
+            shell.attach_workspace_drag(&payload, &composer, window, cx);
+            let text = composer.read(cx).input.read(cx).text().to_string();
+            assert!(text.contains("folder"));
+            assert!(text.contains("a.txt"));
+        });
+    }
+
+    #[gpui::test]
+    fn batch_failures_report_completed_entries(cx: &mut TestAppContext) {
+        let (_, files, cx) = setup(cx);
+        let intent = files.read_with(cx, |files, cx| MutationIntent {
+            operation_id: "op".into(),
+            origin: files.interaction_origin(cx).unwrap(),
+            entry: crate::files::test_support::entry(
+                "src/a.txt",
+                zeron_proto::WorkspaceEntryKind::File,
+            ),
+            destination: Some("dest/a.txt".into()),
+        });
+        assert_eq!(
+            batch_failure_message(&intent, 2, 5, "Destination exists"),
+            "Moved 2 of 5 — a.txt: Destination exists"
+        );
     }
 }

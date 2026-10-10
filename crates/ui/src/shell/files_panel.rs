@@ -172,7 +172,7 @@ impl Shell {
                 &files,
                 window,
                 move |this: &mut Self, source, event, window, cx| match event {
-                    FilesEvent::HoldMutation { origin, path } => {
+                    FilesEvent::HoldMutation { origin, paths } => {
                         let surfaces = this
                             .files
                             .values()
@@ -181,7 +181,7 @@ impl Shell {
                             .cloned()
                             .collect::<Vec<_>>();
                         for surface in surfaces {
-                            surface.update(cx, |files, cx| files.hold_mutation(path.clone(), cx));
+                            surface.update(cx, |files, cx| files.hold_mutation(paths.clone(), cx));
                         }
                     }
                     FilesEvent::AddToChat {
@@ -202,6 +202,11 @@ impl Shell {
                         if this.accepts_file_navigation(&owner, &source, cx) =>
                     {
                         this.start_file_mutation(source.clone(), intent.clone(), cx);
+                    }
+                    FilesEvent::MutateMany(intents)
+                        if this.accepts_file_navigation(&owner, &source, cx) =>
+                    {
+                        this.start_file_mutations(source.clone(), intents.clone(), cx);
                     }
                     FilesEvent::OpenFile(path)
                         if this.accepts_file_navigation(&owner, &source, cx) =>

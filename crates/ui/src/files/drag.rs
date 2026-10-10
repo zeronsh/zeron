@@ -37,7 +37,45 @@ pub(super) fn destination_path(
     })
 }
 
+/// Resolve a multi-entry drop. Entries already in `directory` are skipped;
+/// a folder dropped into itself, or two entries landing on the same name,
+/// invalidates the whole gesture rather than moving only part of it.
+pub(super) fn destination_paths(
+    items: &[WorkspacePathItem],
+    directory: &str,
+) -> Option<Vec<(String, String)>> {
+    let mut moves = Vec::with_capacity(items.len());
+    for item in items {
+        if item.is_directory && mutations::contains_path(&item.path, directory) {
+            return None;
+        }
+        if let Some(destination) = destination_path(&item.path, directory, item.is_directory) {
+            if moves.iter().any(|(_, existing)| existing == &destination) {
+                return None;
+            }
+            moves.push((item.path.clone(), destination));
+        }
+    }
+    (!moves.is_empty()).then_some(moves)
+}
+
 impl FilesSurface {
+    /// The selection roots as drag items, in visible order.
+    pub(super) fn tree_drag_items(&self) -> Vec<WorkspacePathItem> {
+        self.tree
+            .selection_roots()
+            .into_iter()
+            .filter_map(|path| {
+                let entry = &self.tree.node(&path)?.entry;
+                Some(WorkspacePathItem {
+                    is_directory: entry.kind == WorkspaceEntryKind::Directory,
+                    revision: entry.mutation_revision.clone(),
+                    path,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn track_tree_drop_row(
         &self,
         key: String,
@@ -110,10 +148,12 @@ impl FilesSurface {
             && self
                 .mutation_capabilities
                 .is_some_and(|caps| caps.move_entry)
-            && self.tree.node(&payload.path).is_some_and(|node| {
-                node.entry.kind != WorkspaceEntryKind::Symlink
-                    && node.entry.mutation_revision.is_some()
-                    && node.entry.mutation_revision == payload.revision
+            && payload.items().iter().all(|item| {
+                self.tree.node(&item.path).is_some_and(|node| {
+                    node.entry.kind != WorkspaceEntryKind::Symlink
+                        && node.entry.mutation_revision.is_some()
+                        && node.entry.mutation_revision == item.revision
+                })
             })
     }
 
@@ -140,13 +180,22 @@ impl FilesSurface {
                 };
             }
         }
+        drop(rows);
+        self.is_tree_empty_space(point).then(String::new)
+    }
+
+    /// The list area below the last painted row, which targets the
+    /// workspace root for drops and clears the selection when clicked.
+    pub(super) fn is_tree_empty_space(&self, point: Point<Pixels>) -> bool {
         let viewport = self.tree_list.viewport_bounds();
-        let last = rows.values().map(|(bounds, _)| bounds.bottom()).max();
-        if viewport.contains(&point) && last.is_none_or(|bottom| point.y >= bottom) {
-            Some(String::new())
-        } else {
-            None
-        }
+        let last = self
+            .tree_drag
+            .rows
+            .borrow()
+            .values()
+            .map(|(bounds, _)| bounds.bottom())
+            .max();
+        viewport.contains(&point) && last.is_none_or(|bottom| point.y >= bottom)
     }
 
     pub(super) fn on_tree_drag_move(
@@ -165,11 +214,10 @@ impl FilesSurface {
         self.close_tree_context_menu(cx);
         self.tree_drag.pointer = event.event.position;
         self.tree_drag.payload = Some(payload.clone());
+        let items = payload.items();
         let destination = self
             .drop_directory_at(event.event.position)
-            .filter(|directory| {
-                destination_path(&payload.path, directory, payload.is_directory).is_some()
-            });
+            .filter(|directory| destination_paths(&items, directory).is_some());
         if self.tree_drag.destination != destination {
             self.tree_drag.hover_since = Some(cx.background_executor().now());
             self.tree_drag.destination = destination;
@@ -207,17 +255,19 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let destination = if self.tree_drag_compatible(payload, cx) {
+        let moves = if self.tree_drag_compatible(payload, cx) {
             self.drop_directory_at(window.mouse_position())
-                .and_then(|directory| {
-                    destination_path(&payload.path, &directory, payload.is_directory)
-                })
+                .and_then(|directory| destination_paths(&payload.items(), &directory))
         } else {
             None
         };
         self.clear_tree_drag(window, cx);
-        if let Some(destination) = destination {
-            self.request_mutation(&payload.path, Some(destination), cx);
+        if let Some(moves) = moves {
+            let requests = moves
+                .into_iter()
+                .map(|(path, destination)| (path, Some(destination)))
+                .collect();
+            self.request_mutations(requests, cx);
         }
     }
 
@@ -258,9 +308,10 @@ impl FilesSurface {
                 .set_offset_from_scrollbar(gpui::point(offset.x, offset.y - px(speed * elapsed)));
             cx.notify();
         }
-        let destination = self.drop_directory_at(pointer).filter(|directory| {
-            destination_path(&payload.path, directory, payload.is_directory).is_some()
-        });
+        let items = payload.items();
+        let destination = self
+            .drop_directory_at(pointer)
+            .filter(|directory| destination_paths(&items, directory).is_some());
         if destination != self.tree_drag.destination {
             self.tree_drag.destination = destination;
             self.tree_drag.hover_since = Some(now);
@@ -311,7 +362,7 @@ impl FilesSurface {
             if let Some(dialog) = self.tree_delete.take() {
                 cx.emit(FilesEvent::HoldMutation {
                     origin: dialog.origin,
-                    path: None,
+                    paths: Vec::new(),
                 });
             }
             cx.notify();
@@ -472,6 +523,99 @@ mod tests {
         assert_eq!(edge_scroll_speed(99., 100., 500.), 0.);
         assert!(edge_scroll_speed(486., 100., 500.) > 0.);
     }
+    #[gpui::test]
+    fn dragging_a_selection_moves_every_root_once(cx: &mut gpui::TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        super::super::test_support::set_root_entries(
+            &files,
+            cx,
+            vec![
+                super::super::test_support::entry("folder", WorkspaceEntryKind::Directory),
+                super::super::test_support::entry("a.txt", WorkspaceEntryKind::File),
+                super::super::test_support::entry("b.txt", WorkspaceEntryKind::File),
+            ],
+        );
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+        files.update(cx, |files, cx| {
+            files.tree.select("a.txt");
+            files.tree.toggle_selected("b.txt");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let start = cx.debug_bounds("tree-entry:b.txt").unwrap().center();
+        let end = cx.debug_bounds("tree-entry:folder").unwrap().center();
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(9.), px(0.)),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            end,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree_drag.destination.as_deref(), Some("folder"));
+            assert_eq!(files.tree_drag.payload.as_ref().unwrap().items().len(), 2);
+        });
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let events = events.borrow();
+        let batches = events
+            .iter()
+            .filter_map(|event| match event {
+                FilesEvent::MutateMany(intents) => Some(intents),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batches.len(), 1);
+        let moves = batches[0]
+            .iter()
+            .map(|intent| (intent.entry.path.as_str(), intent.destination.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            moves,
+            [
+                ("a.txt", Some("folder/a.txt")),
+                ("b.txt", Some("folder/b.txt"))
+            ]
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, FilesEvent::Mutate(_)))
+        );
+    }
+
+    #[test]
+    fn selection_drop_skips_entries_already_there_and_rejects_conflicts() {
+        let item = |path: &str, is_directory| WorkspacePathItem {
+            path: path.into(),
+            is_directory,
+            revision: None,
+        };
+        assert_eq!(
+            destination_paths(&[item("a/x", false), item("b/y", false)], "a"),
+            Some(vec![("b/y".into(), "a/y".into())])
+        );
+        assert_eq!(destination_paths(&[item("a/x", false)], "a"), None);
+        assert_eq!(
+            destination_paths(&[item("dir", true), item("f", false)], "dir/sub"),
+            None
+        );
+        assert_eq!(
+            destination_paths(&[item("a/x", false), item("b/x", false)], "c"),
+            None
+        );
+    }
+
     #[test]
     fn tree_drop_resolves_parent_root_and_descendants() {
         assert_eq!(

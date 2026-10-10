@@ -4,22 +4,31 @@ Right-click a file or folder in the explorer to open the shared context menu.
 The same menu opens with the Menu key or Shift+F10 on the selected row.
 
 - **Add to chat** inserts a workspace reference into the current draft and focuses
-  the composer. It keeps existing text and does not send a message.
+  the composer, one per selected entry. It keeps existing text and does not
+  send a message.
 - **Copy path** copies the full path using the owning workspace's root and path
-  format, including when the workspace belongs to another device.
+  format, including when the workspace belongs to another device. With several
+  entries, **Copy paths** copies one path per line.
 - **Rename…** edits the name in the row. Enter submits; Escape or losing focus
   before submission cancels. F2 also opens the inline editor. A rename never
-  overwrites another entry.
+  overwrites another entry. It is unavailable while several entries are
+  selected.
 - **Delete…** asks for permanent deletion. Cancel is initially selected; use
   Tab/arrow keys to choose the destructive action. Deleting a folder includes
   its current contents. Open buffers remain available for recovery; autosave
   cannot recreate deleted files. The Delete key opens the same confirmation.
+  With several entries the menu reads **Delete N items…** and one confirmation
+  covers all of them.
 
-Drag an entry onto a folder to move it. Dropping on a file targets that file's
-parent directory. The root row and the empty space below the list target the
-workspace root. A drop in the current parent is a no-op; a folder cannot move
-into itself or a descendant. Existing destinations are never overwritten or
-merged. The source remains visible until the host confirms the operation.
+Drag an entry onto a folder to move it. Dragging a selected row moves the
+whole selection; dragging any other row moves only that row. Dropping on a
+file targets that file's parent directory. The root row and the empty space
+below the list target the workspace root. A drop in the current parent is a
+no-op; a folder cannot move into itself or a descendant. In a multi-entry
+drop, entries already in the target are skipped, and the drop is refused if
+any folder would move into itself or two entries would land on the same name.
+Existing destinations are never overwritten or merged. The source remains
+visible until the host confirms the operation.
 
 Drag from the row on macOS, Linux, and Windows. The Windows drag threshold
 protects ordinary clicks from small pointer jitter. Search results and file
@@ -30,8 +39,26 @@ Holding a compatible drag over a closed folder opens it after 650 ms. Dragging
 near the top or bottom of the list scrolls it. Escape, leaving the tree,
 switching sessions, and closing the explorer clear the feedback and timers.
 Folders opened by hover stay open. The chat column retains its own drop zone,
-so a gesture ending there adds a reference instead of moving the entry. OS file
-attachments continue through the existing composer attachment pipeline.
+so a gesture ending there adds a reference instead of moving the entry; a
+dragged selection adds one reference per entry. OS file attachments continue
+through the existing composer attachment pipeline.
+
+## Selecting several entries
+
+Ctrl+click (Cmd+click on macOS) adds or removes one entry without opening it.
+Shift+click selects the visible range from the last plain or Ctrl/Cmd click;
+Shift+Ctrl/Cmd+click adds that range to the current selection. Shift+Up/Down
+extend the range from the keyboard, and Escape keeps only the cursor row. A
+plain click or arrow key returns to a single selection. A plain click on the
+empty space below the rows clears the selection; the tree keeps focus, and the
+next arrow key starts again from the first or last row. Clicking elsewhere in
+the app keeps the selection, shown dimmed while the tree is unfocused.
+
+Collapsing a folder removes its hidden children from the selection; if the
+cursor was inside, the folder takes its place. Right-clicking a selected row
+keeps the selection; right-clicking any other row selects only that row.
+Actions apply to the selection roots: a selected entry inside a selected
+folder travels with that folder instead of being handled twice.
 
 ## Workspace and editor consistency
 
@@ -43,8 +70,12 @@ must be refreshed before another explicit attempt. Symlinks cannot be renamed,
 moved or deleted through these actions, and traversal through symlink parents
 is rejected. The workspace root and `.git` paths are protected.
 
-Move and rename use one RPC. Writes acquire a shared checkout gate before their
-existing per-file lock; structural operations acquire the exclusive gate.
+Move and rename use one RPC. A multi-entry move or delete sends one request
+per entry, in visible order, through the same checks as a single operation.
+The first failure stops the queue and reports how many entries were already
+moved or deleted; those are not rolled back. Writes acquire a shared checkout
+gate before their existing per-file lock; structural operations acquire the
+exclusive gate.
 The UI pauses affected autosaves and waits for in-flight saves. It remaps open
 editors, tabs and comment paths while retaining unsaved text. Response and
 semantic watcher events share an operation ID so receiving both is harmless.

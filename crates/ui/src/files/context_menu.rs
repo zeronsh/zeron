@@ -5,7 +5,8 @@ use gpui::{ClipboardItem, KeyDownEvent, MouseButton};
 use mutations::WorkspaceInteractionOrigin;
 
 pub(super) struct TreeContextMenu {
-    pub path: String,
+    /// Selection roots in visible order; one entry for a plain right-click.
+    pub paths: Vec<String>,
     pub origin: WorkspaceInteractionOrigin,
     pub position: Point<Pixels>,
     pub active: usize,
@@ -45,16 +46,40 @@ impl FilesSurface {
         if self.tree.node(&path).is_none() {
             return;
         }
-        self.tree.select(path.clone());
+        // Like other explorers, a right-click inside the selection keeps it.
+        if !self.tree.is_selected(&path) {
+            self.tree.select(path.clone());
+        }
+        let paths = self.tree_action_paths();
         self.tree_focus.focus(window, cx);
         self.close_editor_context_menu(cx);
         self.tree_context_menu.open(TreeContextMenu {
-            path,
+            paths,
             origin,
             position,
             active: 0,
         });
         cx.notify();
+    }
+
+    /// What keyboard and menu actions apply to: the selection roots when the
+    /// cursor is part of the selection, otherwise the cursor alone.
+    pub(super) fn tree_action_paths(&self) -> Vec<String> {
+        match self.tree.selected() {
+            Some(cursor) if self.tree.is_selected(cursor) => self.tree.selection_roots(),
+            Some(cursor) => vec![cursor.to_string()],
+            None => Vec::new(),
+        }
+    }
+
+    fn tree_menu_enabled(&self, paths: &[String], action: usize, cx: &gpui::App) -> bool {
+        match action {
+            0 | 1 => true,
+            2 => paths.len() == 1 && self.can_mutate_tree_entry(&paths[0], false, cx),
+            _ => paths
+                .iter()
+                .all(|path| self.can_mutate_tree_entry(path, true, cx)),
+        }
     }
 
     pub(super) fn close_tree_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -93,7 +118,7 @@ impl FilesSurface {
                             },
                         )
                         .unwrap_or(0);
-                        if next < 2 || self.can_mutate_tree_entry(&menu.path, next == 3, cx) {
+                        if self.tree_menu_enabled(&menu.paths, next, cx) {
                             break;
                         }
                     }
@@ -117,33 +142,48 @@ impl FilesSurface {
         let Some(menu) = self.tree_context_menu.as_open() else {
             return;
         };
-        let path = menu.path.clone();
+        let paths = menu.paths.clone();
         let origin = menu.origin.clone();
-        if !self.accepts_origin(&origin, cx) {
+        if !self.accepts_origin(&origin, cx) || !self.tree_menu_enabled(&paths, action, cx) {
             self.close_tree_context_menu(cx);
             return;
         }
-        let Some(node) = self.tree.node(&path) else {
+        let Some(entries) = paths
+            .iter()
+            .map(|path| {
+                let node = self.tree.node(path)?;
+                Some((
+                    path.clone(),
+                    node.entry.kind == zeron_proto::WorkspaceEntryKind::Directory,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
             self.close_tree_context_menu(cx);
             return;
         };
-        let is_directory = node.entry.kind == zeron_proto::WorkspaceEntryKind::Directory;
         self.close_tree_context_menu(cx);
         match action {
-            0 => cx.emit(FilesEvent::AddToChat {
-                path,
-                is_directory,
-                origin,
-            }),
+            0 => {
+                for (path, is_directory) in entries {
+                    cx.emit(FilesEvent::AddToChat {
+                        path,
+                        is_directory,
+                        origin: origin.clone(),
+                    });
+                }
+            }
             1 => {
-                cx.write_to_clipboard(ClipboardItem::new_string(absolute_workspace_path(
-                    &origin.context.cwd,
-                    &path,
-                )));
+                let text = paths
+                    .iter()
+                    .map(|path| absolute_workspace_path(&origin.context.cwd, path))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.tree_focus.focus(window, cx);
             }
-            2 => self.begin_tree_rename(path, window, cx),
-            3 => self.begin_tree_delete(path, window, cx),
+            2 => self.begin_tree_rename(paths[0].clone(), window, cx),
+            3 => self.begin_tree_delete(paths, window, cx),
             _ => {}
         }
     }
@@ -155,6 +195,12 @@ impl FilesSurface {
     ) -> Option<gpui::AnyElement> {
         let menu = self.tree_context_menu.get()?;
         let theme = theme.for_popup();
+        let count = menu.paths.len();
+        let delete_label = if count > 1 {
+            format!("Delete {count} items…")
+        } else {
+            "Delete…".into()
+        };
         let mut card = popover::popover_card(&theme)
             .w(px(190.0))
             .flex()
@@ -162,10 +208,13 @@ impl FilesSurface {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         for (index, (label, icon_path)) in [
-            ("Add to chat", icons::CHAT_ROUND_LINE),
-            ("Copy path", icons::COPY),
-            ("Rename…", icons::PEN),
-            ("Delete…", icons::TRASH_BIN_MINIMALISTIC),
+            ("Add to chat".to_string(), icons::CHAT_ROUND_LINE),
+            (
+                if count > 1 { "Copy paths" } else { "Copy path" }.to_string(),
+                icons::COPY,
+            ),
+            ("Rename…".to_string(), icons::PEN),
+            (delete_label, icons::TRASH_BIN_MINIMALISTIC),
         ]
         .into_iter()
         .enumerate()
@@ -173,17 +222,22 @@ impl FilesSurface {
             if index == 2 {
                 card = card.child(popover::menu_separator());
             }
-            let enabled = index < 2 || self.can_mutate_tree_entry(&menu.path, index == 3, cx);
+            let enabled = self.tree_menu_enabled(&menu.paths, index, cx);
             card = card.child(
                 popover::menu_row(&theme, menu.active == index, format!("tree-menu-{index}"))
                     .id(gpui::SharedString::from(format!("tree-menu-{index}")))
                     .role(gpui::Role::MenuItem)
-                    .aria_label(label)
+                    .aria_label(label.clone())
                     .when(index == 3, |row| row.text_color(theme.danger))
                     .when(index == 1, |row| {
-                        row.tooltip(|_, cx| {
+                        row.tooltip(move |_, cx| {
                             cx.new(|_| preview::FileEditorTooltip {
-                                text: "Copy full path".into(),
+                                text: if count > 1 {
+                                    "Copy full paths, one per line"
+                                } else {
+                                    "Copy full path"
+                                }
+                                .into(),
                             })
                             .into()
                         })
@@ -318,5 +372,68 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, FilesEvent::OpenFile(_)))
         );
+    }
+
+    #[gpui::test]
+    fn menu_inside_a_selection_acts_on_every_root(cx: &mut TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+        let at = gpui::point(px(50.), px(50.));
+        files.update_in(cx, |files, window, cx| {
+            files.tree.select("folder");
+            files.tree.toggle_selected("a.txt");
+            files.open_tree_context_menu("a.txt".into(), at, window, cx);
+            let paths = files.tree_context_menu.as_open().unwrap().paths.clone();
+            assert_eq!(paths, ["folder", "a.txt"]);
+            assert!(!files.tree_menu_enabled(&paths, 2, cx));
+            assert!(files.tree_menu_enabled(&paths, 3, cx));
+            files.dispatch_tree_menu(1, window, cx);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("/workspace/folder\n/workspace/a.txt")
+            );
+            files.open_tree_context_menu("a.txt".into(), at, window, cx);
+            files.dispatch_tree_menu(2, window, cx);
+            assert!(files.tree_rename.is_none());
+            files.open_tree_context_menu("a.txt".into(), at, window, cx);
+            files.dispatch_tree_menu(0, window, cx);
+            files.open_tree_context_menu("folder".into(), at, window, cx);
+            files.dispatch_tree_menu(3, window, cx);
+            assert_eq!(
+                files.tree_delete.as_ref().unwrap().paths,
+                ["folder", "a.txt"]
+            );
+            files.dismiss_tree_delete(true, window, cx);
+        });
+        cx.run_until_parked();
+        let added = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                FilesEvent::AddToChat { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(added, ["folder", "a.txt"]);
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            FilesEvent::MutateMany(intents)
+                if intents.iter().all(|intent| intent.destination.is_none())
+                    && intents.len() == 2
+        )));
+
+        // Right-clicking outside the selection narrows it to that entry.
+        files.update_in(cx, |files, window, cx| {
+            files.tree.select("folder");
+            files.open_tree_context_menu("a.txt".into(), at, window, cx);
+            assert_eq!(files.tree_context_menu.as_open().unwrap().paths, ["a.txt"]);
+            assert_eq!(files.tree.selected_paths(), ["a.txt"]);
+        });
     }
 }

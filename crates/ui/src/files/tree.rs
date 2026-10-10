@@ -205,7 +205,19 @@ impl FilesSurface {
             .on_hover(cx.listener(Self::on_tree_hovered))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.tree_focus.focus(window, cx)),
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.tree_focus.focus(window, cx);
+                    // Like other explorers, a plain click on empty space
+                    // deselects; a modified click there keeps the selection.
+                    let modifiers = event.modifiers;
+                    if !modifiers.shift
+                        && !modifiers.secondary()
+                        && this.is_tree_empty_space(event.position)
+                        && this.tree.clear_selection()
+                    {
+                        cx.notify();
+                    }
+                }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_tree_key_down(event, window, cx)
@@ -255,15 +267,26 @@ impl FilesSurface {
                 };
                 let path = row.path.clone();
                 let menu_path = path.clone();
-                let selected = self.tree.selected() == Some(path.as_str());
+                let selected = self.tree.is_selected(&path);
+                let cursor = self.tree.selected() == Some(path.as_str());
                 let focused = self.tree_focus.is_focused(window);
+                // Mark the keyboard cursor once it no longer equals the whole selection.
+                let distinct_cursor =
+                    cursor && focused && (!selected || self.tree.selection_len() > 1);
                 let is_directory = node.entry.kind == WorkspaceEntryKind::Directory;
                 let decoration = self.git_decoration(&row.path, is_directory, cx);
-                let drag_payload = WorkspacePathDrag::new(path.clone(), is_directory).with_origin(
-                    self.interaction_origin(cx),
-                    super::WorkspacePathSource::Tree,
-                    node.entry.mutation_revision.clone(),
-                );
+                let drag_payload = WorkspacePathDrag::new(path.clone(), is_directory)
+                    .with_origin(
+                        self.interaction_origin(cx),
+                        super::WorkspacePathSource::Tree,
+                        node.entry.mutation_revision.clone(),
+                    )
+                    // Dragging a selected row carries the whole selection.
+                    .with_selection(if selected && self.tree.selection_len() > 1 {
+                        self.tree_drag_items()
+                    } else {
+                        Vec::new()
+                    });
                 let drag_owner = cx.weak_entity();
                 let renaming = self
                     .tree_rename
@@ -315,15 +338,34 @@ impl FilesSurface {
                         element.opacity(0.52)
                     })
                     .when(selected, |element| {
-                        element.bg(crate::theme::wash(if focused { 0.12 } else { 0.08 }))
+                        element.bg(crate::theme::wash(match (focused, distinct_cursor) {
+                            (true, true) => 0.16,
+                            (true, false) => 0.12,
+                            (false, _) => 0.08,
+                        }))
                     })
                     .when(!selected, |element| {
-                        element.hover(|style| style.bg(crate::theme::wash(0.055)))
+                        element
+                            .when(distinct_cursor, |element| {
+                                element.bg(crate::theme::wash(0.04))
+                            })
+                            .hover(|style| style.bg(crate::theme::wash(0.055)))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.tree_focus.focus(window, cx);
-                        this.activate_tree_path(path.clone(), cx);
-                    }))
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            this.tree_focus.focus(window, cx);
+                            let modifiers = event.modifiers();
+                            if modifiers.shift {
+                                this.tree.select_range_to(&path, modifiers.secondary());
+                                cx.notify();
+                            } else if modifiers.secondary() {
+                                this.tree.toggle_selected(path.clone());
+                                cx.notify();
+                            } else {
+                                this.activate_tree_path(path.clone(), cx);
+                            }
+                        }),
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -523,19 +565,32 @@ impl FilesSurface {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key == "escape" && self.tree.collapse_selection() {
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if matches!(event.keystroke.key.as_str(), "f2" | "delete") {
-            if let Some(path) = self.tree.selected().map(str::to_string) {
-                if event.keystroke.key == "f2" {
-                    self.begin_tree_rename(path, window, cx);
-                } else {
-                    self.begin_tree_delete(path, window, cx);
-                }
+            let paths = self.tree_action_paths();
+            if event.keystroke.key == "delete" {
+                self.begin_tree_delete(paths, window, cx);
+            } else if let [path] = paths.as_slice() {
+                self.begin_tree_rename(path.clone(), window, cx);
             }
             window.prevent_default();
             cx.stop_propagation();
             return;
         }
         let handled = match event.keystroke.key.as_str() {
+            "up" if event.keystroke.modifiers.shift => {
+                self.tree.extend_selection(-1);
+                true
+            }
+            "down" if event.keystroke.modifiers.shift => {
+                self.tree.extend_selection(1);
+                true
+            }
             "up" => {
                 self.tree.select_previous();
                 true
@@ -692,6 +747,111 @@ mod tests {
         state.splice(2..10, 0);
         draw(100.0);
         assert_eq!(tree_scroll_overflow(&state), (false, false));
+    }
+
+    #[gpui::test]
+    fn modifier_clicks_build_a_selection_without_opening(cx: &mut gpui::TestAppContext) {
+        use super::super::{FilesEvent, test_support};
+        let (files, cx) = test_support::setup(cx);
+        test_support::set_root_entries(
+            &files,
+            cx,
+            vec![
+                test_support::entry("folder", WorkspaceEntryKind::Directory),
+                test_support::entry("a.txt", WorkspaceEntryKind::File),
+                test_support::entry("b.txt", WorkspaceEntryKind::File),
+                test_support::entry("c.txt", WorkspaceEntryKind::File),
+            ],
+        );
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+        let row = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            cx.debug_bounds(selector).unwrap().center()
+        };
+        let secondary = gpui::Modifiers::secondary_key();
+        let shift = gpui::Modifiers::shift();
+
+        let a = row(cx, "tree-entry:a.txt");
+        cx.simulate_click(a, gpui::Modifiers::default());
+        let c = row(cx, "tree-entry:c.txt");
+        cx.simulate_click(c, secondary);
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["a.txt", "c.txt"]);
+        });
+        let folder = row(cx, "tree-entry:folder");
+        cx.simulate_click(folder, shift);
+        files.read_with(cx, |files, _| {
+            assert_eq!(
+                files.tree.selected_paths(),
+                ["folder", "a.txt", "b.txt", "c.txt"]
+            );
+            assert!(!files.tree.is_expanded("folder"));
+        });
+        cx.run_until_parked();
+        let opened = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                FilesEvent::OpenFile(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(opened, ["a.txt"]);
+
+        cx.simulate_keystrokes("escape");
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder"]);
+        });
+        cx.simulate_keystrokes("shift-down shift-down");
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder", "a.txt", "b.txt"]);
+        });
+        let b = row(cx, "tree-entry:b.txt");
+        cx.simulate_click(b, gpui::Modifiers::default());
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn plain_click_on_empty_space_clears_the_selection(cx: &mut gpui::TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update(cx, |files, cx| {
+            files.tree.select("folder");
+            files.tree.toggle_selected("a.txt");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let last = cx.debug_bounds("tree-entry:a.txt").unwrap();
+        let empty = gpui::point(last.center().x, last.bottom() + px(40.));
+        files.read_with(cx, |files, _| assert!(files.is_tree_empty_space(empty)));
+
+        // Modified clicks on empty space keep the selection.
+        cx.simulate_click(empty, gpui::Modifiers::secondary_key());
+        cx.simulate_click(empty, gpui::Modifiers::shift());
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder", "a.txt"]);
+        });
+        // A click on a row is not empty space.
+        files.read_with(cx, |files, _| {
+            assert!(!files.is_tree_empty_space(last.center()));
+        });
+
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        files.update_in(cx, |files, window, _| {
+            assert!(files.tree.selected_paths().is_empty());
+            assert_eq!(files.tree.selected(), None);
+            assert!(files.tree_focus.is_focused(window));
+        });
+        cx.simulate_keystrokes("down");
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree.selected_paths(), ["folder"]);
+        });
     }
 
     #[test]

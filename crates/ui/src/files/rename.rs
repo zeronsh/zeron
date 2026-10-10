@@ -13,11 +13,12 @@ pub(super) struct TreeRename {
     _events: Subscription,
 }
 pub(super) struct TreeDelete {
-    pub path: String,
+    /// Selection roots, so a folder's selected children are not deleted twice.
+    pub paths: Vec<String>,
     pub origin: mutations::WorkspaceInteractionOrigin,
     pub focus: FocusHandle,
     pub confirm_focused: bool,
-    revision: Option<String>,
+    revisions: Vec<Option<String>>,
 }
 
 pub(super) fn name_selection(name: &str, directory: bool) -> std::ops::Range<usize> {
@@ -44,6 +45,24 @@ pub(super) fn renamed_path(path: &str, name: &str) -> Result<String, &'static st
         format!("{parent}/{name}")
     })
 }
+/// "a.txt" for one entry; "3 items (a.txt, b.txt and 1 more)" for several.
+fn delete_subject(paths: &[String]) -> String {
+    let names = paths
+        .iter()
+        .map(|path| path.rsplit('/').next().unwrap_or(path))
+        .collect::<Vec<_>>();
+    match names.as_slice() {
+        [name] => (*name).to_string(),
+        [first, second] => format!("2 items ({first} and {second})"),
+        [first, second, rest @ ..] => format!(
+            "{} items ({first}, {second} and {} more)",
+            names.len(),
+            rest.len()
+        ),
+        [] => String::new(),
+    }
+}
+
 impl FilesSurface {
     pub(super) fn can_mutate_tree_entry(&self, path: &str, deleting: bool, cx: &gpui::App) -> bool {
         !self.mutation_busy()
@@ -204,11 +223,15 @@ impl FilesSurface {
     }
     pub(super) fn begin_tree_delete(
         &mut self,
-        path: String,
+        paths: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_mutate_tree_entry(&path, true, cx) {
+        if paths.is_empty()
+            || !paths
+                .iter()
+                .all(|path| self.can_mutate_tree_entry(path, true, cx))
+        {
             return;
         }
         let Some(origin) = self.interaction_origin(cx) else {
@@ -218,18 +241,22 @@ impl FilesSurface {
         focus.focus(window, cx);
         cx.emit(FilesEvent::HoldMutation {
             origin: origin.clone(),
-            path: Some(path.clone()),
+            paths: paths.clone(),
         });
-        let revision = self
-            .tree
-            .node(&path)
-            .and_then(|node| node.entry.mutation_revision.clone());
+        let revisions = paths
+            .iter()
+            .map(|path| {
+                self.tree
+                    .node(path)
+                    .and_then(|node| node.entry.mutation_revision.clone())
+            })
+            .collect();
         self.tree_delete = Some(TreeDelete {
-            path,
+            paths,
             origin,
             focus,
             confirm_focused: false,
-            revision,
+            revisions,
         });
         cx.notify();
     }
@@ -244,21 +271,27 @@ impl FilesSurface {
         };
         cx.emit(FilesEvent::HoldMutation {
             origin: dialog.origin.clone(),
-            path: None,
+            paths: Vec::new(),
         });
         if confirm && self.accepts_origin(&dialog.origin, cx) {
-            if self
-                .tree
-                .node(&dialog.path)
-                .and_then(|node| node.entry.mutation_revision.as_ref())
-                != dialog.revision.as_ref()
-            {
+            let changed = dialog
+                .paths
+                .iter()
+                .zip(&dialog.revisions)
+                .any(|(path, revision)| {
+                    self.tree
+                        .node(path)
+                        .and_then(|node| node.entry.mutation_revision.as_ref())
+                        != revision.as_ref()
+                });
+            if changed {
                 self.report_mutation_error(
                     "Entry changed; reopen Delete to confirm its current contents".into(),
                     cx,
                 );
             } else {
-                self.request_mutation(&dialog.path, None, cx);
+                let requests = dialog.paths.into_iter().map(|path| (path, None)).collect();
+                self.request_mutations(requests, cx);
             }
         }
         self.tree_focus.focus(window, cx);
@@ -272,18 +305,22 @@ impl FilesSurface {
     ) -> Option<AnyElement> {
         let dialog = self.tree_delete.as_ref()?;
         let theme = theme.for_popup();
-        let directory = self
-            .tree
-            .node(&dialog.path)
-            .is_some_and(|n| n.entry.kind == zeron_proto::WorkspaceEntryKind::Directory);
-        let name = dialog.path.rsplit('/').next().unwrap_or(&dialog.path);
+        let directories = dialog
+            .paths
+            .iter()
+            .filter(|path| {
+                self.tree
+                    .node(path)
+                    .is_some_and(|n| n.entry.kind == zeron_proto::WorkspaceEntryKind::Directory)
+            })
+            .count();
         let copy = format!(
             "Permanently delete {}? {}Open editor buffers will be kept for recovery.",
-            name,
-            if directory {
-                "All current folder contents will be deleted. "
-            } else {
-                "This cannot be undone. "
+            delete_subject(&dialog.paths),
+            match (directories, dialog.paths.len()) {
+                (0, _) => "This cannot be undone. ",
+                (_, 1) => "All current folder contents will be deleted. ",
+                _ => "Folders are deleted with all their current contents. ",
             }
         );
         let card = popover::dialog_card(&theme)
@@ -445,7 +482,7 @@ mod tests {
             })
         });
         files.update_in(cx, |files, window, cx| {
-            files.begin_tree_delete("a.txt".into(), window, cx);
+            files.begin_tree_delete(vec!["a.txt".into()], window, cx);
             files.begin_tree_rename("a.txt".into(), window, cx);
             let input = files.tree_rename.as_ref().unwrap().input.clone();
             input.update(cx, |input, cx| input.set_value("renamed.txt", window, cx));
@@ -519,7 +556,7 @@ mod tests {
         events.borrow_mut().clear();
         files.update_in(cx, |files, window, cx| {
             files.tree_rename = None;
-            files.begin_tree_delete("folder".into(), window, cx);
+            files.begin_tree_delete(vec!["folder".into()], window, cx);
             assert!(!files.tree_delete.as_ref().unwrap().confirm_focused);
             files.dismiss_tree_delete(false, window, cx);
         });
@@ -531,6 +568,20 @@ mod tests {
                 .any(|event| matches!(event, FilesEvent::Mutate(_)))
         );
     }
+    #[test]
+    fn delete_copy_names_a_few_selected_entries() {
+        let paths = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(delete_subject(&paths(&["src/a.txt"])), "a.txt");
+        assert_eq!(
+            delete_subject(&paths(&["a.txt", "src"])),
+            "2 items (a.txt and src)"
+        );
+        assert_eq!(
+            delete_subject(&paths(&["a.txt", "b.txt", "c/d.txt", "e"])),
+            "4 items (a.txt, b.txt and 2 more)"
+        );
+    }
+
     #[test]
     fn rename_preserves_parent_and_selects_only_basename() {
         assert_eq!(renamed_path("src/a.txt", "é.txt").unwrap(), "src/é.txt");
