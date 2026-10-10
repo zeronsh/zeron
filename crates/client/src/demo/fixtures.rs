@@ -64,6 +64,16 @@ pub(crate) fn chats() -> Vec<DemoChat> {
     };
     vec![
         DemoChat {
+            parent: Some("chat-ios-keyboard"),
+            ..chat(
+                "chat-images",
+                Some("space-zeron"),
+                MAC,
+                "Screenshots from the host",
+                "Check the screenshots on the phone.",
+            )
+        },
+        DemoChat {
             branch: Some("veil-fade"),
             pr: Some((90, Open, "Stream pull request status on every client")),
             status: Some(SessionStatus::Working),

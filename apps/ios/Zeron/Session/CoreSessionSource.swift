@@ -250,12 +250,17 @@ final class CoreSessionSource: SessionSource {
 
     private static let images = NSCache<NSString, UIImage>()
 
+    static func imageCacheKey(device: String, reference: String) -> NSString {
+        "\(device.utf8.count):\(device)\(reference)" as NSString
+    }
+
     func image(_ reference: String) async -> UIImage? {
-        if let hit = Self.images.object(forKey: reference as NSString) { return hit }
+        let key = Self.imageCacheKey(device: hostDevice, reference: reference)
+        if let hit = Self.images.object(forKey: key) { return hit }
         guard let data = try? await client.readAttachment(deviceId: hostDevice, path: reference),
               let image = await UIImage(data: data)?.byPreparingForDisplay()
         else { return nil }
-        Self.images.setObject(image, forKey: reference as NSString)
+        Self.images.setObject(image, forKey: key)
         return image
     }
 
@@ -263,21 +268,28 @@ final class CoreSessionSource: SessionSource {
         // Claim the view first: a slower load for a row it used to show
         // must not land on top of this one.
         view.accessibilityIdentifier = reference
-        if let hit = Self.images.object(forKey: reference as NSString) {
-            view.image = hit
+        let key = Self.imageCacheKey(device: hostDevice, reference: reference)
+        if let hit = Self.images.object(forKey: key) {
+            if let thumbnail = view as? TranscriptImageView { thumbnail.showImage(hit) }
+            else { view.image = hit }
             return
         }
+        (view as? TranscriptImageView)?.showLoading()
         let device = hostDevice
         let client = self.client
         view.accessibilityIdentifier = reference
         Task.detached(priority: .userInitiated) {
-            guard let data = try? await client.readAttachment(deviceId: device, path: reference),
-                  let image = UIImage(data: data)?.preparingForDisplay()
-            else { return }
-            Self.images.setObject(image, forKey: reference as NSString)
+            let data = try? await client.readAttachment(deviceId: device, path: reference)
+            let image = data.flatMap { UIImage(data: $0)?.preparingForDisplay() }
+            if let image { Self.images.setObject(image, forKey: key) }
             await MainActor.run {
                 guard view.accessibilityIdentifier == reference else { return }
-                UIView.transition(with: view, duration: 0.2, options: .transitionCrossDissolve) { view.image = image }
+                guard let image else {
+                    (view as? TranscriptImageView)?.showFailure()
+                    return
+                }
+                if let thumbnail = view as? TranscriptImageView { thumbnail.showImage(image) }
+                else { view.image = image }
             }
         }
     }

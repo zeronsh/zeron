@@ -101,6 +101,7 @@ fn assistant(id: &str, host: &str, at: i64, parts: Vec<MessagePart>) -> SessionM
 
 /// Paths the demo serves generated images for.
 pub(crate) const DEMO_IMAGES: &[(&str, u32, u32, u32)] = &[
+    ("/workspace/calculator/5-plus-3.png", 960, 540, 4),
     (
         "/Users/dev/.zeron/uploads/4f1c9a2e-Image_1.png",
         960,
@@ -612,6 +613,12 @@ fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageE
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
     match chat_id {
+        "chat-images" => short(
+            host,
+            now,
+            "Show the calculation screenshot.",
+            "Here are the screenshots.\n\n![Calculation result: 8](/workspace/calculator/5-plus-3.png)\n\n[Download screenshot](/workspace/calculator/5-plus-3.png)\n\n![Missing screenshot](/tmp/calculator-result/missing.png)",
+        ),
         "chat-veil" => veil(host, crate::now_ms()),
         "chat-picker" => picker(host, now),
         "chat-tabs" => tabs(host, now),
