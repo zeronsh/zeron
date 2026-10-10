@@ -433,7 +433,7 @@ impl Shell {
                 .left_0()
                 .w(px(width))
                 .h(px(new_thread_background_height(f32::from(viewport.height))))
-                .opacity(new_thread_background_opacity(theme.is_frost()))
+                .opacity(settings::new_thread_background_opacity(theme.is_frost()))
                 .child(
                     gpui::canvas(
                         |_, _, _| {},
