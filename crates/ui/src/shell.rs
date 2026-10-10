@@ -260,13 +260,7 @@ fn chat_copy_path(chat: &zeron_proto::Chat) -> Option<&str> {
 /// POSIX path to a Windows viewport (no drive, so `Path::is_absolute` says
 /// no) or a drive path to a POSIX one.
 fn is_host_absolute_path(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    path.starts_with('/')
-        || path.starts_with("\\\\")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'\\' | b'/'))
+    path.starts_with('/') || path.starts_with("\\\\") || crate::workspace_links::is_drive_path(path)
 }
 
 fn composer_target_width(panel_width: f32, content_width: f32, docked: bool) -> f32 {
