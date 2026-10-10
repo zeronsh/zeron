@@ -7090,17 +7090,17 @@ impl Shell {
     /// Native Windows caption controls integrated into Zeron's unified
     /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
     /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
-    /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
+    /// Snap Layouts) while GPUI renders the bundled SVG caption icons.
     fn render_windows_caption_controls(&self, window: &Window, cx: &App) -> Option<AnyElement> {
         if !cfg!(target_os = "windows") {
             return None;
         }
 
         let theme = Theme::of(cx);
-        let (maximize_id, maximize_glyph) = if window.is_maximized() {
-            ("window-restore", "\u{e923}")
+        let (maximize_id, maximize_icon) = if window.is_maximized() {
+            ("window-restore", icons::WINDOW_RESTORE)
         } else {
-            ("window-maximize", "\u{e922}")
+            ("window-maximize", icons::WINDOW_MAXIMIZE)
         };
         Some(
             div()
@@ -7111,24 +7111,23 @@ impl Shell {
                 .h(px(Theme::TITLEBAR_HEIGHT))
                 .flex()
                 .flex_row()
-                .font_family("Segoe Fluent Icons")
                 .child(windows_caption_button(
                     "window-minimize",
-                    "\u{e921}",
+                    icons::WINDOW_MINIMIZE,
                     WindowControlArea::Min,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     maximize_id,
-                    maximize_glyph,
+                    maximize_icon,
                     WindowControlArea::Max,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     "window-close",
-                    "\u{e8bb}",
+                    icons::CLOSE,
                     WindowControlArea::Close,
                     theme,
                     true,
@@ -12845,11 +12844,11 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
     }
 }
 
-/// A Windows-owned caption target using the same system glyphs and native
-/// non-client hit-test areas as GPUI/Zed's platform titlebar.
+/// A Windows-owned caption target using bundled SVG icons and native
+/// non-client hit-test areas. Windows 10 has no Segoe Fluent Icons font.
 fn windows_caption_button(
     id: &'static str,
-    glyph: &'static str,
+    icon_path: &'static str,
     area: WindowControlArea,
     theme: &Theme,
     close: bool,
@@ -12872,19 +12871,29 @@ fn windows_caption_button(
     };
     div()
         .id(id)
+        .group("windows-caption-button")
         .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
         .h_full()
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text)
-        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
-        .active(move |style| style.bg(active_bg).text_color(active_fg))
+        .hover(move |style| style.bg(hover_bg))
+        .active(move |style| style.bg(active_bg))
         .occlude()
         .window_control_area(area)
-        .child(glyph)
+        .child(
+            icon(icon_path)
+                .id("caption-icon")
+                .size(px(16.0))
+                .text_color(theme.text)
+                .group_hover("windows-caption-button", move |style| {
+                    style.text_color(hover_fg)
+                })
+                .group_active("windows-caption-button", move |style| {
+                    style.text_color(active_fg)
+                }),
+        )
 }
 
 /// A Linux caption button in zeron's own cluster style (24px, rounded-6,

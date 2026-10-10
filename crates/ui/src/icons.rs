@@ -189,10 +189,9 @@ icon_assets![
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),
     (CLOSE, "close"),
-    // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
+    // Bundled caption glyphs (minimize dash, maximize square,
     // restore stacked squares) in the same style as `close` — drawn for the
-    // client-side-decoration window controls; no system glyph font exists on
-    // Linux the way Segoe Fluent Icons does on Windows.
+    // Linux and Windows window controls without a system icon font.
     (WINDOW_MINIMIZE, "window-minimize"),
     (WINDOW_MAXIMIZE, "window-maximize"),
     (WINDOW_RESTORE, "window-restore"),
