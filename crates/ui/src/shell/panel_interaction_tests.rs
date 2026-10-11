@@ -18,6 +18,9 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
         let mut config = UiSettings::default();
         config.sidebar_width = 300.0;
         config.files_panel_width = 377.0;
+        // The session card shifts the composer while it fits; these panels
+        // measure the composer centered in its column.
+        config.session_info_hidden = true;
         settings::init(config, dir.path(), cx);
     });
     let (shell, cx) = cx.add_window_view(|_, cx| {

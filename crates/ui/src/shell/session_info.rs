@@ -1,9 +1,9 @@
 //! The session card: where this chat runs (device, project, branch), its
 //! side-chat actions, and the project's run actions, in one toggleable card.
-//! When the centered transcript leaves room at the column's right, the card
-//! shows there on its own (until the user hides it); on a tighter column it
-//! stays hidden, and opening it floats it over the transcript. The card never
-//! takes room from the transcript.
+//! While the column has room, the card shows at its right on its own (until
+//! the user hides it), the transcript and composer shifting left as needed
+//! to clear it. Once clearing it would narrow the transcript, the card hides,
+//! and opening it floats it over the transcript instead.
 use super::*;
 
 use crate::project_actions::{ProjectActionsStatus, action_icon};
@@ -16,12 +16,17 @@ const SESSION_CARD_GAP: f32 = 24.0;
 /// The transcript's own side gutters (its rows pad 48px each side).
 const TRANSCRIPT_GUTTER: f32 = 48.0;
 
-/// Whether a main column `main` wide fits the card beside the centered
-/// reading column (configured `transcript` wide) without moving it.
-pub(super) fn session_card_fits(main: f32, transcript: f32) -> bool {
-    let column = transcript.min(main - 2.0 * TRANSCRIPT_GUTTER).max(0.0);
+/// The room the transcript holds free on its right for the card docked in a
+/// main column `main` wide, for a configured reading width `transcript`: none
+/// while the centered column already clears the card, else just enough to
+/// shift it left. `None` once that would narrow the column: the card no
+/// longer fits beside it.
+pub(super) fn session_card_reserve(main: f32, transcript: f32) -> Option<f32> {
     let card_left = main - SESSION_CARD_WIDTH - SESSION_CARD_INSET;
-    main / 2.0 + column / 2.0 <= card_left - SESSION_CARD_GAP
+    // Centered in `main - reserve`, the column's right edge is
+    // (main - reserve) / 2 + transcript / 2; keep it at `card_left - gap`.
+    let reserve = (main + transcript - 2.0 * (card_left - SESSION_CARD_GAP)).max(0.0);
+    (main - reserve - 2.0 * TRANSCRIPT_GUTTER >= transcript - 0.5).then_some(reserve)
 }
 
 /// A non-interactive card row: icon slot, label, optional trailing detail.
@@ -47,16 +52,21 @@ fn row_glyph(path: &'static str, theme: &Theme) -> AnyElement {
 }
 
 impl Shell {
-    /// Whether the main column, at its LIVE width, fits the card beside the
-    /// transcript: while the sidebar or a pane animates, the settled width
-    /// would show or hide the card ahead of the column.
-    pub(super) fn session_info_fits(&self, cx: &App) -> bool {
+    /// The card's reserve at the main column's LIVE width (see
+    /// [`session_card_reserve`]): while the sidebar or a pane animates, the
+    /// settled width would move or hide the card ahead of the column.
+    fn session_info_reserve(&self, cx: &App) -> Option<f32> {
         let main = (self.viewport_width
             - self.sidebar_now()
             - self.right_visible_width(cx)
             - self.files_visible_width(cx))
         .max(0.0);
-        session_card_fits(main, crate::settings::transcript_width(cx))
+        session_card_reserve(main, crate::settings::transcript_width(cx))
+    }
+
+    /// Whether the card fits beside the transcript without narrowing it.
+    pub(super) fn session_info_fits(&self, cx: &App) -> bool {
+        self.session_info_reserve(cx).is_some()
     }
 
     /// Beside the transcript it shows unless hidden; over it, only while
@@ -101,23 +111,37 @@ impl Shell {
     }
 
     /// This frame's card: docked beside the transcript (else floating over
-    /// it) and its reveal, 0 (hidden) → 1 (shown), easing on the shell's
-    /// resize clock whenever the card shows or hides, by toggle or by the
-    /// column crossing the fit.
-    pub(super) fn session_info_frame(&mut self, has_selection: bool, cx: &App) -> (bool, f32) {
-        let docked = self.session_info_fits(cx);
-        if docked {
+    /// it), its reveal, 0 (hidden) → 1 (shown), and the room the transcript
+    /// holds free for it. The reveal eases on the shell's resize clock
+    /// whenever the card shows or hides, by toggle or by the column crossing
+    /// the fit, and the reserve eases with it.
+    pub(super) fn session_info_frame(&mut self, has_selection: bool, cx: &App) -> (bool, f32, f32) {
+        let reserve = self.session_info_reserve(cx);
+        if let Some(reserve) = reserve {
             // An overlay opened on a tighter column ends once the card fits.
             self.session_info_overlay = false;
+            self.session_info_last_reserve = reserve;
         }
         let shown = has_selection && self.session_info_visible(cx);
+        if shown {
+            self.session_info_docked = reserve.is_some();
+        }
         let target = if shown { 1.0 } else { 0.0 };
         if shown != self.session_info_shown {
             let from = self.eval_tween(self.session_info_tween, 1.0 - target);
             self.session_info_tween = Some(WidthTween::new(from, target));
             self.session_info_shown = shown;
         }
-        (docked, self.eval_tween(self.session_info_tween, target))
+        let reveal = self.eval_tween(self.session_info_tween, target);
+        // Hiding as the column stops fitting, the card keeps its docked look
+        // and the transcript eases back from the last room it held.
+        let docked = self.session_info_docked;
+        let reserve = if docked {
+            reserve.unwrap_or(self.session_info_last_reserve) * reveal
+        } else {
+            0.0
+        };
+        (docked, reveal, reserve)
     }
 
     /// The card, positioned within the main column; `None` while closed or
@@ -399,7 +423,13 @@ impl Shell {
                         action_icon(draft.icon),
                         theme,
                     )))
-                    .child(div().flex_1().min_w_0().truncate().child(draft.name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(draft.name.clone()),
+                    )
                     .child(
                         div()
                             .flex_none()
@@ -433,19 +463,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_wide_column_fits_the_card_beside_the_centered_transcript() {
-        assert!(session_card_fits(1400.0, 736.0));
+    fn a_wide_column_keeps_the_transcript_centered_beside_the_card() {
+        assert_eq!(session_card_reserve(1600.0, 736.0), Some(0.0));
         // The centered column's right edge clears the card by the gap.
-        let main = 1400.0;
+        let main = 1600.0;
         let card_left = main - SESSION_CARD_WIDTH - SESSION_CARD_INSET;
         assert!(main / 2.0 + 736.0 / 2.0 <= card_left - SESSION_CARD_GAP);
     }
 
     #[test]
-    fn a_tighter_column_does_not_fit_it() {
-        assert!(!session_card_fits(1200.0, 736.0));
-        assert!(!session_card_fits(700.0, 736.0));
+    fn a_tighter_column_shifts_the_transcript_just_enough() {
+        let main = 1200.0;
+        let reserve = session_card_reserve(main, 736.0).expect("it still fits");
+        assert!(reserve > 0.0);
+        let card_left = main - SESSION_CARD_WIDTH - SESSION_CARD_INSET;
+        let right = (main - reserve) / 2.0 + 736.0 / 2.0;
+        assert!((right - (card_left - SESSION_CARD_GAP)).abs() < 0.01);
+        // At full width: the column keeps its configured width.
+        assert!(main - reserve - 2.0 * TRANSCRIPT_GUTTER >= 736.0);
+    }
+
+    #[test]
+    fn the_card_stops_fitting_where_the_transcript_would_narrow() {
+        // Gutter, column, gap, card, inset.
+        let least =
+            TRANSCRIPT_GUTTER + 736.0 + SESSION_CARD_GAP + SESSION_CARD_WIDTH + SESSION_CARD_INSET;
+        assert!(session_card_reserve(least, 736.0).is_some());
+        assert!(session_card_reserve(least - 1.0, 736.0).is_none());
+        assert!(session_card_reserve(700.0, 736.0).is_none());
         // A narrower reading column leaves room sooner.
-        assert!(session_card_fits(1200.0, 560.0));
+        assert!(session_card_reserve(least - 1.0, 560.0).is_some());
     }
 }

@@ -2217,6 +2217,11 @@ pub struct Shell {
     /// Whether the card showed at the toggle's press (see
     /// `note_session_info_press`).
     session_info_pressed_open: Option<bool>,
+    /// The card last showed docked beside the transcript (else over it).
+    session_info_docked: bool,
+    /// The room the transcript last held free for the docked card, eased
+    /// back from as the card hides because the column stopped fitting it.
+    session_info_last_reserve: f32,
     files_content_tween: Option<WidthTween>,
     /// The last tracked frame: its chat, the window fit, and for each of
     /// `[sidebar, surface host, Files]` the width painted and the width its
@@ -2662,6 +2667,8 @@ impl Shell {
             session_info_shown: false,
             session_info_overlay: false,
             session_info_pressed_open: None,
+            session_info_docked: false,
+            session_info_last_reserve: 0.0,
             files_content_tween: None,
             painted_columns: None,
             fit_exits: [None; 3],
@@ -11007,16 +11014,20 @@ impl Shell {
         }
         self.composer
             .update(cx, |composer, cx| composer.set_dock_frame(dock_frame, cx));
-        // The session card: beside the transcript when it fits, else over it
-        // once opened. It never takes room from the transcript.
-        let (session_docked, session_reveal) = self.session_info_frame(has_selection, cx);
+        // The session card: docked, the transcript holds its room free on
+        // the right and the composer follows the column left by half of it;
+        // over a column too tight for that, it floats once opened.
+        let (session_docked, session_reveal, session_reserve) =
+            self.session_info_frame(has_selection, cx);
+        self.transcript
+            .update(cx, |transcript, cx| transcript.set_right_reserve(session_reserve, cx));
         // Panel open/close glides the composer width; a window resize or a
         // seam drag is direct manipulation, so the width tracks the pointer.
         let direct_width =
             self.reduced_motion || self.viewport_resized || self.pane_resize_dragging.is_some();
         let composer_width = self.composer_dock.borrow_mut().layout_width(
             composer_target_width(
-                main_content_width,
+                main_content_width - session_reserve,
                 ui_settings.transcript_width,
                 has_selection,
             ),
@@ -11166,7 +11177,10 @@ impl Shell {
         } else {
             None
         };
-        let status = self.render_status_strip(composer_width, cx);
+        let status = div()
+            .relative()
+            .left(px(-session_reserve / 2.0))
+            .child(self.render_status_strip(composer_width, cx));
         let session_card = self.render_session_info(
             session_docked,
             session_reveal,
