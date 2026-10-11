@@ -33,6 +33,17 @@ Folders opened by hover stay open. The chat column retains its own drop zone,
 so a gesture ending there adds a reference instead of moving the entry. OS file
 attachments continue through the existing composer attachment pipeline.
 
+## Search
+
+The explorer's search box queries the host's workspace search index (fff; see
+[performance-workspace-search.md](performance-workspace-search.md)), so a query
+no longer walks the folder. Matching is fuzzy and typo-tolerant: exact file
+names and recently changed files rank first, and new, renamed or deleted
+entries appear without reopening the tree. Ignored files, symbolic links and,
+outside git repositories, dotfiles are not indexed. With "show ignored" on, the
+search walks the folder directly instead and matches names and paths as plain
+case-insensitive substrings.
+
 ## Workspace and editor consistency
 
 Operations run through the owning engine, locally or remotely. Directory pages

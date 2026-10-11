@@ -714,6 +714,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_session_card_docks_beside_a_wide_transcript_and_floats_over_a_narrow_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                shell.debug_gate = Some(super::GatePhase::Ready);
+                shell.settings.sidebar_collapsed = true;
+                shell
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("regular".into()));
+                shell.toggle_session_info(cx);
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        for (width, docked) in [(1600.0, true), (700.0, false)] {
+            cx.simulate_resize(gpui::size(px(width), px(900.0)));
+            cx.run_until_parked();
+            let card = cx
+                .debug_bounds("session-info")
+                .expect("the card shows for a selected chat");
+            assert!(card.right() <= px(width), "{width}: inside the window");
+            let actions = cx.debug_bounds("session-info-side-chat").unwrap();
+            assert!(card.contains(&actions.center()));
+            if docked {
+                // Docked, the transcript keeps the card's room clear.
+                assert!(card.left() > px(width / 2.0));
+            }
+        }
+    }
+
+    #[gpui::test]
     fn copying_from_the_copy_submenu_shows_a_toast(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let window = test_shell(cx, dir.path());

@@ -1389,9 +1389,13 @@ impl GitCheckoutInspector {
                 .or_else(|| (remotes.len() == 1).then(|| remotes[0].to_owned()));
         }
 
+        // A push URL that isn't a remote (a fork's
+        // `DISABLED--push-to-your-fork-origin-instead`) falls back to the
+        // fetch URL, which still identifies the repository.
         let remote_url = if let Some(remote) = remote_name.as_deref() {
             self.git_optional(&checkout_root, &["remote", "get-url", "--push", remote])
                 .await
+                .filter(|url| parse_git_remote(url).is_some())
         } else {
             None
         };
@@ -3865,6 +3869,48 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(
             source.branch.head_selectors,
             ["contributor:feature/no-upstream", "feature/no-upstream"]
+        );
+    }
+
+    /// A common fork setup disables pushes to upstream with a placeholder
+    /// push URL; the remote is still identified by its fetch URL.
+    #[tokio::test]
+    async fn git_inspector_ignores_a_disabled_push_url() {
+        let temp = tempfile::tempdir().expect("fixture tempdir");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout directory");
+        run_git(&checkout, &["init", "-q", "-b", "main"]);
+        run_git(
+            &checkout,
+            &["remote", "add", "upstream", "git@github.com:acme/zeron.git"],
+        );
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "upstream",
+                "DISABLED--push-to-your-fork-origin-instead",
+            ],
+        );
+        run_git(&checkout, &["config", "branch.main.remote", "upstream"]);
+        run_git(&checkout, &["config", "branch.main.merge", "refs/heads/main"]);
+
+        let resolver = ChangeRequestResolver::new();
+        let source = resolver
+            .inspect_checkout(&checkout)
+            .await
+            .expect("inspect checkout with a disabled push URL");
+
+        assert_eq!(source.branch.remote_name.as_deref(), Some("upstream"));
+        assert_eq!(
+            source.branch.remote_url.as_deref(),
+            Some("git@github.com:acme/zeron.git")
+        );
+        assert_eq!(
+            resolver.repository_for_checkout(&checkout).await.as_deref(),
+            Some("acme/zeron")
         );
     }
 

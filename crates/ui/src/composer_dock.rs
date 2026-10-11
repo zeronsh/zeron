@@ -253,6 +253,7 @@ impl Visuals {
 
 pub(crate) struct DockState {
     pane: panel_handoff::PanelHandoff,
+    conversation: Option<String>,
     phase: Glide,
     last_frame: Option<Instant>,
     pub frame: DockFrame,
@@ -274,6 +275,7 @@ impl Default for DockState {
     fn default() -> Self {
         Self {
             pane: Default::default(),
+            conversation: None,
             phase: Glide::new(0.0),
             last_frame: None,
             frame: DockFrame::settled(false),
@@ -310,7 +312,13 @@ impl DockState {
         let mut position = self.position.unwrap_or((Glide::new(x), Glide::new(y)));
         if let Some(progress) = self.pane.progress {
             if progress >= panel_handoff::GEOMETRY_SWITCH {
-                let travel = if docked { 12.0 } else { 8.0 };
+                let travel = if !self.pane.route_change {
+                    0.0
+                } else if docked {
+                    12.0
+                } else {
+                    8.0
+                };
                 position = (
                     Glide::new(x),
                     Glide::new(
@@ -344,6 +352,21 @@ impl DockState {
         (viewport - bottom).max(0.0)
     }
 
+    /// A different conversation can have a different panel allocation even
+    /// though both composers are docked. Treat that as navigation, not resize.
+    pub fn observe_conversation(&mut self, key: &str) {
+        if self
+            .conversation
+            .as_deref()
+            .is_some_and(|previous| previous != key)
+        {
+            self.pane.navigate();
+        }
+        if self.conversation.as_deref() != Some(key) {
+            self.conversation = Some(key.to_owned());
+        }
+    }
+
     /// Retained transcript pixels belong to the source column. Letting them
     /// reflow into the hero's wider layout before fading creates an exit flash.
     pub fn transcript_width(&mut self, target: f32, docked: bool, panel_handoff: bool) -> f32 {
@@ -357,10 +380,16 @@ impl DockState {
         self.departing_column_width.unwrap_or(target)
     }
 
-    pub fn observe_pane(&mut self, docked: bool, target: f32, enabled: bool, now: Instant) -> bool {
+    pub fn observe_column(
+        &mut self,
+        docked: bool,
+        column: (f32, f32),
+        enabled: bool,
+        now: Instant,
+    ) -> bool {
         self.pane.sample(
             docked,
-            target,
+            column,
             enabled,
             now,
             panel_handoff::DURATION * crate::motion::speed_scale(),
@@ -371,7 +400,12 @@ impl DockState {
         self.pane.opacity()
     }
 
-    pub fn layout_width(&mut self, target: f32, reduced: bool, now: Instant) -> f32 {
+    /// The composer follows its column, which panel tweens already animate: a
+    /// second spring here lags the column and drags the composer's position
+    /// with it. Only the dock route's own motion glides the width. `direct`
+    /// snaps even then: reduced motion and direct manipulation (window resize,
+    /// seam drag).
+    pub fn layout_width(&mut self, target: f32, direct: bool, now: Instant) -> f32 {
         let dt = if self.route_changed {
             0.0
         } else {
@@ -386,7 +420,7 @@ impl DockState {
             if progress >= panel_handoff::GEOMETRY_SWITCH {
                 *width = Glide::new(target);
             }
-        } else if reduced || (!self.frame.active && !self.moving) {
+        } else if direct || (!self.frame.active && !self.moving) {
             *width = Glide::new(target);
         } else {
             width.advance(target, dt, duration(self.frame.docked));
@@ -784,22 +818,22 @@ mod tests {
                 let now = Instant::now();
                 let source_pane = if docked { 0.0 } else { 480.0 };
                 let target_pane = if docked { 480.0 } else { 0.0 };
-                state.observe_pane(!docked, source_pane, true, now);
+                state.observe_column(!docked, (0.0, source_pane), true, now);
                 state.tick(!docked, false, now);
                 state.position = Some((Glide::new(sidebar), Glide::new(360.0)));
-                state.observe_pane(docked, target_pane, true, now);
+                state.observe_column(docked, (0.0, target_pane), true, now);
                 state.tick(docked, false, now);
                 for progress in [0.19, 0.22, 0.25] {
                     let at = now
                         + std::time::Duration::from_secs_f32(
                             progress * panel_handoff::DURATION * crate::motion::speed_scale(),
                         );
-                    state.observe_pane(docked, target_pane, true, at);
+                    state.observe_column(docked, (0.0, target_pane), true, at);
                     assert_eq!(state.tick(docked, false, at).dissolve(), 1.0);
                 }
                 let at =
                     now + std::time::Duration::from_secs_f32(0.321 * crate::motion::speed_scale());
-                state.observe_pane(docked, target_pane, true, at);
+                state.observe_column(docked, (0.0, target_pane), true, at);
                 assert_eq!(
                     state.tick(docked, false, at).dissolve(),
                     if docked { 1.0 } else { 0.0 }
@@ -844,16 +878,16 @@ mod tests {
                 let now = Instant::now();
                 let source_pane = if docked { 0.0 } else { 480.0 };
                 let target_pane = if docked { 480.0 } else { 0.0 };
-                state.observe_pane(!docked, source_pane, true, now);
+                state.observe_column(!docked, (0.0, source_pane), true, now);
                 state.tick(!docked, false, now);
                 state.layout_width(source, false, now);
                 state.position = Some((Glide::new(0.0), Glide::new(300.0)));
-                state.observe_pane(docked, target_pane, true, now);
+                state.observe_column(docked, (0.0, target_pane), true, now);
                 state.tick(docked, false, now);
                 assert_eq!(state.layout_width(target, false, now), source);
                 let hidden =
                     now + std::time::Duration::from_secs_f32(0.075 * crate::motion::speed_scale());
-                state.observe_pane(docked, target_pane, true, hidden);
+                state.observe_column(docked, (0.0, target_pane), true, hidden);
                 state.tick(docked, false, hidden);
                 assert_eq!(state.opacity(), 0.0);
                 assert_eq!(state.layout_width(target, false, hidden), target);
@@ -879,20 +913,20 @@ mod tests {
     fn panel_return_sizes_while_hidden_and_finishes_controls_with_input() {
         let now = Instant::now();
         let mut state = DockState::default();
-        state.observe_pane(true, 480.0, true, now);
+        state.observe_column(true, (0.0, 480.0), true, now);
         state.tick(true, false, now);
         state.position = Some((Glide::new(100.0), Glide::new(700.0)));
-        state.observe_pane(false, 0.0, true, now);
+        state.observe_column(false, (0.0, 0.0), true, now);
         assert_eq!(state.tick(false, false, now).amount, 1.0);
         let hidden = now + std::time::Duration::from_secs_f32(0.075 * crate::motion::speed_scale());
-        state.observe_pane(false, 0.0, true, hidden);
+        state.observe_column(false, (0.0, 0.0), true, hidden);
         let frame = state.tick(false, false, hidden);
         assert_eq!(state.opacity(), 0.0);
         assert_eq!(frame.amount, 0.0);
         for seconds in [0.321, 0.400, 0.500] {
             let at =
                 now + std::time::Duration::from_secs_f32(seconds * crate::motion::speed_scale());
-            state.observe_pane(false, 0.0, true, at);
+            state.observe_column(false, (0.0, 0.0), true, at);
             let frame = state.tick(false, false, at);
             assert_eq!(frame.selectors(), 1.0);
             assert_eq!(frame.dissolve(), 0.0);
@@ -1012,7 +1046,7 @@ mod tests {
                 let pane = if self.docked { 320.0 } else { 0.0 };
                 let frame = {
                     let mut state = self.state.borrow_mut();
-                    state.observe_pane(self.docked, pane, true, self.now);
+                    state.observe_column(self.docked, (0.0, pane), true, self.now);
                     state.tick(self.docked, false, self.now)
                 };
                 let width = self
@@ -1151,10 +1185,10 @@ mod tests {
     fn panel_entry_switches_chips_and_height_while_hidden() {
         let now = Instant::now();
         let mut state = DockState::default();
-        state.observe_pane(false, 0.0, true, now);
+        state.observe_column(false, (0.0, 0.0), true, now);
         state.tick(false, false, now);
         state.position = Some((Glide::new(100.0), Glide::new(300.0)));
-        state.observe_pane(true, 480.0, true, now);
+        state.observe_column(true, (0.0, 480.0), true, now);
         state.tick(true, false, now);
         for step in 0..=100 {
             let progress = step as f32 / 100.0;
@@ -1162,7 +1196,7 @@ mod tests {
                 + std::time::Duration::from_secs_f32(
                     progress * panel_handoff::DURATION * crate::motion::speed_scale(),
                 );
-            state.observe_pane(true, 480.0, true, at);
+            state.observe_column(true, (0.0, 480.0), true, at);
             let frame = state.tick(true, false, at);
             if progress < 0.18 {
                 assert_eq!(frame.amount, 0.0, "hold departing geometry until hidden");
@@ -1189,10 +1223,10 @@ mod tests {
                         let mut state = DockState::default();
                         let now = Instant::now();
                         let pane = |docked| if docked { panel_width } else { 0.0 };
-                        state.observe_pane(!docked, pane(!docked), true, now);
+                        state.observe_column(!docked, (0.0, pane(!docked)), true, now);
                         state.tick(!docked, false, now);
                         state.position = Some((Glide::new(0.0), Glide::new(300.0)));
-                        state.observe_pane(docked, pane(docked), true, now);
+                        state.observe_column(docked, (0.0, pane(docked)), true, now);
                         state.tick(docked, false, now);
                         let span = if panel_width > 0.0 {
                             panel_handoff::DURATION * crate::motion::speed_scale()
@@ -1201,10 +1235,10 @@ mod tests {
                         };
                         let reverse_at =
                             now + std::time::Duration::from_secs_f32(span * interruption);
-                        state.observe_pane(docked, pane(docked), true, reverse_at);
+                        state.observe_column(docked, (0.0, pane(docked)), true, reverse_at);
                         let before = state.tick(docked, false, reverse_at);
                         let opacity = state.opacity();
-                        state.observe_pane(!docked, pane(!docked), true, reverse_at);
+                        state.observe_column(!docked, (0.0, pane(!docked)), true, reverse_at);
                         let reversed = state.tick(!docked, false, reverse_at);
                         assert!((reversed.amount - before.amount).abs() < 0.00001);
                         assert_eq!(reversed.visuals, before.visuals);
@@ -1214,7 +1248,7 @@ mod tests {
                                 + std::time::Duration::from_secs_f32(
                                     frame as f32 / hz as f32 * crate::motion::speed_scale(),
                                 );
-                            state.observe_pane(!docked, pane(!docked), true, at);
+                            state.observe_column(!docked, (0.0, pane(!docked)), true, at);
                             let frame = state.tick(!docked, false, at);
                             assert!(frame.selectors() == 0.0 || frame.footer() == 0.0);
                             for alpha in [frame.selectors(), frame.footer(), state.opacity()] {
@@ -1235,13 +1269,13 @@ mod tests {
             let mut state = DockState::default();
             let now = Instant::now();
             let pane = |docked| if docked { 480.0 } else { 0.0 };
-            state.observe_pane(!docked, pane(!docked), true, now);
+            state.observe_column(!docked, (0.0, pane(!docked)), true, now);
             state.tick(!docked, false, now);
             state.position = Some((Glide::new(0.0), Glide::new(300.0)));
-            state.observe_pane(docked, pane(docked), true, now);
+            state.observe_column(docked, (0.0, pane(docked)), true, now);
             state.tick(docked, false, now);
             let at = now + std::time::Duration::from_millis(100);
-            state.observe_pane(docked, pane(docked), false, at);
+            state.observe_column(docked, (0.0, pane(docked)), false, at);
             // Reduced motion snaps the reflow too (#453), so the settled frame
             // carries the snap flag.
             let mut settled = DockFrame::settled(docked);

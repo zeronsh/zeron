@@ -1463,9 +1463,13 @@ fn forwardable(method: &str) -> bool {
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
             | methods::LIST_DRIVES
+            | methods::SEARCH_HOME_FOLDERS
+            | methods::RELEASE_HOME_FOLDER_SEARCH
             | methods::SEARCH_FILES
             | methods::LIST_WORKSPACE_DIRECTORY
             | methods::SEARCH_WORKSPACE_FILES
+            | methods::WARM_WORKSPACE_SEARCH
+            | methods::SEARCH_WORKSPACE_CONTENT
             | methods::READ_WORKSPACE_IMAGE
             | methods::READ_WORKSPACE_FILE
             | methods::DELETE_WORKSPACE_ENTRY
@@ -3168,6 +3172,28 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
             }
+            methods::SEARCH_HOME_FOLDERS => {
+                let request: zeron_proto::SearchHomeFoldersRequest = parse_params(params)?;
+                if request.query.chars().count() > 256 {
+                    return Err(RpcError::BadParams(
+                        "SearchHomeFolders query must not exceed 256 characters".into(),
+                    ));
+                }
+                let limit = request
+                    .limit
+                    .map_or(crate::repos::HOME_FOLDER_RESULTS, usize::from)
+                    .min(crate::repos::HOME_FOLDER_MAX_RESULTS);
+                let result = self
+                    .repos
+                    .search_home_folders(request.query, limit)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&result)
+            }
+            methods::RELEASE_HOME_FOLDER_SEARCH => {
+                self.repos.release_home_folder_search();
+                RpcReply::value(&serde_json::json!({}))
+            }
             methods::LIST_DRIVES => {
                 let drives = self
                     .repos
@@ -3221,6 +3247,28 @@ impl RpcService for EngineRpc {
                 .map_err(|_| RpcError::Failed("workspace file search timed out".into()))?
                 .map_err(RpcError::from)?;
                 RpcReply::value(&matches)
+            }
+            methods::SEARCH_WORKSPACE_CONTENT => {
+                let request: zeron_proto::SearchWorkspaceContentRequest = parse_params(params)?;
+                let result = tokio::time::timeout(
+                    crate::workspace_files::WORKSPACE_FILE_RPC_TIMEOUT,
+                    self.workspace_files.search_content(request),
+                )
+                .await
+                .map_err(|_| RpcError::Failed("workspace content search timed out".into()))?
+                .map_err(RpcError::from)?;
+                RpcReply::value(&result)
+            }
+            methods::WARM_WORKSPACE_SEARCH => {
+                let request: zeron_proto::WarmWorkspaceSearchRequest = parse_params(params)?;
+                let result = tokio::time::timeout(
+                    crate::workspace_files::WORKSPACE_FILE_RPC_TIMEOUT,
+                    self.workspace_files.warm_search(request),
+                )
+                .await
+                .map_err(|_| RpcError::Failed("workspace search warm-up timed out".into()))?
+                .map_err(RpcError::from)?;
+                RpcReply::value(&result)
             }
             methods::READ_WORKSPACE_IMAGE => {
                 let request: zeron_proto::ReadWorkspaceImageRequest = parse_params(params)?;
@@ -4167,6 +4215,12 @@ mod tests {
         assert!(forwardable(methods::WATCH_WORKSPACE_GIT_STATUS));
         assert!(!is_stream_method(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(!is_stream_method(methods::SEARCH_WORKSPACE_FILES));
+        assert!(forwardable(methods::WARM_WORKSPACE_SEARCH));
+        assert!(!is_stream_method(methods::WARM_WORKSPACE_SEARCH));
+        assert!(forwardable(methods::SEARCH_WORKSPACE_CONTENT));
+        assert!(!is_stream_method(methods::SEARCH_WORKSPACE_CONTENT));
+        assert!(forwardable(methods::SEARCH_HOME_FOLDERS));
+        assert!(forwardable(methods::RELEASE_HOME_FOLDER_SEARCH));
         assert!(!is_stream_method(methods::READ_WORKSPACE_FILE));
         assert!(!is_stream_method(methods::WRITE_WORKSPACE_FILE));
         assert!(is_stream_method(methods::WATCH_WORKSPACE_FILES));

@@ -151,7 +151,10 @@ impl Shell {
             // Programmatic, so an already-open pane is left alone.
             self.set_surfaces_open(true, cx);
         } else {
+            // Rank the pane most recent, open or fit-hidden, so a narrow
+            // window shows it on the next visit.
             self.panels.update(key, |p| p.changes_open = true);
+            self.record_panel_open(AuxiliaryPanel::Right, key);
         }
     }
 
@@ -312,9 +315,11 @@ impl Shell {
         };
         let transcript = tab.transcript.clone();
         let composer = tab.composer.clone();
-        // Share the main chat's docked width cap and responsive padding.
+        // Share the main chat's docked width cap and responsive padding. Size
+        // from the width the pane lays out at, not its mask, which an open or
+        // close animates.
         let width = composer_target_width(
-            self.right_visible_width(cx),
+            self.right_content_width(self.right_target(cx)),
             settings::transcript_width(cx),
             true,
         );

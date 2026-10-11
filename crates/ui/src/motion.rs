@@ -442,6 +442,9 @@ pub const DIALOG_IN: MotionSpec = MotionSpec::new(180, EASE);
 pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
+/// Panel columns share the dialog entrance's gentle acceleration and soft
+/// landing. Wide moves stretch this base to at most 240ms in the shell.
+pub const PANEL_RESIZE: MotionSpec = DIALOG_IN;
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).

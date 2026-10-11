@@ -17,7 +17,7 @@ use zeron_proto::{
 };
 
 use super::{
-    FilesCloseDisposition, FilesEvent, FilesSurface,
+    FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface,
     client::{FilesRequestContext, WorkspaceFilesClient},
     document::{DocumentKey, DocumentPhase, FileDocument},
     toolbar, toolbar_button,
@@ -577,7 +577,7 @@ impl FilesSurface {
     pub(crate) fn navigate_to_line(
         &mut self,
         line: u32,
-        column: Option<u32>,
+        column: Option<FileColumn>,
         cx: &mut Context<Self>,
     ) {
         if line == 0 {
@@ -628,8 +628,19 @@ impl FilesSurface {
         if let Some(editor) = editor {
             editor.update(cx, |state, cx| {
                 let row = (line - 1).min(state.text().lines_len().saturating_sub(1) as u32);
+                let character = match column {
+                    Some(FileColumn::Character(column)) => column.saturating_sub(1),
+                    Some(FileColumn::Byte(column)) => {
+                        // Convert against the loaded line, not the trimmed and
+                        // truncated search preview (which may omit indentation).
+                        let text = state.text().slice_line(row as usize);
+                        let byte = column.min(text.len() as u64) as usize;
+                        text.byte_to_char_idx(byte) as u32
+                    }
+                    None => 0,
+                };
                 state.set_cursor_position(
-                    gpui_base::input::Position::new(row, column.unwrap_or(1).saturating_sub(1)),
+                    gpui_base::input::Position::new(row, character),
                     window,
                     cx,
                 );
@@ -4002,6 +4013,96 @@ mod markdown_buffer_tests {
     use gpui::{AppContext, TestAppContext};
 
     #[gpui::test]
+    fn content_search_byte_columns_place_cursor_at_match_after_unicode(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let path = "search.txt";
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new_editor(
+                state,
+                "chat".into(),
+                path.into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                cx,
+            )
+        });
+        for prefix in [
+            "plain ",
+            "café ",
+            "🦀 ",
+            "café 🦀 ",
+            "\u{2003}\tcafé 🦀 ",
+            "cafe\u{301} ",
+        ] {
+            let source = format!("first line\n{prefix}needle suffix\nlast line");
+            window
+                .update(cx, |surface, window, cx| {
+                    surface.preview.documents.insert(
+                        path.into(),
+                        FileDocument::loading(DocumentKey {
+                            chat_id: "chat".into(),
+                            checkout_id: Some("checkout".into()),
+                            path: path.into(),
+                        }),
+                    );
+                    surface.navigate_to_line(2, Some(FileColumn::Byte(prefix.len() as u64)), cx);
+                    // Navigation can arrive before the file contents do.
+                    surface.apply_line_navigation(path, None, window, cx);
+                    assert!(surface.pending_line_navigation.is_some());
+                    surface.preview.documents.get_mut(path).unwrap().set_loaded(
+                        zeron_proto::WorkspaceFileText {
+                            checkout_id: "checkout".into(),
+                            path: path.into(),
+                            text: Some(source.clone()),
+                            content_hash: Some("hash".into()),
+                            size: source.len() as u64,
+                            modified_at: None,
+                            encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+                            line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+                            read_only_reason: None,
+                            truncated: false,
+                        },
+                    );
+                    let editor = cx.new(|cx| {
+                        gpui_base::input::EditorState::new(window, cx).default_value(source.clone())
+                    });
+                    surface.apply_line_navigation(path, Some(&editor), window, cx);
+                    assert!(surface.pending_line_navigation.is_none());
+                    assert_eq!(
+                        editor.read(cx).cursor(),
+                        source.find("needle").unwrap(),
+                        "{prefix:?}"
+                    );
+                    assert_eq!(
+                        editor.read(cx).cursor_position(),
+                        gpui_base::input::Position::new(1, prefix.chars().count() as u32)
+                    );
+                    // Opening a link to the same character must keep its existing
+                    // one-based character semantics, even on a multibyte line.
+                    surface.navigate_to_line(
+                        2,
+                        Some(FileColumn::Character(prefix.chars().count() as u32 + 1)),
+                        cx,
+                    );
+                    surface.apply_line_navigation(path, Some(&editor), window, cx);
+                    assert_eq!(
+                        editor.read(cx).cursor(),
+                        source.find("needle").unwrap(),
+                        "file link: {prefix:?}"
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
     fn chat_line_link_opens_markdown_source_and_centers_the_requested_line(
         cx: &mut TestAppContext,
     ) {
@@ -4036,8 +4137,8 @@ mod markdown_buffer_tests {
                     path: path.into(),
                 });
                 assert!(document.show_markdown);
-                surface.navigate_to_line(20, Some(3), cx);
-                surface.navigate_to_line(90, Some(6), cx);
+                surface.navigate_to_line(20, Some(FileColumn::Character(3)), cx);
+                surface.navigate_to_line(90, Some(FileColumn::Character(6)), cx);
                 surface.preview.active = Some(path.into());
                 surface.preview.documents.insert(path.into(), document);
             })
@@ -4050,7 +4151,10 @@ mod markdown_buffer_tests {
         .unwrap();
         window
             .update(cx, |surface, _, cx| {
-                assert_eq!(surface.pending_line_navigation, Some((90, Some(6))));
+                assert_eq!(
+                    surface.pending_line_navigation,
+                    Some((90, Some(FileColumn::Character(6))))
+                );
                 surface.preview.documents.get_mut(path).unwrap().set_loaded(
                     zeron_proto::WorkspaceFileText {
                         checkout_id: "checkout".into(),

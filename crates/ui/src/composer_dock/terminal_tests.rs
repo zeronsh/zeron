@@ -37,9 +37,9 @@ impl Render for Fixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let mut columns = Vec::new();
         for ix in 0..2 {
-            self.states[ix].borrow_mut().observe_pane(
+            self.states[ix].borrow_mut().observe_column(
                 self.docked,
-                self.right_width,
+                (0.0, self.right_width),
                 !self.reduced,
                 self.now,
             );

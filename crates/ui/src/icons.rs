@@ -85,6 +85,7 @@ icon_assets![
     (FOLDER_WITH_FILES, "folder-with-files"),
     // Original tree glyph with compact nodes for the independent Files panel.
     (FILE_TREE, "file-tree"),
+    (FOLDER_TREE, "folder-tree"),
     // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
     (FLOPPY_DISK, "floppy-disk"),
     // Zeron Icons (icons.zeron.sh): 24px canvas, 1.75px round strokes. The
@@ -304,6 +305,45 @@ pub fn sidebar_glyph(open: f32, right: bool, size: f32, color: Hsla) -> Div {
         .child(panel)
 }
 
+/// The frame every panel toggle shares (`<rect x=3 y=4 w=18 h=16 rx=4
+/// stroke-width=1.75>`), from quads so the strokes stay crisp at 16px.
+fn panel_frame(s: f32, color: Hsla) -> Div {
+    let stroke = 1.75;
+    div()
+        .absolute()
+        .left(px((3.0 - stroke / 2.0) * s))
+        .top(px((4.0 - stroke / 2.0) * s))
+        .w(px((18.0 + stroke) * s))
+        .h(px((16.0 + stroke) * s))
+        .rounded(px((4.0 + stroke / 2.0) * s))
+        .border(px(stroke * s))
+        .border_color(color)
+}
+
+/// The session card toggle: [`sidebar_glyph`]'s frame with a panel in only
+/// its top-right corner, drawn from the same quads so the strokes match the
+/// sidebar toggles beside it.
+pub fn corner_card_glyph(size: f32, color: Hsla) -> Div {
+    let s = size / 24.0;
+    let frame = panel_frame(s, color);
+    // The open sidebar panel's footprint (x 12..17.5 from the right inset),
+    // cut to its top half.
+    let panel = div()
+        .absolute()
+        .top(px(7.5 * s))
+        .right(px(6.5 * s))
+        .w(px(5.5 * s))
+        .h(px(4.5 * s))
+        .rounded(px(0.875 * s))
+        .bg(color);
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .child(frame)
+        .child(panel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +371,7 @@ mod tests {
             CHAT_ROUND_LINE,
             GIT_BRANCH,
             CLOSE_CIRCLE,
+            FOLDER_TREE,
         ] {
             let bytes = Assets.load(path).unwrap().unwrap();
             let image = renderer.render_single_frame(&bytes, 1.0).unwrap();
