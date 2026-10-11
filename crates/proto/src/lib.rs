@@ -7,6 +7,7 @@ pub mod agent;
 pub mod attachment_mentions;
 pub mod chat_mentions;
 pub mod change_request_assessment;
+pub mod change_request_scope;
 pub mod entities;
 pub mod file_mentions;
 pub mod invocation;
@@ -18,6 +19,7 @@ pub mod voice;
 pub mod workspace;
 
 pub use agent::*;
+pub use change_request_scope::ChangeRequestScope;
 pub use entities::*;
 pub use preview::*;
 pub use sidebar_pins::*;

@@ -948,6 +948,13 @@ pub struct ChangeRequestSummary {
     pub state: ChangeRequestState,
     pub base_ref: String,
     pub head_ref: String,
+    /// How the provider writes the change request (`#90`). Absent from
+    /// older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// What clients can do with it natively. Absent from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<ChangeRequestFeatures>,
 }
 
 /// Relationship filter for one repository; never widens repository scope.
@@ -994,6 +1001,10 @@ pub struct ChangeRequestListItem {
     pub mergeability: ChangeRequestMergeability,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// How the provider writes the change request (`#12`). Absent from
+    /// older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 /// One page of a repository-scoped listing, newest updates first.
@@ -1011,6 +1022,91 @@ pub struct ChangeRequestPage {
     /// engines that predate the copy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fetched_at: Option<DateTime<Utc>>,
+    /// How clients present the provider these rows came from. Absent from
+    /// older engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<ChangeRequestPresentation>,
+}
+
+/// What clients can do with one provider's change requests in place.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestFeatures {
+    /// The engine reads detail and diff, so it opens in the app rather than
+    /// the browser.
+    pub native_detail: bool,
+    /// Comments can be posted from the app.
+    pub comments: bool,
+    /// Agent handoff prompts know the provider's CLI.
+    pub handoff: bool,
+}
+
+/// How clients name and show one provider: copy, the media it serves, and
+/// its features. Filled by the engine's adapter for that provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestPresentation {
+    /// `GitHub`.
+    pub provider_name: String,
+    /// `GitHub CLI`.
+    pub cli_name: String,
+    /// `gh`.
+    pub cli_command: String,
+    /// `gh auth login`.
+    pub sign_in_command: String,
+    /// `pull request`.
+    pub noun: String,
+    /// Hosts whose images load inline in a description: exact, or every
+    /// subdomain for an entry starting with a dot. Any other host would
+    /// learn who opened the change request and when.
+    pub media_hosts: Vec<String>,
+    pub media_rewrites: Vec<ChangeRequestMediaRewrite>,
+    pub features: ChangeRequestFeatures,
+}
+
+/// A file page that serves HTML, rewritten to the raw file it shows: on
+/// `host`, a path whose segment after the first `after_segments` is
+/// `segment` loses that segment and moves to `raw_host`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestMediaRewrite {
+    pub host: String,
+    pub after_segments: usize,
+    pub segment: String,
+    pub raw_host: String,
+}
+
+impl ChangeRequestPresentation {
+    /// Whether images on `host` load inline.
+    pub fn inline_media_host(&self, host: &str) -> bool {
+        self.media_hosts.iter().any(|served| {
+            if served.starts_with('.') {
+                host.ends_with(served.as_str())
+            } else {
+                host == served
+            }
+        })
+    }
+
+    /// The raw file a file page at `path` on `host` shows, as its host and
+    /// path, when a rewrite applies.
+    pub fn raw_media(&self, host: &str, path: &str) -> Option<(String, String)> {
+        let segments: Vec<_> = path.split('/').skip(1).collect();
+        self.media_rewrites.iter().find_map(|rewrite| {
+            let after = rewrite.after_segments;
+            (rewrite.host == host
+                && segments.len() > after + 2
+                && segments[after] == rewrite.segment)
+                .then(|| {
+                    let kept: Vec<_> = segments[..after]
+                        .iter()
+                        .chain(&segments[after + 1..])
+                        .copied()
+                        .collect();
+                    (rewrite.raw_host.clone(), format!("/{}", kept.join("/")))
+                })
+        })
+    }
 }
 
 /// Read-only GitHub detail response. Optional collections tolerate absent provider data.
@@ -1045,6 +1141,10 @@ pub struct ChangeRequestDetail {
     /// reviews are the viewer's. Absent from older engines.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewer_login: Option<String>,
+    /// How clients present this change request's provider. Absent from
+    /// older engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<ChangeRequestPresentation>,
 }
 
 impl ChangeRequestDetail {
@@ -1078,6 +1178,10 @@ pub struct ChangeRequestReviewThread {
 #[serde(default, rename_all = "camelCase")]
 pub struct ChangeRequestActor {
     pub login: String,
+    /// The account's image. Engines that send presentation data send it
+    /// whenever the provider has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1550,6 +1654,8 @@ mod tests {
                     state,
                     base_ref: "main".into(),
                     head_ref: "feature/change".into(),
+                    reference: None,
+                    features: None,
                 }),
                 updated_at: Utc.with_ymd_and_hms(2026, 8, 15, 12, 30, 0).unwrap(),
             };
@@ -1593,6 +1699,7 @@ mod tests {
                 mergeability: ChangeRequestMergeability::Conflicting,
                 created_at: Utc.with_ymd_and_hms(2026, 8, 10, 9, 30, 0).unwrap(),
                 updated_at: Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap(),
+                reference: None,
             };
 
             let value = serde_json::to_value(&item).unwrap();
@@ -1607,11 +1714,46 @@ mod tests {
             assert_eq!(value["updatedAt"], "2026-08-19T12:00:00Z");
             assert!(value.get("baseRef").is_none());
             assert!(value.get("headRef").is_none());
+            // Older peers never see the optional presentation fields.
+            assert!(value.get("reference").is_none());
+            assert!(value["author"].get("avatarUrl").is_none());
             assert_eq!(
                 serde_json::from_value::<ChangeRequestListItem>(value).unwrap(),
                 item
             );
         }
+    }
+
+    #[test]
+    fn presentation_media_rules_match_hosts_and_rewrite_file_pages() {
+        let presentation = ChangeRequestPresentation {
+            media_hosts: vec!["forge.test".into(), ".cdn.forge.test".into()],
+            media_rewrites: vec![ChangeRequestMediaRewrite {
+                host: "forge.test".into(),
+                after_segments: 2,
+                segment: "blob".into(),
+                raw_host: "raw.forge.test".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(presentation.inline_media_host("forge.test"));
+        assert!(presentation.inline_media_host("images.cdn.forge.test"));
+        assert!(!presentation.inline_media_host("cdn.forge.test.example"));
+        assert!(!presentation.inline_media_host("example.com"));
+        assert_eq!(
+            presentation.raw_media("forge.test", "/team/app/blob/main/shot.png"),
+            Some(("raw.forge.test".into(), "/team/app/main/shot.png".into()))
+        );
+        for (host, path) in [
+            ("forge.test", "/team/app/tree/main/shot.png"),
+            ("forge.test", "/team/app/blob/shot.png"),
+            ("other.test", "/team/app/blob/main/shot.png"),
+        ] {
+            assert_eq!(presentation.raw_media(host, path), None, "{host}{path}");
+        }
+        // Absent from older engines, every field reads as empty.
+        let page: ChangeRequestPage = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(page.presentation, None);
     }
 
     #[test]
@@ -1671,6 +1813,7 @@ mod tests {
             mergeability: ChangeRequestMergeability::Mergeable,
             created_at: Utc.with_ymd_and_hms(2026, 8, 10, 9, 30, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap(),
+            reference: None,
         })
         .unwrap();
         value.as_object_mut().unwrap().remove("reviewDecision");

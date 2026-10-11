@@ -1,13 +1,16 @@
 //! On-disk copy of the pull request board, so it opens instantly — across
 //! launches too — while a fresh page loads behind it.
 //!
-//! Pull requests are stored once each, per GitHub account, and a board query
+//! Pull requests are stored once each, per account, and a board query
 //! (account, repository, filter) stores only which of them it returned, in
 //! order, beside its total and cursor. A pull request seen through any query
 //! therefore reads the same everywhere: the newest copy wins, so refreshing
-//! one filter updates the others. Keyed by the `gh` account so switching
-//! accounts never shows another account's results. Local data only; the
-//! board's own refresh always reaches GitHub and writes back here.
+//! one filter updates the others. The account is the key the provider's
+//! adapter gives for the signed-in user (GitHub's is the bare `gh` login,
+//! as before other providers; others namespace theirs), so switching
+//! accounts never shows another account's results. The repository is the
+//! board's wire scope. Local data only, written by the board's registry;
+//! its refresh always reaches the provider and writes back here.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -97,7 +100,8 @@ impl ChangeRequestStore {
         .flatten()
         .and_then(|(fetched_at, next_cursor, total_count, items)| {
             // A row this build can't read makes the whole page a miss: the
-            // board then loads from GitHub rather than show a partial list.
+            // board then loads from the provider rather than show a partial
+            // list.
             let items = items
                 .iter()
                 .map(|item| serde_json::from_str::<ChangeRequestListItem>(item).ok())
@@ -107,6 +111,7 @@ impl ChangeRequestStore {
                 next_cursor,
                 total_count: total_count.and_then(|count| u64::try_from(count).ok()),
                 fetched_at: Utc.timestamp_millis_opt(fetched_at).single(),
+                presentation: None,
             })
         })
     }
@@ -232,7 +237,7 @@ fn prune(conn: &Connection) -> rusqlite::Result<()> {
 impl Inner {
     /// Run `f` on the open database, opening and migrating it first. `None`
     /// when the database can't be opened or `f` fails; the board then simply
-    /// loads from GitHub.
+    /// loads from the provider.
     fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Option<T> {
         self.with_conn_mut(|conn| f(conn))
     }
@@ -337,6 +342,7 @@ mod tests {
             mergeability: ChangeRequestMergeability::Unknown,
             created_at: DateTime::UNIX_EPOCH,
             updated_at: DateTime::UNIX_EPOCH,
+            reference: None,
         }
     }
 
@@ -346,6 +352,7 @@ mod tests {
             items,
             next_cursor: Some("Y3Vyc29yOjUw".into()),
             fetched_at: Some(fetched_at),
+            presentation: None,
         }
     }
 

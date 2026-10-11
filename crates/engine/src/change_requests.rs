@@ -84,8 +84,8 @@ pub struct CheckoutChangeRequests {
 }
 
 impl CheckoutChangeRequests {
-    pub fn start(repos: Repos, device_id: &str) -> Self {
-        Self::new(repos, device_id, Arc::new(ChangeRequestResolver::new()))
+    pub fn start(repos: Repos, device_id: &str, resolver: ChangeRequestResolver) -> Self {
+        Self::new(repos, device_id, Arc::new(resolver))
     }
 
     pub fn new(
@@ -271,7 +271,7 @@ impl CheckoutChangeRequests {
             return (state.last_success.clone(), state.next_refresh);
         }
 
-        match self.inner.lookup.resolve_github_source(source).await {
+        match self.inner.lookup.resolve_source(source).await {
             Ok(change_request) => {
                 let ttl = if change_request.is_some() {
                     self.inner.timing.with_change_request_ttl
@@ -453,7 +453,7 @@ mod tests {
             Ok(self.source.lock().unwrap().clone())
         }
 
-        async fn resolve_github_source(
+        async fn resolve_source(
             &self,
             _source: &CheckoutSourceContext,
         ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
@@ -488,6 +488,8 @@ mod tests {
             state: ChangeRequestState::Open,
             base_ref: "main".into(),
             head_ref: "feature/status".into(),
+            reference: None,
+            features: None,
         }
     }
 

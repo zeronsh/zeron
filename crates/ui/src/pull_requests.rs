@@ -10,8 +10,8 @@ use gpui::{
     ScrollHandle, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestFilter, ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestPage,
-    ChangeRequestReviewDecision, Device,
+    ChangeRequestFeatures, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestMergeability,
+    ChangeRequestPage, ChangeRequestPresentation, ChangeRequestReviewDecision, Device,
 };
 use zeron_rpc::{RpcError, capability_errors, methods};
 
@@ -49,6 +49,8 @@ enum PullRequestsPageError {
     Network,
     RemoteOffline(String),
     UpdateRequired(String),
+    /// The device's engine reads only bare `owner/repo` scopes.
+    HostScopesUnsupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,10 +188,10 @@ fn request_color(item: &ChangeRequestListItem, theme: &Theme) -> gpui::Hsla {
 
 fn matches_query(item: &ChangeRequestListItem, query: &str) -> bool {
     let text = format!(
-        "{} {} #{} {} {}",
+        "{} {} {} {} {}",
         item.title,
         item.repository,
-        item.number,
+        crate::pull_request_provider::reference(item.number, item.reference.as_deref()),
         status_description(item),
         item.author.login
     )
@@ -307,6 +309,9 @@ pub struct PullRequestsPage {
         Instant,
         Paging,
     )>,
+    /// Each scope's provider presentation, from its last page, keyed by
+    /// target device and lowercase repository.
+    presentations: HashMap<(Option<String>, String), ChangeRequestPresentation>,
     paging: Paging,
     /// The next page, while it loads; `None` when idle.
     more_task: Option<Task<()>>,
@@ -568,6 +573,7 @@ impl PullRequestsPage {
             seen_context: None,
             _repository_events: repository_events,
             snapshots: Vec::new(),
+            presentations: HashMap::new(),
             paging: Paging::default(),
             more_task: None,
             more_error: None,
@@ -865,11 +871,20 @@ impl PullRequestsPage {
             .text()
             .trim()
             .to_ascii_lowercase();
-        if !valid_repository_filter(&repository) {
-            crate::toast::error(cx, "Enter a repository as owner/name.");
+        // The engine's grammar: a qualified github.com repository is the
+        // same scope as its bare owner/name, which every engine reads.
+        let Some(repository) =
+            zeron_proto::ChangeRequestScope::parse(&repository).map(|scope| scope.to_string())
+        else {
+            let message = if self.target_supports_host_scopes(cx) {
+                "Enter a repository as owner/name, or host/path."
+            } else {
+                "Enter a repository as owner/name."
+            };
+            crate::toast::error(cx, message);
             cx.notify();
             return;
-        }
+        };
         self.close_repository_menu(cx);
         self.initial_scope_task = None;
         self.initial_scope_attempted = true;
@@ -1618,6 +1633,14 @@ impl PullRequestsPage {
             return;
         }
 
+        if !self.target_reads_scope(cx) {
+            self.load_state = PullRequestsLoadState::Failed(
+                PullRequestsPageError::HostScopesUnsupported(target_name),
+            );
+            cx.notify();
+            return;
+        }
+
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let mut params = params_for_target(self.target_device.as_deref());
@@ -1630,6 +1653,14 @@ impl PullRequestsPage {
         // A reload starts over from the first page.
         self.more_task = None;
         self.more_error = None;
+        // A first load that fails has no page to name its provider; engines
+        // that read host scopes describe it alone.
+        let describe = (self.presentation_data().is_none() && self.target_supports_host_scopes(cx))
+            .then(|| {
+                let mut params = params_for_target(self.target_device.as_deref());
+                params["repository"] = self.repository.clone().unwrap().into();
+                params
+            });
         self.request_task = Some(cx.spawn(async move |this, cx| {
             let mut result = fetch_page(&engine, params.clone()).await;
             if result.as_ref().is_ok_and(|page| page.items.is_empty()) && !refresh {
@@ -1651,12 +1682,31 @@ impl PullRequestsPage {
                     result = fetch_page(&engine, params).await;
                 }
             }
+            let described = match describe.filter(|_| result.is_err()) {
+                Some(params) => engine
+                    .client()
+                    .call(methods::DESCRIBE_CHANGE_REQUEST_SCOPE, params)
+                    .await
+                    .ok()
+                    .and_then(|value| {
+                        serde_json::from_value::<Option<ChangeRequestPresentation>>(value).ok()
+                    })
+                    .flatten(),
+                None => None,
+            };
             this.update(cx, |page, cx| {
                 if page.generation != generation {
                     return;
                 }
 
                 page.request_task = None;
+                if let Some(presentation) = described {
+                    page.remember_presentation(presentation);
+                }
+                let presentation = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|page| page.presentation.clone());
                 // How old the page is: a stored copy keeps its fetch time.
                 let age = result
                     .as_ref()
@@ -1698,6 +1748,9 @@ impl PullRequestsPage {
                             },
                         );
                     }
+                    if let Some(presentation) = presentation {
+                        page.remember_presentation(presentation);
+                    }
                     page.automatic_filter = false;
                     page.remember_filter(page.filter);
                     let now = Instant::now();
@@ -1713,6 +1766,59 @@ impl PullRequestsPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Whether the target engine reads the board's scope. Engines that
+    /// predate host-qualified scopes take a bare `owner/repo` for github.com,
+    /// so anything else is never sent to them.
+    fn target_reads_scope(&self, cx: &gpui::App) -> bool {
+        self.repository
+            .as_deref()
+            .and_then(zeron_proto::ChangeRequestScope::parse)
+            .is_none_or(|scope| scope.is_legacy())
+            || self.target_supports_host_scopes(cx)
+    }
+
+    fn target_supports_host_scopes(&self, cx: &gpui::App) -> bool {
+        let capability = zeron_proto::capabilities::CHANGE_REQUESTS_HOST_SCOPES_V1;
+        let state = self.state.read(cx);
+        match self.target_device.as_deref() {
+            Some(target) => state.device_supports(target, capability),
+            None => state
+                .engine()
+                .is_some_and(|engine| engine.engine_info().supports(capability)),
+        }
+    }
+
+    /// The current scope's presentation, once a page (or the engine) said.
+    fn presentation_data(&self) -> Option<&ChangeRequestPresentation> {
+        let repository = self.repository.as_ref()?.to_ascii_lowercase();
+        self.presentations
+            .get(&(self.target_device.clone(), repository))
+    }
+
+    pub(crate) fn presentation(&self) -> std::borrow::Cow<'_, ChangeRequestPresentation> {
+        crate::pull_request_provider::presentation(self.presentation_data())
+    }
+
+    /// The presentation the detail view starts from for `url`, when it is
+    /// on this board.
+    pub(crate) fn presentation_for(&self, url: &str) -> Option<ChangeRequestPresentation> {
+        self.items
+            .iter()
+            .any(|item| item.url == url)
+            .then(|| self.presentation_data().cloned())
+            .flatten()
+    }
+
+    fn remember_presentation(&mut self, presentation: ChangeRequestPresentation) {
+        let Some(repository) = self.repository.as_ref() else {
+            return;
+        };
+        self.presentations.insert(
+            (self.target_device.clone(), repository.to_ascii_lowercase()),
+            presentation,
+        );
     }
 
     fn store_snapshot(&mut self, at: Instant) {
@@ -1744,7 +1850,8 @@ impl PullRequestsPage {
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.more_error = Some(PullRequestsPageError::Network);
-            toast_page_error(&PullRequestsPageError::Network, None, cx);
+            let presentation = self.presentation().into_owned();
+            toast_page_error(&PullRequestsPageError::Network, &presentation, None, cx);
             cx.notify();
             return;
         };
@@ -1766,6 +1873,9 @@ impl PullRequestsPage {
                 page.more_task = None;
                 match result {
                     Ok(next) => {
+                        if let Some(presentation) = next.presentation {
+                            page.remember_presentation(presentation);
+                        }
                         let known: HashSet<String> =
                             page.items.iter().map(|item| item.url.clone()).collect();
                         page.items.extend(
@@ -1782,7 +1892,8 @@ impl PullRequestsPage {
                     }
                     Err(error) => {
                         let error = map_rpc_error(&error, &target_name);
-                        toast_page_error(&error, None, cx);
+                        let presentation = page.presentation().into_owned();
+                        toast_page_error(&error, &presentation, None, cx);
                         page.more_error = Some(error);
                     }
                 }
@@ -2020,7 +2131,7 @@ impl PullRequestsPage {
             _ => icons::PULL_REQUEST,
         };
         let (title, body) = match &self.load_state {
-            PullRequestsLoadState::Failed(error) => error_copy(error),
+            PullRequestsLoadState::Failed(error) => error_copy(error, &self.presentation()),
             _ if self.repository.is_none() => (
                 "Choose a repository".into(),
                 "No GitHub repository was found for this project. Choose one to load your open pull requests.".into(),
@@ -2252,8 +2363,14 @@ impl Render for PullRequestsPage {
         if refresh_error && !self.refresh_error_shown {
             if let PullRequestsLoadState::Failed(error) = &self.load_state {
                 let error = error.clone();
+                let presentation = self.presentation().into_owned();
                 cx.defer(move |cx| {
-                    toast_page_error(&error, Some("Showing the last loaded results."), cx)
+                    toast_page_error(
+                        &error,
+                        &presentation,
+                        Some("Showing the last loaded results."),
+                        cx,
+                    )
                 });
             }
         }
@@ -2340,9 +2457,12 @@ impl Render for PullRequestsPage {
                                     .role(gpui::Role::Button)
                                     .aria_label("Refresh pull requests")
                                     .aria_description(if loading {
-                                        "Loading pull requests"
+                                        "Loading pull requests".to_owned()
                                     } else {
-                                        "Fetch the latest results from GitHub"
+                                        format!(
+                                            "Fetch the latest results from {}",
+                                            self.presentation().provider_name
+                                        )
                                     })
                                     .tab_index(0)
                                     .size(px(HEADER_CONTROL_HEIGHT))
@@ -2777,6 +2897,8 @@ impl PullRequestsPage {
                     .when(last, |el| el.rounded_b(px(12.0)))
                     .child(render_table_row(
                         item,
+                        self.presentation_data()
+                            .map(|presentation| presentation.features),
                         layout,
                         self.sort.field,
                         first,
@@ -2941,6 +3063,7 @@ pub(crate) fn table_row_shell(
 
 fn render_table_row(
     item: &ChangeRequestListItem,
+    features: Option<ChangeRequestFeatures>,
     layout: PullRequestTableLayout,
     sort_field: PullRequestSortField,
     first: bool,
@@ -2959,10 +3082,10 @@ fn render_table_row(
         .debug_selector(|| "pull-request-row".to_string())
         .role(gpui::Role::Link)
         .aria_label(format!(
-            "{}: {} #{}. {}. Open pull request",
+            "{}: {} {}. {}. Open pull request",
             item.title,
             item.repository,
-            item.number,
+            crate::pull_request_provider::reference(item.number, item.reference.as_deref()),
             status_description(item)
         ))
         .tab_index(0)
@@ -2971,7 +3094,7 @@ fn render_table_row(
         .hover(|style| style.bg(theme.glass_hover()))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            crate::pull_request_detail::open(&url, window, cx);
+            crate::pull_request_detail::open(&url, features.as_ref(), window, cx);
         });
     let (date_label, timestamp) = if sort_field == PullRequestSortField::Opened {
         ("Opened", item.created_at)
@@ -3127,8 +3250,14 @@ fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement
                         .gap(px(5.0))
                         .min_w_0()
                         .max_w(px(150.0))
+                        // Rows from engines that present them carry a
+                        // reference; older ones named GitHub accounts.
                         .child(super::pull_request_media::avatar(
                             &item.author.login,
+                            crate::pull_request_provider::avatar_url(
+                                &item.author,
+                                item.reference.is_some(),
+                            ),
                             format!("pr-list-author-{}", pull_request_key(item)).into(),
                             16.0,
                             theme,
@@ -3398,8 +3527,13 @@ fn repository_menu_label(theme: &Theme, label: &str) -> gpui::Div {
 }
 
 /// A page-level failure as a toast: its title and explanation.
-fn toast_page_error(error: &PullRequestsPageError, suffix: Option<&str>, cx: &mut gpui::App) {
-    let (title, body) = error_copy(error);
+fn toast_page_error(
+    error: &PullRequestsPageError,
+    presentation: &ChangeRequestPresentation,
+    suffix: Option<&str>,
+    cx: &mut gpui::App,
+) {
+    let (title, body) = error_copy(error, presentation);
     let message = match suffix {
         Some(suffix) => format!("{title}. {body} {suffix}"),
         None => format!("{title}. {body}"),
@@ -3407,17 +3541,10 @@ fn toast_page_error(error: &PullRequestsPageError, suffix: Option<&str>, cx: &mu
     crate::toast::error(cx, message);
 }
 
+/// A board scope in the grammar the engine reads: a bare `owner/repo`, or
+/// `host/path` for engines that accept host-qualified scopes.
 fn valid_repository_filter(value: &str) -> bool {
-    let parts: Vec<_> = value.split('/').collect();
-    parts.len() == 2
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && *part != "."
-                && *part != ".."
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-        })
+    zeron_proto::ChangeRequestScope::parse(value).is_some()
 }
 
 fn params_for_target(target: Option<&str>) -> serde_json::Value {
@@ -3458,18 +3585,29 @@ fn map_rpc_error(error: &RpcError, target_name: &str) -> PullRequestsPageError {
     }
 }
 
-fn error_copy(error: &PullRequestsPageError) -> (String, String) {
+/// What a failure says, in the words of the board's provider.
+fn error_copy(
+    error: &PullRequestsPageError,
+    presentation: &ChangeRequestPresentation,
+) -> (String, String) {
+    let provider = &presentation.provider_name;
     match error {
         PullRequestsPageError::CliUnavailable => (
-            "GitHub CLI isn’t available on this device".into(),
-            "Install gh and sign in to view your pull requests.".into(),
+            format!("{} isn’t available on this device", presentation.cli_name),
+            format!(
+                "Install {} and sign in to view your {}s.",
+                presentation.cli_command, presentation.noun
+            ),
         ),
         PullRequestsPageError::Authentication => (
-            "Sign in to GitHub on this device".into(),
-            "Run gh auth login, then refresh this page.".into(),
+            format!("Sign in to {provider} on this device"),
+            format!(
+                "Run {}, then refresh this page.",
+                presentation.sign_in_command
+            ),
         ),
         PullRequestsPageError::RateLimited => (
-            "GitHub’s rate limit was reached".into(),
+            format!("{provider}’s rate limit was reached"),
             "Requests are paused for 15 minutes. Your loaded results stay available.".into(),
         ),
         PullRequestsPageError::Network => (
@@ -3483,6 +3621,10 @@ fn error_copy(error: &PullRequestsPageError) -> (String, String) {
         PullRequestsPageError::UpdateRequired(name) => (
             format!("Update Zeron on {name}"),
             "This device doesn’t support pull requests yet.".into(),
+        ),
+        PullRequestsPageError::HostScopesUnsupported(name) => (
+            format!("Update Zeron on {name}"),
+            "This device opens only github.com repositories so far.".into(),
         ),
     }
 }
@@ -3626,6 +3768,7 @@ mod tests {
             updated_at: Utc
                 .with_ymd_and_hms(2026, 8, 19, updated_hour, 0, 0)
                 .unwrap(),
+            reference: None,
         }
     }
 
@@ -3638,6 +3781,7 @@ mod tests {
             let width = f32::from(window.viewport_size().width);
             div().w_full().child(render_table_row(
                 &self.item,
+                None,
                 table_layout(width),
                 PullRequestSortField::Updated,
                 true,
@@ -3803,6 +3947,7 @@ mod tests {
                     next_cursor: None,
                     total_count: None,
                     fetched_at: None,
+                    presentation: None,
                 })
             }
         });
@@ -4046,6 +4191,7 @@ mod tests {
                             next_cursor: None,
                             total_count: Some(1),
                             fetched_at: None,
+                            presentation: None,
                         })
                     }
                     _ => panic!("unexpected request {method}"),
@@ -4093,6 +4239,7 @@ mod tests {
                                 next_cursor: None,
                                 total_count: Some(1),
                                 fetched_at: None,
+                                presentation: None,
                             })
                         }
                         other => panic!("unexpected request {other}"),
@@ -4363,6 +4510,7 @@ mod tests {
                             next_cursor: None,
                             total_count: Some(1),
                             fetched_at: None,
+                            presentation: None,
                         })
                     }
                     _ => panic!("unexpected request {method}"),
@@ -5124,6 +5272,7 @@ mod tests {
                         next_cursor: None,
                         total_count: Some(1),
                         fetched_at: None,
+                        presentation: None,
                     });
                 }
                 match after.as_deref() {
@@ -5134,6 +5283,7 @@ mod tests {
                         next_cursor: Some("Y3Vyc29yOjUw".into()),
                         total_count: Some(52),
                         fetched_at: None,
+                        presentation: None,
                     }),
                     Some("Y3Vyc29yOjUw") => zeron_rpc::RpcReply::value(&ChangeRequestPage {
                         // #50 moved onto the second page; it must not repeat.
@@ -5143,6 +5293,7 @@ mod tests {
                         next_cursor: None,
                         total_count: Some(52),
                         fetched_at: None,
+                        presentation: None,
                     }),
                     other => panic!("unexpected cursor {other:?}"),
                 }
@@ -5313,6 +5464,7 @@ mod tests {
                         } else {
                             Utc::now()
                         }),
+                        presentation: None,
                     })
                 }
             })
@@ -5392,5 +5544,185 @@ mod tests {
             assert_eq!(page.items.len(), 50, "the late Reviewing reply is ignored");
             assert_eq!(page.load_state, PullRequestsLoadState::Ready);
         });
+    }
+
+    #[test]
+    fn repository_scopes_follow_the_engine_grammar() {
+        for (value, valid) in [
+            ("owner/repo", true),
+            ("forge.test/team/platform/app", true),
+            ("github.com/owner/repo", true),
+            ("owner/repo/extra", false),
+            ("forge.test/team//app", false),
+            ("forge.test:22/team/app", false),
+            ("", false),
+        ] {
+            assert_eq!(valid_repository_filter(value), valid, "{value}");
+        }
+    }
+
+    #[gpui::test]
+    fn host_scopes_load_only_from_engines_that_read_them(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let wire = "forge.test/team/platform/app";
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let rpc = ScriptedRpc::new(move |method, params| {
+            let recorded = recorded.clone();
+            async move {
+                assert_eq!(method, methods::LIST_CHANGE_REQUEST_PAGE);
+                let repository = params["repository"].as_str().unwrap().to_owned();
+                recorded.lock().unwrap().push(repository.clone());
+                zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                    items: vec![pull_request(&repository, 7, 1, 1, 1)],
+                    total_count: Some(1),
+                    ..Default::default()
+                })
+            }
+        });
+        for supported in [false, true] {
+            let client = rpc.client();
+            let (page, cx) = cx.add_window_view(|_, cx| {
+                let mut engine = crate::state::EngineHandle::from_test_client(client);
+                if supported {
+                    engine = engine.with_test_capabilities(&[
+                        zeron_proto::capabilities::CHANGE_REQUESTS_HOST_SCOPES_V1,
+                    ]);
+                }
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.set_test_engine(engine);
+                    state
+                });
+                PullRequestsPage::new(state, cx)
+            });
+            page.update(cx, |page, cx| {
+                page.repository_input
+                    .update(cx, |input, cx| input.set_text(wire.to_uppercase(), cx));
+                page.select_repository(cx);
+            });
+            if supported {
+                settle(
+                    cx,
+                    &runtime,
+                    |page| page.load_state == PullRequestsLoadState::Ready,
+                    &page,
+                    &rpc,
+                );
+                page.read_with(cx, |page, _| {
+                    assert_eq!(page.repository.as_deref(), Some(wire));
+                    assert_eq!(page.items[0].number, 7);
+                });
+                assert_eq!(*calls.lock().unwrap(), [wire]);
+            } else {
+                cx.run_until_parked();
+                page.read_with(cx, |page, _| {
+                    assert_eq!(page.repository.as_deref(), Some(wire));
+                    assert_eq!(
+                        page.load_state,
+                        PullRequestsLoadState::Failed(
+                            PullRequestsPageError::HostScopesUnsupported("This device".into())
+                        ),
+                        "an older engine is never asked"
+                    );
+                });
+                assert!(calls.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn failure_copy_names_the_provider_the_engine_describes(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let rpc = ScriptedRpc::new(move |method, _| {
+            let recorded = recorded.clone();
+            async move {
+                recorded.lock().unwrap().push(method.clone());
+                match method.as_str() {
+                    methods::LIST_CHANGE_REQUEST_PAGE => Err(RpcError::Capability(
+                        capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
+                    )),
+                    methods::DESCRIBE_CHANGE_REQUEST_SCOPE => {
+                        zeron_rpc::RpcReply::value(&Some(ChangeRequestPresentation {
+                            provider_name: "Forge".into(),
+                            sign_in_command: "forge login".into(),
+                            ..Default::default()
+                        }))
+                    }
+                    other => panic!("unexpected {other}"),
+                }
+            }
+        });
+        for (supported, repository, sign_in) in [
+            (
+                true,
+                "forge.test/team/app",
+                "Run forge login, then refresh this page.",
+            ),
+            // An older engine is never asked; its only provider was GitHub.
+            (
+                false,
+                "owner/repo",
+                "Run gh auth login, then refresh this page.",
+            ),
+        ] {
+            calls.lock().unwrap().clear();
+            let client = rpc.client();
+            let (page, cx) = cx.add_window_view(|_, cx| {
+                let mut engine = crate::state::EngineHandle::from_test_client(client);
+                if supported {
+                    engine = engine.with_test_capabilities(&[
+                        zeron_proto::capabilities::CHANGE_REQUESTS_HOST_SCOPES_V1,
+                    ]);
+                }
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.set_test_engine(engine);
+                    state
+                });
+                PullRequestsPage::new(state, cx)
+            });
+            page.update(cx, |page, cx| {
+                page.repository_input
+                    .update(cx, |input, cx| input.set_text(repository, cx));
+                page.select_repository(cx);
+            });
+            settle(
+                cx,
+                &runtime,
+                |page| matches!(page.load_state, PullRequestsLoadState::Failed(_)),
+                &page,
+                &rpc,
+            );
+            page.read_with(cx, |page, _| {
+                let PullRequestsLoadState::Failed(error) = &page.load_state else {
+                    unreachable!();
+                };
+                assert_eq!(error, &PullRequestsPageError::Authentication);
+                assert_eq!(error_copy(error, &page.presentation()).1, sign_in);
+            });
+            assert_eq!(
+                calls
+                    .lock()
+                    .unwrap()
+                    .contains(&methods::DESCRIBE_CHANGE_REQUEST_SCOPE.to_owned()),
+                supported
+            );
+        }
+    }
+
+    #[test]
+    fn rows_name_their_change_request_as_the_provider_writes_it() {
+        let mut item = pull_request("forge.test/team/app", 7, 1, 1, 1);
+        assert!(matches_query(&item, "#7"));
+        item.reference = Some("~7".into());
+        assert!(matches_query(&item, "~7"));
+        assert!(!matches_query(&item, "#7"));
     }
 }

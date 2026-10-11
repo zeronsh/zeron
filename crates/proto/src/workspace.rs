@@ -15,6 +15,9 @@ pub mod capabilities {
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
+    /// The pull request board accepts host-qualified scopes (`host/path`)
+    /// beside the bare `owner/repo` every engine reads.
+    pub const CHANGE_REQUESTS_HOST_SCOPES_V1: &str = "change-requests-host-scopes-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -25,6 +28,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         HARNESS_UPDATES_V1,
         crate::voice::remote::CAPABILITY,
+        CHANGE_REQUESTS_HOST_SCOPES_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -105,7 +109,8 @@ mod tests {
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
                     "harness-updates-v1",
-                    "voice-client-media-v1"
+                    "voice-client-media-v1",
+                    "change-requests-host-scopes-v1"
                 ],
             })
         );

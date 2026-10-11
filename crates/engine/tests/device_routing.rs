@@ -261,7 +261,7 @@ impl CheckoutChangeRequestLookup for StaticChangeRequestLookup {
         Ok(self.source.clone())
     }
 
-    async fn resolve_github_source(
+    async fn resolve_source(
         &self,
         _source: &CheckoutSourceContext,
     ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
@@ -300,6 +300,8 @@ fn change_request_lookup(root: &std::path::Path) -> Arc<StaticChangeRequestLooku
             state: ChangeRequestState::Open,
             base_ref: "main".into(),
             head_ref: "feature/status".into(),
+            reference: None,
+            features: None,
         },
         resolves: AtomicUsize::new(0),
     })

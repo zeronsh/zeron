@@ -17,6 +17,7 @@ use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod auth;
+mod change_request_board;
 mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
@@ -65,9 +66,8 @@ pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
 pub use source_control::{
-    BranchHeadContext, ChangeRequestError, ChangeRequestProvider, ChangeRequestResolution,
-    ChangeRequestResolver, CheckoutChangeRequestLookup, CheckoutSourceContext, GitHubCli,
-    GitRemote, parse_git_remote,
+    BranchHeadContext, ChangeRequestError, ChangeRequestResolution, ChangeRequestResolver,
+    CheckoutChangeRequestLookup, CheckoutSourceContext, GitHubCli, GitRemote, parse_git_remote,
 };
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
@@ -141,6 +141,7 @@ pub struct EngineCore {
     pub project_actions: ProjectActionsStore,
     pub previews: zeron_preview::PreviewService,
     pub change_requests: CheckoutChangeRequests,
+    change_request_resolver: ChangeRequestResolver,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
@@ -260,7 +261,16 @@ impl EngineCore {
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
-        let change_requests = CheckoutChangeRequests::start(repos.clone(), &device_id);
+        // One registry for the board and the per-chat badge: they share
+        // adapters, caches and the on-disk store.
+        let change_request_resolver = ChangeRequestResolver::with_providers(
+            change_request_board::ChangeRequestBoardProviders::new(repos.data_dir()),
+        );
+        let change_requests = CheckoutChangeRequests::start(
+            repos.clone(),
+            &device_id,
+            change_request_resolver.clone(),
+        );
         let workspace_files =
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
@@ -335,6 +345,7 @@ impl EngineCore {
             project_actions,
             previews,
             change_requests,
+            change_request_resolver,
             diff_sync,
             spaces_sync,
             uploads,
@@ -467,6 +478,7 @@ impl EngineCore {
             self.terminals.clone(),
             self.project_actions.clone(),
             self.change_requests.clone(),
+            self.change_request_resolver.clone(),
             self.diff_sync.clone(),
             self.uploads.clone(),
             self.agent_accounts.clone(),

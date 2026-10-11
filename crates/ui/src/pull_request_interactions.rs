@@ -111,6 +111,7 @@ impl PullRequestDetailPage {
         let (cache, target, url) = (self.cache.clone(), self.target.clone(), self.url.clone());
         // Detached: leaving the pull request neither stops the post nor loses
         // its outcome.
+        let presentation = self.presentation().into_owned();
         cx.spawn(async move |_, cx| {
             let result = engine
                 .client()
@@ -118,8 +119,9 @@ impl PullRequestDetailPage {
                 .await
                 .map_err(|error| {
                     format!(
-                        "Couldn’t confirm your comment was posted. {} Your draft is kept; check GitHub before sending again.",
-                        super::failure_reason(&error)
+                        "Couldn’t confirm your comment was posted. {} Your draft is kept; check {} before sending again.",
+                        super::failure_reason(&error, &presentation),
+                        presentation.provider_name
                     )
                 })
                 .and_then(|value| {
@@ -304,7 +306,24 @@ impl PullRequestDetailPage {
                         .child("No matching participants. You can type any @username."),
                 );
             }
+            // Choices are participants, so their avatars are already known.
+            let actor = |login: &str| {
+                self.detail.as_ref().and_then(|detail| {
+                    std::iter::once(&detail.author)
+                        .chain(detail.activity_comments().map(|comment| &comment.author))
+                        .find(|actor| actor.login == login)
+                        .cloned()
+                })
+            };
+            let presented = self.presented();
             for (index, login) in self.mention_choices.iter().enumerate() {
+                let avatar = crate::pull_request_provider::avatar_url(
+                    &actor(login).unwrap_or_else(|| zeron_proto::ChangeRequestActor {
+                        login: login.clone(),
+                        avatar_url: None,
+                    }),
+                    presented,
+                );
                 menu = menu.child(
                     crate::popover::menu_row(
                         &popup_theme,
@@ -315,6 +334,7 @@ impl PullRequestDetailPage {
                     .w_full()
                     .child(super::super::pull_request_media::avatar(
                         login,
+                        avatar,
                         format!("pr-mention-avatar-{index}").into(),
                         20.0,
                         theme,
@@ -545,6 +565,7 @@ mod tests {
                     body: params["body"].as_str().unwrap().into(),
                     author: zeron_proto::ChangeRequestActor {
                         login: "writer".into(),
+                        avatar_url: None,
                     },
                     ..Default::default()
                 })
@@ -631,6 +652,7 @@ mod tests {
             page.detail = Some(ChangeRequestDetail {
                 author: zeron_proto::ChangeRequestActor {
                     login: "octocat".into(),
+                    avatar_url: None,
                 },
                 ..Default::default()
             });

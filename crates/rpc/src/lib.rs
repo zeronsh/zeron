@@ -205,6 +205,9 @@ pub mod methods {
     /// One page of a repository's open pull requests (`filter`, `after`
     /// cursor), with the total count.
     pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";
+    /// How clients present a scope's provider, for a board whose first page
+    /// failed. Engines advertising `change-requests-host-scopes-v1` answer.
+    pub const DESCRIBE_CHANGE_REQUEST_SCOPE: &str = "DescribeChangeRequestScope";
     /// Resolve a selected checkout through local Git metadata only.
     pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
     pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";

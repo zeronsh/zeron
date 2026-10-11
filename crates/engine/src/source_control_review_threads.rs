@@ -57,7 +57,7 @@ impl GitHubCli {
         let mut cursor = None;
         let mut seen = std::collections::HashSet::new();
         // Bound aggregate memory; never present a partial result as complete.
-        let mut budget = 8 * GITHUB_OUTPUT_LIMIT;
+        let mut budget = 8 * CLI_OUTPUT_LIMIT;
         loop {
             let value = self
                 .review_query(

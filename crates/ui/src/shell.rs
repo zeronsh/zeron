@@ -5365,12 +5365,16 @@ impl Shell {
             cx.notify();
             return;
         }
-        let preview = self
+        let (preview, presentation) = self
             .pull_requests_page
             .as_ref()
-            .and_then(|page| page.read(cx).preview(&url));
+            .map(|page| {
+                let page = page.read(cx);
+                (page.preview(&url), page.presentation_for(&url))
+            })
+            .unwrap_or_default();
         self.pull_request_detail = Some(cx.new(|cx| {
-            crate::pull_request_detail::PullRequestDetailPage::new(
+            let mut detail = crate::pull_request_detail::PullRequestDetailPage::new(
                 self.state.clone(),
                 url,
                 target,
@@ -5378,7 +5382,9 @@ impl Shell {
                 preview,
                 window,
                 cx,
-            )
+            );
+            detail.set_board_presentation(presentation);
+            detail
         }));
         self.pull_request_detail_subscription = self
             .pull_request_detail

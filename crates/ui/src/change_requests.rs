@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px};
 use zeron_proto::{
-    ChangeRequestListItem, ChangeRequestState, ChangeRequestSummary, Chat,
+    ChangeRequestFeatures, ChangeRequestListItem, ChangeRequestState, ChangeRequestSummary, Chat,
     CheckoutChangeRequestStatus, Space,
 };
 
@@ -34,6 +34,8 @@ impl ChangeRequestBadgeTone {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChangeRequestBadgeModel {
     pub number: SharedString,
+    /// How the provider writes it, for the tooltip (`#90`).
+    pub reference: SharedString,
     pub state_label: &'static str,
     pub title: SharedString,
     pub tone: ChangeRequestBadgeTone,
@@ -41,10 +43,20 @@ pub(crate) struct ChangeRequestBadgeModel {
 
 impl ChangeRequestBadgeModel {
     pub fn from_summary(summary: &ChangeRequestSummary) -> Self {
-        Self::from_fields(summary.number, &summary.title, summary.state)
+        Self::from_fields(
+            summary.number,
+            summary.reference.as_deref(),
+            &summary.title,
+            summary.state,
+        )
     }
 
-    fn from_fields(number: u64, title: &str, state: ChangeRequestState) -> Self {
+    fn from_fields(
+        number: u64,
+        reference: Option<&str>,
+        title: &str,
+        state: ChangeRequestState,
+    ) -> Self {
         let (state_label, tone) = match state {
             ChangeRequestState::Open => ("Open", ChangeRequestBadgeTone::Open),
             ChangeRequestState::Merged => ("Merged", ChangeRequestBadgeTone::Merged),
@@ -52,6 +64,7 @@ impl ChangeRequestBadgeModel {
         };
         Self {
             number: number.to_string().into(),
+            reference: crate::pull_request_provider::reference(number, reference).into(),
             state_label,
             title: title.replace(['\r', '\n'], " ").into(),
             tone,
@@ -84,8 +97,8 @@ impl Render for ChangeRequestTooltip {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(self.model.tone.color(theme))
                     .child(SharedString::from(format!(
-                        "PR #{} · {}",
-                        self.model.number, self.model.state_label
+                        "PR {} · {}",
+                        self.model.reference, self.model.state_label
                     ))),
             )
             .child(
@@ -152,6 +165,7 @@ fn render_pull_request_badge(
         id,
         model,
         summary.url,
+        summary.features,
         surface,
         query,
         interactive,
@@ -169,8 +183,14 @@ pub(crate) fn pull_request_list_badge(
 ) -> AnyElement {
     render_badge_model(
         id,
-        ChangeRequestBadgeModel::from_fields(item.number, &item.title, item.state),
+        ChangeRequestBadgeModel::from_fields(
+            item.number,
+            item.reference.as_deref(),
+            &item.title,
+            item.state,
+        ),
         item.url.clone(),
+        None,
         ChangeRequestBadgeSurface::Sidebar,
         None,
         false,
@@ -183,6 +203,7 @@ fn render_badge_model(
     id: SharedString,
     model: ChangeRequestBadgeModel,
     url: String,
+    features: Option<ChangeRequestFeatures>,
     surface: ChangeRequestBadgeSurface,
     query: Option<&str>,
     interactive: bool,
@@ -217,7 +238,13 @@ fn render_badge_model(
                 .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    crate::pull_request_detail::open_on_device(&url, device.clone(), window, cx);
+                    crate::pull_request_detail::open_on_device(
+                        &url,
+                        device.clone(),
+                        features.as_ref(),
+                        window,
+                        cx,
+                    );
                 })
                 .tooltip(move |_, cx| {
                     cx.new(|_| ChangeRequestTooltip {
@@ -482,6 +509,8 @@ mod tests {
                 state: ChangeRequestState::Open,
                 base_ref: "main".into(),
                 head_ref: "feature/pr".into(),
+                reference: None,
+                features: None,
             }),
             updated_at: Utc.timestamp_opt(1, 0).unwrap(),
         }
@@ -742,9 +771,19 @@ mod tests {
             summary.title = "First line\nSecond line".into();
             let model = ChangeRequestBadgeModel::from_summary(&summary);
             assert_eq!(model.number, "90");
+            assert_eq!(model.reference, "#90");
             assert_eq!(model.state_label, label);
             assert_eq!(model.tone, tone);
             assert_eq!(model.title, "First line Second line");
         }
+        // The provider's own reference, when the engine sends one.
+        let mut summary = snapshot("local", "/repo", "checkout")
+            .change_request
+            .unwrap();
+        summary.reference = Some("~90".into());
+        assert_eq!(
+            ChangeRequestBadgeModel::from_summary(&summary).reference,
+            "~90"
+        );
     }
 }

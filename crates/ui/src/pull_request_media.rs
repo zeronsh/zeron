@@ -1,9 +1,12 @@
-//! GitHub description media is opt-in; transcript Markdown keeps its existing policy.
+//! Pull request description media is opt-in, on the hosts its provider
+//! names; transcript Markdown keeps its existing policy.
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{AnyElement, IntoElement, SharedString, div, prelude::*, px};
 use html5ever::tokenizer::{BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer};
 use pulldown_cmark::{Event, Options, Parser};
+
+use zeron_proto::ChangeRequestPresentation;
 
 use crate::{
     markdown::{self, BlockTree, parser::InlineImage, render::MediaUi},
@@ -101,7 +104,11 @@ pub(super) fn parse_description(source: &str) -> BlockTree {
     markdown::parse_full(&description_markdown(source))
 }
 
-fn image_url(source: &str, pr_url: &str) -> Option<url::Url> {
+fn image_url(
+    source: &str,
+    pr_url: &str,
+    presentation: &ChangeRequestPresentation,
+) -> Option<url::Url> {
     let mut url = if source.starts_with('/') {
         url::Url::parse(pr_url).ok()?.join(source).ok()?
     } else {
@@ -110,31 +117,21 @@ fn image_url(source: &str, pr_url: &str) -> Option<url::Url> {
     if !crate::asset_http::public_https(&url) {
         return None;
     }
-    // GitHub's file viewer serves HTML; load its raw image instead.
-    if url.host_str() == Some("github.com") {
-        let path = url.path().to_owned();
-        let parts: Vec<_> = path.split('/').collect();
-        if parts.len() > 5 && parts[3] == "blob" {
-            url.set_path(&format!(
-                "/{}/{}/{}",
-                parts[1],
-                parts[2],
-                parts[4..].join("/")
-            ));
-            url.set_host(Some("raw.githubusercontent.com")).ok()?;
-        }
+    // A file page serves HTML; load the raw image it shows instead.
+    if let Some((host, path)) =
+        presentation.raw_media(url.host_str().unwrap_or_default(), url.path())
+    {
+        url.set_path(&path);
+        url.set_host(Some(&host)).ok()?;
     }
     Some(url)
 }
 
-/// GitHub serves the image itself. Anything else is another party's server,
-/// which would learn who opened the pull request and when.
-fn github_hosted(url: &url::Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        host == "github.com"
-            || host.ends_with(".githubusercontent.com")
-            || host.ends_with(".githubassets.com")
-    })
+/// The provider serves the image itself. Anything else is another party's
+/// server, which would learn who opened the pull request and when.
+fn provider_hosted(url: &url::Url, presentation: &ChangeRequestPresentation) -> bool {
+    url.host_str()
+        .is_some_and(|host| presentation.inline_media_host(host))
 }
 
 fn placeholder(label: String, theme: &Theme) -> AnyElement {
@@ -335,13 +332,14 @@ impl gpui::Element for PreviewImage {
 
 pub(super) fn media(
     pr_url: &str,
+    presentation: ChangeRequestPresentation,
     open: Rc<dyn Fn(&str, &mut gpui::Window, &mut gpui::App)>,
 ) -> MediaUi {
     let pr_url = pr_url.to_owned();
     MediaUi {
         diagram: None,
         image: image_renderer(move |image, id, theme| {
-            let Some(source) = image_url(&image.source, &pr_url) else {
+            let Some(source) = image_url(&image.source, &pr_url, &presentation) else {
                 return placeholder(
                     "Image unavailable here. Open the pull request in your browser to see it."
                         .into(),
@@ -353,7 +351,7 @@ pub(super) fn media(
             } else {
                 image.alt.clone()
             };
-            let inline = github_hosted(&source);
+            let inline = provider_hosted(&source, &presentation);
             let host = source.host_str().unwrap_or_default().to_owned();
             let source = String::from(source);
             let tile_selector = format!("pr-image-tile-{id}");
@@ -514,9 +512,15 @@ pub(super) fn render_description(
     output.into_any_element()
 }
 
-/// GitHub redirects this public profile image endpoint to its avatar CDN.
-/// Stable sizing lets repeated authors share GPUI's image cache.
-pub(super) fn avatar(login: &str, id: SharedString, size: f32, theme: &Theme) -> AnyElement {
+/// An account's image at `url`, or its initial while it loads, when it
+/// fails, or when the provider has none.
+pub(super) fn avatar(
+    login: &str,
+    url: Option<String>,
+    id: SharedString,
+    size: f32,
+    theme: &Theme,
+) -> AnyElement {
     let initial = login
         .chars()
         .next()
@@ -536,14 +540,9 @@ pub(super) fn avatar(login: &str, id: SharedString, size: f32, theme: &Theme) ->
             .child(initial.clone())
             .into_any_element()
     };
-    if login.is_empty() {
+    let Some(url) = url else {
         return fallback();
-    }
-    let mut url = url::Url::parse("https://github.com/").unwrap();
-    url.path_segments_mut()
-        .unwrap()
-        .push(&format!("{login}.png"));
-    url.set_query(Some("size=64"));
+    };
     div()
         .id(id.clone())
         .size(px(size))
@@ -551,7 +550,7 @@ pub(super) fn avatar(login: &str, id: SharedString, size: f32, theme: &Theme) ->
         .rounded_full()
         .overflow_hidden()
         .child(
-            gpui::img(SharedString::from(url.to_string()))
+            gpui::img(SharedString::from(url))
                 .id(id)
                 .size(px(size))
                 .rounded_full()
@@ -604,6 +603,8 @@ mod tests {
     #[test]
     fn pull_request_image_urls_only_load_web_media_and_normalize_github_blobs() {
         let pr = "https://github.com/owner/repo/pull/1";
+        let github = crate::pull_request_provider::presentation(None);
+        let image_url = |source: &str, pr: &str| image_url(source, pr, &github);
         assert_eq!(
             image_url("/user-attachments/assets/abc", pr)
                 .unwrap()
@@ -616,6 +617,25 @@ mod tests {
                 .as_str(),
             "https://raw.githubusercontent.com/o/r/main/image.png"
         );
+        assert!(provider_hosted(
+            &url::Url::parse("https://private-user-images.githubusercontent.com/a.png").unwrap(),
+            &github
+        ));
+        // Another provider's rules come from its presentation alone.
+        let forge = ChangeRequestPresentation {
+            media_hosts: vec!["forge.test".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            super::image_url("https://github.com/o/r/blob/main/image.png", pr, &forge)
+                .unwrap()
+                .as_str(),
+            "https://github.com/o/r/blob/main/image.png"
+        );
+        assert!(!provider_hosted(
+            &url::Url::parse("https://github.com/a.png").unwrap(),
+            &forge
+        ));
         for source in [
             "file:///etc/passwd",
             "javascript:alert(1)",
@@ -641,6 +661,7 @@ mod tests {
             let options = markdown::render::RenderOptions {
                 media: Some(media(
                     "https://github.com/a/b/pull/1",
+                    crate::pull_request_provider::presentation(None).into_owned(),
                     Rc::new(|_, _, _| {}),
                 )),
                 tasks: None,

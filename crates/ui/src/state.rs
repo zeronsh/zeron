@@ -534,6 +534,14 @@ impl EngineHandle {
         }
     }
 
+    /// A test engine that advertises `capabilities`.
+    #[cfg(test)]
+    pub(crate) fn with_test_capabilities(mut self, capabilities: &[&str]) -> Self {
+        self.engine_info.capabilities =
+            capabilities.iter().map(|value| value.to_string()).collect();
+        self
+    }
+
     pub fn client(&self) -> &RpcClient {
         self.inner.client()
     }

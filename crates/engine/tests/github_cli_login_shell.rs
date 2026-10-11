@@ -95,7 +95,7 @@ printf '%s\n' '[{"number":90,"title":"Login shell pull request","url":"https://g
     }
 
     let resolution = ChangeRequestResolver::new()
-        .resolve_github(&checkout)
+        .resolve(&checkout)
         .await
         .expect("gh resolves through the login-shell PATH");
     let pull_request = resolution.change_request.expect("pull request");
