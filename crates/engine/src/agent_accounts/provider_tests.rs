@@ -152,6 +152,60 @@ fn rows(snapshot: &AgentAccountsSnapshot, harness: HarnessId) -> Vec<AgentAccoun
         .collect()
 }
 
+#[tokio::test]
+async fn codex_banked_resets_reach_account_rows_and_survive_restart() {
+    let server = MockServer::start(|method, path, _| {
+        assert_eq!((method, path), ("GET", "/backend-api/wham/usage"));
+        (200, serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": { "used_percent": 12, "limit_window_seconds": 18000, "reset_at": 2000000000 },
+                "secondary_window": { "used_percent": 30, "limit_window_seconds": 604800, "reset_at": 2000100000 }
+            },
+            "rate_limit_reset_credits": { "available_count": 2 }
+        }).to_string())
+    }).await;
+    let temp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(temp.path(), mocked(&server.base));
+    let access = chatgpt_access("alex@example.com", "account", "plus");
+    let id_token = jwt(serde_json::json!({
+        "email": "alex@example.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "account", "chatgpt_plan_type": "plus"
+        }
+    }));
+    write(
+        &config.codex_auth_file(),
+        &serde_json::json!({
+            "tokens": { "access_token": access, "id_token": id_token, "account_id": "account" }
+        })
+        .to_string(),
+    );
+    let fetched = accounts.list(true).await.unwrap();
+    let account = &rows(&fetched, HarnessId::Codex)[0];
+    assert_eq!(account.available_resets, Some(2));
+    assert_eq!(account.usage_windows.len(), 2);
+    assert!(
+        account
+            .usage_windows
+            .iter()
+            .all(|window| window.resets_at.is_some())
+    );
+    let wire = serde_json::to_value(&fetched).unwrap();
+    let decoded: AgentAccountsSnapshot = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        rows(&decoded, HarnessId::Codex)[0].available_resets,
+        Some(2)
+    );
+    drop(accounts);
+    let (restarted, _) = accounts_with(temp.path(), mocked(&server.base));
+    assert_eq!(
+        rows(&restarted.list(false).await.unwrap(), HarnessId::Codex)[0].available_resets,
+        Some(2)
+    );
+    assert_eq!(server.hits("GET /backend-api/wham/usage"), 1);
+}
+
 async fn settle(accounts: &AgentAccounts, login_id: &str) -> Vec<AgentLoginPoll> {
     let mut seen = Vec::new();
     for _ in 0..300 {
