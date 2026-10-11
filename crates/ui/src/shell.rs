@@ -18,8 +18,8 @@ use chrono::{DateTime, Utc};
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Empty, Entity, FocusHandle, Focusable as _,
     IntoElement, KeyBinding, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window,
-    WindowControlArea, actions, div, prelude::*, px,
+    MouseUpEvent, NavigationDirection, Pixels, Point, Render, SharedString, Subscription, Task,
+    Window, WindowControlArea, actions, div, prelude::*, px,
 };
 
 use gpui_tokio::Tokio;
@@ -29,7 +29,9 @@ use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
-use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
+use crate::files::{
+    FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag,
+};
 use crate::icons::{self, icon};
 use crate::loaders;
 use crate::motion::{
@@ -83,7 +85,9 @@ mod session_info;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
+mod search_warm;
 pub(crate) mod spaces;
+mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
 mod voice_stage;
@@ -301,6 +305,13 @@ fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
 
+/// Show the command palette's tab at this (zero-based) position. Bound to
+/// mod-1…4 inside the palette's key context only, where it outranks the
+/// session jumps on the same keys while the palette is open.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct SelectPaletteTab(pub usize);
+
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------
@@ -503,6 +514,21 @@ pub fn apply_keymap(
             JumpSession(slot),
             None,
         ))
+    }));
+    // Context-free bindings (the jumps above) match at the full focus depth,
+    // so a palette binding must too: one for the palette's focused search
+    // input, one for the card itself. Bound after the jumps, they win the tie.
+    let palette_input = format!("{} > PaletteSearch", command_palette::KEY_CONTEXT);
+    cx.bind_keys((0..command_palette::Tab::ALL.len()).flat_map(|ix| {
+        let combo = platform_combo(&format!("mod-{}", ix + 1));
+        [
+            KeyBinding::new(&combo, SelectPaletteTab(ix), Some(&palette_input)),
+            KeyBinding::new(
+                &combo,
+                SelectPaletteTab(ix),
+                Some(command_palette::KEY_CONTEXT),
+            ),
+        ]
     }));
 }
 
@@ -2074,6 +2100,10 @@ pub struct Shell {
     /// The New project palette's collapsed-breadcrumbs (`…`) menu.
     project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
+    /// The focus whose workspace search index was last warmed (see `search_warm`).
+    search_warm: Option<search_warm::SearchWarm>,
+    /// Per chat, the files opened in editor tabs, most recent first.
+    recent_files: std::collections::HashMap<String, std::collections::VecDeque<String>>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
@@ -2567,6 +2597,8 @@ impl Shell {
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
             command_palette: None,
+            search_warm: None,
+            recent_files: std::collections::HashMap::new(),
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
@@ -2747,6 +2779,7 @@ impl Shell {
         }
         self.prune_file_explorers(cx);
         self.refresh_harness_update_watch(cx);
+        self.sync_search_warm(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -3579,6 +3612,10 @@ impl Shell {
             RightSurface::File(id) => {
                 if let Some(file) = self.file_surfaces.get(&id).cloned() {
                     file.update(cx, |file, cx| file.ensure_loaded(cx));
+                    if let Some(path) = self.file_surface_paths.get(&id).cloned() {
+                        let chat_id = file.read(cx).chat_id().to_owned();
+                        self.note_recent_file(&chat_id, &path);
+                    }
                 }
             }
             RightSurface::Terminal(tab) => {
@@ -3868,7 +3905,7 @@ impl Shell {
         &mut self,
         owner: (String, Entity<AppState>),
         path: String,
-        location: Option<(u32, Option<u32>)>,
+        location: Option<(u32, Option<FileColumn>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4064,7 +4101,8 @@ impl Shell {
         self.add_file_surface_at(
             owner,
             link.path,
-            link.line.map(|line| (line, link.column)),
+            link.line
+                .map(|line| (line, link.column.map(FileColumn::Character))),
             window,
             cx,
         );
@@ -5300,7 +5338,8 @@ impl Shell {
         self.set_route(Route::PullRequests, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
-        self.add_space = None;
+        // Through `close_add_space`, so the host's home index is released.
+        self.close_add_space(cx);
         self.close_right_plus(cx);
         if self.spaces_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
@@ -8077,30 +8116,16 @@ impl Shell {
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
-            // is held, cut to the sidebar PR badge's exact cloth
-            // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
-            // rounded 4, borderless 0.08-fill with 0.85 text of one tone —
-            // neutral here — and the label in the badge's mono at 10 MEDIUM.
-            // Any other geometry reads as a second badge system on the row.
-            {
-                let tone = theme.text_muted;
-                div()
-                    .h(px(16.0))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(tone.opacity(0.08))
-                    .whitespace_nowrap()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(tone.opacity(0.85))
-                    .font_family(theme.font_mono.clone())
-                    .child(label)
-                    .into_any_element()
-            }
+            // is held, in the shared legend voice (the compact rows' plain
+            // muted text, `popover::kbd_hint`).
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .font_family(crate::popover::KEY_GLYPH_FONT)
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted.opacity(0.5))
+                .child(label)
+                .into_any_element()
         } else if corner_hovered {
             div()
                 .flex()
@@ -10399,8 +10424,7 @@ impl Shell {
             return true;
         }
         if self.add_space.is_some() {
-            self.add_space = None;
-            cx.notify();
+            self.close_add_space(cx);
             return true;
         }
         if self.spaces_menu.is_open() {
@@ -11305,6 +11329,9 @@ impl Shell {
                                 self.reduced_motion,
                                 frame_time,
                             )
+                            // Centered on the transcript, which keeps the
+                            // session card's room free on its right.
+                            .shift_x(-session_reserve / 2.0)
                             .reserve_terminal(terminal_geometry.clone()),
                         )
                     })
@@ -13547,6 +13574,16 @@ impl Render for Shell {
                     }
                 }),
             )
+            // Mouse side buttons walk the same history as the titlebar
+            // back/forward arrows (the browser surface keeps them to itself).
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, _, cx| this.navigate_back(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
+            )
             .capture_key_down(cx.listener(Self::on_key_down_capture))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
@@ -13732,8 +13769,7 @@ impl Render for Shell {
                     return;
                 }
                 if this.add_space.is_some() {
-                    this.add_space = None;
-                    cx.notify();
+                    this.close_add_space(cx);
                 } else {
                     this.open_add_space(cx);
                 }
@@ -14064,8 +14100,7 @@ impl Render for Shell {
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
-        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active()
-        {
+        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
             window.request_animation_frame();
         }
 

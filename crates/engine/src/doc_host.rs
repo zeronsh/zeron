@@ -5385,6 +5385,16 @@ impl DocHost {
                 // creates the row under our device id (we are about to host it).
                 if let Some(ws) = self.workspace() {
                     ws.claim_chat(chat_id, Some(&request.cwd))?;
+                    // Older clients send `~` for a projectless run; a chat
+                    // created with a scratch folder runs there instead.
+                    if zeron_proto::projectless::is_home_cwd(&request.cwd)
+                        && let Ok(Some(chat)) = ws.chat(chat_id)
+                        && let Some(cwd) = chat.cwd.filter(|cwd| {
+                            chat.space_id.is_none() && zeron_proto::projectless::is_scratch_cwd(cwd)
+                        })
+                    {
+                        request.cwd = cwd;
+                    }
                     // A pre-existing row (the client's createChat raced ahead)
                     // still carries the repo folder — repoint it at the fresh
                     // worktree, and stamp the actual `zeron/<name>` branch so

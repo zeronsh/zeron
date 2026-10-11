@@ -10,6 +10,26 @@ final class AppModel {
         var folders: [FolderRowVM] = []
         var sessions: [SessionRowVM] = []
         var sectionSessions: [String: [SessionRowVM]] = [:]
+        /// `sessions` grouped by repository project, groups in recency order.
+        var projectGroups: [ProjectGroupVM] = []
+    }
+
+    struct ProjectGroupVM: Equatable {
+        /// Section id: `project:<group key>` (`home:<device>` without a project).
+        let id: String
+        var name: String
+        var sessions: [SessionRowVM]
+    }
+
+    /// The Sessions page groups its unsectioned sessions by project
+    /// (the desktop sidebar's "By project"). Local to this phone.
+    var groupByProject: Bool {
+        get { UserDefaults.standard.bool(forKey: "groupByProject") }
+        set {
+            guard newValue != groupByProject else { return }
+            UserDefaults.standard.set(newValue, forKey: "groupByProject")
+            observers.values.forEach { $0() }
+        }
     }
 
     struct LiveCounts: Equatable {
@@ -365,6 +385,7 @@ final class AppModel {
             page.sectionSessions[s.id] = list
         }
         page.sessions = ws.front.recent.map(vm)
+        page.projectGroups = Self.projectGroups(ws.front.recent, page.sessions, projects: ws.projects)
         rawProjects = ws.projects
         // Sessions reachable only through their project still resolve by id.
         for p in ws.projects {
@@ -386,6 +407,34 @@ final class AppModel {
         frontPage = page
         archived = archivedVMs
         if changed { observers.values.forEach { $0() } }
+    }
+
+    /// Like the desktop's project grouping: checkouts of one repository
+    /// share a group (named for its representative), project-less sessions
+    /// group per device. Groups and rows keep the incoming recency order.
+    private static func projectGroups(_ rows: [SessionRow], _ vms: [SessionRowVM], projects: [ProjectView]) -> [ProjectGroupVM] {
+        let byId = Dictionary(projects.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var groups: [ProjectGroupVM] = []
+        var index: [String: Int] = [:]
+        for (row, vm) in zip(rows, vms) {
+            let id: String
+            let name: String
+            if let ref = row.project {
+                let project = byId[ref.id]
+                id = "project:" + (project?.groupKey ?? ref.id)
+                name = project?.groupName ?? ref.name
+            } else {
+                id = "home:" + row.deviceId
+                name = row.deviceName.map { "Home · \($0)" } ?? "Home"
+            }
+            if let i = index[id] {
+                groups[i].sessions.append(vm)
+            } else {
+                index[id] = groups.count
+                groups.append(ProjectGroupVM(id: id, name: name, sessions: [vm]))
+            }
+        }
+        return groups
     }
 
     static func status(_ i: ChatIndicator) -> SessionRowVM.Status {

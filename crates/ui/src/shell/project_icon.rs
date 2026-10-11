@@ -292,7 +292,7 @@ impl Shell {
         let name = chat
             .and_then(|chat| state.space_for_chat(chat))
             .map(|space| space.display_name().to_string())
-            .unwrap_or_else(|| "Home".into());
+            .unwrap_or_else(|| "No project".into());
         // Same fallback as the row's "@ device" fragment.
         let device = chat
             .and_then(|chat| state.device_name(&chat.device_id))

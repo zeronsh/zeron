@@ -116,51 +116,47 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
+/// A provider's version line: the installed version, plus only what the
+/// Update button doesn't already say (progress, a failure), all in one muted
+/// tone. Up-to-date providers, checks in flight and providers whose updates
+/// aren't monitored show just the version, so rows don't flash through
+/// states while checks run.
 fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedString, gpui::Hsla) {
     let installed = status
         .installed_version
         .as_deref()
-        .map(|version| format!("v{version}"))
-        .unwrap_or_else(|| "Version unavailable".into());
+        .map(|version| format!("v{version}"));
+    let with = |detail: &str| match &installed {
+        Some(version) => format!("{version} · {detail}"),
+        None => detail.to_owned(),
+    };
+    let version_only = || installed.clone().unwrap_or_default();
     let label = match status.phase {
-        HarnessUpdatePhase::Dormant => "Update monitoring off".into(),
-        HarnessUpdatePhase::Checking => "Checking for updates…".into(),
-        HarnessUpdatePhase::Current => format!("{installed} · Up to date"),
-        HarnessUpdatePhase::Available => {
-            let available = match status.latest_version.as_deref() {
-                Some(latest) => format!("{installed} · v{latest} available"),
-                None => format!("{installed} · Update available"),
-            };
-            // Applicable Homebrew updates still name the brew command when the
-            // cask or formula has not published the upstream release yet.
-            status
-                .manual_command
-                .as_deref()
-                .map(|instruction| format!("{available} · {instruction}"))
-                .unwrap_or(available)
+        HarnessUpdatePhase::Dormant
+        | HarnessUpdatePhase::Checking
+        | HarnessUpdatePhase::Current => version_only(),
+        // The row's Update button already says it; one Zeron can only
+        // describe (a command to run yourself) is just the version too.
+        HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
+            if status.can_apply =>
+        {
+            version_only()
         }
-        HarnessUpdatePhase::WaitingForIdle => format!("{installed} · Waiting for agent to be idle"),
-        HarnessUpdatePhase::Preparing => format!("{installed} · Preparing update…"),
-        HarnessUpdatePhase::Downloading => format!("{installed} · Downloading…"),
-        HarnessUpdatePhase::Installing => format!("{installed} · Installing…"),
-        HarnessUpdatePhase::Verifying => "Verifying updated CLI…".into(),
-        HarnessUpdatePhase::Updated => format!("{installed} · Updated"),
-        HarnessUpdatePhase::ManualActionRequired => status
-            .manual_command
-            .as_deref()
-            .map(|command| format!("{installed} · {command}"))
-            .unwrap_or_else(|| format!("{installed} · Manual update checks")),
-        HarnessUpdatePhase::Failed => status
-            .error
-            .as_ref()
-            .map(|error| format!("Update check failed · {}", error.message))
-            .unwrap_or_else(|| "Update check failed".into()),
+        HarnessUpdatePhase::Available => match status.latest_version.as_deref() {
+            Some(latest) => with(&format!("v{latest} available")),
+            None => with("Update available"),
+        },
+        HarnessUpdatePhase::ManualActionRequired => version_only(),
+        HarnessUpdatePhase::WaitingForIdle => with("Waiting for agent to be idle"),
+        HarnessUpdatePhase::Preparing => with("Preparing update…"),
+        HarnessUpdatePhase::Downloading => with("Downloading…"),
+        HarnessUpdatePhase::Installing => with("Installing…"),
+        HarnessUpdatePhase::Verifying => with("Verifying…"),
+        HarnessUpdatePhase::Updated => with("Updated"),
+        HarnessUpdatePhase::Failed => with("Couldn't check for updates"),
     };
     let color = match status.phase {
-        HarnessUpdatePhase::Available => theme.accent,
-        HarnessUpdatePhase::Updated => theme.success,
-        HarnessUpdatePhase::Failed => theme.danger,
-        HarnessUpdatePhase::ManualActionRequired => theme.warning_muted,
+        HarnessUpdatePhase::Failed => theme.danger_muted,
         _ => theme.text_muted.opacity(0.75),
     };
     (label.into(), color)
@@ -180,6 +176,8 @@ pub struct HarnessesPage {
     error: Option<String>,
     load_task: Option<Task<()>>,
     toggle_task: Option<Task<()>>,
+    /// A toggle the engine hasn't answered yet: the switch shows it at once.
+    pending_toggle: Option<(HarnessId, bool)>,
     installing: Option<HarnessId>,
     install_task: Option<Task<()>>,
 
@@ -189,6 +187,9 @@ pub struct HarnessesPage {
     accounts_page: Option<Entity<AccountsPage>>,
     update_task: Option<Task<()>>,
     update_action_task: Option<Task<()>>,
+    /// "Check now" is running: the button says so, since rows no longer
+    /// show "Checking…" while a check is in flight.
+    checking_updates: bool,
 }
 
 impl HarnessesPage {
@@ -204,6 +205,7 @@ impl HarnessesPage {
             error: None,
             load_task: None,
             toggle_task: None,
+            pending_toggle: None,
             installing: None,
             install_task: None,
 
@@ -211,6 +213,7 @@ impl HarnessesPage {
             accounts_page: None,
             update_task: None,
             update_action_task: None,
+            checking_updates: false,
         };
         page.load(cx);
         page
@@ -577,12 +580,17 @@ impl HarnessesPage {
             "enabled": enabled,
         }));
         self.error = None;
+        self.pending_toggle = Some((harness, enabled));
+        cx.notify();
         self.toggle_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::SET_HARNESS_ENABLED, params)
                 .await;
             this.update(cx, |page, cx| {
+                if page.pending_toggle == Some((harness, enabled)) {
+                    page.pending_toggle = None;
+                }
                 match result {
                     Ok(value) => {
                         if let Ok(list) = serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
@@ -613,12 +621,15 @@ impl HarnessesPage {
         };
         let params = self.with_target(serde_json::json!({}));
         self.error = None;
+        self.checking_updates = true;
+        cx.notify();
         self.update_action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::CHECK_HARNESS_UPDATES, params)
                 .await;
             this.update(cx, |page, cx| {
+                page.checking_updates = false;
                 match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessUpdateStatus>>(value) {
                         Ok(statuses) => page.updates = Loadable::Ready(statuses),
@@ -802,7 +813,10 @@ impl HarnessesPage {
             .map(|(ix, descriptor)| {
                 let harness = descriptor.id;
                 let installed = descriptor.installed;
-                let enabled = descriptor_enabled(&descriptor);
+                let enabled = match self.pending_toggle {
+                    Some((pending, on)) if pending == harness => on,
+                    _ => descriptor_enabled(&descriptor),
+                };
                 // The one enabled harness left can't be switched off — the
                 // composer needs something to run — but only when it could
                 // actually run: an uninstalled last harness stays togglable
@@ -845,7 +859,7 @@ impl HarnessesPage {
                 } else if !installed {
                     meta.push(
                         div()
-                            .text_color(theme.warning_muted.opacity(0.9))
+                            .text_color(theme.text_muted.opacity(0.75))
                             .child(SharedString::from(install_hint(
                                 harness,
                                 enabled,
@@ -854,24 +868,42 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                if let Some(status) = update {
+                // Not installed: the hint above says all there is.
+                if let Some(status) = update.filter(|_| installed) {
                     let (text, color) = harness_update_label(status, &theme);
-                    meta.push(div().text_color(color).child(text).into_any_element());
-                }
-                match harness {
-                    HarnessId::Cursor => meta.push(
-                        div()
-                            .text_color(theme.text_muted.opacity(0.65))
-                            .child("Cursor SDK · Managed by Zeron")
-                            .into_any_element(),
-                    ),
-                    HarnessId::Pi => meta.push(
-                        div()
-                            .text_color(theme.text_muted.opacity(0.65))
-                            .child("Pi RPC · Native connection")
-                            .into_any_element(),
-                    ),
-                    _ => {}
+                    // Next to an Update button the version reads as the
+                    // jump it would make: v1.2 → v1.3.
+                    let next = status
+                        .latest_version
+                        .as_deref()
+                        .filter(|_| {
+                            status.can_apply
+                                && matches!(
+                                    status.phase,
+                                    HarnessUpdatePhase::Available
+                                        | HarnessUpdatePhase::ManualActionRequired
+                                )
+                        })
+                        .filter(|latest| status.installed_version.as_deref() != Some(*latest));
+                    if let Some(next) = next.filter(|_| !text.is_empty()) {
+                        meta.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .text_color(color)
+                                .child(text)
+                                .child(
+                                    crate::icons::icon(crate::icons::ARROW_RIGHT)
+                                        .size(px(11.0))
+                                        .text_color(color),
+                                )
+                                .child(format!("v{next}"))
+                                .into_any_element(),
+                        );
+                    } else if !text.is_empty() {
+                        meta.push(div().text_color(color).child(text).into_any_element());
+                    }
                 }
                 // widgets::row_tile with the brand tint honored (the Claude
                 // mark keeps its orange, like the picker rail).
@@ -999,45 +1031,60 @@ impl HarnessesPage {
                                     }),
                             )
                             .children(update_action)
-                            .when(enabled, |el| {
-                                el.child(
-                                    crate::icons::icon(if expanded {
-                                        crate::icons::ALT_ARROW_DOWN
-                                    } else {
-                                        crate::icons::ALT_ARROW_RIGHT
-                                    })
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted)
-                                    .group_hover(format!("harness-details-{ix}"), |s| {
-                                        s.text_color(theme.text)
-                                    }),
-                                )
-                            }),
-                    )
-                    .when(
-                        offers_install(harness, installed, descriptor.can_install)
-                            && self.installing != Some(harness),
-                        |el| {
-                            el.child(
-                                widgets::ghost_action(&theme)
-                                    .id(("harness-install", ix))
-                                    .when(self.installing.is_none(), |el| {
-                                        el.on_click(cx.listener(move |this, _, _, cx| {
-                                            this.install(harness, cx)
-                                        }))
-                                    })
-                                    .child("Install"),
+                            // Install / Cancel sit with the row's other
+                            // action, before the caret, so carets line up.
+                            .when(
+                                offers_install(harness, installed, descriptor.can_install)
+                                    && self.installing != Some(harness),
+                                |el| {
+                                    el.child(
+                                        widgets::ghost_action(&theme)
+                                            .id(("harness-install", ix))
+                                            .flex_none()
+                                            .when(self.installing.is_none(), |el| {
+                                                el.on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.install(harness, cx)
+                                                }))
+                                            })
+                                            .child("Install"),
+                                    )
+                                },
                             )
-                        },
+                            .when(self.installing == Some(harness), |el| {
+                                el.child(
+                                    widgets::ghost_action(&theme)
+                                        .id(("harness-cancel-install", ix))
+                                        .flex_none()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.cancel_install(cx)
+                                        }))
+                                        .child("Cancel"),
+                                )
+                            })
+                            // Always present so every row's controls hold
+                            // their place; inert while the provider is off.
+                            .child(
+                                crate::icons::icon(if expanded {
+                                    crate::icons::ALT_ARROW_DOWN
+                                } else {
+                                    crate::icons::ALT_ARROW_RIGHT
+                                })
+                                .size(px(14.0))
+                                .flex_none()
+                                .when(enabled, |caret| {
+                                    caret
+                                        .text_color(theme.text_muted)
+                                        .group_hover(format!("harness-details-{ix}"), |s| {
+                                            s.text_color(theme.text)
+                                        })
+                                })
+                                .when(!enabled, |caret| {
+                                    caret.text_color(theme.text_muted.opacity(0.35))
+                                }),
+                            ),
                     )
-                    .when(self.installing == Some(harness), |el| {
-                        el.child(
-                            widgets::ghost_action(&theme)
-                                .id(("harness-cancel-install", ix))
-                                .on_click(cx.listener(|this, _, _, cx| this.cancel_install(cx)))
-                                .child("Cancel"),
-                        )
-                    })
                     .child(
                         widgets::toggle_switch(
                             &theme,
@@ -1186,7 +1233,11 @@ impl Render for HarnessesPage {
             .when(can_control, |button| {
                 button.on_click(cx.listener(|this, _, _, cx| this.check_updates(cx)))
             })
-            .child("Check now");
+            .child(if self.checking_updates {
+                "Checking…"
+            } else {
+                "Check now"
+            });
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 

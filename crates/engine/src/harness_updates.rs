@@ -1275,11 +1275,37 @@ impl HarnessUpdateCoordinator {
         for harness in &self.inner.order {
             if !enabled.contains(harness) {
                 self.cancel(*harness);
+                if !self.is_mutating(*harness) {
+                    self.mutate(*harness, |status| {
+                        status.phase = HarnessUpdatePhase::Dormant;
+                        status.progress = None;
+                        status.error = None;
+                    });
+                }
             }
+        }
+        // Only a provider that just came on (still dormant) needs a check.
+        // Re-checking every provider on each toggle sent every row through
+        // Checking… and back, at staggered times (user report: all rows
+        // flickered through random states).
+        let woken: Vec<HarnessId> = self
+            .snapshot()
+            .into_iter()
+            .filter(|status| {
+                enabled.contains(&status.harness)
+                    && status.phase == HarnessUpdatePhase::Dormant
+                    && self.policy(status.harness) != HarnessUpdatePolicy::Off
+            })
+            .map(|status| status.harness)
+            .collect();
+        if woken.is_empty() {
+            return;
         }
         let coordinator = self.clone();
         tokio::spawn(async move {
-            coordinator.check_all().await;
+            for harness in woken {
+                let _ = coordinator.check_one(harness).await;
+            }
         });
     }
 
@@ -2927,6 +2953,39 @@ esac
             std::fs::read_to_string(temp.path().join("version")).unwrap(),
             "1.0.0\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn toggling_one_agent_leaves_the_others_settled() {
+        let (temp, coordinator) = automatic_fixture();
+        let registry = &coordinator.inner.registry;
+        registry.register(Arc::new(ExecutableHarness(
+            temp.path().join("agent"),
+            HarnessId::Codex,
+        )));
+        for harness in [HarnessId::Grok, HarnessId::Codex] {
+            coordinator.mutate(harness, |status| {
+                status.phase = HarnessUpdatePhase::Current;
+                status.installed_version = Some("1.0.0".into());
+            });
+        }
+        registry.set_enabled(HarnessId::Grok, false).unwrap();
+        coordinator.refresh_enabled();
+        // The switched-off agent goes quiet; the other one isn't re-checked
+        // (every row used to cycle through Checking… on each toggle).
+        assert_eq!(
+            coordinator.status(HarnessId::Grok).phase,
+            HarnessUpdatePhase::Dormant
+        );
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            assert_eq!(
+                coordinator.status(HarnessId::Codex).phase,
+                HarnessUpdatePhase::Current
+            );
+        }
+        coordinator.shutdown().await;
     }
 
     #[test]

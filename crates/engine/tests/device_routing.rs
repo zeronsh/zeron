@@ -1282,7 +1282,22 @@ async fn exercise_terminal_relay(projectless: bool) {
     };
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
     let expected_cwd = if projectless {
-        std::env::var("HOME").expect("HOME set in test env")
+        // B's own scratch folder for the chat, created when the terminal opened.
+        let chat = core_b.workspace.chat("chat-term").unwrap().unwrap();
+        let chat_cwd = chat.cwd.clone().unwrap();
+        assert!(
+            zeron_proto::projectless::is_scratch_cwd(&chat_cwd),
+            "{chat_cwd}"
+        );
+        assert_eq!(chat.space_id, None);
+        assert!(core_b.workspace.read_spaces().unwrap().is_empty());
+        let name = chat_cwd.rsplit('/').next().unwrap();
+        dirs.path()
+            .join("b")
+            .join("scratch")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
     } else {
         cwd.to_string_lossy().into_owned()
     };
@@ -1291,12 +1306,6 @@ async fn exercise_terminal_relay(projectless: bool) {
         Some(expected_cwd.as_str()),
         "cwd from B's chat row"
     );
-    if projectless {
-        let chat = core_b.workspace.chat("chat-term").unwrap().unwrap();
-        assert_eq!(chat.cwd.as_deref(), Some("~"));
-        assert_eq!(chat.space_id, None);
-        assert!(core_b.workspace.read_spaces().unwrap().is_empty());
-    }
 
     // SubscribeTerminal: the stream is proxied item-by-item through the relay.
     let mut stream = client
@@ -1441,6 +1450,36 @@ async fn workspace_file_surface_proxies_over_the_relay() {
         .await
         .expect("remote search");
     assert_eq!(matches[0]["path"], "src/remote.rs");
+
+    let warm = client
+        .call(
+            methods::WARM_WORKSPACE_SEARCH,
+            serde_json::json!({
+                "chatId": "chat-files",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote search warm-up");
+    assert!(matches!(warm["state"].as_str(), Some("building" | "ready")));
+
+    let content = client
+        .call(
+            methods::SEARCH_WORKSPACE_CONTENT,
+            serde_json::json!({
+                "chatId": "chat-files",
+                "query": "REMOTE",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote content search");
+    assert!(
+        content["matches"]
+            .as_array()
+            .is_some_and(|matches| matches.iter().any(|m| m["path"] == "src/remote.rs"))
+            || content["indexing"] == true
+    );
 
     let read = client
         .call(

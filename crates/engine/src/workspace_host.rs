@@ -27,6 +27,7 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
+use zeron_proto::projectless;
 use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -135,6 +136,20 @@ pub(crate) fn join_retry_jitter() -> std::time::Duration {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     std::time::Duration::from_millis(u64::from(nanos) % 500)
+}
+
+/// A new projectless chat's cwd: the scratch folder the creating client
+/// already picked, else one named for the chat. Older clients send `~` (or
+/// nothing); new chats never run in the host's home.
+fn new_projectless_cwd(
+    chat_id: &str,
+    requested: Option<&str>,
+    created_at: chrono::DateTime<Utc>,
+) -> String {
+    match requested.map(str::trim) {
+        Some(cwd) if projectless::is_scratch_cwd(cwd) => cwd.to_string(),
+        _ => projectless::scratch_cwd(chat_id, created_at),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -784,19 +799,23 @@ impl WorkspaceHost {
     /// older clocks — fields the claim never wrote (`config`, `title`) must
     /// still land then.
     ///
-    /// Resolve project cwd claims to a space. The portable home marker `~`
-    /// is the composer's projectless target; preserve it without minting a
-    /// project when the run outruns createChat on the registry channel.
+    /// Resolve project cwd claims to a space. A projectless target (`~` from
+    /// older clients, or a scratch folder) mints no project when the run
+    /// outruns createChat on the registry channel; the new row gets its own
+    /// scratch folder either way.
     pub fn claim_chat(&self, chat_id: &str, cwd: Option<&str>) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(());
         }
-        let space_id = match cwd {
-            Some("~" | "~/") => None,
-            Some(cwd) => Some(self.space_for_path(cwd)?),
-            None => None,
+        let now = Utc::now();
+        let (cwd, space_id) = match cwd {
+            Some(cwd) if projectless::is_projectless_cwd(Some(cwd)) => {
+                (Some(new_projectless_cwd(chat_id, Some(cwd), now)), None)
+            }
+            Some(cwd) => (Some(cwd.to_string()), Some(self.space_for_path(cwd)?)),
+            None => (None, None),
         };
-        self.mutate(|doc| doc.claim_chat(chat_id, cwd, space_id.as_deref(), Utc::now()));
+        self.mutate(|doc| doc.claim_chat(chat_id, cwd.as_deref(), space_id.as_deref(), now));
         Ok(())
     }
 
@@ -908,7 +927,8 @@ impl WorkspaceHost {
     /// Create a chat, usually *in a project*: the project fixes the host device
     /// and base cwd (`cwd` override = an isolated-worktree path). With no
     /// `space_id` the chat is project-less: `device_id` picks the host and the
-    /// cwd defaults to `~` (expanded host-side when the run spawns).
+    /// cwd defaults to the chat's own scratch folder (expanded and created
+    /// host-side when the run spawns).
     pub fn create_chat(
         &self,
         chat_id: &str,
@@ -950,18 +970,25 @@ impl WorkspaceHost {
                 ));
             }
         };
+        let created_at = Utc::now();
+        let cwd = match &space {
+            Some(space) => cwd.unwrap_or_else(|| space.path.clone()),
+            None if projectless::is_projectless_cwd(cwd.as_deref()) => {
+                if self.hosts_scratch_folders(&host_device)? {
+                    new_projectless_cwd(chat_id, cwd.as_deref(), created_at)
+                } else {
+                    "~".to_string()
+                }
+            }
+            None => cwd.unwrap_or_default(),
+        };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
                 archived: false,
-                cwd: Some(cwd.unwrap_or_else(|| {
-                    space
-                        .as_ref()
-                        .map(|s| s.path.clone())
-                        .unwrap_or_else(|| "~".to_string())
-                })),
+                cwd: Some(cwd),
                 branch: None,
                 checkout_id: None,
                 source_context: None,
@@ -981,6 +1008,21 @@ impl WorkspaceHost {
             })
         })?;
         Ok(())
+    }
+
+    /// Whether `device_id` creates scratch folders for projectless chats: this
+    /// engine does; a peer must advertise it (older hosts only expand `~`).
+    fn hosts_scratch_folders(&self, device_id: &str) -> Result<bool, EngineError> {
+        if device_id == self.inner.config.device_id {
+            return Ok(true);
+        }
+        Ok(self.read_devices()?.iter().any(|device| {
+            device.id == device_id
+                && device
+                    .capabilities
+                    .iter()
+                    .any(|c| c == zeron_proto::capabilities::PROJECTLESS_SCRATCH_V1)
+        }))
     }
 
     // ── spaces (Mutate surface + owner stamps) ──────────────────────────────

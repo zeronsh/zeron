@@ -708,6 +708,8 @@ impl Client {
     /// before any session doc opens, so the host never reads it as legacy.
     pub fn create_session(&self, new: NewSession) -> Result<String> {
         let (state, _) = self.inner.workspace.state();
+        let id = crate::new_id();
+        let now = Utc::now();
         let (device_id, space_id, cwd) = match &new.target {
             SessionTarget::Project { space_id } => {
                 let space = state
@@ -732,12 +734,22 @@ impl Client {
                         "that device can't host sessions".into(),
                     ));
                 }
-                (device_id.clone(), None, "~".to_owned())
+                // Its own folder on the host, created when the first run
+                // spawns; a host that predates scratch folders runs it in `~`.
+                let cwd = if host
+                    .capabilities
+                    .iter()
+                    .any(|c| c == crate::rpc::capability::PROJECTLESS_SCRATCH_V1)
+                {
+                    zeron_proto::projectless::scratch_cwd(&id, now)
+                } else {
+                    "~".to_owned()
+                };
+                (device_id.clone(), None, cwd)
             }
         };
-        let now = Utc::now();
         let chat = Chat {
-            id: crate::new_id(),
+            id,
             device_id,
             title: new.title.filter(|t| !t.trim().is_empty()),
             archived: false,

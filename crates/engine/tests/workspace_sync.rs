@@ -404,7 +404,10 @@ async fn projectless_claim_syncs_after_offline_creation_and_survives_viewer_rest
     let row = b.workspace.chat("projectless-offline").unwrap().unwrap();
     assert_eq!(row.device_id, "dev-a");
     assert_eq!(row.space_id, None);
-    assert_eq!(row.cwd.as_deref(), Some("~"));
+    // The claim gives the new chat its own scratch folder, not `~`.
+    assert!(zeron_proto::projectless::is_scratch_cwd(
+        row.cwd.as_deref().unwrap()
+    ));
     assert!(a.workspace.read_spaces().unwrap().is_empty());
     assert!(b.workspace.read_spaces().unwrap().is_empty());
     b.shutdown().await;

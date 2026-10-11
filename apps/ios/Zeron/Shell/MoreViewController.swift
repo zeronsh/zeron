@@ -144,6 +144,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
     }
 
     private func toggled(_ id: String, _ on: Bool) {
+        if id == "groupByProject" {
+            app.groupByProject = on
+            return
+        }
         let push = PushNotifications.shared
         if id == "notify:enabled" {
             guard on else {
@@ -206,7 +210,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         }
         s.appendItems(wall)
         s.appendSections(["Sessions"])
-        s.appendItems([Row(id: "archived", title: "Archived Sessions", symbol: "archivebox")])
+        s.appendItems([
+            Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
+            Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
+        ])
         s.appendSections([" "])
         s.appendItems([Row(id: "signout", title: "Sign Out", symbol: "rectangle.portrait.and.arrow.right", accessory: .none, destructive: true)])
         dataSource.apply(s, animatingDifferences: false)

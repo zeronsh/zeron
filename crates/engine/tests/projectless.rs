@@ -1,8 +1,10 @@
 //! "Don't work in a project" against a real engine: a chat minted through the
 //! UI's exact wire shape (`Mutate createChat` with a `deviceId` and no
-//! `spaceId`) stores cwd `~`, spawns its run from the host's REAL home dir,
-//! and never mints a space row — the two failure modes of pre-#40 engines
-//! (a phantom project at root, and the run dying on the literal `~`).
+//! `spaceId`) gets its own scratch folder (`~/.zeron/scratch/<date>-<id>`),
+//! spawns its run there, and never mints a space row — the two failure modes
+//! of pre-#40 engines (a phantom project at root, and the run dying on the
+//! literal `~`). Chats from before scratch folders keep `~` and the host's
+//! REAL home dir, so their harness sessions still resume.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -108,9 +110,32 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
         .count()
 }
 
+/// Where a projectless chat's run spawns: the host's home for a legacy `~`
+/// row, else its scratch folder under the engine data dir.
+fn expected_cwd(chat_cwd: &str, data_dir: &std::path::Path) -> String {
+    if chat_cwd == "~" {
+        return std::env::var("HOME").expect("HOME set in test env");
+    }
+    assert!(
+        zeron_proto::projectless::is_scratch_cwd(chat_cwd),
+        "not a scratch cwd: {chat_cwd}"
+    );
+    let name = chat_cwd.rsplit('/').next().unwrap();
+    data_dir
+        .join("scratch")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn projectless_chat_runs_from_home_and_mints_no_space() {
-    exercise_projectless(false).await;
+async fn projectless_chat_runs_in_its_scratch_folder_and_mints_no_space() {
+    exercise_projectless(Mode::CreateFirst).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_home_chat_keeps_running_from_home() {
+    exercise_projectless(Mode::Legacy).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -128,18 +153,20 @@ async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
     let client = zeron_rpc::memory_client(core.rpc_service());
     let home = std::env::var("HOME").expect("HOME set in test env");
 
+    // `None` expects the chat's own scratch folder: a new chat with no cwd,
+    // or `~` from an older client, never runs in home.
     for (chat_id, cwd, expected) in [
-        ("default-home", None, home.clone()),
-        ("home-slash", Some("~/".to_string()), home.clone()),
+        ("default-home", None, None),
+        ("home-slash", Some("~/".to_string()), None),
         (
             "home-relative",
             Some("~/../".to_string()),
-            format!("{home}/../"),
+            Some(format!("{home}/../")),
         ),
         (
             "explicit",
             Some(tmp.path().to_string_lossy().into_owned()),
-            tmp.path().to_string_lossy().into_owned(),
+            Some(tmp.path().to_string_lossy().into_owned()),
         ),
     ] {
         let mut params = serde_json::json!({
@@ -158,11 +185,16 @@ async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
             )
             .await
             .expect("open terminal");
+        let chat = core.workspace.chat(chat_id).unwrap().unwrap();
+        let chat_cwd = chat.cwd.clone().unwrap();
+        let expected =
+            expected.unwrap_or_else(|| expected_cwd(&chat_cwd, &tmp.path().join("data")));
         // Compare paths to tolerate the trailing slash from joining ~/.
         assert_eq!(
             std::path::Path::new(session["cwd"].as_str().unwrap()),
             std::path::Path::new(&expected)
         );
+        assert!(std::path::Path::new(&expected).is_dir());
         client
             .call(
                 methods::CLOSE_TERMINAL,
@@ -172,8 +204,10 @@ async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
             )
             .await
             .expect("close terminal");
-        let chat = core.workspace.chat(chat_id).unwrap().unwrap();
-        assert_eq!(chat.cwd.as_deref(), Some(cwd.as_deref().unwrap_or("~")));
+        match &cwd {
+            Some(cwd) if cwd != "~/" => assert_eq!(&chat_cwd, cwd),
+            _ => assert!(zeron_proto::projectless::is_scratch_cwd(&chat_cwd)),
+        }
         assert_eq!(chat.space_id, None);
     }
 
@@ -226,10 +260,21 @@ async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn projectless_command_before_metadata_survives_restart_and_resume() {
-    exercise_projectless(true).await;
+    exercise_projectless(Mode::CommandFirst).await;
 }
 
-async fn exercise_projectless(command_first: bool) {
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    /// createChat, then the run.
+    CreateFirst,
+    /// The run claims the chat before createChat lands.
+    CommandFirst,
+    /// A chat from before scratch folders: its row says `~`.
+    Legacy,
+}
+
+async fn exercise_projectless(mode: Mode) {
+    let command_first = mode == Mode::CommandFirst;
     let tmp = tempfile::tempdir().unwrap();
     let requests: RequestLog = RequestLog::default();
     let registry = HarnessRegistry::new();
@@ -273,10 +318,18 @@ async fn exercise_projectless(command_first: bool) {
             .expect("read chat row")
             .expect("chat row exists");
         assert_eq!(chat.space_id, None, "project-less chat must carry no space");
-        assert_eq!(chat.cwd.as_deref(), Some("~"), "cwd defaults to `~`");
+        assert!(
+            zeron_proto::projectless::is_scratch_cwd(chat.cwd.as_deref().unwrap()),
+            "cwd defaults to a scratch folder: {:?}",
+            chat.cwd
+        );
         assert_eq!(chat.device_id, core.device_id);
+        if mode == Mode::Legacy {
+            assert!(core.workspace.set_chat_cwd(CHAT, "~").unwrap());
+        }
     }
-    // Run exactly as the composer sends it: the chat's stored cwd, `~`.
+    // Run as an older composer sends it: `~`. The host runs a scratch chat
+    // in its folder regardless.
     let queue_turn = |core: &EngineCore, message_id: &str| {
         core.doc_host
             .queue_command(
@@ -306,7 +359,9 @@ async fn exercise_projectless(command_first: bool) {
 
     let chat = core.workspace.chat(CHAT).unwrap().unwrap();
     assert_eq!(chat.space_id, None);
-    assert_eq!(chat.cwd.as_deref(), Some("~"));
+    let chat_cwd = chat.cwd.clone().unwrap();
+    assert_eq!(mode == Mode::Legacy, chat_cwd == "~");
+    assert!(mode == Mode::Legacy || zeron_proto::projectless::is_scratch_cwd(&chat_cwd));
     assert_eq!(chat.device_id, core.device_id);
     // Simulate the metadata arriving after the command and a retry.
     for _ in 0..2 {
@@ -321,7 +376,8 @@ async fn exercise_projectless(command_first: bool) {
             .unwrap();
     }
 
-    // The harness must see the host's real home dir, not the literal `~`.
+    // The harness must see a real folder (the scratch folder, or a legacy
+    // chat's home), not the literal `~`.
     let cwds: Vec<String> = requests
         .lock()
         .expect("request log")
@@ -329,8 +385,11 @@ async fn exercise_projectless(command_first: bool) {
         .filter(|r| r.prompt == "hello from no project")
         .map(|r| r.cwd.clone())
         .collect();
-    let home = std::env::var("HOME").expect("HOME set in test env");
-    assert_eq!(cwds, vec![home], "run spawns from the expanded home dir");
+    assert_eq!(
+        cwds,
+        vec![expected_cwd(&chat_cwd, &tmp.path().join("data"))],
+        "run spawns from the expanded folder"
+    );
 
     // And no phantom project: the flow must not mint any space row.
     let spaces = core.workspace.read_spaces().expect("read spaces");
@@ -347,7 +406,7 @@ async fn exercise_projectless(command_first: bool) {
         .expect("reopen persisted engine");
     let chat = core.workspace.chat(CHAT).unwrap().unwrap();
     assert_eq!(chat.space_id, None);
-    assert_eq!(chat.cwd.as_deref(), Some("~"));
+    assert_eq!(chat.cwd.as_deref(), Some(chat_cwd.as_str()));
     assert_eq!(
         complete_assistant_count(&core),
         1,
@@ -362,7 +421,10 @@ async fn exercise_projectless(command_first: bool) {
             .filter(|r| r.prompt == "hello from no project")
             .collect();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].cwd, std::env::var("HOME").unwrap());
+        assert_eq!(
+            requests[1].cwd,
+            expected_cwd(&chat_cwd, &tmp.path().join("data"))
+        );
         assert_eq!(requests[1].resume.as_deref(), Some("sess-np"));
     }
     assert!(core.workspace.read_spaces().unwrap().is_empty());

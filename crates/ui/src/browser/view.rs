@@ -784,6 +784,10 @@ impl Render for BrowserSurface {
             .on_action(cx.listener(|_, _: &super::CloseTab, _, cx| cx.emit(BrowserEvent::Close)))
             .on_action(cx.listener(|this, _: &super::Back, _, _| this.history(false)))
             .on_action(cx.listener(|this, _: &super::Forward, _, _| this.history(true)))
+            // Mouse side buttons drive the shell's route history everywhere
+            // else; over the browser they are inert.
+            .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Back), |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Forward), |_, _, cx| cx.stop_propagation())
             .child(toolbar)
             .when_some(self.validation.clone(), |el, message| el.child(div().px(px(12.0)).py(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.danger).child(message)))
             .when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)

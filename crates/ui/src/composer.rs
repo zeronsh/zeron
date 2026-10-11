@@ -8845,6 +8845,18 @@ impl Composer {
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
+        // A host that predates scratch folders runs a projectless chat in `~`.
+        let scratch_folders = {
+            let state = self.state.read(cx);
+            let host = if device_id == "local" {
+                local_device_id.as_deref()
+            } else {
+                Some(device_id.as_str())
+            };
+            host.is_some_and(|host| {
+                state.device_supports(host, zeron_proto::capabilities::PROJECTLESS_SCRATCH_V1)
+            })
+        };
         let create_side_chat = self.state.update(cx, |state, _| {
             if state.side_chat_unsaved()
                 && let Some(mut config) = resolved.chat_config()
@@ -9210,9 +9222,16 @@ impl Composer {
                 // picked base ref (CreateWorktree on send, targeted at the
                 // space's device; the RPC relay-forwards).
                 let mut cwd = if is_new {
-                    // Project-less sessions run from the host's home dir —
-                    // "~" is expanded on the host when the run spawns.
-                    space_path.clone().or_else(|| Some("~".to_string()))
+                    // Project-less sessions run in their own folder under the
+                    // host's home, expanded and created on the host when the
+                    // run spawns.
+                    space_path.clone().or_else(|| {
+                        Some(if scratch_folders {
+                            zeron_proto::projectless::scratch_cwd(&chat_id, chrono::Utc::now())
+                        } else {
+                            "~".to_string()
+                        })
+                    })
                 } else {
                     existing_cwd
                 }
@@ -9289,6 +9308,8 @@ impl Composer {
                                     "deviceId".into(),
                                     serde_json::Value::String(device_id.clone()),
                                 );
+                                // The scratch folder the run below names.
+                                object.insert("cwd".into(), serde_json::Value::String(cwd.clone()));
                             }
                         }
                     }
@@ -15128,10 +15149,13 @@ mod tests {
             assert!(display[span.range.clone()].contains("Brief\u{00A0}Hello"));
         }
         // Two chats with one title keep their titles, never their ids.
-        let other =
-            zeron_proto::chat_mentions::chat_mention_link("a2c4", "Brief Hello").unwrap();
+        let other = zeron_proto::chat_mentions::chat_mention_link("a2c4", "Brief Hello").unwrap();
         let (display, spans) = sent_mention_display(&format!("{link} {other}")).unwrap();
-        assert!(spans.iter().all(|span| display[span.range.clone()].contains("Brief")));
+        assert!(
+            spans
+                .iter()
+                .all(|span| display[span.range.clone()].contains("Brief"))
+        );
         assert!(!display.contains("a2c4"));
     }
 

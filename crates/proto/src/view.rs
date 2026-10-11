@@ -385,7 +385,7 @@ pub fn project_label(cwd: Option<&str>) -> String {
     let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
         return "No project".to_string();
     };
-    if matches!(cwd, "~" | "~/") {
+    if crate::projectless::is_projectless_cwd(Some(cwd)) {
         return "No project".to_string();
     }
     std::path::Path::new(cwd.trim_end_matches(['/', '\\']))
@@ -444,13 +444,14 @@ pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
 }
 
 /// Session-row sub-line, "project · branch" (zeron `chatLocation`): the repo
-/// checkout identity. Either part may be missing; empty when both are.
+/// checkout identity. Either part may be missing; empty when both are. A
+/// projectless chat names no project and no folder.
 pub fn chat_location(chat: &Chat) -> Option<String> {
     let project = chat
         .cwd
         .as_deref()
         .map(str::trim)
-        .filter(|c| !c.is_empty())
+        .filter(|c| !crate::projectless::is_projectless_cwd(Some(c)))
         .map(|c| project_label(Some(c)));
     let reference = chat
         .branch

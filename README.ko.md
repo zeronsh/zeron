@@ -2,7 +2,7 @@
 
 코딩 에이전트(Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity)를 기본적으로 로컬에서 관리하고, 필요하면 여러 기기 간 동기화도 사용할 수 있습니다.
 
-*[English](README.md) | [简体中文](README.zh-CN.md) | 한국어 | [日本語](README.ja.md)*
+*[English](README.md) | [简体中文](README.zh-CN.md) | 한국어 | [日本語](README.ja.md) | [Español](README.es.md)*
 
 ![Zeron 데스크톱 앱](docs/media/readme/app-screenshot.jpg)
 

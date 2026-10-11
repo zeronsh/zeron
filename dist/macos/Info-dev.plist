@@ -36,6 +36,10 @@
     </dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Zeron uses your microphone for on-device dictation and for voice sessions you start. Voice sessions stream your audio to OpenAI through your ChatGPT-authenticated Codex account.</string>
+    <!-- macOS 26 attaches one-time-code AutoFill (a SafariPlatformSupport
+         helper process) to every text input unless the app opts out. -->
+    <key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>

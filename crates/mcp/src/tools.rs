@@ -765,7 +765,30 @@ impl Tools {
         {
             mutate["branch"] = json!(branch);
         }
-        if let Some(cwd) = args.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        let mut cwd = args
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned);
+        // A projectless chat runs in its own scratch folder on a host that
+        // creates them; naming it here keeps createChat and the first run
+        // in agreement.
+        if space.is_none()
+            && cwd.is_none()
+            && self.zeron.devices().await?.iter().any(|d| {
+                d.id == device_id
+                    && d.capabilities
+                        .iter()
+                        .any(|c| c == zeron_proto::capabilities::PROJECTLESS_SCRATCH_V1)
+            })
+        {
+            cwd = Some(zeron_proto::projectless::scratch_cwd(
+                &chat_id,
+                chrono::Utc::now(),
+            ));
+        }
+        if let Some(cwd) = &cwd {
             mutate["cwd"] = json!(cwd);
         }
         self.zeron.mutate(mutate).await?;
@@ -799,7 +822,7 @@ impl Tools {
                 device_id: device_id.clone(),
                 title: args.title.clone(),
                 archived: false,
-                cwd: args.cwd.clone(),
+                cwd: cwd.clone(),
                 branch: args.branch.clone(),
                 checkout_id: None,
                 source_context: None,

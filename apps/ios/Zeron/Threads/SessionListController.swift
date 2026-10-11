@@ -359,6 +359,12 @@ class SessionsViewController: SessionListController {
         for f in app.frontPage.folders {
             out.append((f.id, f.name, [], app.sessions(inFolder: f.id)))
         }
+        if app.groupByProject {
+            for g in app.frontPage.projectGroups {
+                out.append((g.id, g.name, [], g.sessions))
+            }
+            return out
+        }
         out.append(("recent", out.isEmpty ? nil : "Recent", [], app.frontPage.sessions))
         return out
     }
@@ -409,7 +415,16 @@ class SessionsViewController: SessionListController {
             },
             UIAction(title: "Collapse All", image: UIImage(systemName: "rectangle.compress.vertical")) { [weak self] _ in
                 guard let self else { return }
-                for f in self.app.frontPage.folders where !self.collapsed.contains(f.id) { self.toggleSection(f.id) }
+                var ids = self.app.frontPage.folders.map(\.id)
+                if self.app.groupByProject { ids += self.app.frontPage.projectGroups.map(\.id) }
+                for id in ids where !self.collapsed.contains(id) { self.toggleSection(id) }
+            },
+            // Rebuilt on each open: Settings flips it too.
+            UIDeferredMenuElement.uncached { [weak self] done in
+                guard let app = self?.app else { return done([]) }
+                done([UIAction(title: "Group by Project", image: UIImage(systemName: "square.stack.3d.up"), state: app.groupByProject ? .on : .off) { _ in
+                    app.groupByProject.toggle()
+                }])
             },
             UIAction(title: "Archived", image: UIImage(systemName: "archivebox")) { [weak self] _ in
                 guard let self else { return }

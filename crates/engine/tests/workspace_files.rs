@@ -512,8 +512,16 @@ async fn projectless_home_is_required_for_files_catalogs_and_terminal() {
 
     let temp = tempfile::tempdir().unwrap();
     let core = assemble(&temp.path().join("data"), "device-missing-home");
+    // A chat from before scratch folders runs in `~`, so it needs a home.
     core.workspace
         .create_chat("chat-missing-home", None, Some(&core.device_id), None, None)
+        .unwrap();
+    core.workspace
+        .set_chat_cwd("chat-missing-home", "~")
+        .unwrap();
+    // A new projectless chat's scratch folder lives under the data dir.
+    core.workspace
+        .create_chat("chat-scratch", None, Some(&core.device_id), None, None)
         .unwrap();
     let explicit = temp.path().join("explicit-folder");
     std::fs::create_dir(&explicit).unwrap();
@@ -557,6 +565,13 @@ async fn projectless_home_is_required_for_files_catalogs_and_terminal() {
         )
         .await
         .expect("an explicit folder remains usable without a home variable");
+    client
+        .call(
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({ "chatId": "chat-scratch" }),
+        )
+        .await
+        .expect("a scratch folder needs no home variable");
     core.shutdown().await;
 }
 

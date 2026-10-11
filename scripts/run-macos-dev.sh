@@ -57,9 +57,9 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
-  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
