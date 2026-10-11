@@ -115,6 +115,13 @@ impl VoiceCard {
         cx.refresh_windows();
         cx.notify();
     }
+    fn toggle_acceleration(&mut self, cx: &mut Context<Self>) {
+        let on = !settings::current(cx).dictation_accelerated;
+        settings::update(settings::SavePolicy::Immediate, cx, |s| {
+            s.dictation_accelerated = on
+        });
+        cx.notify();
+    }
     fn primary(&mut self, cx: &mut Context<Self>) {
         if let Some(cancel) = &self.cancel {
             cancel.store(true, Ordering::Release);
@@ -529,6 +536,52 @@ impl Render for VoiceCard {
                 )
                 .child(control)
         });
+        let acceleration_row = zeron_voice::ACCELERATOR
+            .filter(|_| enabled && self.ready)
+            .map(|accelerator| {
+                let on = settings::current(cx).dictation_accelerated;
+                let weak = cx.entity().downgrade();
+                let switch = widgets::toggle_switch(&theme, on, "voice-accelerated")
+                    .id("voice-accelerate")
+                    .cursor_pointer()
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("GPU acceleration")
+                    .aria_toggled(if on {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_acceleration(cx)))
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                            this.toggle_acceleration(cx);
+                        }
+                    }))
+                    .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                        weak.update(cx, |this, cx| this.toggle_acceleration(cx))
+                            .ok();
+                    });
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "GPU acceleration"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![
+                                    accelerator.into_any_element(),
+                                    "Falls back to CPU".into_any_element(),
+                                ],
+                            )),
+                    )
+                    .child(switch)
+            });
         // Always visible, so ⌘D can be rebound (and freed) before the model
         // is downloaded.
         let shortcut_row = {
@@ -627,6 +680,7 @@ impl Render for VoiceCard {
                                     widgets::section_card(&theme)
                                         .child(dictation_row)
                                         .children(microphone_row)
+                                        .children(acceleration_row)
                                         .child(shortcut_row),
                                 )
                                 .children(model_card),

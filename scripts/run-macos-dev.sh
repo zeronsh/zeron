@@ -27,6 +27,10 @@ cargo build -p zeron
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 install -m 755 "$TARGET_DIR/debug/zeron" "$CONTENTS/MacOS/zeron"
+DAWN="$CONTENTS/MacOS/libwebgpu_dawn.dylib"
+if [[ -f "$TARGET_DIR/debug/libwebgpu_dawn.dylib" ]]; then
+  install -m 755 "$TARGET_DIR/debug/libwebgpu_dawn.dylib" "$DAWN"
+fi
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
@@ -56,12 +60,13 @@ IDENTITY="${ZERON_DEV_CODESIGN_IDENTITY:-}"
 if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
-if [[ -n "$IDENTITY" ]]; then
-  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
-else
-  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
+if [[ -z "$IDENTITY" ]]; then
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
+if [[ -f "$DAWN" ]]; then
+  codesign --force --sign "${IDENTITY:--}" "$DAWN"
+fi
+codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign "${IDENTITY:--}" --identifier "$BUNDLE_ID" "$APP"
 
 if [[ "${ZERON_DEV_BUILD_ONLY:-0}" == "1" ]]; then
   echo "built: $APP" >&2

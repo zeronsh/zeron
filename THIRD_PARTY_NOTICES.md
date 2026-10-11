@@ -146,7 +146,7 @@ Attribution is retained in the pinned Zui dependency’s `NOTICE`.
 
 Parakeet TDT 0.6B v3 model weights are by NVIDIA under CC BY 4.0. The optional download uses Ivan Stupakov's INT8 ONNX conversion, pinned to revision `8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce`, with per-file SHA-256 verification. Original: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3. Conversion: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx. License: https://creativecommons.org/licenses/by/4.0/.
 
-Native runtime dependencies: parakeet-rs 0.3.8 (MIT OR Apache-2.0), ort/ort-sys 2.0.0-rc.13 (MIT OR Apache-2.0), ONNX Runtime 1.28.0 (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). See `crates/voice/NOTICE.md` for exact conversion provenance, changes, runtime/platform limitations and supported languages. Models are not included in the application bundle.
+Native runtime dependencies: parakeet-rs 0.3.8 (MIT OR Apache-2.0), ort/ort-sys 2.0.0-rc.13 (MIT OR Apache-2.0), ONNX Runtime 1.28.0 (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). Windows packages also bundle Microsoft DirectML (DirectML.dll) for optional GPU acceleration under Microsoft's DirectML redistributable license: https://www.nuget.org/packages/Microsoft.AI.DirectML. Apple silicon macOS and x86_64 Linux packages bundle Dawn (libwebgpu_dawn), Google's WebGPU implementation used by the ONNX Runtime WebGPU execution provider, under the BSD-3-Clause license: https://dawn.googlesource.com/dawn/+/refs/heads/main/LICENSE. See `crates/voice/NOTICE.md` for exact conversion provenance, changes, runtime/platform limitations and supported languages. Models are not included in the application bundle.
 
 ## Bezel thinking orbs
 

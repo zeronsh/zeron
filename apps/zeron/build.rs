@@ -10,6 +10,10 @@ fn main() {
             "cargo:rustc-link-arg-bin=zeron=-Wl,-sectcreate,__TEXT,__info_plist,{}",
             plist.display()
         );
+        println!("cargo:rustc-link-arg-bin=zeron=-Wl,-rpath,@executable_path");
+    }
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg-bin=zeron=-Wl,-rpath,$ORIGIN");
     }
     println!("cargo:rerun-if-changed=../../dist/windows/zeron.rc");
     println!("cargo:rerun-if-changed=../../dist/windows/zeron.ico");

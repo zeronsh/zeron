@@ -31,6 +31,10 @@ fi
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/zeron"
+DAWN="$(dirname "$BIN")/libwebgpu_dawn.so"
+if [[ -f "$DAWN" ]]; then
+  install -m 755 "$DAWN" "$STAGE/libwebgpu_dawn.so"
+fi
 install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
 install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"

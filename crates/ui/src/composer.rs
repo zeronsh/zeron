@@ -4291,6 +4291,9 @@ impl ComposerInput {
         let marked = self.marked_range.as_ref().map(|r| {
             self.projection.raw_to_display(r.start)..self.projection.raw_to_display(r.end)
         });
+        let preview = self.dictation.preview().map(|r| {
+            self.projection.raw_to_display(r.start)..self.projection.raw_to_display(r.end)
+        });
         let mut boundaries = vec![0, display.len()];
         for (range, _) in &syntax {
             boundaries.extend([range.start, range.end]);
@@ -4305,6 +4308,9 @@ impl ComposerInput {
             }
         }
         if let Some(range) = &marked {
+            boundaries.extend([range.start, range.end]);
+        }
+        if let Some(range) = &preview {
             boundaries.extend([range.start, range.end]);
         }
         boundaries.sort_unstable();
@@ -4377,6 +4383,10 @@ impl ComposerInput {
                     {
                         run.color = Theme::of(cx).syntax.color(*kind);
                     }
+                }
+                if !chip && preview.as_ref().is_some_and(|range| range.contains(&r[0])) {
+                    run.font.style = gpui::FontStyle::Italic;
+                    run.color = crate::motion::mix(run.color, theme.text_muted, 0.45);
                 }
                 run
             })
@@ -9791,11 +9801,14 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
         };
+        let (voice_t, voice_frame) = self.update_voice(window, cx);
+        let microphone = self.render_dictation_button(voice_t, voice_frame.as_ref(), cx);
+        let dictation_status = self.render_dictation_status(cx);
         let counter = wizard.counter();
         let Some(question) = wizard.current().cloned() else {
             return gpui::Empty.into_any_element();
@@ -9985,8 +9998,14 @@ impl Composer {
                             .pt(px(12.0))
                             .pb(px(4.0))
                             .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+                            .flex()
+                            .flex_row()
+                            .items_end()
+                            .gap(px(8.0))
+                            .child(div().flex_1().min_w_0().child(self.input.clone()))
+                            .children(microphone),
+                    )
+                    .children(dictation_status),
             )
             .child(
                 div()
@@ -10025,8 +10044,7 @@ impl Composer {
         }
         // A queue row still acquiring its edit lease is about to replace the
         // draft, which would discard the dictation.
-        if self.wizard.is_some()
-            || self.queue_edit_finishing
+        if self.queue_edit_finishing
             || self.queue_edit_pending_id.is_some()
             || self.sending
             || self.input.read(cx).read_only
@@ -10150,7 +10168,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         use crate::dictation::{Phase, glass, waveform::Mode};
-        if !crate::dictation::enabled(cx) || self.wizard.is_some() {
+        if !crate::dictation::enabled(cx) {
             return None;
         }
         let theme = Theme::of(cx).clone();
@@ -10900,7 +10918,7 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let wizard = self.render_wizard(window, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 

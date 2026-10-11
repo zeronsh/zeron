@@ -26,6 +26,11 @@ fn main() {
         println!("cargo:rustc-link-lib=static=voice-permission");
         println!("cargo:rustc-link-lib=framework=AVFoundation");
     }
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux") => println!("cargo:rustc-link-arg-examples=-Wl,-rpath,$ORIGIN"),
+        Ok("macos") => println!("cargo:rustc-link-arg-examples=-Wl,-rpath,@executable_path"),
+        _ => {}
+    }
 
     println!("cargo:rerun-if-changed=src/browser/linux/helper.c");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
