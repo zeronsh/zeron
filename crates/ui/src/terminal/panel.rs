@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::{
-    App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, SharedString,
-    Subscription, Task, Window, actions, div, prelude::*, px,
+    App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta,
+    SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
 use zeron_proto::{TerminalEvent, TerminalSession};
@@ -33,7 +33,9 @@ use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
 use crate::state::{AppState, CANVAS_PANEL_PREFIX, EngineHandle};
 use crate::theme::Theme;
 
-use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
+use super::emulator::{
+    CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side, TerminalLink,
+};
 use super::view::{
     COALESCE_MS, InputCoalescer, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD, TerminalElement,
     cell_at, keystroke_bytes, paste_bytes, terminal_panel_bg,
@@ -151,6 +153,17 @@ pub fn shell_title(shell: &str) -> String {
         "terminal".to_string()
     } else {
         name.to_string()
+    }
+}
+
+/// The modifier that turns a click into "open link": Cmd on macOS, Ctrl
+/// elsewhere — what every mainstream terminal uses, and it keeps a plain
+/// click free for selection.
+fn link_modifier(modifiers: &Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.platform
+    } else {
+        modifiers.control
     }
 }
 
@@ -358,6 +371,10 @@ pub struct TerminalPanel {
     /// than a permanently painted rail beside the panel: the terminal owns
     /// the cursor.
     bar: MenuScrollbarState,
+    /// Fixture builds record link activations instead of launching the OS
+    /// opener, so a run never opens the developer's browser.
+    #[cfg(feature = "browser-fixture")]
+    fixture_opened_links: Vec<String>,
     _observe: Subscription,
 }
 
@@ -382,6 +399,8 @@ impl TerminalPanel {
             selection_scroll_task: None,
             rail_tab_key: None,
             bar: MenuScrollbarState::default(),
+            #[cfg(feature = "browser-fixture")]
+            fixture_opened_links: Vec::new(),
             _observe: observe,
         }
     }
@@ -1090,6 +1109,49 @@ impl TerminalPanel {
         Some((point, hit.side))
     }
 
+    /// The link under a window position, strictly inside the grid (no edge
+    /// clamping — a pointer in the padding is over nothing).
+    fn link_at_position(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        cx: &App,
+    ) -> Option<TerminalLink> {
+        let geometry = self.geometry?;
+        let grid = gpui::Bounds::new(
+            geometry.origin,
+            gpui::size(
+                px(geometry.cell_w * geometry.cols as f32),
+                px(geometry.line_h * geometry.rows as f32),
+            ),
+        );
+        if !grid.contains(&position) {
+            return None;
+        }
+        let (point, _) = self.grid_point_at(position, cx)?;
+        self.with_active_emulator(cx, |emu| emu.link_at(point))
+            .flatten()
+    }
+
+    /// Re-resolve the modifier-hover link highlight for a pointer sample.
+    fn update_link_hover(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        modifiers: &Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let link = (link_modifier(modifiers) && self.selection_drag.is_none())
+            .then(|| self.link_at_position(position, cx))
+            .flatten();
+        let changed = self
+            .with_active_emulator(cx, |emu| {
+                emu.set_highlighted_link(link.map(|link| link.range))
+            })
+            .unwrap_or(false);
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1097,6 +1159,16 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        if link_modifier(&event.modifiers)
+            && event.click_count == 1
+            && let Some(link) = self.link_at_position(event.position, cx)
+        {
+            #[cfg(feature = "browser-fixture")]
+            self.fixture_opened_links.push(link.uri);
+            #[cfg(not(feature = "browser-fixture"))]
+            cx.open_url(&link.uri);
+            return;
+        }
         let Some((point, side)) = self.grid_point_at(event.position, cx) else {
             return;
         };
@@ -1161,6 +1233,7 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         if !event.dragging() {
+            self.update_link_hover(event.position, &event.modifiers, cx);
             return;
         }
         let Some(mut drag) = self.selection_drag else {
@@ -1342,6 +1415,13 @@ impl TerminalPanel {
 
     fn on_terminal_hover(&mut self, hovered: &bool, _window: &mut Window, cx: &mut Context<Self>) {
         if self.bar.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+        if !*hovered
+            && self
+                .with_active_emulator(cx, |emu| emu.set_highlighted_link(None))
+                .unwrap_or(false)
+        {
             cx.notify();
         }
     }
@@ -1747,6 +1827,9 @@ impl Render for TerminalPanel {
             window.focus(&self.focus_handle, cx);
         }
         let focused = self.focus_handle.is_focused(window);
+        let link_hovered = self
+            .active_tab(cx)
+            .is_some_and(|tab| tab.emulator.has_highlighted_link());
         let scrollbar = self.render_scrollbar(&theme, cx);
 
         // Embedded (right-pane surface host): the shell's surface tabs
@@ -1776,6 +1859,12 @@ impl Render for TerminalPanel {
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .on_modifiers_changed(cx.listener(
+                        |this, event: &gpui::ModifiersChangedEvent, window, cx| {
+                            this.update_link_hover(window.mouse_position(), &event.modifiers, cx);
+                        },
+                    ))
+                    .when(link_hovered, |el| el.cursor_pointer())
                     // Bound on the window, not the element: a drag that ends
                     // outside the panel still has to end the gesture, or the
                     // next unrelated pointer move keeps extending a selection
@@ -1816,6 +1905,48 @@ impl Render for TerminalPanel {
                     .children(scrollbar),
             )
             .into_any_element()
+    }
+}
+
+/// Native fixture hooks for terminal link coverage; absent in shipped builds.
+#[cfg(feature = "browser-fixture")]
+impl TerminalPanel {
+    /// Add a PTY-less tab to the selected chat with `output` already fed.
+    pub fn fixture_seed_tab(&mut self, title: &str, output: &[u8], cx: &mut Context<Self>) {
+        let chat = self.selected_chat(cx);
+        let key = self.reserve_tab_for_chat(chat.clone(), title.to_string(), cx);
+        if let Some(tab) = self.tab_mut(&chat, key) {
+            tab.emulator.feed(output);
+        }
+        cx.notify();
+    }
+
+    /// Window position of a viewport cell's centre, from the last prepaint.
+    pub fn fixture_cell_position(&self, row: usize, col: usize) -> Option<gpui::Point<Pixels>> {
+        let geometry = self.geometry?;
+        Some(gpui::point(
+            geometry.origin.x + px(geometry.cell_w * (col as f32 + 0.5)),
+            geometry.origin.y + px(geometry.line_h * (row as f32 + 0.5)),
+        ))
+    }
+
+    /// Viewport row text of the active tab, for locating fixture output.
+    pub fn fixture_row_text(&self, row: usize, cx: &App) -> Option<String> {
+        self.active_tab(cx).map(|tab| tab.emulator.row_text(row))
+    }
+
+    pub fn fixture_link_highlighted(&self, cx: &App) -> bool {
+        self.active_tab(cx)
+            .is_some_and(|tab| tab.emulator.has_highlighted_link())
+    }
+
+    pub fn fixture_has_selection(&self, cx: &App) -> bool {
+        self.active_tab(cx)
+            .is_some_and(|tab| tab.emulator.has_selection())
+    }
+
+    pub fn fixture_take_opened_links(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.fixture_opened_links)
     }
 }
 

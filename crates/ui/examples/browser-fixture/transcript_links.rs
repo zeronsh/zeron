@@ -48,7 +48,7 @@ async fn key(
     })?;
     Ok(())
 }
-async fn screenshot(
+pub(super) async fn screenshot(
     window: WindowHandle<shell::Shell>,
     output: &std::path::Path,
     name: &str,
