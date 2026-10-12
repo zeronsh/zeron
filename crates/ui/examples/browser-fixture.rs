@@ -1,8 +1,8 @@
-#[path = "browser-fixture/transcript_links.rs"]
-mod transcript_links;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[path = "browser-fixture/transcript_links.rs"]
+mod transcript_links;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -17,6 +17,34 @@ async fn pause(cx: &mut AsyncApp, ms: u64) {
     cx.background_executor()
         .timer(Duration::from_millis(ms))
         .await;
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_visible_window(cx: &mut AsyncApp) -> anyhow::Result<()> {
+    // Wayland captures the Weston window supplied by the runner. On X11,
+    // mapping our own window can lag behind startup on a busy CI runner.
+    if std::env::var_os("ZERON_BROWSER_CAPTURE_WINDOW").is_some() {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let windows = std::process::Command::new("xdotool")
+            .args([
+                "search",
+                "--onlyvisible",
+                "--pid",
+                &std::process::id().to_string(),
+            ])
+            .output()?;
+        if windows.status.success() && !windows.stdout.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "fixture window not visible within 10 seconds"
+        );
+        pause(cx, 50).await;
+    }
 }
 
 fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
@@ -223,6 +251,8 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                #[cfg(target_os = "linux")]
+                wait_for_visible_window(cx).await?;
                 if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
                 }
