@@ -16,14 +16,45 @@ if (-not ('ZeronWindowProbe' -as [type])) {
 Add-Type @'
 using System;
 using System.Text;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class ZeronWindowProbe {
+    private delegate bool WindowCallback(IntPtr hwnd, IntPtr data);
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(WindowCallback callback, IntPtr data);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wparam, IntPtr lparam);
+    public static IntPtr[] Windows(uint processId) {
+        var windows = new List<IntPtr>();
+        EnumWindows((hwnd, data) => {
+            uint owner;
+            GetWindowThreadProcessId(hwnd, out owner);
+            var name = new StringBuilder(256);
+            GetClassName(hwnd, name, name.Capacity);
+            if (owner == processId && IsWindowVisible(hwnd) && name.ToString() != "ConsoleWindowClass") windows.Add(hwnd);
+            return true;
+        }, IntPtr.Zero);
+        return windows.ToArray();
+    }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassName(IntPtr hwnd, StringBuilder name, int count);
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
 }
 '@
+}
+
+function Wait-WindowCount($Process, [int]$Expected) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited) { throw 'GUI exited while another window should remain' }
+        if ([ZeronWindowProbe]::Windows($Process.Id).Count -eq $Expected) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Expected $Expected native windows"
 }
 
 $overrides = @{
@@ -82,7 +113,28 @@ try {
             if ($null -eq $firstDevice) { $firstDevice = $device }
             elseif ($device -ne $firstDevice) { throw 'Reopening changed the persisted device identity' }
             "Run $run window class=$class; owner=$owner; HWND=$hwnd" | Add-Content -Encoding utf8 -LiteralPath (Join-Path $root 'result.txt')
-            if (-not $p.CloseMainWindow()) { throw "Run $run could not request normal close" }
+            foreach ($expected in 2..3) {
+                $launcher = Start-Process -FilePath $Exe -ArgumentList '--new-window' -PassThru
+                try {
+                    $null = $launcher.Handle
+                    if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0) { throw 'New-window launch was not forwarded' }
+                } finally { $launcher.Dispose() }
+                Wait-WindowCount $p $expected
+            }
+            $launcher = Start-Process -FilePath $Exe -PassThru
+            try {
+                $null = $launcher.Handle
+                if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0) { throw 'Activation was not forwarded' }
+            } finally { $launcher.Dispose() }
+            Wait-WindowCount $p 3
+            if ([regex]::Matches((Get-Content -LiteralPath $stdout -Raw), 'engine core assembled').Count -ne 1) {
+                throw 'Opening windows bootstrapped more than one engine'
+            }
+            if (-not [ZeronWindowProbe]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close the first window' }
+            Wait-WindowCount $p 2
+            foreach ($remaining in [ZeronWindowProbe]::Windows($p.Id)) {
+                [void][ZeronWindowProbe]::PostMessage($remaining, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+            }
             if (-not $p.WaitForExit(15000)) { throw "Run $run stayed alive 15s after window close" }
             if ($p.ExitCode -ne 0) { throw "Run $run closed with exit $($p.ExitCode)" }
             "Run $run normal close: exit 0" | Add-Content -Encoding utf8 -LiteralPath (Join-Path $root 'result.txt')
@@ -96,7 +148,7 @@ try {
             $p.Dispose()
         }
     }
-    Write-Host "PASS: $Runs native GUI open/close cycles; evidence: $root"
+    Write-Host "PASS: $Runs native GUI cycles with three windows and one engine; evidence: $root"
 } catch {
     Write-Host "FAIL: $($_.Exception.Message); evidence: $root"
     throw
