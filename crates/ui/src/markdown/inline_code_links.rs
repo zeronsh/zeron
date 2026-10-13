@@ -765,11 +765,23 @@ mod tests {
             });
             let target = fixture.file_target("top.md");
             cx.simulate_click(position, gpui::Modifiers::default());
-            let activated = activated.borrow();
-            let last = activated.last().expect("the file link activates");
+            let log = activated.borrow();
+            let last = log.last().expect("the file link activates");
             assert_eq!(last.action, crate::markdown::render::LinkAction::Primary);
             assert_eq!(last.target.original, target);
-            drop(activated);
+            drop(log);
+            cx.simulate_click(
+                position,
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            let log = activated.borrow();
+            let last = log.last().expect("Ctrl+click activates the file link");
+            assert_eq!(last.action, crate::markdown::render::LinkAction::External);
+            assert_eq!(last.target.original, target);
+            drop(log);
             cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::default());
             cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::default());
             for selector in [

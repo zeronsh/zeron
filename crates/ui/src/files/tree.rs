@@ -5,7 +5,7 @@ use gpui::{
 use zeron_proto::WorkspaceEntryKind;
 
 use super::{
-    FilesSurface, WorkspacePathDrag, model::DirectoryLoadState, model::VisibleRowKind,
+    FilesEvent, FilesSurface, WorkspacePathDrag, model::DirectoryLoadState, model::VisibleRowKind,
     workspace_path_drag_ghost,
 };
 use crate::{
@@ -320,10 +320,16 @@ impl FilesSurface {
                     .when(!selected, |element| {
                         element.hover(|style| style.bg(crate::theme::wash(0.055)))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.tree_focus.focus(window, cx);
-                        this.activate_tree_path(path.clone(), cx);
-                    }))
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            this.tree_focus.focus(window, cx);
+                            if event.modifiers().control {
+                                cx.emit(FilesEvent::OpenFileExternal(path.clone()));
+                            } else {
+                                this.activate_tree_path(path.clone(), cx);
+                            }
+                        }),
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -732,5 +738,77 @@ mod tests {
         sync_list_rows(&list, &removed, &[]);
         assert_eq!(list.item_count(), 0);
         assert_eq!(list.logical_scroll_top().item_ix, 0);
+    }
+}
+
+#[cfg(test)]
+mod external_click_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn ctrl_click_opens_files_and_directories_without_internal_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                captured.borrow_mut().push(event.clone())
+            })
+        });
+        for (path, selector) in [
+            ("a.txt", "tree-entry:a.txt"),
+            ("folder", "tree-entry:folder"),
+        ] {
+            let position = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(
+                position,
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            assert!(events.borrow().iter().any(
+                |event| matches!(event, FilesEvent::OpenFileExternal(opened) if opened == path)
+            ));
+        }
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, FilesEvent::OpenFile(_)))
+        );
+        files.read_with(cx, |files, cx| {
+            assert!(!files.tree.is_expanded("folder"));
+            #[cfg(unix)]
+            assert_eq!(
+                files.external_file_url("a.txt", cx).as_deref(),
+                Some("file:///workspace/a.txt")
+            );
+        });
+        let position = cx.debug_bounds("tree-entry:a.txt").unwrap().center();
+        cx.simulate_click(position, gpui::Modifiers::default());
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, FilesEvent::OpenFile(opened) if opened == "a.txt"))
+        );
+        files.update(cx, |files, cx| {
+            files
+                .state
+                .update(cx, |state, _| state.chats[0].device_id = "remote".into());
+            assert!(
+                files.external_file_url("a.txt", cx).is_none(),
+                "stale context must not open locally"
+            );
+            files.sync_target(cx);
+            assert!(
+                files.external_file_url("a.txt", cx).is_none(),
+                "remote files must not open locally"
+            );
+        });
     }
 }

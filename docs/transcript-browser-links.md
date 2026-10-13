@@ -2,6 +2,10 @@
 
 Click an HTTP(S) link in an agent message to open and select a **new Browser tab** in that conversation. The right panel opens if necessary. Links in a subagent transcript belong to its containing conversation. A pending activation is discarded if the selected conversation has changed.
 
+**Ctrl+click** opens a web link (including links inside the embedded browser) in your default external browser, regardless of **Open links in Zeron**. The shortcut also applies to file links and mentions (including detected inline-code paths), links in Markdown file previews, file-tree and file-search rows, and the open-file button in diff headers. Files open with their system default application; folders open in the system file manager. Normal clicks keep their existing behavior.
+
+System file opening is available for files on this desktop. Remote-device files never launch a same-named local path. File links retain their owning chat/checkout and URL decoding; line anchors are omitted when handing a file to its default app.
+
 Right-click a link for **Open in Zeron**, **Open in external browser**, or **Copy link address**. The same menu includes **Open links in Zeron**, which controls normal click and Enter/Space activation and is enabled by default. The three explicit actions remain available regardless of that preference. Tab and Shift+Tab move through links and other controls when an input or completion menu does not consume the key. Enter or Space activates a focused link. Shift+F10 opens its action menu; arrows or Tab move through the actions, and Escape dismisses the menu.
 
 Hover or keyboard focus shows the full destination, including when the Markdown label says something different. The compact tooltip fits the destination text up to 360 px, wraps long destinations, and scrolls within the window. Copy link address is available in the context menu. Opening that menu hides the tooltip and cancels pending hover disclosure until the menu closes. Inspecting a link makes no network requests. Scrolling the transcript, changing conversations, or removing a link dismisses its disclosure.
@@ -21,6 +25,8 @@ The fixture uses synthetic chat data, temporary app storage, and a local HTTP se
 
 ```sh
 cargo test -p zeron-ui
+# Offscreen WebKit test on a running graphical session:
+python3 scripts/test-linux-browser-ctrl-click.py
 cargo build -p zeron
 cargo build -p zeron-ui --example browser-fixture --features browser-fixture
 ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY=1 \

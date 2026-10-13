@@ -2598,6 +2598,7 @@ impl FilesSurface {
             .get_or_insert_with(|| {
                 let owner = cx.weak_entity();
                 let web_links = Self::markdown_web_link_handler(cx);
+                let external_owner = owner.clone();
                 cx.new(|cx| {
                     let mut view = super::markdown_preview::MarkdownPreview::new(
                         path.to_string(),
@@ -2608,6 +2609,11 @@ impl FilesSurface {
                         cx,
                     );
                     view.set_web_link_handler(web_links);
+                    view.set_external_file_handler(Rc::new(move |path, cx| {
+                        let _ = external_owner.update(cx, |_, cx| {
+                            cx.emit(FilesEvent::OpenFileExternal(path));
+                        });
+                    }));
                     view
                 })
             })

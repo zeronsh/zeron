@@ -151,6 +151,7 @@ impl Element for LinkRanges {
                     let keyboard_epoch = state.epoch.clone();
                     let hit = div()
                         .id(format!("link-{index}-{part}-{}", state.epoch.get()))
+                        .debug_selector(move || format!("markdown-link:{index}:{part}"))
                         // Removing the builder cancels both visible tooltips
                         // and GPUI's delayed show task while the menu owns input.
                         .when(state.menu.borrow().is_none(), |hit| {
@@ -188,7 +189,7 @@ impl Element for LinkRanges {
                             {
                                 activate_link(
                                     click_target.clone(),
-                                    LinkAction::Primary,
+                                    LinkAction::for_click(event),
                                     click_ui.as_ref(),
                                     window,
                                     cx,
@@ -257,6 +258,11 @@ impl Element for LinkRanges {
                         );
                         let dismissed = state.dismissed.clone();
                         let epoch = state.epoch.clone();
+                        let link_bounds: Vec<_> = self
+                            .links
+                            .iter()
+                            .flat_map(|(range, _)| range_rects(&self.layout, range, 0., 0.))
+                            .collect();
                         // This disclosure is not a menu: menu_at consumes every
                         // outside press, preventing other controls from receiving it.
                         let mut popup = gpui::deferred(
@@ -268,7 +274,17 @@ impl Element for LinkRanges {
                                     div()
                                         .id("focused-link-destination")
                                         .occlude()
-                                        .on_mouse_down_out(move |_, window, _| {
+                                        .on_mouse_down_out(move |event, window, _| {
+                                            // Rekeying the hit targets between mouse-down
+                                            // and mouse-up loses their pending activation.
+                                            // A press on another link lets focus replace
+                                            // this disclosure without dismissing it first.
+                                            if link_bounds
+                                                .iter()
+                                                .any(|bounds| bounds.contains(&event.position))
+                                            {
+                                                return;
+                                            }
                                             dismissed.set(true);
                                             epoch.set(epoch.get().wrapping_add(1));
                                             window.refresh();
@@ -1188,6 +1204,68 @@ mod rendered_tests {
             })
             .detach();
         });
+    }
+
+    #[gpui::test]
+    fn ctrl_click_routes_rendered_markdown_and_autolinks_externally(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        for markdown in [
+            "see [docs](https://example.com/full?q=yes#fragment) here",
+            "see https://example.com/full?q=yes#fragment here",
+            "see [lib](src/lib.rs:12) here",
+            "see [lib](zeron-file:src/lib.rs) here",
+        ] {
+            let activated: Rc<RefCell<Vec<LinkActivation>>> = Rc::default();
+            let (_view, visual) = cx.add_window_view(|_, _| Fixture {
+                markdown: markdown.into(),
+                width: 320.,
+                activated: activated.clone(),
+                source_local: true,
+                file_roots: Some(Rc::new(vec![crate::workspace_links::FileLinkRoot {
+                    chat: Some("session".into()),
+                    root: dir.path().to_string_lossy().into_owned(),
+                    local: true,
+                }])),
+            });
+            visual.update(|window, cx| {
+                window.activate_window();
+                window.draw(cx).clear();
+            });
+            let position = visual
+                .debug_bounds("markdown-link:0:0")
+                .expect(markdown)
+                .center();
+            visual.simulate_mouse_move(position, None, gpui::Modifiers::default());
+            visual.simulate_click(position, gpui::Modifiers::default());
+            assert_eq!(activated.borrow().len(), 1, "normal click: {markdown}");
+            let position = visual
+                .debug_bounds("markdown-link:0:0")
+                .expect(markdown)
+                .center();
+            visual.simulate_mouse_move(position, None, gpui::Modifiers::default());
+            visual.simulate_click(
+                position,
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            );
+            let log = activated.borrow();
+            assert_eq!(
+                log.len(),
+                2,
+                "{markdown}: {log:?}, selection={:?}",
+                super::super::selection::selected_text()
+            );
+            assert_eq!(log[0].action, LinkAction::Primary);
+            assert_eq!(log[1].action, LinkAction::External);
+            assert_eq!(log[1].target, log[0].target);
+            assert_eq!(log[1].source_session.as_deref(), Some("session"));
+        }
     }
 
     /// A resolved file link's context menu swaps the web actions for file

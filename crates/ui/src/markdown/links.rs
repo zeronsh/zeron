@@ -21,8 +21,20 @@ pub enum LinkAction {
     Primary,
     /// Explicit "Open in Zeron" context-menu action.
     Internal,
+    /// Ctrl+click or explicit external-open action, independent of preferences.
     External,
     Copy,
+}
+impl LinkAction {
+    /// ClickEvent keeps mouse-up modifiers; keyboard and touch activation
+    /// retain the normal destination preference.
+    pub fn for_click(event: &gpui::ClickEvent) -> Self {
+        if event.modifiers().control {
+            Self::External
+        } else {
+            Self::Primary
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkOutcome {
@@ -48,6 +60,40 @@ impl LinkActivation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ctrl_click_overrides_the_primary_destination() {
+        let mut mouse = gpui::MouseClickEvent {
+            down: gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            },
+            up: gpui::MouseUpEvent::default(),
+        };
+        assert_eq!(
+            LinkAction::for_click(&gpui::ClickEvent::Mouse(mouse.clone())),
+            LinkAction::Primary
+        );
+        mouse.up.modifiers.control = true;
+        assert_eq!(
+            LinkAction::for_click(&gpui::ClickEvent::Mouse(mouse.clone())),
+            LinkAction::External
+        );
+        mouse.up.modifiers.control = false;
+        mouse.up.modifiers.shift = true;
+        assert_eq!(
+            LinkAction::for_click(&gpui::ClickEvent::Mouse(mouse)),
+            LinkAction::Primary
+        );
+        assert_eq!(
+            LinkAction::for_click(&gpui::ClickEvent::default()),
+            LinkAction::Primary
+        );
+        assert_eq!(
+            LinkAction::for_click(&gpui::ClickEvent::Touch(Default::default())),
+            LinkAction::Primary
+        );
+    }
     #[test]
     fn internal_external_and_unsupported_platform_routes() {
         let mut a = LinkActivation {

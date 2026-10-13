@@ -253,6 +253,50 @@ pub(crate) struct FileLink {
     pub local: bool,
 }
 
+/// A local wire path opened with the OS default application. Wire paths are
+/// already decoded: percent signs, colons and hashes are literal filenames.
+/// Never interpret a remote device's path as a file on this desktop.
+pub(crate) fn local_file_url(root: &str, path: &str, local: bool) -> Option<String> {
+    if !local || path.is_empty() {
+        return None;
+    }
+    let path = Path::new(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        if path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+        {
+            return None;
+        }
+        let root = if root == "~" || root.starts_with("~/") {
+            PathBuf::from(std::env::var_os("HOME")?).join(root.strip_prefix("~/").unwrap_or(""))
+        } else {
+            PathBuf::from(root)
+        };
+        root.join(path)
+    };
+    url::Url::from_file_path(absolute)
+        .ok()
+        .map(|url| url.to_string())
+}
+
+/// Resolve authored file links with the same ownership and decoding rules
+/// as the internal viewer, dropping source line anchors for the system app.
+pub(crate) fn external_workspace_file_url(
+    target: &str,
+    roots: &[FileLinkRoot],
+    source_local: bool,
+) -> Option<String> {
+    match first_root_owning(target, roots.iter().map(|root| root.root.as_str()))? {
+        FileLinkResolution::Owned { root, link } => {
+            local_file_url(&roots[root].root, &link.path, roots[root].local)
+        }
+        FileLinkResolution::Outside(link) => local_file_url("", &link.path, source_local),
+    }
+}
+
 /// A decoded path plus its line reference, tagged by shape so resolution can
 /// apply each kind's own inside/outside rule.
 struct ClassifiedLink {
@@ -688,6 +732,79 @@ mod tests {
                 link == expected
             }
             _ => false,
+        }
+    }
+
+    #[test]
+    fn local_file_urls_round_trip_real_paths_without_decoding_wire_names() {
+        let root = tempfile::tempdir().unwrap();
+        let filename = "100% #1.txt";
+        let url = local_file_url(&root.path().to_string_lossy(), filename, true).unwrap();
+        assert_eq!(
+            url::Url::parse(&url).unwrap().to_file_path().unwrap(),
+            root.path().join(filename)
+        );
+        assert!(local_file_url(&root.path().to_string_lossy(), "../escape", true).is_none());
+        assert!(local_file_url(&root.path().to_string_lossy(), filename, false).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn external_file_urls_preserve_wire_names_and_resolve_authored_links() {
+        let roots = vec![
+            FileLinkRoot {
+                chat: Some("side".into()),
+                root: "/side repo".into(),
+                local: true,
+            },
+            FileLinkRoot {
+                chat: Some("parent".into()),
+                root: "/parent repo".into(),
+                local: true,
+            },
+        ];
+        assert_eq!(
+            local_file_url("/side repo", "src/100% #1:2.rs", true).as_deref(),
+            Some("file:///side%20repo/src/100%25%20%231:2.rs")
+        );
+        assert_eq!(
+            external_workspace_file_url("src/hello%20world.rs:12:3", &roots, true).as_deref(),
+            Some("file:///side%20repo/src/hello%20world.rs")
+        );
+        assert_eq!(
+            external_workspace_file_url("/parent%20repo/src/lib.rs#L12", &roots, true).as_deref(),
+            Some("file:///parent%20repo/src/lib.rs")
+        );
+        assert_eq!(
+            external_workspace_file_url("file:///outside/hello%20world.md#L5", &roots, true)
+                .as_deref(),
+            Some("file:///outside/hello%20world.md")
+        );
+        for path in ["../escape", "src/../../escape", ""] {
+            assert!(local_file_url("/repo", path, true).is_none(), "{path}");
+        }
+        assert_eq!(
+            external_workspace_file_url("file:///tmp/%GG", &roots, true).as_deref(),
+            Some("file:///tmp/%25GG"),
+            "authored file links preserve literal percent signs"
+        );
+        assert!(local_file_url("/repo", "a.txt", false).is_none());
+        let remote = vec![FileLinkRoot {
+            local: false,
+            ..roots[0].clone()
+        }];
+        assert!(external_workspace_file_url("src/lib.rs", &remote, true).is_none());
+        assert!(external_workspace_file_url("/outside/a.txt", &remote, false).is_none());
+        for target in [
+            "javascript:alert(1)",
+            "data:text/plain,hi",
+            "../escape",
+            "src/a.rs:0",
+        ] {
+            assert!(
+                external_workspace_file_url(target, &roots, true).is_none(),
+                "{target}"
+            );
         }
     }
 
