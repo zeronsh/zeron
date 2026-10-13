@@ -81,6 +81,7 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 #[cfg(test)]
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
+mod sidebar_peek;
 mod session_info;
 mod side_chats;
 mod sidebar_pins;
@@ -2207,6 +2208,8 @@ pub struct Shell {
     debug_gate: Option<GatePhase>,
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
+    sidebar_peek: sidebar_peek::SidebarPeek,
+    sidebar_peek_focus: FocusHandle,
     files_tween: Option<WidthTween>,
     /// The session card's reveal (0 closed → 1 open).
     session_info_tween: Option<WidthTween>,
@@ -2662,6 +2665,8 @@ impl Shell {
             debug_gate,
             debug_upload,
             sidebar_tween: None,
+            sidebar_peek: sidebar_peek::SidebarPeek::default(),
+            sidebar_peek_focus: cx.focus_handle(),
             files_tween: None,
             session_info_tween: None,
             session_info_shown: false,
@@ -3280,6 +3285,7 @@ impl Shell {
             return;
         }
         let from = self.sidebar_now();
+        self.prepare_sidebar_peek_toggle(cx);
         let before = self.painted_panels(cx);
         self.sidebar_edge_bounce = None;
         self.sidebar_resize_edge = None;
@@ -7697,12 +7703,7 @@ impl Shell {
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
-        let inner = self.sidebar_pane.clone().cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.sidebar_content_width()))
-                .h_full()
-                .flex_none(),
-        );
+        let floating = self.sidebar_peek_mounted();
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
@@ -7714,7 +7715,14 @@ impl Shell {
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
-            .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            .when(!floating && self.sidebar_now() > 0.0, |el| {
+                el.child(
+                    div()
+                        .h_full()
+                        .pt(px(Theme::TITLEBAR_HEIGHT))
+                        .child(self.sidebar_content()),
+                )
+            })
             .into_any_element()
     }
 
@@ -10488,6 +10496,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sidebar_peek_key_down(event, window, cx);
         if event.keystroke.key == "escape" && self.voice.read(cx).stage_open {
             self.set_voice_stage_open(false, cx);
             cx.stop_propagation();
@@ -10518,6 +10527,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape" && self.dismiss_sidebar_peek(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         // Inputs and completion menus consume Tab first. Unhandled Tab walks
         // accessible controls, including individual transcript link ranges.
         let modifiers = event.keystroke.modifiers;
@@ -13492,6 +13505,7 @@ impl Render for Shell {
             self.button_layout_sub =
                 Some(cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()));
         }
+        self.reconcile_sidebar_peek(window, cx);
 
         if self.activation_sub.is_none() {
             self.activation_sub = Some(cx.observe_window_activation(
@@ -13509,6 +13523,7 @@ impl Render for Shell {
                         this.check_voice_codex(true, cx);
                     }
                     if !window.is_window_active() {
+                        this.reset_sidebar_peek(cx);
                         this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
                         this.composer.update(cx, |composer, cx| {
@@ -14015,10 +14030,12 @@ impl Render for Shell {
                     .h_full()
                     .flex_none()
                     .relative()
-                    .children(
-                        sidebar_handle
-                            .map(|handle| handle.left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))),
-                    );
+                    .when(!self.settings.sidebar_collapsed, |el| {
+                        el.children(
+                            sidebar_handle
+                                .map(|handle| handle.left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))),
+                        )
+                    });
                 // Keep the right resize target outside the pane's
                 // overflow-hidden width container. This mirrors the sidebar
                 // seam and lets the target straddle both adjacent panes.
@@ -14089,10 +14106,35 @@ impl Render for Shell {
                             .opacity(under_stage)
                             .child(title_bar),
                     )
+                    .when(
+                        self.settings.sidebar_collapsed && settings::sidebar_hover_enabled(cx),
+                        |el| {
+                            // Keep the idle trigger in the base scene. On macOS,
+                            // any deferred draw captures the entire native overlay.
+                            el.child(
+                                div()
+                                    .id("sidebar-peek-edge")
+                                    .absolute()
+                                    .left_0()
+                                    .top(px(Theme::TITLEBAR_HEIGHT))
+                                    .bottom_0()
+                                    .w(px(sidebar_peek::EDGE))
+                                    .occlude(),
+                            )
+                        },
+                    )
+                    .when(self.sidebar_peek_mounted(), |el| {
+                        el.child(self.render_sidebar_peek(cx))
+                    })
                     // The stage covers the conversation's titlebar but never
                     // the cluster: the sidebar toggle and navigation stay live.
                     .children(voice_stage)
                     .child(self.render_titlebar_cluster(cx))
+                    .when(
+                        (self.settings.sidebar_collapsed && settings::sidebar_hover_enabled(cx))
+                            || self.sidebar_peek_mounted(),
+                        |el| el.child(self.sidebar_peek_pointer_observer(cx)),
+                    )
                     .children(self.render_sidebar_options_titlebar(cx))
                     .children(overlays);
                 root.child(sidebar_tone)
@@ -14164,11 +14206,22 @@ impl Render for Shell {
             )
         };
         let root = root
-            .children(self.render_windows_caption_controls(window, cx))
-            .children(self.render_linux_caption_controls(window, cx))
-            // Last so the invisible CSD resize strips sit above every other
-            // element at the window edges.
-            .children(Self::render_linux_resize_borders(window));
+            .children(
+                self.render_windows_caption_controls(window, cx)
+                    .map(gpui::deferred),
+            )
+            .children(
+                self.render_linux_caption_controls(window, cx)
+                    .into_iter()
+                    .map(gpui::deferred),
+            )
+            // Above floating content too: the peek's deferred edge/panel must
+            // not steal the compositor's window-resize targets on Linux.
+            .children(
+                Self::render_linux_resize_borders(window)
+                    .into_iter()
+                    .map(|border| gpui::deferred(border).priority(3)),
+            );
         self.render_time = None;
         root
     }

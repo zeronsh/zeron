@@ -338,6 +338,11 @@ impl Shell {
     /// or what it had while the fit slides it out. Below the saved width
     /// when the window squeezes it.
     pub(super) fn sidebar_content_width(&self) -> f32 {
+        // The floating peek does not participate in the column fit. Keep its
+        // content at the saved width while the pinned sidebar has no slot.
+        if self.sidebar_peek_mounted() {
+            return self.settings.sidebar_width;
+        }
         self.fit_exit_content(0)
             .unwrap_or(self.horizontal_fit().sidebar_limit)
     }

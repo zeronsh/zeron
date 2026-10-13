@@ -18,6 +18,7 @@ fn main() -> anyhow::Result<()> {
         let by_project = std::env::var_os("ZERON_SIDEBAR_BY_PROJECT").is_some();
         settings.sidebar_organization = if by_project { settings::SidebarOrganization::ByProject } else { settings::SidebarOrganization::InOneList };
         settings.sidebar_width = 310.0;
+        settings.sidebar_collapsed = std::env::var_os("ZERON_SIDEBAR_PEEK").is_some();
         settings.sidebar_pins_mut("local".into()).extend(["chat-0".into(), "chat-1".into()]);
         let project_path = data.join("fieldnotes");
         std::fs::create_dir_all(project_path.join("public")).unwrap();
@@ -98,7 +99,16 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
         appearance::reapply_window_background(cx);
-        state.update(cx, |_, cx| cx.notify());
+        state.update(cx, |s, cx| {
+            // Put content underneath the floating sidebar so its backdrop blur
+            // can be compared with the contextual menus in this isolated app.
+            let entries = serde_json::from_value(serde_json::json!([
+                {"id":"fixture-user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the Fieldnotes workspace and its sidebar."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+                {"id":"fixture-assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"## Fieldnotes workspace\n\nThe floating sidebar should reveal the conversation behind its glass surface. Move to the left edge to preview your sessions, then move back into the conversation.\n\n### Workspace details\n\n| Project | Branch | Status |\n| --- | --- | --- |\n| Fieldnotes | sidebar-preview | Ready for review |\n| API server | authentication | In progress |\n| Documentation | getting-started | Published |\n\n```rust\nlet workspace = Workspace::new(\n    \"Fieldnotes\",\n    Surface::Frosted,\n);\nworkspace.open_sidebar();\n```\n\nThe titlebar stays available while the sidebar is open. Contextual menus use the same frosted surface.\n\n### Next steps\n\n- Review the session list\n- Open the view options menu\n- Move between the panel and the conversation\n- Pin the sidebar using the titlebar toggle"}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
+            ])).unwrap();
+            s.receive_transcript_frame(zeron_doc::TranscriptFrame::Reset { reset: entries }, cx).unwrap();
+            cx.notify();
+        });
         cx.activate(true);
     });
     Ok(())
