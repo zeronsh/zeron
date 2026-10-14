@@ -16,8 +16,9 @@ mod style;
 mod tools;
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -32,6 +33,13 @@ pub use rows::{PendingUser, RowKind, TranscriptInput};
 use rows::{Gap, Placed, RowBuilder, RowCore, place_row};
 pub use style::{FaceRole, StyleDesc};
 use style::Typography;
+
+/// Lock `m`, ignoring poison. Every mutex here guards data that is replaced or
+/// read whole (an `Arc`, a sender, an id map), never left half-updated, so a
+/// panic elsewhere must not turn later FFI calls into panics of their own.
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Measures text the bundled faces can't render (emoji, CJK…) with the
 /// platform's own text engine — pretext's "browser as ground truth".
@@ -54,14 +62,14 @@ struct MeasurerBridge {
 
 impl zeron_text::FallbackMeasurer for MeasurerBridge {
     fn measure(&self, style: zeron_text::StyleId, text: &str) -> f32 {
-        let Some(desc) = self.styles.lock().unwrap().get(&style.0).cloned() else {
+        let Some(desc) = lock(&self.styles).get(&style.0).cloned() else {
             return 0.0;
         };
         self.platform.measure(desc.face, desc.size, desc.ligatures, text.to_owned())
     }
 
     fn measure_run(&self, style: zeron_text::StyleId, text: &str, advances: &mut Vec<f32>) -> bool {
-        let Some(desc) = self.styles.lock().unwrap().get(&style.0).cloned() else {
+        let Some(desc) = lock(&self.styles).get(&style.0).cloned() else {
             return false;
         };
         let run = self.platform.measure_run(desc.face, desc.size, desc.ligatures, text.to_owned());
@@ -356,10 +364,16 @@ impl TranscriptView {
             frame: Mutex::new(Arc::new(LayoutFrame::empty())),
         });
         let worker_shared = shared.clone();
-        thread::Builder::new()
+        // A failed spawn (out of threads or memory) can't be reported through
+        // this constructor. Panicking would cross the FFI boundary and take
+        // the app down, so the view degrades instead: the receiver is dropped
+        // with the closure, sends are ignored, and `frame()` stays empty.
+        if let Err(e) = thread::Builder::new()
             .name("zeron-layout".into())
             .spawn(move || Worker::new(&text, worker_shared, listener).run(rx))
-            .expect("spawn layout thread");
+        {
+            eprintln!("zeron-layout: could not start the layout thread: {e}");
+        }
         Arc::new(Self {
             tx: Mutex::new(tx),
             shared,
@@ -373,7 +387,7 @@ impl TranscriptView {
         let Some(handle) = client.session_handle(&chat_id) else {
             return false;
         };
-        let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        let tx = Mutex::new(lock(&self.tx).clone());
         let guard = handle.watch(move |snap| {
             let input = TranscriptInput {
                 entries: snap.transcript_messages(),
@@ -389,9 +403,9 @@ impl TranscriptView {
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
             };
-            let _ = tx.lock().unwrap().send(Msg::Input(input));
+            let _ = lock(&tx).send(Msg::Input(input));
         });
-        *self.watch.lock().unwrap() = Some(guard);
+        *lock(&self.watch) = Some(guard);
         true
     }
 
@@ -414,7 +428,7 @@ impl TranscriptView {
 
     /// The latest published frame.
     pub fn frame(&self) -> Arc<LayoutFrame> {
-        self.shared.frame.lock().unwrap().clone()
+        lock(&self.shared.frame).clone()
     }
 
     /// Feed markdown fixtures directly (demo screens, benchmarks, tests).
@@ -423,7 +437,7 @@ impl TranscriptView {
     }
 
     pub fn close(&self) {
-        self.watch.lock().unwrap().take();
+        lock(&self.watch).take();
         self.send(Msg::Shutdown);
     }
 }
@@ -435,7 +449,7 @@ impl TranscriptView {
     }
 
     fn send(&self, msg: Msg) {
-        let _ = self.tx.lock().unwrap().send(msg);
+        let _ = lock(&self.tx).send(msg);
     }
 }
 
@@ -489,6 +503,9 @@ pub(crate) struct Worker {
     revision: u64,
     shared: Arc<Shared>,
     listener: Option<Arc<dyn LayoutListener>>,
+    /// Test seam: make the next pass panic, to exercise recovery.
+    #[cfg(test)]
+    panic_next_pass: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Worker {
@@ -510,6 +527,8 @@ impl Worker {
             revision: 0,
             shared,
             listener: Some(listener),
+            #[cfg(test)]
+            panic_next_pass: Arc::default(),
         }
     }
 
@@ -527,14 +546,8 @@ impl Worker {
                     Msg::Viewport { width, scale } => {
                         if (scale - self.typo.scale).abs() > f32::EPSILON {
                             self.typo.scale = scale;
-                            // New sizes: every prepared paragraph is stale —
-                            // but what the user opened or folded stays so.
-                            let old = std::mem::take(&mut self.builder);
-                            self.builder.expanded = old.expanded;
-                            self.builder.collapsed = old.collapsed;
-                            self.builder.detail_open = old.detail_open;
-                            self.heights.clear();
-                            self.cache = WidthCache::new();
+                            // New sizes: every prepared paragraph is stale.
+                            self.reset_caches();
                         }
                         self.width = width;
                         dirty = true;
@@ -559,7 +572,7 @@ impl Worker {
                 }
             }
             if dirty && self.width > 0.0 && self.typo.has_faces() {
-                self.pass();
+                self.guarded_pass();
                 // The width cache never evicts, and a streaming block that
                 // falls back to the platform (CJK, emoji) or can't break (a
                 // long hash) adds a whole-prefix entry per update. Past the
@@ -571,8 +584,34 @@ impl Worker {
         }
     }
 
+    /// One pass that survives a panic. The worker is the only thing that
+    /// publishes frames, so letting a bad input kill it would freeze the
+    /// transcript for the life of the view; instead the last good frame stays
+    /// published and the next input gets a clean pass.
+    fn guarded_pass(&mut self) {
+        // `AssertUnwindSafe`: the closure borrows `self` mutably, but the
+        // unwind path below discards every cache the pass mutates before
+        // `self` is used again, so no half-updated state is observed.
+        if catch_unwind(AssertUnwindSafe(|| self.pass())).is_err() {
+            // The build may have stopped mid-way through the row cache, and
+            // `pass` drains `heights` as it goes.
+            self.reset_caches();
+        }
+    }
+
+    /// Drop every prepared paragraph and measured height, but keep what the
+    /// user opened or folded.
+    fn reset_caches(&mut self) {
+        let old = std::mem::take(&mut self.builder);
+        self.builder.expanded = old.expanded;
+        self.builder.collapsed = old.collapsed;
+        self.builder.detail_open = old.detail_open;
+        self.heights.clear();
+        self.cache = WidthCache::new();
+    }
+
     fn is_open(&self, key: u64) -> bool {
-        let frame = self.shared.frame.lock().unwrap().clone();
+        let frame = lock(&self.shared.frame).clone();
         frame
             .index_of(key)
             .and_then(|i| frame.rows.get(i as usize))
@@ -584,6 +623,10 @@ impl Worker {
     }
 
     pub(crate) fn pass(&mut self) -> Arc<LayoutFrame> {
+        #[cfg(test)]
+        if self.panic_next_pass.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            panic!("injected layout panic");
+        }
         let started = Instant::now();
         let placed: Vec<Placed> = {
             let mut ctx = Ctx {
@@ -632,7 +675,7 @@ impl Worker {
             index: OnceLock::new(),
             build_micros: started.elapsed().as_micros() as u64,
         });
-        *self.shared.frame.lock().unwrap() = frame.clone();
+        *lock(&self.shared.frame) = frame.clone();
         if let Some(l) = &self.listener {
             l.frame_ready(self.revision);
         }
