@@ -577,6 +577,9 @@ pub struct ChatDocHandle {
     /// Queue rows held as explicit steers for a turn-boundary agent. They
     /// lead ordinary queued rows, in the order they were steered.
     steered_rows: Mutex<Vec<String>>,
+    /// Background events waiting for the agent's turn to end (see
+    /// [`DocHost::deliver_event`]). Never shown and never in the queue.
+    pending_events: Mutex<Vec<String>>,
     /// Sends held for a turn-boundary agent's turn end (rather than queued
     /// by the user), with the run configuration each was sent with: the row
     /// carries only its text and images.
@@ -1596,6 +1599,7 @@ impl DocHost {
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
+            pending_events: Mutex::new(Vec::new()),
             held_sends: Mutex::new(HashMap::new()),
             stopped_by: Mutex::new(None),
             queue_paused: AtomicBool::new(recovered_queue_pending),
@@ -3516,6 +3520,71 @@ impl DocHost {
         Ok(id)
     }
 
+    /// Hand the agent a background event — another chat it delegated to
+    /// reporting back — the way its own background work wakes it: no
+    /// transcript entry, no queue row. An idle agent starts a turn on it; a
+    /// running turn takes it at its next step when the harness reads steers
+    /// mid-turn; otherwise it waits for the turn to end. Host only.
+    pub async fn deliver_event(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<&'static str, EngineError> {
+        let sessions = self
+            .sessions()
+            .ok_or_else(|| EngineError::Other("sessions engine not wired".into()))?;
+        if !self.is_host(chat_id) {
+            return Err(EngineError::Other(
+                "background events go to the chat's host device".into(),
+            ));
+        }
+        let handle = self.open(chat_id)?;
+        if sessions.turn_in_flight(chat_id)
+            && sessions.live_run_steerable(chat_id)
+            && !sessions.defers_to_turn_end(chat_id, None)
+            && sessions.steer_event(chat_id, text).await? == SteerOutcome::Accepted
+        {
+            return Ok("steered");
+        }
+        lock(&handle.pending_events).push(text.to_owned());
+        if sessions.turn_in_flight(chat_id) {
+            return Ok("held");
+        }
+        self.drain_queue(&handle).await;
+        Ok("delivered")
+    }
+
+    /// Start a turn on the waiting background events, folded into one prompt.
+    async fn flush_events(&self, sessions: &SessionsEngine, handle: &Arc<ChatDocHandle>) {
+        let chat_id = &handle.chat_id;
+        if sessions.turn_in_flight(chat_id) {
+            return;
+        }
+        let events = std::mem::take(&mut *lock(&handle.pending_events));
+        if events.is_empty() {
+            return;
+        }
+        let prompt = events.join("\n\n");
+        let Some(mut request) = sessions
+            .last_request(chat_id)
+            .or_else(|| self.request_from_chat_row(chat_id, &prompt))
+        else {
+            tracing::warn!(chat = %chat_id, "background event dropped: no run config");
+            return;
+        };
+        request.prompt = prompt;
+        request.resume = None;
+        request.attachments = Vec::new();
+        let harness = self.harness_for_request(chat_id, &request);
+        if let Err(err) = sessions.dispatch_event(chat_id, harness, request).await {
+            tracing::warn!(chat = %chat_id, error = %err, "background event dispatch failed");
+            let mut pending = lock(&handle.pending_events);
+            let later = std::mem::take(&mut *pending);
+            *pending = events;
+            pending.extend(later);
+        }
+    }
+
     /// Retype a queued message. Empty text deletes the row — emptying the box
     /// is how you say "drop it". `false` when the row is already gone.
     pub fn update_queued_message(
@@ -4055,6 +4124,9 @@ impl DocHost {
         }
         loop {
             let Ok(Some(head)) = handle.doc.read_queue().map(|q| q.into_iter().next()) else {
+                // The user's own queued messages go first; background events
+                // wake the agent once nothing else is waiting.
+                self.flush_events(&sessions, handle).await;
                 return;
             };
             match &head.delivery_gate {

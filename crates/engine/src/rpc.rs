@@ -183,6 +183,33 @@ struct QueueMessageParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TurnNoticeParams {
+    watcher_chat_id: String,
+    chat_id: String,
+    /// NotifyTurnEnd only.
+    #[serde(default)]
+    message_id: String,
+    /// A question the watcher already saw; the watch goes past it.
+    #[serde(default)]
+    reported_input: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliverEventParams {
+    chat_id: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListTurnNoticesParams {
+    #[serde(default)]
+    watcher_chat_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct QueuedMessageParams {
     chat_id: String,
     id: String,
@@ -635,6 +662,7 @@ pub struct EngineRpc {
     updater: Option<zeron_update::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
+    turn_notices: Option<zeron_mcp::TurnNotices>,
     engine_info: EngineInfo,
 }
 
@@ -682,6 +710,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             harness_updates: None,
+            turn_notices: None,
             local_import: None,
             engine_info,
         }
@@ -716,6 +745,19 @@ impl EngineRpc {
     ) -> Self {
         self.harness_updates = Some(coordinator);
         self
+    }
+
+    /// Attach the turn-notice service behind `NotifyTurnEnd`.
+    pub fn with_turn_notices(mut self, notices: Option<zeron_mcp::TurnNotices>) -> Self {
+        self.turn_notices = notices;
+        self
+    }
+
+    fn turn_notices(&self) -> Result<&zeron_mcp::TurnNotices, RpcError> {
+        self.turn_notices
+            .as_ref()
+            .filter(|notices| notices.started())
+            .ok_or_else(|| RpcError::Failed("turn notices are not running on this engine".into()))
     }
 
     /// Attach the local→synced profile importer (synced runtimes only).
@@ -2147,6 +2189,38 @@ impl RpcService for EngineRpc {
                     })
                     .boxed(),
                 ))
+            }
+            methods::NOTIFY_TURN_END => {
+                let p: TurnNoticeParams = parse_params(params)?;
+                if p.message_id.trim().is_empty() || p.watcher_chat_id == p.chat_id {
+                    return Err(RpcError::BadParams(
+                        "NotifyTurnEnd needs a messageId and two different chats".into(),
+                    ));
+                }
+                let mut watch =
+                    zeron_mcp::Watch::new(&p.watcher_chat_id, &p.chat_id, &p.message_id);
+                watch.reported_input = p.reported_input;
+                self.turn_notices()?.register(watch);
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::DELIVER_EVENT => {
+                let p: DeliverEventParams = parse_params(params)?;
+                let delivery = self
+                    .doc_host
+                    .deliver_event(&p.chat_id, &p.text)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "delivery": delivery }))
+            }
+            methods::CANCEL_TURN_NOTICE => {
+                let p: TurnNoticeParams = parse_params(params)?;
+                let cancelled = self.turn_notices()?.cancel(&p.watcher_chat_id, &p.chat_id);
+                RpcReply::value(&serde_json::json!({ "cancelled": cancelled }))
+            }
+            methods::LIST_TURN_NOTICES => {
+                let p: ListTurnNoticesParams = parse_params(params)?;
+                let watches = self.turn_notices()?.list(p.watcher_chat_id.as_deref());
+                RpcReply::value(&serde_json::json!({ "watches": watches }))
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;

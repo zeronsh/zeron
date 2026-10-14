@@ -12,6 +12,7 @@ zeron-doc.workspace = true
 zeron-sync.workspace = true
 zeron-harness.workspace = true
 zeron-rpc.workspace = true
+zeron-mcp.workspace = true
 zeron-update.workspace = true
 loro.workspace = true
 tokio.workspace = true
@@ -46,7 +47,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
-zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 # Paused-clock tests (the 30-minute idle reaper).
 tokio = { workspace = true, features = ["test-util"] }

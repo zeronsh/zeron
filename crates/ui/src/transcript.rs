@@ -8551,23 +8551,7 @@ impl Transcript {
 /// Keep routing instructions in the stored prompt for agents, but show a
 /// concise attribution in the human transcript (including existing messages).
 fn agent_message_display(text: &str) -> String {
-    let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
-        return text.to_owned();
-    };
-    let Some((header, body)) = rest.split_once("]\n\n") else {
-        return text.to_owned();
-    };
-    let Some((label, id)) =
-        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")
-    else {
-        return text.to_owned();
-    };
-    let Some(id) = id.strip_suffix('.') else {
-        return text.to_owned();
-    };
-    let suffix = format!(" ({id})");
-    let name = label.strip_suffix(&suffix).unwrap_or(label);
-    format!("Message from {name}\n\n{body}")
+    zeron_proto::agent_messages::display(text).unwrap_or_else(|| text.to_owned())
 }
 
 /// The bubble text's runs: body text in the sans font, chips as labels in it
@@ -8617,10 +8601,8 @@ fn user_bubble_runs(
     }
     // Attribution names are bold sans text, never Markdown/italic. Split
     // existing runs so file-mention styling and selection offsets stay intact.
-    if let Some(rest) = text.strip_prefix("Message from ")
-        && let Some((name, _)) = rest.split_once("\n\n")
-    {
-        let bold = "Message from ".len().."Message from ".len() + name.len();
+    let names = zeron_proto::agent_messages::sender_ranges(text);
+    if !names.is_empty() {
         let mut offset = 0;
         runs = runs
             .into_iter()
@@ -8628,17 +8610,19 @@ fn user_bubble_runs(
                 let end = offset + run.len;
                 let mut pieces = Vec::new();
                 while offset < end {
-                    let in_name = bold.contains(&offset);
-                    let next = if offset < bold.start {
-                        end.min(bold.start)
-                    } else if in_name {
-                        end.min(bold.end)
-                    } else {
-                        end
+                    let name = names.iter().find(|r| r.contains(&offset));
+                    let next = match name {
+                        Some(name) => end.min(name.end),
+                        None => names
+                            .iter()
+                            .map(|r| r.start)
+                            .filter(|start| *start > offset)
+                            .min()
+                            .map_or(end, |start| end.min(start)),
                     };
                     let mut piece = run.clone();
                     piece.len = next - offset;
-                    if in_name {
+                    if name.is_some() {
                         piece.font.weight = gpui::FontWeight::BOLD;
                     }
                     pieces.push(piece);
@@ -11720,6 +11704,20 @@ mod tests {
     }
 
     #[test]
+    fn agent_to_agent_messages_show_their_sender() {
+        // An agent-to-agent message stays a bubble, shown by sender.
+        let message = "[Message from Zeron chat Lead (0f3a9c21), id 0f3a9c21-aaaa. Your final response goes back to it automatically when this turn ends, so don't reply with send_message.]\n\nRead these files";
+        let mut entry = assistant("m1", MessageStatus::Complete, vec![text_part("t", message)]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::User { text, .. } = &rows[0].kind else {
+            panic!("messages stay bubbles");
+        };
+        assert_eq!(text.as_ref(), "Message from Lead\n\nRead these files");
+    }
+
+    #[test]
     fn generated_image_owner_candidates_and_same_length_corrections() {
         assert_eq!(
             generated_image_devices("owner", &["host".into(), "local".into(), "owner".into()]),
@@ -13599,6 +13597,7 @@ mod tests {
                         state.sessions.push(zeron_proto::Session {
                             last_completed_turn: None,
                             running_subagents: 0,
+                            background_tasks: 0,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,

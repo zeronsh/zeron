@@ -21,6 +21,8 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
 
+use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
+
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -552,6 +554,220 @@ impl Zeron {
             }
         }
     }
+}
+
+impl Zeron {
+    /// Block until the turn that handles the user message `message_id` in
+    /// `chat` settles, and report what came after it.
+    ///
+    /// Anchoring on the message (not on "the next idle") is what makes this
+    /// right for a busy chat: a send held for the turn end only reaches the
+    /// transcript when its own turn starts, so the turn already running
+    /// cannot be mistaken for the reply. A question the agent asks returns
+    /// [`TurnOutcome::AwaitingInput`] unless its request id is `skip_input`
+    /// (one the caller already reported).
+    ///
+    /// A turn that ends while the runtime still holds background work (a
+    /// shell or subagent the agent will be woken by) is not the result yet:
+    /// the wait holds until that work drains and the wake turn ends, up to
+    /// [`BACKGROUND_HOLD_MAX`] for work that never finishes (a dev server).
+    pub async fn await_message_turn(
+        &self,
+        chat: &Chat,
+        message_id: &str,
+        timeout: Duration,
+        skip_input: Option<&str>,
+    ) -> anyhow::Result<MessageTurn> {
+        let deadline = Instant::now() + timeout;
+        let mut saw_working = false;
+        let mut last = MessageTurn {
+            outcome: TurnOutcome::TimedOut,
+            session: None,
+            after: Vec::new(),
+            delivered: false,
+            background: 0,
+        };
+        // Idle but holding background work since; that work drained at.
+        let mut held_since: Option<Instant> = None;
+        let mut drained_at: Option<Instant> = None;
+        // While the chat is settled, the transcript can trail the session row
+        // (and a remote doc trails further): re-check on a backoff as well as
+        // on every status change.
+        let mut recheck = SETTLED_RECHECK_MIN;
+        'resubscribe: loop {
+            let mut rx = match self.subscribe(methods::WATCH_SESSIONS, json!({})).await {
+                Ok(rx) => rx,
+                Err(err) if deadline > Instant::now() => {
+                    tracing::debug!(error = %err, "WatchSessions: resubscribing");
+                    tokio::time::sleep(RESUBSCRIBE_DELAY).await;
+                    continue 'resubscribe;
+                }
+                Err(_) => return Ok(last),
+            };
+            let mut session: Option<Session> = None;
+            let mut settled = false;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(last);
+                }
+                let mut wake = if settled {
+                    remaining.min(recheck)
+                } else {
+                    remaining
+                };
+                if let Some(at) = drained_at {
+                    wake = wake.min(WAKE_GRACE.saturating_sub(at.elapsed()) + SETTLED_RECHECK_MIN);
+                }
+                match tokio::time::timeout(wake, rx.recv()).await {
+                    Ok(Some(item)) => {
+                        let sessions: Vec<Session> = match serde_json::from_value(item) {
+                            Ok(sessions) => sessions,
+                            Err(err) => {
+                                tracing::warn!(error = %err, "WatchSessions: unexpected item");
+                                continue;
+                            }
+                        };
+                        session = session_for(&sessions, chat);
+                        recheck = SETTLED_RECHECK_MIN;
+                    }
+                    Ok(None) => {
+                        tokio::time::sleep(RESUBSCRIBE_DELAY).await;
+                        continue 'resubscribe;
+                    }
+                    // A settled chat's periodic re-read.
+                    Err(_) if settled => recheck = (recheck * 2).min(SETTLED_RECHECK_MAX),
+                    Err(_) => return Ok(last),
+                }
+                let status = session
+                    .as_ref()
+                    .map(|s| s.status)
+                    .unwrap_or(SessionStatus::Idle);
+                last.session = session.clone();
+                if status == SessionStatus::Working {
+                    saw_working = true;
+                    settled = false;
+                    // A wake turn: whatever held the result is now running.
+                    held_since = None;
+                    drained_at = None;
+                    continue;
+                }
+                settled = true;
+                let entries = match self.transcript_on(&chat.id, Some(&chat.device_id)).await {
+                    Ok(entries) => entries,
+                    Err(err) => {
+                        tracing::debug!(chat = %chat.id, error = %err, "transcript read failed; retrying");
+                        continue;
+                    }
+                };
+                let rendered = render_entries(&entries, RenderOptions::default());
+                // Not in the transcript yet: still held for a turn end, or
+                // the doc trails the dispatch.
+                let Some(at) = rendered.iter().position(|m| m.id == message_id) else {
+                    continue;
+                };
+                last.delivered = true;
+                last.after = rendered[at + 1..].to_vec();
+                if last
+                    .after
+                    .iter()
+                    .any(|m| m.status == Some(zeron_doc::MessageStatus::Streaming))
+                {
+                    continue;
+                }
+                match status {
+                    SessionStatus::AwaitingInput => {
+                        let request = pending_request_id(&last.after);
+                        if request.is_some() && request.as_deref() != skip_input {
+                            last.outcome = TurnOutcome::AwaitingInput;
+                            return Ok(last);
+                        }
+                    }
+                    SessionStatus::Errored if saw_working || !last.after.is_empty() => {
+                        last.outcome = TurnOutcome::Errored;
+                        return Ok(last);
+                    }
+                    // An idle chat with nothing after the message has not
+                    // started its turn yet.
+                    SessionStatus::Idle if saw_working || !last.after.is_empty() => {
+                        let background = session
+                            .as_ref()
+                            .map_or(0, |s| s.background_tasks.max(s.running_subagents));
+                        if background > 0 {
+                            let since = *held_since.get_or_insert_with(Instant::now);
+                            drained_at = None;
+                            if since.elapsed() < BACKGROUND_HOLD_MAX {
+                                continue;
+                            }
+                            last.background = background;
+                        } else if held_since.is_some() {
+                            // The agent reports the drained set a moment
+                            // before the turn the completion wakes starts.
+                            let at = *drained_at.get_or_insert_with(Instant::now);
+                            if at.elapsed() < WAKE_GRACE {
+                                continue;
+                            }
+                        }
+                        last.outcome = TurnOutcome::Completed;
+                        return Ok(last);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// The longest a finished turn's result waits on background work.
+pub const BACKGROUND_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+/// After background work drains, how long a wake turn gets to start.
+const WAKE_GRACE: Duration = Duration::from_secs(5);
+
+/// Gap before a settled chat's transcript is read again, doubling to the max.
+const SETTLED_RECHECK_MIN: Duration = Duration::from_millis(250);
+const SETTLED_RECHECK_MAX: Duration = Duration::from_secs(15);
+
+/// Where [`Zeron::await_message_turn`] left a sent message.
+#[derive(Debug, Clone)]
+pub struct MessageTurn {
+    pub outcome: TurnOutcome,
+    pub session: Option<Session>,
+    /// Everything after the sent message, oldest first.
+    pub after: Vec<RenderedMessage>,
+    /// The message reached the transcript.
+    pub delivered: bool,
+    /// Background tasks still running when the result was reported anyway
+    /// ([`BACKGROUND_HOLD_MAX`] passed).
+    pub background: u32,
+}
+
+impl MessageTurn {
+    /// The agent's replies: assistant messages after the sent one.
+    pub fn replies(&self) -> Vec<RenderedMessage> {
+        self.after
+            .iter()
+            .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
+            .cloned()
+            .collect()
+    }
+
+    /// The question the agent is blocked on, if any.
+    pub fn pending_input(&self) -> Option<Value> {
+        self.after
+            .iter()
+            .rev()
+            .find_map(|m| m.pending_input.clone())
+    }
+}
+
+fn pending_request_id(after: &[RenderedMessage]) -> Option<String> {
+    after
+        .iter()
+        .rev()
+        .find_map(|m| m.pending_input.as_ref())
+        .and_then(|p| p.get("requestId"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// The session row that speaks for `chat`: the host device's, else the

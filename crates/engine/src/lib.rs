@@ -148,6 +148,9 @@ pub struct EngineCore {
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
+    /// "Tell chat A when chat B finishes": the orchestration notices behind
+    /// the Zeron MCP tools. Started by [`Self::start_turn_notices`].
+    pub turn_notices: zeron_mcp::TurnNotices,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -315,6 +318,8 @@ impl EngineCore {
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
+        let turn_notices =
+            zeron_mcp::TurnNotices::new(Some(profile.store_root().join("turn-notices.json")));
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),
@@ -343,6 +348,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             harness_updates,
+            turn_notices,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -460,6 +466,29 @@ impl EngineCore {
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
+        Arc::new(
+            self.rpc_service_base()
+                .with_turn_notices(Some(self.turn_notices.clone())),
+        )
+    }
+
+    /// Begin delivering turn notices (and resume persisted ones). Call once
+    /// peer links are attached: notices read remote chats through them.
+    pub fn start_turn_notices(&self) {
+        if self.turn_notices.started() {
+            return;
+        }
+        // The notices' own view of the engine leaves notices out, so the
+        // service and the notices don't hold each other alive.
+        let client = zeron_rpc::memory_client(Arc::new(self.rpc_service_base()));
+        self.turn_notices
+            .start(Arc::new(zeron_mcp::Zeron::with_client(
+                client,
+                zeron_mcp::Origin::default(),
+            )));
+    }
+
+    fn rpc_service_base(&self) -> EngineRpc {
         let mut rpc = EngineRpc::new(
             self.sessions.clone(),
             self.doc_host.clone(),
@@ -487,7 +516,7 @@ impl EngineCore {
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
-        Arc::new(rpc)
+        rpc
     }
 
     /// Revoke every account-scoped transport before any slower graceful
@@ -506,6 +535,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.turn_notices.shutdown();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
@@ -868,6 +898,7 @@ impl Engine {
             core.set_links(links);
             core.start_host_relay(&edge.url)
         });
+        core.start_turn_notices();
 
         Ok(EngineRuntime {
             core,

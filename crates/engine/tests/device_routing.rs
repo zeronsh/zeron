@@ -2153,3 +2153,105 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
     drop(host);
     relay.abort();
 }
+
+/// Delegation without waiting: the coordinator starts a side chat through the
+/// MCP tools and returns at once; when the child's turn ends, the engine puts
+/// the child's final response into the coordinator by itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_delegation_notifies_the_parent_when_the_child_finishes() {
+    use serde_json::json;
+    use zeron_mcp::{Origin, Tools, Zeron};
+
+    let dirs = tempfile::tempdir().unwrap();
+    let dir = dirs.path().join("a");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "device-a").unwrap();
+    let profile = zeron_engine::EngineProfile::development(&dir, "dev-org", "dev-user");
+    let core = EngineCore::assemble_with_profile(
+        profile,
+        registry_for(HarnessId::Codex),
+        HarnessId::Codex,
+        None,
+    )
+    .unwrap();
+    core.start_turn_notices();
+    core.workspace
+        .create_chat("coordinator", None, Some("device-a"), None, None)
+        .unwrap();
+    let tools = Tools::new(Arc::new(Zeron::with_client(
+        zeron_rpc::memory_client(core.rpc_service()),
+        Origin {
+            chat_id: Some("coordinator".into()),
+            device_id: Some("device-a".into()),
+        },
+    )));
+    let created = tools
+        .call(
+            "create_chat",
+            json!({ "harness": "codex", "title": "Worker", "prompt": "do the thing" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created["kind"], "side");
+    assert!(created.get("turn").is_none(), "it did not wait: {created}");
+    assert!(
+        created["notice"]
+            .as_str()
+            .unwrap()
+            .contains("automatic Zeron notice"),
+        "{created}"
+    );
+    let child = created["chatId"].as_str().unwrap().to_owned();
+
+    // The coordinator's agent is woken by a background event: a new agent
+    // turn, with nothing in its transcript or queue standing for the notice.
+    let reader = Zeron::with_client(
+        zeron_rpc::memory_client(core.rpc_service()),
+        Origin::default(),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let rendered = zeron_mcp::render_entries(
+            &reader.transcript("coordinator").await.unwrap(),
+            Default::default(),
+        );
+        if rendered
+            .iter()
+            .any(|m| m.role == zeron_doc::MessageRole::Assistant && m.text == "remote reply")
+        {
+            assert!(
+                rendered.iter().all(|m| m.role != zeron_doc::MessageRole::User),
+                "the event left no message behind: {rendered:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the coordinator was never woken"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let queued = reader
+        .snapshot(zeron_rpc::methods::WATCH_QUEUE, json!({ "chatId": "coordinator" }))
+        .await
+        .unwrap();
+    assert!(queued["items"].as_array().is_none_or(Vec::is_empty), "{queued}");
+    // The child was told its answer goes back on its own.
+    let child_transcript = reader.transcript(&child).await.unwrap();
+    let prompt = zeron_mcp::render_entries(&child_transcript, Default::default())
+        .into_iter()
+        .find(|m| m.role == zeron_doc::MessageRole::User)
+        .unwrap()
+        .text;
+    assert!(
+        prompt.starts_with(
+            "[Message from Zeron chat coordina, id coordinator. Your final response goes back"
+        ),
+        "{prompt}"
+    );
+    assert!(
+        core.turn_notices.list(None).is_empty(),
+        "delivered watches end"
+    );
+    core.shutdown().await;
+}

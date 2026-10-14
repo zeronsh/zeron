@@ -22,28 +22,37 @@ const LATEST_PROTOCOL: &str = "2025-06-18";
 
 const INSTRUCTIONS: &str = "\
 Zeron runs coding agents in chats, each hosted on a device, optionally in a project \
-(a folder on that specific device). These tools operate the local Zeron engine: \
-discover devices/projects/chats, create chats with a chosen harness and \
-model, read transcripts, and send messages between chats.\n\
+(a folder on that device). These tools drive the local Zeron engine: discover \
+devices, projects, harnesses and models; create chats; read transcripts; and \
+message other chats.\n\
 \n\
-Chats are referenced by full id, a unique id prefix, or an exact title. Use \
-`whoami` to learn which chat you are speaking from; messages you send are \
-attributed to it and a chat cannot message itself. For request/response \
-with a single chat, `send_message` with `wait: true` returns its reply. \
-For parallel delegation, use `create_chats` with a prompt for each chat or \
-`send_messages` for existing chats. These batch tools launch requests concurrently \
-even if your harness executes tool calls sequentially. Alternatively, launch ALL \
-chats/messages with `wait: false` first, then use `wait_for_turn` to collect replies. \
-Do not wait for one worker before launching the next independent worker. \
-Use `kind: chat` in `create_chat` or each `create_chats` request for a standalone \
-session visible in Sessions; it cannot have a parent. Use `kind: side` for a child \
-with an explicit parent or your origin chat. Omitted kind keeps legacy defaults: \
-side with an origin/parent, standalone otherwise. Side chats cannot create chats. \
-Discover hosts with `list_devices`, then `list_projects {device}`, \
-`list_harnesses {device}` and `list_models {device, harness}`. A project fixes \
-its host; with both project and device it must belong to that device. Use listed \
-ids when names/paths repeat. Without project or device, creation uses the local engine. \
-If a chat is `awaitingInput`, answer it with `respond_to_input`.";
+Delegating works like background subagents. create_chat (or create_chats for \
+several) with a self-contained prompt starts a side chat and returns at once. \
+When its turn ends, its final response arrives in your chat as an automatic \
+\"[Zeron notice: ...]\" message, batched when several finish together and \
+held until your current turn ends. So after delegating, keep doing your own \
+work or end your turn; don't poll, wait, read_chat in a loop, or message a \
+child to ask how it's going. A notice needs no reply: act on the result. \
+To follow up with a child, send_message it; that reply comes back as a notice \
+too. Use wait: true or wait_for_turn only when you truly can't continue \
+without one specific answer.\n\
+\n\
+When you receive \"[Message from Zeron chat ...]\", your final response \
+goes back to the sender automatically when your turn ends: answer by finishing \
+the work and writing your report as your last message. Don't reply with \
+send_message or send progress updates. Message the sender only if you are \
+blocked on a decision only it can make.\n\
+\n\
+Chats are referenced by full id, unique id prefix, or exact title; whoami \
+gives your own chat id and the notices you are waiting on. A chat cannot \
+message itself. kind side (the default inside a chat) creates a child of \
+your chat; kind chat creates a standalone sidebar session, only when the \
+user asks for one. Side chats cannot create chats. Discover hosts with \
+list_devices, then list_projects, list_harnesses and list_models for a \
+device; a project fixes its host. Without project or device, chats are \
+created on the local engine. If a notice says a chat is waiting for an \
+answer, answer it with respond_to_input. archive_chat tidies up children \
+you no longer need.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;

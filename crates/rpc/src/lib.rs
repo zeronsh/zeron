@@ -76,6 +76,18 @@ pub mod methods {
     pub const WATCH_QUEUE: &str = "WatchQueue";
     /// Append to the queue. `{ chatId, text, attachments?, holdForTurnEnd? }` → `{ id }`.
     pub const QUEUE_MESSAGE: &str = "QueueMessage";
+    /// Tell one chat when another finishes the turn that handles a message
+    /// it sent (the engine queues the final response into the watcher).
+    /// `{ watcherChatId, chatId, messageId }` → `{ ok }`. Local engine only.
+    pub const NOTIFY_TURN_END: &str = "NotifyTurnEnd";
+    /// Hand a chat's agent a background event: no transcript entry, no
+    /// queue row; it starts a turn, steers one, or waits for the turn end.
+    /// `{ chatId, text }` → `{ delivery }`. Host only.
+    pub const DELIVER_EVENT: &str = "DeliverEvent";
+    /// Drop a pending turn notice. `{ watcherChatId, chatId }` → `{ cancelled }`.
+    pub const CANCEL_TURN_NOTICE: &str = "CancelTurnNotice";
+    /// Pending turn notices. `{ watcherChatId? }` → `{ watches: [...] }`.
+    pub const LIST_TURN_NOTICES: &str = "ListTurnNotices";
     /// Retype a queued message; empty text deletes it.
     /// `{ chatId, id, text }` → `{ changed }`.
     pub const UPDATE_QUEUED_MESSAGE: &str = "UpdateQueuedMessage";

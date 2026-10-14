@@ -321,6 +321,11 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
+    /// Background work (shells, agents) the chat's parked runtime still
+    /// holds after its turn ended. The agent is usually waiting on it to be
+    /// woken, so the turn's result is not final while this is non-zero.
+    #[serde(default)]
+    pub background_tasks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

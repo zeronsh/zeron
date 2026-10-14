@@ -265,6 +265,7 @@ mod gate_tests {
             started_at: None,
             updated_at,
             running_subagents: running,
+            background_tasks: 0,
         }
     }
 

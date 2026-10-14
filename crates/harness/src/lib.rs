@@ -77,6 +77,7 @@ impl SteerMessage {
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    background_changed: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl TurnControl {
@@ -92,8 +93,23 @@ impl TurnControl {
 
     /// Driver: how many background tasks the runtime currently holds.
     pub fn set_background(&self, tasks: usize) {
-        self.background
-            .store(tasks, std::sync::atomic::Ordering::Release);
+        let previous = self
+            .background
+            .swap(tasks, std::sync::atomic::Ordering::AcqRel);
+        if previous != tasks {
+            self.background_changed.notify_one();
+        }
+    }
+
+    /// Host: how many background tasks the runtime reports.
+    pub fn background_tasks(&self) -> usize {
+        self.background.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Host: resolves after the background count changes (a change made
+    /// while nobody waits is kept for the next wait).
+    pub async fn background_changed(&self) {
+        self.background_changed.notified().await;
     }
 
     /// Host: the runtime reports live background work, so retiring it now

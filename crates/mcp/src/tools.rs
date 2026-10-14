@@ -20,7 +20,8 @@ use zeron_proto::{
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
-use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
+use crate::zeron::{HarnessInfo, MessageTurn, TurnOutcome, Zeron, session_for, short};
+use zeron_rpc::methods;
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
@@ -68,7 +69,7 @@ fn catalog() -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
             name: "whoami",
-            description: "Which chat and device this server speaks for, plus the engine's workspace mode. Call this first when you need to know your own chat id.",
+            description: "Which chat and device this server speaks for, the engine's workspace mode, and the chats you are waiting to hear back from (pendingNotices).",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -119,7 +120,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a standalone session visible in Sessions with kind chat, or a child with kind side. Omitted kind preserves the default: side with an origin/parent, standalone otherwise. A side chat cannot create chats. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. Returns the new chat id. For parallel delegation use create_chats, or leave wait=false on every launch and wait only after all chats have been started.",
+            description: "Create a chat and optionally start it on a task. kind side (the default when you are in a chat) makes a child of your chat: use it to delegate. kind chat makes a standalone session in the sidebar; only use it when the user asks for a separate chat. Side chats cannot create chats. Choose a project and/or device; harness and model are validated on that host. Give the child a self-contained prompt: it does not see your conversation. By default the call returns at once and the child's final response comes back to you as an automatic notice when its turn ends, so keep working or end your turn rather than waiting. For several children use create_chats.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -134,8 +135,9 @@ fn catalog() -> Vec<ToolDef> {
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
-                    "prompt": { "type": "string", "description": "First message to send right away." },
-                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
+                    "prompt": { "type": "string", "description": "The task, sent right away. Make it self-contained: goal, context, constraints, and what to report back." },
+                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn ends and return the reply. Only when you need the result before you can do anything else." },
+                    "notify": { "type": "boolean", "default": true, "description": "With prompt: get the final response as an automatic notice when the turn ends (when not waiting)." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
                 }
             }),
@@ -152,24 +154,25 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat. Messages are attributed to your chat. mode 'auto' starts a turn when the chat is idle, steers a running turn through its live mailbox (at the next supported input boundary without interrupting the agent). Use mode 'queue' only to explicitly hold a message for later. With wait=true, blocks until the turn finishes and returns the assistant's reply. For parallel work use send_messages, or send to all chats with wait=false before waiting.",
+            description: "Send a message to another chat, attributed to yours. It returns at once; when the turn that handles the message ends, the chat's final response comes back to you as an automatic notice (notify=false for an FYI that needs no answer). The receiver is told its answer is routed back, so it won't message you. mode auto starts a turn when the chat is idle and otherwise steers the running turn at its next input boundary without interrupting it; queue holds the message until the current turn ends. Use wait=true only when you can't continue without the answer. To give several chats work at once use send_messages. Don't use this to reply to a notice or to ask a chat how it's going.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
-                "wait": { "type": "boolean", "default": false },
+                "wait": { "type": "boolean", "default": false, "description": "Block until the turn that handles this message ends and return the reply." },
+                "notify": { "type": "boolean", "default": true, "description": "Get the final response as an automatic notice when the turn ends (when not waiting)." },
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message.",
+            description: "Block until a chat's turn ends: the one handling your last message to it, else its current one. Returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the replies. Rarely needed: results arrive as automatic notices without waiting. Use it only when you can't make progress until a specific chat answers; a wait that returns the result also clears its pending notice.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
         },
         ToolDef {
             name: "interrupt_chat",
-            description: "Stop the chat's running turn.",
+            description: "Stop the chat's running turn. Clears your pending notice about it.",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
@@ -202,12 +205,12 @@ fn catalog() -> Vec<ToolDef> {
         (
             "create_chats",
             "create_chat",
-            "Create multiple standalone or side chats concurrently (kind per request). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
+            "Create several chats at once, each with its own prompt, so all the work starts together (use it even if your tool calls run one at a time). Each request takes create_chat arguments. Returns immediately; each child's final response arrives as its own automatic notice (batched when they finish together). Results keep request order and report per-request errors; successful requests are not rolled back.",
         ),
         (
             "send_messages",
             "send_message",
-            "Send messages to multiple independent chats concurrently. Prefer this to delegate parallel work to existing chats. Each request has send_message arguments; wait defaults to false. If wait=true, requests still run concurrently. Results preserve request order and include per-request errors; successful sends are not rolled back. Do not include dependent messages to the same chat.",
+            "Send messages to several chats at once. Each request takes send_message arguments; each reply arrives as an automatic notice. Results keep request order and report per-request errors; successful sends are not rolled back. Don't put two dependent messages to the same chat in one batch.",
         ),
     ] {
         let item_schema = tools
@@ -280,6 +283,8 @@ struct TurnStart {
 struct PendingTurn {
     baseline: Option<Session>,
     start: TurnStart,
+    /// The sent user message; its turn is the one waited on.
+    message_id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -298,6 +303,7 @@ struct CreateChatArgs {
     prompt: Option<String>,
     #[serde(default)]
     wait: bool,
+    notify: Option<bool>,
     timeout_secs: Option<u64>,
 }
 
@@ -319,6 +325,7 @@ struct SendArgs {
     mode: Option<String>,
     #[serde(default)]
     wait: bool,
+    notify: Option<bool>,
     timeout_secs: Option<u64>,
 }
 
@@ -515,13 +522,24 @@ impl Tools {
             },
             None => Value::Null,
         };
+        let pending_notices = match origin.chat_id.as_deref() {
+            Some(id) => self
+                .zeron
+                .call(methods::LIST_TURN_NOTICES, json!({ "watcherChatId": id }))
+                .await
+                .ok()
+                .and_then(|reply| reply.get("watches").cloned())
+                .unwrap_or(Value::Null),
+            None => Value::Null,
+        };
         Ok(json!({
             "chat": chat,
+            "pendingNotices": pending_notices,
             "originDeviceId": origin.device_id,
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
             "note": if origin.chat_id.is_some() {
-                "Messages you send are attributed to this chat; it cannot message itself."
+                "Messages you send are attributed to this chat; it cannot message itself. pendingNotices lists the chats whose turn results will arrive here automatically."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
@@ -837,24 +855,32 @@ impl Tools {
                 last_seen_at: None,
                 room_gen: None,
             };
-            let sent = self
-                .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
+            let notify = args.notify.unwrap_or(true);
+            let body = self.attribute(&chat, prompt.trim(), notify).await;
+            let (sent, message_id) = self
+                .deliver(&chat, space.as_ref(), &harnesses, None, body, "run")
                 .await?;
             result["sent"] = sent;
             let pending = Arc::new(PendingTurn {
                 baseline: None,
                 // A new chat has no earlier messages.
                 start: TurnStart::default(),
+                message_id: Some(message_id.clone()),
             });
             self.pending_turns
                 .lock()
                 .await
                 .insert(chat.id.clone(), pending.clone());
-            if args.wait {
-                result["turn"] = self
-                    .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
-                    .await?;
-            }
+            self.finish_send(
+                &mut result,
+                &chat,
+                pending,
+                &message_id,
+                args.wait,
+                notify,
+                args.timeout_secs,
+            )
+            .await?;
         }
         Ok(result)
     }
@@ -919,28 +945,116 @@ impl Tools {
             .into_iter()
             .map(|m| m.id)
             .collect();
-        let body = self.attribute(&chat, text).await;
+        let notify = args.notify.unwrap_or(true);
+        let body = self.attribute(&chat, text, notify).await;
         let mut result = json!({
             "chatId": chat.id,
             "title": chat.title,
         });
-        result["sent"] = self
+        let (sent, message_id) = self
             .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
             .await?;
+        result["sent"] = sent;
         let pending = Arc::new(PendingTurn {
             baseline,
             start: TurnStart { message_ids },
+            message_id: Some(message_id.clone()),
         });
         self.pending_turns
             .lock()
             .await
             .insert(chat.id.clone(), pending.clone());
-        if args.wait {
-            result["turn"] = self
-                .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
-                .await?;
-        }
+        self.finish_send(
+            &mut result,
+            &chat,
+            pending,
+            &message_id,
+            args.wait,
+            notify,
+            args.timeout_secs,
+        )
+        .await?;
         Ok(result)
+    }
+
+    /// After a send: wait for the reply when asked, and otherwise (or when
+    /// the wait runs out) have the engine notify this chat when the turn
+    /// ends, so the caller never has to poll.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_send(
+        &self,
+        result: &mut Value,
+        chat: &Chat,
+        pending: Arc<PendingTurn>,
+        message_id: &str,
+        wait: bool,
+        notify: bool,
+        timeout_secs: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let mut settled = false;
+        if wait {
+            let turn = self
+                .await_pending_turn(chat, pending, wait_duration(timeout_secs))
+                .await?;
+            settled = turn["outcome"] == "completed" || turn["outcome"] == "errored";
+            let input = turn["pendingInput"]["requestId"]
+                .as_str()
+                .map(str::to_owned);
+            result["turn"] = turn;
+            if notify && !settled {
+                result["notice"] = self.watch_turn(chat, message_id, input.as_deref()).await;
+            }
+        } else if notify {
+            result["notice"] = self.watch_turn(chat, message_id, None).await;
+        }
+        if !notify && !settled && self.zeron.origin().chat_id.is_some() {
+            result["notice"] = json!("No automatic notice (notify=false).");
+        }
+        Ok(())
+    }
+
+    /// Ask the engine to tell this chat when `chat` finishes the turn that
+    /// handles `message_id`. The result is the note returned to the agent.
+    async fn watch_turn(
+        &self,
+        chat: &Chat,
+        message_id: &str,
+        reported_input: Option<&str>,
+    ) -> Value {
+        let Some(origin) = self.zeron.origin().chat_id.as_deref() else {
+            return Value::Null;
+        };
+        let mut params = json!({
+            "watcherChatId": origin,
+            "chatId": chat.id,
+            "messageId": message_id,
+        });
+        if let Some(request) = reported_input {
+            params["reportedInput"] = json!(request);
+        }
+        match self.zeron.call(methods::NOTIFY_TURN_END, params).await {
+            Ok(_) => json!(
+                "When that turn ends, its final response arrives in this chat as an automatic Zeron notice. Don't poll, wait, or message it to check on progress: continue other work, or end your turn if you have nothing else to do."
+            ),
+            Err(err) => json!(format!(
+                "Automatic notices are unavailable on this engine ({err:#}); use wait_for_turn to collect the reply."
+            )),
+        }
+    }
+
+    /// Drop this chat's pending notice about `chat` (its result was read
+    /// through a wait, or this chat stopped it).
+    async fn cancel_notice(&self, chat: &Chat) {
+        let Some(origin) = self.zeron.origin().chat_id.as_deref() else {
+            return;
+        };
+        let _ = self
+            .zeron
+            .call(
+                methods::CANCEL_TURN_NOTICE,
+                json!({ "watcherChatId": origin, "chatId": chat.id }),
+            )
+            .await;
     }
 
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
@@ -962,6 +1076,10 @@ impl Tools {
                 .await?
             }
         };
+        // The reply is in hand: the automatic notice would repeat it.
+        if turn["outcome"] == "completed" || turn["outcome"] == "errored" {
+            self.cancel_notice(&chat).await;
+        }
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
 
@@ -980,6 +1098,8 @@ impl Tools {
             .zeron
             .queue_command(&chat.id, &SessionCommandPayload::Interrupt {})
             .await?;
+        // Stopping it is this chat's own doing; no notice about it.
+        self.cancel_notice(&chat).await;
         Ok(json!({ "chatId": chat.id, "commandId": command_id }))
     }
 
@@ -1032,9 +1152,11 @@ impl Tools {
 
     /// Prefix the sender's identity when this server speaks for a chat, so
     /// the receiving agent (and the human reading that transcript) can tell
-    /// an agent-to-agent message from a typed one. Reply instructions always
-    /// use the full id: display prefixes need not uniquely identify a chat.
-    async fn attribute(&self, target: &Chat, text: &str) -> String {
+    /// an agent-to-agent message from a typed one, and so the agent knows its
+    /// answer is routed back on its own: the old "reply with send_message"
+    /// instruction is what made chats answer, re-answer, and steer each other.
+    /// The sender's full id is included: display prefixes need not be unique.
+    async fn attribute(&self, target: &Chat, text: &str, notify: bool) -> String {
         let Some(origin_id) = self.zeron.origin().chat_id.as_deref() else {
             return text.to_owned();
         };
@@ -1051,9 +1173,14 @@ impl Tools {
             }
             _ => short(origin_id).to_owned(),
         };
+        let routing = if notify {
+            "Your final response goes back to it automatically when this turn ends, so don't reply with send_message."
+        } else {
+            "It doesn't need a reply."
+        };
         format!(
-            "[Message from Zeron chat {label}. Reply to it with the Zeron `send_message` tool, chat {}.]\n\n{text}",
-            origin_id
+            "{}{label}, id {origin_id}. {routing}]\n\n{text}",
+            zeron_proto::agent_messages::MESSAGE_PREFIX
         )
     }
 
@@ -1066,7 +1193,7 @@ impl Tools {
         session: Option<&Session>,
         text: String,
         mode: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> anyhow::Result<(Value, String)> {
         let harness = chat
             .config
             .as_ref()
@@ -1088,7 +1215,10 @@ impl Tools {
             "run" | "steer" | "queue" => mode,
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
-        let id = match chosen {
+        // The user message's id, known up front so a wait (or a notice) can
+        // anchor on the exact turn that handles it.
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let (id, message_id) = match chosen {
             "run" => {
                 let config = chat.config.clone();
                 let cwd = chat
@@ -1116,34 +1246,45 @@ impl Tools {
                     attachments: Vec::new(),
                     worktree: None,
                 };
-                self.zeron
+                let id = self
+                    .zeron
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Run {
                             request,
-                            message_id: uuid::Uuid::new_v4().to_string(),
+                            message_id: message_id.clone(),
                         },
                     )
-                    .await?
+                    .await?;
+                (id, message_id)
             }
             "steer" => {
-                self.zeron
+                let id = self
+                    .zeron
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Steer {
                             prompt: text,
-                            message_id: Some(uuid::Uuid::new_v4().to_string()),
+                            message_id: Some(message_id.clone()),
                         },
                     )
-                    .await?
+                    .await?;
+                (id, message_id)
             }
-            _ => self.zeron.queue_message(&chat.id, &text).await?,
+            // A queue row keeps its id when it becomes the user message.
+            _ => {
+                let id = self.zeron.queue_message(&chat.id, &text).await?;
+                (id.clone(), id)
+            }
         };
-        Ok(json!({
-            "delivery": chosen,
-            "id": id,
-            "chatStatusAtSend": status,
-        }))
+        Ok((
+            json!({
+                "delivery": chosen,
+                "id": id,
+                "chatStatusAtSend": status,
+            }),
+            message_id,
+        ))
     }
 
     async fn await_pending_turn(
@@ -1152,15 +1293,25 @@ impl Tools {
         pending: Arc<PendingTurn>,
         timeout: Duration,
     ) -> anyhow::Result<Value> {
-        let turn = self
-            .await_turn(
-                chat,
-                pending.baseline.as_ref(),
-                true,
-                timeout,
-                pending.start.clone(),
-            )
-            .await?;
+        let turn = match pending.message_id.as_deref() {
+            Some(message_id) => {
+                let turn = self
+                    .zeron
+                    .await_message_turn(chat, message_id, timeout, None)
+                    .await?;
+                message_turn_json(&turn)
+            }
+            None => {
+                self.await_turn(
+                    chat,
+                    pending.baseline.as_ref(),
+                    true,
+                    timeout,
+                    pending.start.clone(),
+                )
+                .await?
+            }
+        };
         if turn["timedOut"] == false {
             let mut turns = self.pending_turns.lock().await;
             // A concurrent send may already have installed a newer baseline.
@@ -1239,6 +1390,19 @@ impl Tools {
             "replies": replies,
         }))
     }
+}
+
+/// A message-anchored wait in the same shape as [`Tools::await_turn`]'s.
+fn message_turn_json(turn: &MessageTurn) -> Value {
+    let (status, _) = status_of(turn.session.as_ref());
+    json!({
+        "outcome": turn.outcome,
+        "status": status,
+        "timedOut": turn.outcome == TurnOutcome::TimedOut,
+        "delivered": turn.delivered,
+        "pendingInput": turn.pending_input(),
+        "replies": turn.replies(),
+    })
 }
 
 /// claude-code when it is offered here, else the first available harness.
@@ -1360,6 +1524,14 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
+                methods::NOTIFY_TURN_END | methods::CANCEL_TURN_NOTICE => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(json!({ "ok": true, "cancelled": true }))
+                }
+                methods::LIST_TURN_NOTICES => RpcReply::Value(json!({ "watches": [] })),
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1449,7 +1621,11 @@ mod tests {
             .unwrap();
         assert_eq!(sent["sent"]["delivery"], "run");
         let writes = world.writes.lock().unwrap();
-        let (method, params) = writes.last().expect("a queued command");
+        let (method, params) = writes
+            .iter()
+            .rev()
+            .find(|(m, _)| m == methods::QUEUE_COMMAND)
+            .expect("a queued command");
         assert_eq!(method, methods::QUEUE_COMMAND);
         assert_eq!(params["chatId"], "chat-alpha-1");
         assert_eq!(params["command"]["kind"], "run");
@@ -1459,7 +1635,12 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.ends_with("please review"));
-        assert!(prompt.contains("tool, chat chat-beta-2.]"), "{prompt}");
+        assert!(
+            prompt.contains(", id chat-beta-2. Your final response goes back to it automatically"),
+            "{prompt}"
+        );
+        // The receiver is told not to answer through the tool.
+        assert!(!prompt.contains("Reply to it with"), "{prompt}");
         assert_eq!(params["command"]["request"]["cwd"], "/repo/comet");
         assert_eq!(params["command"]["request"]["harness"], "claude-code");
         assert_eq!(params["command"]["request"]["model"], "opus");
@@ -1505,14 +1686,19 @@ mod tests {
             .unwrap();
         let reply_id = {
             let writes = world.writes.lock().unwrap();
-            let prompt = writes.last().unwrap().1["command"]["request"]["prompt"]
+            let prompt = writes
+                .iter()
+                .rev()
+                .find(|(m, _)| m == methods::QUEUE_COMMAND)
+                .unwrap()
+                .1["command"]["request"]["prompt"]
                 .as_str()
                 .unwrap();
             prompt
-                .split_once("tool, chat ")
+                .split_once(", id ")
                 .unwrap()
                 .1
-                .split_once(".]\n\n")
+                .split_once(". Your final response")
                 .unwrap()
                 .0
                 .to_owned()
@@ -1551,9 +1737,10 @@ mod tests {
             updated_at: chrono::Utc::now() - chrono::Duration::minutes(10),
             last_completed_turn: None,
             running_subagents: 0,
+            background_tasks: 0,
         };
         // No mid-turn capability is required for a live mailbox delivery.
-        let sent = tools
+        let (sent, message_id) = tools
             .deliver(
                 &chats[0],
                 None,
@@ -1569,6 +1756,8 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, methods::QUEUE_COMMAND);
         assert_eq!(writes[0].1["command"]["kind"], "steer");
+        // The steer carries the id a wait or notice anchors on.
+        assert_eq!(writes[0].1["command"]["messageId"], message_id);
     }
 
     #[tokio::test]
@@ -2040,6 +2229,8 @@ mod tests {
     struct DelayedTurn {
         world: World,
         sent: Mutex<Option<(i64, Instant, String)>>,
+        /// The sent user message's id; it reaches the transcript at once.
+        message: Mutex<Option<String>>,
         reply_delay: Duration,
         never_reply: bool,
         /// Host clock offset: a remote engine stamps createdAt on its own clock.
@@ -2068,6 +2259,8 @@ mod tests {
                 }
                 methods::QUEUE_COMMAND => {
                     let reply = self.world.handle(method, params.clone()).await?;
+                    *self.message.lock().unwrap() =
+                        params["command"]["messageId"].as_str().map(str::to_owned);
                     *self.sent.lock().unwrap() = Some((
                         now_millis(),
                         Instant::now(),
@@ -2103,6 +2296,15 @@ mod tests {
                             "deviceId":"dev-remote", "status":"complete", "parts":[{"kind":"text", "id":"t", "text":"old reply"}]
                         }));
                     }
+                    if let Some((timestamp, _, chat)) = sent.as_ref()
+                        && params["chatId"] == chat.as_str()
+                        && let Some(id) = self.message.lock().unwrap().clone()
+                    {
+                        messages.as_array_mut().unwrap().push(json!({
+                            "id":id, "role":"user", "createdAt":timestamp + self.host_skew_millis,
+                            "deviceId":"dev-local", "parts":[{"kind":"text", "id":"t", "text":"go"}]
+                        }));
+                    }
                     if let Some((timestamp, started, _)) = sent
                         && started.elapsed() >= self.reply_delay
                         && !self.never_reply
@@ -2128,6 +2330,7 @@ mod tests {
                     ..Default::default()
                 },
                 sent: Mutex::new(None),
+                message: Mutex::new(None),
                 reply_delay: Duration::from_millis(450),
                 never_reply: false,
                 host_skew_millis: 0,
@@ -2167,6 +2370,7 @@ mod tests {
                     ..Default::default()
                 },
                 sent: Mutex::new(None),
+                message: Mutex::new(None),
                 reply_delay: Duration::from_millis(450),
                 never_reply: false,
                 host_skew_millis: 0,
@@ -2216,6 +2420,7 @@ mod tests {
                     ..Default::default()
                 },
                 sent: Mutex::new(None),
+                message: Mutex::new(None),
                 reply_delay: Duration::from_millis(100),
                 never_reply: false,
                 host_skew_millis: -30_000,
@@ -2250,6 +2455,7 @@ mod tests {
                 ..Default::default()
             },
             sent: Mutex::new(None),
+            message: Mutex::new(None),
             reply_delay: Duration::ZERO,
             never_reply: true,
             host_skew_millis: 0,
@@ -2279,6 +2485,7 @@ mod tests {
                         ..Default::default()
                     },
                     sent: Mutex::new(None),
+                    message: Mutex::new(None),
                     reply_delay: Duration::from_millis(450),
                     never_reply: false,
                     host_skew_millis,
@@ -2358,6 +2565,127 @@ mod tests {
         assert_eq!(
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_register_a_turn_notice_unless_told_not_to() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+            },
+        );
+        let sent = tools
+            .call(
+                "send_message",
+                json!({ "chat": "alpha", "text": "review this" }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            sent["notice"]
+                .as_str()
+                .unwrap()
+                .contains("automatic Zeron notice"),
+            "{sent}"
+        );
+        {
+            let writes = world.writes.lock().unwrap();
+            let command = &writes
+                .iter()
+                .find(|(m, _)| m == methods::QUEUE_COMMAND)
+                .unwrap()
+                .1;
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::NOTIFY_TURN_END);
+            assert_eq!(params["watcherChatId"], "chat-beta-2");
+            assert_eq!(params["chatId"], "chat-alpha-1");
+            // Anchored on the exact message that was sent.
+            assert_eq!(params["messageId"], command["command"]["messageId"]);
+        }
+
+        world.writes.lock().unwrap().clear();
+        let sent = tools
+            .call(
+                "send_message",
+                json!({ "chat": "alpha", "text": "fyi: merged", "notify": false }),
+            )
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        assert!(writes.iter().all(|(m, _)| m != methods::NOTIFY_TURN_END));
+        let prompt = writes[0].1["command"]["request"]["prompt"]
+            .as_str()
+            .unwrap();
+        assert!(prompt.contains("It doesn't need a reply."), "{prompt}");
+        assert_eq!(sent["notice"], "No automatic notice (notify=false).");
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_returns_the_reply_clears_the_notice() {
+        let service = Arc::new(DelayedTurn {
+            world: World {
+                beta_remote: true,
+                ..Default::default()
+            },
+            sent: Mutex::new(None),
+            message: Mutex::new(None),
+            reply_delay: Duration::from_millis(100),
+            never_reply: false,
+            host_skew_millis: 0,
+        });
+        let tools = Tools::new(Arc::new(Zeron::with_client(
+            memory_client(service.clone()),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        )));
+        // A blocking send gets the reply in hand: no notice is registered.
+        let result = tools
+            .call(
+                "send_message",
+                json!({ "chat": "Beta", "text": "go", "wait": true, "timeout_secs": 3 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["turn"]["outcome"], "completed", "{result}");
+        assert!(result.get("notice").is_none_or(Value::is_null), "{result}");
+        assert!(
+            service
+                .world
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(m, _)| m != methods::NOTIFY_TURN_END)
+        );
+
+        // A later wait_for_turn that collects the reply cancels the notice.
+        tools
+            .call("send_message", json!({ "chat": "Beta", "text": "again" }))
+            .await
+            .unwrap();
+        let waited = tools
+            .call(
+                "wait_for_turn",
+                json!({ "chat": "Beta", "timeout_secs": 3 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(waited["turn"]["outcome"], "completed", "{waited}");
+        let writes = service.world.writes.lock().unwrap();
+        let methods_seen: Vec<&str> = writes.iter().map(|(m, _)| m.as_str()).collect();
+        let notify = methods_seen
+            .iter()
+            .position(|m| *m == methods::NOTIFY_TURN_END)
+            .expect("the non-blocking send registered a notice");
+        assert!(
+            methods_seen[notify..].contains(&methods::CANCEL_TURN_NOTICE),
+            "{methods_seen:?}"
         );
     }
 }

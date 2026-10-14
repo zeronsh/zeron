@@ -195,6 +195,9 @@ struct RoutedSteer {
     /// re-dispatches exactly this, not whatever the chat's latest request
     /// became. `None` when the chat had no recorded request.
     request: Option<Box<RunRequest>>,
+    /// A background event (see [`SessionsEngine::deliver_event`]): it has
+    /// no transcript entry, and an orphan re-dispatches without one too.
+    silent: bool,
 }
 
 struct Inner {
@@ -506,7 +509,7 @@ impl SessionsEngine {
                 _ => break,
             }
         }
-        self.dispatch_inner(chat_id, HarnessId::Codex, request, None, false, true)
+        self.dispatch_inner(chat_id, HarnessId::Codex, request, None, false, true, false)
             .await
     }
 
@@ -540,7 +543,21 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_with(chat_id, harness_id, request, message_id, false)
+        self.dispatch_with(chat_id, harness_id, request, message_id, false, false)
+            .await
+    }
+
+    /// Hand the agent a background event: like a dispatch, but nothing is
+    /// written to the transcript or the sidebar preview. The agent reacts
+    /// the way it does when its own background work wakes it — another chat
+    /// it delegated to reporting back is not a message from the user.
+    pub async fn dispatch_event(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        request: RunRequest,
+    ) -> Result<String, EngineError> {
+        self.dispatch_with(chat_id, harness_id, request, None, false, true)
             .await
     }
 
@@ -556,6 +573,7 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
         startup_retry: bool,
+        silent: bool,
     ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
         Box::pin(self.dispatch_inner(
             chat_id,
@@ -564,6 +582,7 @@ impl SessionsEngine {
             message_id,
             startup_retry,
             false,
+            silent,
         ))
     }
 
@@ -575,6 +594,7 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
         idle: bool,
+        silent: bool,
     ) -> Result<String, EngineError> {
         // Project-less chats store a home-relative cwd (the creating device
         // can't know the host's home); expand it here, on the host, where the
@@ -653,6 +673,7 @@ impl SessionsEngine {
                                 fork_history: bootstrap.is_some(),
                                 after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
                                 request: Some(Box::new(request.clone())),
+                                silent,
                             });
                             permit.send(message);
                         })
@@ -677,7 +698,9 @@ impl SessionsEngine {
                     lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
                 }
                 let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                if !silent {
+                    handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                }
                 self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
@@ -689,7 +712,9 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    self.inner.note_message(chat_id, &request.prompt);
+                    if !silent {
+                        self.inner.note_message(chat_id, &request.prompt);
+                    }
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -702,7 +727,9 @@ impl SessionsEngine {
                     ledger.len() != before
                 };
                 if !reclaimed {
-                    self.inner.note_message(chat_id, &request.prompt);
+                    if !silent {
+                        self.inner.note_message(chat_id, &request.prompt);
+                    }
                     return Ok(run_id);
                 }
                 // Keep the already-written doc entry's id for the fresh run
@@ -734,7 +761,7 @@ impl SessionsEngine {
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
-        if !idle {
+        if !idle && !silent {
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
 
@@ -834,7 +861,7 @@ impl SessionsEngine {
         );
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        if !idle {
+        if !idle && !silent {
             self.inner.note_message(chat_id, &request.prompt);
         }
 
@@ -843,7 +870,7 @@ impl SessionsEngine {
         // reason"; the titler only needs the prompt and skips titled chats;
         // the Done-time call below stays as the retry for a failed
         // generation).
-        if !idle && let Some(titles) = self.inner.titles.get() {
+        if !idle && !silent && let Some(titles) = self.inner.titles.get() {
             titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
         }
 
@@ -861,6 +888,7 @@ impl SessionsEngine {
                 idle,
                 voice_active,
                 user_message_id: user_id,
+                silent,
                 resume_injected,
                 startup_retry,
                 fork_history_sent,
@@ -918,6 +946,28 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, issued_at, false)
+            .await
+    }
+
+    /// Steer a background event into the live turn (see
+    /// [`Self::dispatch_event`]): no transcript entry, no preview.
+    pub(crate) async fn steer_event(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+    ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, None, now_ms(), true).await
+    }
+
+    async fn steer_inner(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        message_id: Option<String>,
+        issued_at: i64,
+        silent: bool,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
@@ -973,6 +1023,7 @@ impl SessionsEngine {
                 fork_history: bootstrap.is_some(),
                 after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
                 request: sent_with,
+                silent,
             });
             permit.send(message);
         });
@@ -980,7 +1031,9 @@ impl SessionsEngine {
             return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
-        handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        if !silent {
+            handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        }
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {
@@ -991,7 +1044,9 @@ impl SessionsEngine {
                 history_sent.store(true, std::sync::atomic::Ordering::Release);
             }
             self.set_status(chat_id, SessionStatus::Working, false);
-            self.inner.note_message(chat_id, prompt);
+            if !silent {
+                self.inner.note_message(chat_id, prompt);
+            }
             return Ok(SteerOutcome::Accepted);
         }
         // The run died around the send. Exit drain claimed the entry → its
@@ -1007,7 +1062,9 @@ impl SessionsEngine {
         if reclaimed {
             return Ok(SteerOutcome::NotSteerable);
         }
-        self.inner.note_message(chat_id, prompt);
+        if !silent {
+            self.inner.note_message(chat_id, prompt);
+        }
         Ok(SteerOutcome::Accepted)
     }
 
@@ -1472,6 +1529,31 @@ impl Inner {
         }
     }
 
+    /// Publish how much background work `chat_id`'s runtime still holds
+    /// (see [`Session::background_tasks`]); mirrored like the subagent count.
+    fn set_background_tasks(&self, chat_id: &str, tasks: usize) {
+        let tasks = u32::try_from(tasks).unwrap_or(u32::MAX);
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.background_tasks == tasks {
+                return;
+            }
+            entry.background_tasks = tasks;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
         lock(&self.runs)
             .get(chat_id)
@@ -1501,6 +1583,7 @@ impl Inner {
                     started_at: None,
                     updated_at: now,
                     running_subagents: 0,
+                    background_tasks: 0,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -2110,6 +2193,8 @@ struct RunResumeState {
     idle: bool,
     voice_active: Arc<VoiceActivity>,
     user_message_id: String,
+    /// A background event's turn: retries keep it out of the transcript.
+    silent: bool,
     resume_injected: bool,
     startup_retry: bool,
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
@@ -2516,6 +2601,10 @@ async fn drive_run(
                 },
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
+                    continue;
+                }
+                _ = turn.background_changed() => {
+                    inner.set_background_tasks(&chat_id, turn.background_tasks());
                     continue;
                 }
                 // A hang-up restarts the idle window, however long the call.
@@ -3104,7 +3193,14 @@ async fn drive_run(
                 // The user entry write inside dispatch is idempotent by
                 // message id; `startup_retry` makes this attempt final.
                 if let Err(err) = engine
-                    .dispatch_with(&chat, harness_id, retry, Some(message_id), true)
+                    .dispatch_with(
+                        &chat,
+                        harness_id,
+                        retry,
+                        Some(message_id),
+                        true,
+                        resume_state.silent,
+                    )
                     .await
                 {
                     tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
@@ -3360,6 +3456,8 @@ async fn drive_run(
         }
     }
     inner.set_running_subagents(&chat_id, 0);
+    // The runtime is gone, and its background work with it.
+    inner.set_background_tasks(&chat_id, 0);
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
@@ -3411,8 +3509,10 @@ async fn drive_run(
                     tracing::warn!(chat = %chat, "orphaned steer lost: doc host unavailable");
                     break;
                 };
-                if let Err(err) = host
-                    .dispatch_with_source_context(
+                let sent = if steer.silent {
+                    engine.dispatch_event(&chat, harness_id, request).await
+                } else {
+                    host.dispatch_with_source_context(
                         &engine,
                         &chat,
                         harness_id,
@@ -3420,7 +3520,8 @@ async fn drive_run(
                         Some(steer.message_id.clone()),
                     )
                     .await
-                {
+                };
+                if let Err(err) = sent {
                     tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");
                     engine
                         .inner

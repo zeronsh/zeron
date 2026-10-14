@@ -17,14 +17,16 @@
 //! originating chat, and a chat can never message itself.
 
 mod jsonrpc;
+pub mod notices;
 mod tools;
 mod transcript;
 mod zeron;
 
 pub use jsonrpc::serve_stdio;
+pub use notices::{TurnNotices, Watch};
 pub use tools::{ToolDef, Tools};
 pub use transcript::{RenderOptions, RenderedMessage, render_entries};
-pub use zeron::{Origin, Zeron};
+pub use zeron::{MessageTurn, Origin, TurnOutcome, Zeron};
 
 /// How `zeron mcp` finds the engine and who it speaks for.
 #[derive(Debug, Clone)]
