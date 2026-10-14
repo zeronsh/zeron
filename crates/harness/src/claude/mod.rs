@@ -68,6 +68,7 @@ use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
+pub use normalize::SIGNED_OUT_ERROR;
 use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
 
 /// Locate the device's installed Claude Code CLI: our own PATH, then the

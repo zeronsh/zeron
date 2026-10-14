@@ -6,13 +6,17 @@ use zeron_proto::{AgentEvent, DoneStatus, HarnessId, TodoItem, TodoStatus, ToolC
 
 use super::wire::{ContentBlock, Frame};
 
+/// The error text for a dead login (`authentication_failed`). The error card
+/// matches it to offer "Sign in again".
+pub const SIGNED_OUT_ERROR: &str = "Authentication failed — sign in to Claude again.";
+
 /// Human-readable text for the CLI's assistant-level error codes. These arrive
 /// as a terse `error` field on an `assistant` frame — usually with NO text
 /// content and NOT as a `result` error — so a usage-limited or otherwise failed
 /// turn looks like the agent simply never replied unless we surface it.
 fn assistant_error_text(code: &str) -> String {
     match code {
-        "authentication_failed" => "Authentication failed — sign in to Claude again.".into(),
+        "authentication_failed" => SIGNED_OUT_ERROR.into(),
         "oauth_org_not_allowed" => "This organization isn't allowed to use Claude here.".into(),
         "billing_error" => "Billing error — check your Claude plan or payment method.".into(),
         "rate_limit" => "Claude usage limit reached — try again after the limit resets.".into(),
