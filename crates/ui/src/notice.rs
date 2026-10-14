@@ -2,9 +2,37 @@
 //! transcript converged on (zeron composer.tsx `Notice` / chat-view.tsx
 //! `ErrorChip`).
 
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
+
 use gpui::{AnyElement, Div, FontWeight, SharedString, div, prelude::*, px};
 
 use crate::theme::Theme;
+
+/// How long the copy button shows its check after a click — the same ~1.2s
+/// as the transcript's message and code-block copy actions.
+const COPIED_FEEDBACK: Duration = Duration::from_millis(1200);
+
+// The chip is a free-function builder with no window or view state at render
+// time, so the copied feedback lives in a main-thread `thread_local` (the
+// `motion` hover-fade pattern): the last copied chip's caller key, its message,
+// and when it was copied. The key keeps two chips with the same payload (a
+// repeated transcript error, the main and side-chat composers) from flashing
+// together; the message keeps a new failure in the same slot from inheriting
+// the check.
+thread_local! {
+    static COPIED: RefCell<Option<(SharedString, SharedString, Instant)>> =
+        const { RefCell::new(None) };
+}
+
+fn recently_copied(key: &SharedString, message: &SharedString) -> bool {
+    COPIED.with(|copied| {
+        copied
+            .borrow()
+            .as_ref()
+            .is_some_and(|(k, m, at)| k == key && m == message && at.elapsed() < COPIED_FEEDBACK)
+    })
+}
 
 /// The chip's header icon treatment, which also picks its metrics: the bare
 /// triangle reads lighter and rem-scales with the composer's text; the tile
@@ -28,9 +56,11 @@ pub enum NoticeChipIcon {
 /// zeronsh/comet#95 undiagnosable from the screenshot. `warning` picks the
 /// amber palette (amber-400/amber-200) over the default red
 /// (red-400/red-300). Callers chain their own chrome: the composer its
-/// id/dismiss click, the transcript `w_full().overflow_hidden()`.
+/// id/dismiss click, the transcript `w_full().overflow_hidden()`. `key`
+/// identifies this chip instance for the copy button's transient check.
 pub fn notice_chip(
     theme: &Theme,
+    key: impl Into<SharedString>,
     warning: bool,
     label: &'static str,
     message: impl Into<SharedString>,
@@ -41,8 +71,10 @@ pub fn notice_chip(
     } else {
         (theme.danger, theme.danger_muted)
     };
+    let key = key.into();
     let message = message.into();
     let copy_message = message.clone();
+    let copied = recently_copied(&key, &message);
     let tile = matches!(icon, NoticeChipIcon::Tile);
     let frame = |inset: f32| {
         div()
@@ -113,17 +145,34 @@ pub fn notice_chip(
                     .hover(move |s| s.bg(accent.opacity(0.12)))
                     // The composer chip dismisses on click; copying must
                     // not take the notice with it.
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                             copy_message.to_string(),
                         ));
+                        COPIED.with(|copied| {
+                            *copied.borrow_mut() =
+                                Some((key.clone(), copy_message.clone(), Instant::now()))
+                        });
+                        window.refresh();
+                        // Repaint once the feedback window lapses so the
+                        // check flips back to the copy icon.
+                        window
+                            .spawn(cx, async move |cx| {
+                                cx.background_executor().timer(COPIED_FEEDBACK).await;
+                                cx.update(|window, _| window.refresh()).ok();
+                            })
+                            .detach();
                     })
                     .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
                     .child(
-                        crate::icons::icon(crate::icons::COPY)
-                            .size(px(12.0))
-                            .text_color(muted.opacity(0.8)),
+                        crate::icons::icon(if copied {
+                            crate::icons::CHECK
+                        } else {
+                            crate::icons::COPY
+                        })
+                        .size(px(12.0))
+                        .text_color(muted.opacity(0.8)),
                     ),
             ),
     )
