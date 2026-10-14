@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
 use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
+use zeron_proto::VISUAL_DEFAULT_HEIGHT;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -98,6 +99,10 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// Visual frame height in CSS pixels (`kind: "visual"`, additive; the
+    /// page path and title ride `path` and `name`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +147,19 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             path: Some(path.clone()),
             name: Some(name.clone()),
             mime_type: Some(mime_type.clone()),
+            ..Default::default()
+        },
+        MessagePart::Visual {
+            id,
+            path,
+            title,
+            height,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "visual".into(),
+            path: Some(path.clone()),
+            name: Some(title.clone()),
+            height: Some(*height),
             ..Default::default()
         },
         MessagePart::Text { id, text } => DocPartJson {
@@ -231,6 +249,18 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
 fn from_doc_part(p: DocPartJson) -> MessagePart {
     match p.kind.as_str() {
         "image" => image_part(p.id, p.path, p.name, p.mime_type),
+        "visual" => match p.path.filter(|path| !path.is_empty()) {
+            Some(path) => MessagePart::Visual {
+                id: p.id,
+                path,
+                title: p.name.unwrap_or_default(),
+                height: p.height.unwrap_or(VISUAL_DEFAULT_HEIGHT),
+            },
+            None => MessagePart::Error {
+                id: p.id,
+                message: "Visual unavailable".into(),
+            },
+        },
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
             Some(call) => MessagePart::Tool {
                 id: p.id,
@@ -885,6 +915,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(output_bytes) = doc_part.output_bytes {
         map.insert("outputBytes", output_bytes as i64)?;
     }
+    if let Some(height) = doc_part.height {
+        map.insert("height", i64::from(height))?;
+    }
     if let Some(diff_ref) = &doc_part.diff_ref {
         map.insert("diffRef", diff_ref.as_str())?;
     }
@@ -1335,6 +1368,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(output_bytes) = doc_part.output_bytes {
         map.insert("outputBytes", output_bytes as i64)?;
     }
+    if let Some(height) = doc_part.height {
+        map.insert("height", i64::from(height))?;
+    }
     if let Some(diff_ref) = &doc_part.diff_ref {
         map.insert("diffRef", diff_ref.as_str())?;
     }
@@ -1517,6 +1553,44 @@ mod tests {
                 Some(MessagePart::Error { .. })
             ));
         }
+    }
+
+    #[test]
+    fn visual_round_trips_and_degrades_without_a_path() {
+        let doc = SessionDoc::init("visuals").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a", "owner", 1).unwrap();
+        let mut parts = vec![];
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::Visual {
+                id: "v:1".into(),
+                path: "/uploads/v-1-visual.html".into(),
+                title: "Latency by region".into(),
+                height: 420,
+            },
+        );
+        writer.sync(&parts).unwrap();
+        let imported = LoroDoc::new();
+        imported.import(&doc.export_snapshot().unwrap()).unwrap();
+        let loaded = SessionDoc::from_doc(imported);
+        assert_eq!(loaded.read_entries().unwrap()[0].parts, parts);
+        assert!(matches!(
+            from_doc_part(
+                serde_json::from_value(serde_json::json!({"kind":"visual", "id":"v", "name":"t"}))
+                    .unwrap()
+            ),
+            MessagePart::Error { .. }
+        ));
+        assert!(matches!(
+            from_doc_part(
+                serde_json::from_value(serde_json::json!({"kind":"visual", "id":"v", "path":"/p"}))
+                    .unwrap()
+            ),
+            MessagePart::Visual {
+                height: VISUAL_DEFAULT_HEIGHT,
+                ..
+            }
+        ));
     }
 
     fn user_entry(id: &str, text: &str) -> SessionMessageEntry {

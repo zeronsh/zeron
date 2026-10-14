@@ -451,6 +451,14 @@ impl super::BrowserSurface {
                 this.native_startup = None;
                 let result = result.and_then(|mut native| {
                     native.present(this.presentation);
+                    // An inline page shows the content it is embedded in
+                    // wherever it paints no background of its own.
+                    if this.inline {
+                        native.command(json!({"cmd":"transparent"}));
+                    }
+                    if this.page_zoom != 1.0 {
+                        native.command(json!({"cmd":"zoom","value":this.page_zoom}));
+                    }
                     let result = this
                         .page
                         .url

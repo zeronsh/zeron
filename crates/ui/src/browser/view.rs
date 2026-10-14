@@ -657,7 +657,7 @@ impl Render for BrowserSurface {
             .overflow_hidden()
             // Empty tabs share the shell's glass, like the sidebar tab picker.
             // Keep an opaque backing while native web content is loading.
-            .when(has_page, |body| body.bg(theme.bg));
+            .when(has_page && !self.inline, |body| body.bg(theme.bg));
         #[cfg(target_os = "macos")]
         let body = if let Some(native) = &self.native {
             if self.page.error.is_some() {
@@ -699,6 +699,7 @@ impl Render for BrowserSurface {
             } else {
                 let image = native.image.clone();
                 let image_scale = native.image_scale;
+                let inline = self.inline;
                 let entity = cx.entity().downgrade();
                 body.child(gpui::canvas(|_,_,_| (), move |bounds,_,window,cx| {
                     let scale = window.scale_factor();
@@ -720,7 +721,7 @@ impl Render for BrowserSurface {
                         }
                     });
                     if let Some(image)=&image {
-                        if let Some(bytes)=image.as_bytes(0).filter(|b| b.len() >= 4) {
+                        if let Some(bytes)=image.as_bytes(0).filter(|b| !inline && b.len() >= 4) {
                             let color=gpui::rgb(((bytes[2] as u32)<<16)|((bytes[1] as u32)<<8)|bytes[0] as u32);
                             window.paint_quad(gpui::fill(bounds,color));
                         }
@@ -743,7 +744,12 @@ impl Render for BrowserSurface {
                 .on_mouse_down(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
                 .on_mouse_up(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
                 .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {if !cx.has_active_drag(){this.linux_pointer("move",event.position,event.pressed_button,event.modifiers);}}))
-                .on_scroll_wheel(cx.listener(|this,event: &gpui::ScrollWheelEvent,_,cx| {
+                .on_scroll_wheel(cx.listener(move |this,event: &gpui::ScrollWheelEvent,_,cx| {
+                    // An inline page is sized to its content; the wheel
+                    // scrolls the transcript around it.
+                    if inline {
+                        return;
+                    }
                     if let Some(native)=&this.native {
                         let delta=event.delta.pixel_delta(px(16.));let p=event.position-native.bounds.origin;
                         native.command(serde_json::json!({"cmd":"scroll","x":f32::from(p.x),"y":f32::from(p.y),"dx":-f32::from(delta.x)/40.,"dy":-f32::from(delta.y)/40.,"mods":super::linux::modifiers_mask(event.modifiers)}));
@@ -800,11 +806,11 @@ impl Render for BrowserSurface {
             // else; over the browser they are inert.
             .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Back), |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Forward), |_, _, cx| cx.stop_propagation())
-            .child(toolbar)
-            .when_some(persistence_notice, |el, message| el.child(div().px(px(12.0)).py(px(8.0))
+            .when(!self.inline, |el| el.child(toolbar))
+            .when_some(persistence_notice.filter(|_| !self.inline), |el, message| el.child(div().px(px(12.0)).py(px(8.0))
                 .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(message.to_owned())))
             .when_some(self.validation.clone(), |el, message| el.child(div().px(px(12.0)).py(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.danger).child(message)))
-            .when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)
+            .when(remote_loopback && !self.inline, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)
                 .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted)
                 .child("Localhost opens on this device. Open a detected preview from a new tab to reach your other device.")))
             .child(body)

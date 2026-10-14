@@ -229,6 +229,9 @@ pub mod methods {
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
+    /// Store an agent's HTML page and show it inline in that chat's live
+    /// turn (`show_visual`). Local only: the calling agent runs on this device.
+    pub const PUBLISH_VISUAL: &str = "PublishVisual";
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";

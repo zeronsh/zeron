@@ -879,6 +879,20 @@ fn open_generated_file(
 }
 
 impl Uploads {
+    /// Store an agent's `show_visual` page and return its absolute path. It
+    /// lives beside other attachments, so clients read it the same way.
+    pub fn store_visual(&self, id: &str, html: &str) -> Result<String, EngineError> {
+        use std::io::Write;
+        std::fs::create_dir_all(self.dir())?;
+        let path = self.dir().join(format!("{}-visual.html", sanitize(id)));
+        let mut temporary = tempfile::NamedTempFile::new_in(self.dir())?;
+        temporary.write_all(html.as_bytes())?;
+        temporary
+            .persist(&path)
+            .map_err(|err| EngineError::Other(err.to_string()))?;
+        Ok(path.to_string_lossy().to_string())
+    }
+
     /// Copy a Codex-owned raster into the active profile without exposing the
     /// original path to the journal, document, RPC readers, or relay.
     pub fn import_generated_image(

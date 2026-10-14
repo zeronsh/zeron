@@ -277,6 +277,32 @@ pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
     GEIST.iter().chain(GEIST_MONO.iter()).copied()
 }
 
+/// The bundled faces with the family, weight, and italic flag they declare,
+/// for surfaces that render text outside GPUI (agent visuals load them as web
+/// fonts, so a page renders in the same family the transcript does).
+pub(crate) fn bundled_web_fonts() -> impl Iterator<Item = (&'static str, u16, bool, &'static [u8])>
+{
+    // Both families list their faces in this order.
+    const SHAPES: [(u16, bool); 8] = [
+        (400, false),
+        (400, true),
+        (500, false),
+        (500, true),
+        (600, false),
+        (600, true),
+        (700, false),
+        (700, true),
+    ];
+    [("Geist", &GEIST), ("Geist Mono", &GEIST_MONO)]
+        .into_iter()
+        .flat_map(|(family, faces)| {
+            faces
+                .iter()
+                .zip(SHAPES)
+                .map(move |(bytes, (weight, italic))| (family, weight, italic, *bytes))
+        })
+}
+
 fn register_family(cx: &App, family: &UiFontFamily, faces: &'static [&'static [u8]]) -> bool {
     let fonts = faces.iter().map(|face| Cow::Borrowed(*face)).collect();
     match cx.text_system().add_fonts(fonts) {

@@ -225,10 +225,98 @@ fn catalog() -> Vec<ToolDef> {
             }),
         });
     }
+    tools.push(ToolDef {
+        name: SHOW_VISUAL,
+        description: SHOW_VISUAL_DESCRIPTION,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "html": {
+                    "type": "string",
+                    "description": "One complete, self-contained HTML document with inline <style> and <script>. Remote http(s) resources, such as a CDN chart library, load as-is."
+                },
+                "title": { "type": "string", "description": "Short name for the page." },
+                "height": {
+                    "type": "integer",
+                    "minimum": zeron_proto::VISUAL_MIN_HEIGHT,
+                    "maximum": zeron_proto::VISUAL_MAX_HEIGHT,
+                    "description": "Your best estimate of the page height in CSS pixels at a 720px width. Zeron shows the frame at this height until the page reports its own."
+                }
+            },
+            "required": ["html", "title", "height"]
+        }),
+    });
     tools
 }
 
+/// Shows a page in the CALLING chat, so it is offered only to an agent that
+/// Zeron launched (`ZERON_CHAT_ID` set).
+const SHOW_VISUAL: &str = "show_visual";
+
+const SHOW_VISUAL_DESCRIPTION: &str = "\
+Show an HTML page (chart, table, diagram, timeline, mockup) inline in this chat, above your final \
+text reply; call it before writing that reply. Use it when a visual says more than prose. The \
+reader already sees the page, so the reply should not announce, locate, or restate it: add only \
+what the page doesn't say.\n\
+\n\
+Style: the page is part of your reply, not a widget. Lay content directly on the chat the way \
+Zeron's own transcript does, with type, spacing, and alignment:\n\
+- No cards, tiles, boxed panels, or bordered or filled containers around anything: not around a \
+chart, a stat, a table, or the page. No outer padding, banner title, or badge chrome.\n\
+- Stats are a row of plain figures, a var(--font-size-2xl) number over a short \
+var(--muted-foreground) label, separated by space; at most a 1px var(--border) rule between groups.\n\
+- A chart is its title as a plain heading, an inline legend, and the plot; no frame around it. \
+Tables have no outer border: a var(--muted-foreground) header row and 1px var(--border) row rules.\n\
+- Separate sections with whitespace (24-32px) or a single 1px var(--border) rule.\n\
+\n\
+Surface: the page is transparent and sits directly on the chat. With Zeron's frosted glass the \
+chat is translucent over the user's wallpaper; with opaque surfaces it is a solid fill; either can \
+be light or dark. One page must read well on all four, so:\n\
+- Never paint a background: not html, body, a wrapper, or a section; no gradients, color blocks, \
+box-shadows, or backdrop filters. The only fill is var(--hover) under a row the pointer is over.\n\
+- Data marks (bars, lines, dots, swatches) use solid var(--chart-1) … var(--chart-6) at full \
+opacity, in that order; translucent marks wash out on glass. Use var(--accent) for the one thing to \
+notice, var(--success) / var(--warning) / var(--danger) only for status text and marks, gridlines \
+and axes in var(--border), and keep data labels outside colored marks.\n\
+- Text is var(--foreground); labels, axes, and captions var(--muted-foreground); tertiary notes \
+var(--faint-foreground). Never hard-code a text or fill color, and never assume a dark or light \
+background. Text on an var(--accent) mark uses var(--accent-foreground).\n\
+- Type is Zeron's, and Zeron enforces it. Lay the page out at Zeron's default size; Zeron zooms \
+the whole page to the user's text size. Every text element renders in \
+the interface font (var(--font-sans); var(--font-mono) at var(--font-size-code) inside code, pre, \
+kbd, samp), and every text size snaps to the transcript's scale. So never set font-family, and \
+size text only with the scale: var(--font-size-xs) axis ticks and footnotes, var(--font-size-sm) \
+labels and captions, var(--font-size) body (1rem; the default), var(--font-size-lg) section \
+titles, var(--font-size-xl) the page title, var(--font-size-2xl) a headline figure. Use weights \
+400-700 (600 for titles), var(--line-height) for body text, and font-variant-numeric: \
+tabular-nums for numbers. Put text in HTML or SVG, not canvas; if a library draws on canvas, \
+read the family and sizes from getComputedStyle(document.documentElement). No web fonts, icon \
+fonts, or emoji icons.\n\
+\n\
+Layout: the frame is borderless, as wide as the reply column (about 720px, as narrow as 360px), and \
+Zeron fits its height to the page. Make it fluid: no fixed pixel widths over 320px, SVG with a \
+viewBox at width:100%, and no horizontal scrolling. Give charts fixed pixel heights (160-360px), \
+keep the page under about 900px tall, and avoid 100vh or height:100% on html/body. Links open the \
+way chat links do.\n\
+\n\
+Theme: Zeron injects its active theme as CSS custom properties on :root and they follow the user's \
+settings: --foreground, --muted-foreground, --faint-foreground, --hover, --border, --border-strong, \
+--accent, --accent-foreground, --danger, --warning, --success, --code-background, \
+--code-foreground, --chart-1 … --chart-6, --radius (bar and mark corners), --font-sans, \
+--font-mono, --font-size-xs, --font-size-sm, --font-size, --font-size-lg, --font-size-xl, \
+--font-size-2xl, --font-size-code, --line-height, --surface-treatment, and --background, which is transparent: there is no page color to \
+paint or mask with. html carries data-surface (glass or opaque) and data-appearance (light or dark) \
+for the rare case the variables are not enough.";
+
 // ---- argument shapes ---------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ShowVisualArgs {
+    html: String,
+    title: String,
+    #[serde(default)]
+    height: Option<u32>,
+}
 
 #[derive(Deserialize)]
 struct BatchArgs {
@@ -436,11 +524,15 @@ impl Tools {
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
+        let in_chat = self.zeron.origin().chat_id.is_some();
         catalog()
+            .into_iter()
+            .filter(|tool| in_chat || tool.name != SHOW_VISUAL)
+            .collect()
     }
 
     pub fn has(&self, name: &str) -> bool {
-        catalog().iter().any(|t| t.name == name)
+        self.list().iter().any(|t| t.name == name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
@@ -463,6 +555,7 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            SHOW_VISUAL => self.show_visual(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| format!("{e:#}"))
@@ -974,6 +1067,31 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "title": chat.title, "archived": archived }))
     }
 
+    async fn show_visual(&self, args: ShowVisualArgs) -> anyhow::Result<Value> {
+        let chat_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("show_visual only works from an agent Zeron launched in a chat")?;
+        let shown = self
+            .zeron
+            .call(
+                zeron_rpc::methods::PUBLISH_VISUAL,
+                json!({
+                    "chatId": chat_id,
+                    "title": args.title,
+                    "height": args.height,
+                    "html": args.html,
+                }),
+            )
+            .await?;
+        Ok(json!({
+            "visual": shown,
+            "message": "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say.",
+        }))
+    }
+
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let command_id = self
@@ -1360,6 +1478,13 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
+                methods::PUBLISH_VISUAL => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({ "id": "v:1", "title": params["title"], "height": 360 }))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1395,6 +1520,48 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn show_visual_is_offered_only_inside_a_chat() {
+        let world = Arc::new(World::default());
+        let outside = tools(world.clone(), Origin::default());
+        assert!(!outside.has("show_visual"));
+        assert!(
+            outside
+                .call(
+                    "show_visual",
+                    json!({ "html": "<p>x</p>", "title": "x", "height": 100 })
+                )
+                .await
+                .is_err()
+        );
+
+        let inside = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        assert!(inside.has("show_visual"));
+        for name in zeron_proto::VISUAL_THEME_VARIABLES {
+            assert!(SHOW_VISUAL_DESCRIPTION.contains(name), "{name}");
+        }
+        let shown = inside
+            .call(
+                "show_visual",
+                json!({ "html": "<p>chart</p>", "title": "Chart", "height": 240 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shown["visual"]["title"], "Chart");
+        let writes = world.writes.lock().unwrap();
+        let (method, params) = writes.last().unwrap();
+        assert_eq!(method, methods::PUBLISH_VISUAL);
+        assert_eq!(params["chatId"], "chat-alpha-1");
+        assert_eq!(params["html"], "<p>chart</p>");
+        assert_eq!(params["height"], 240);
     }
 
     #[tokio::test]

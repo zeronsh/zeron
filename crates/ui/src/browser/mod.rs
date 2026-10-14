@@ -3,6 +3,8 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) mod inline_macos;
 #[cfg(target_os = "linux")]
 use linux as native;
 #[cfg(target_os = "macos")]
@@ -112,6 +114,12 @@ pub struct BrowserSurface {
     #[cfg(feature = "browser-fixture")]
     fixture_preview_open: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
     presentation: Presentation,
+    /// A page embedded in other content (an agent visual): no toolbar, no
+    /// focus grab on load, and wheel scrolling stays with the host.
+    inline: bool,
+    /// Whole-page zoom, applied by the native host (Linux), so a page laid
+    /// out at a design size scales the way rem-based interface text does.
+    page_zoom: f32,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
     #[cfg(any(target_os = "macos", windows))]
@@ -195,6 +203,8 @@ impl BrowserSurface {
             #[cfg(feature = "browser-fixture")]
             fixture_preview_open: Default::default(),
             presentation: Presentation::Hidden,
+            inline: false,
+            page_zoom: 1.0,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
             #[cfg(any(target_os = "macos", windows))]
@@ -214,6 +224,23 @@ impl BrowserSurface {
             favicon_generation: 0,
             #[cfg(windows)]
             page_cursor: gpui::CursorStyle::Arrow,
+        }
+    }
+
+    /// Embed the page in other content instead of a browser tab.
+    pub fn set_inline(&mut self) {
+        self.inline = true;
+    }
+
+    /// Zoom the whole page (Linux; other hosts keep 100%).
+    pub fn set_page_zoom(&mut self, zoom: f32) {
+        if self.page_zoom == zoom {
+            return;
+        }
+        self.page_zoom = zoom;
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.native {
+            native.command(serde_json::json!({"cmd":"zoom","value":zoom}));
         }
     }
 
@@ -390,7 +417,9 @@ impl BrowserSurface {
             if let Err(error) = result {
                 self.page.error = Some(format!("Could not open this page: {error}"));
             }
-            window.focus(&self.focus, cx);
+            if !self.inline {
+                window.focus(&self.focus, cx);
+            }
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
