@@ -97,6 +97,17 @@ impl ArchivedPage {
         }
     }
 
+    /// Escape that reached Settings unclaimed closes the Delete all dialog
+    /// first, so it never closes Settings under the dialog (this page
+    /// outlives Settings, and the dialog would reopen with it).
+    pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.delete_all_confirm.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     fn delete_all(&mut self, cx: &mut Context<Self>) {
         let Some(ids) = self.delete_all_confirm.take() else {
             return;
@@ -116,6 +127,20 @@ impl ArchivedPage {
         self.delete_all_task = Some(cx.spawn(async move |this, cx| {
             let mut failed = 0;
             for chat_id in ids {
+                // Unarchived since the confirmation (here, or on another
+                // device): no longer part of what the user agreed to delete.
+                let still_archived = this
+                    .update(cx, |page, cx| {
+                        page.state
+                            .read(cx)
+                            .chats
+                            .iter()
+                            .any(|chat| chat.id == chat_id && chat.archived)
+                    })
+                    .unwrap_or(false);
+                if !still_archived {
+                    continue;
+                }
                 let params = serde_json::json!({ "op": "deleteChat", "chatId": chat_id });
                 if engine.client().call(methods::MUTATE, params).await.is_err() {
                     failed += 1;
@@ -619,7 +644,12 @@ mod tests {
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| {
                 let mut state = AppState::new();
-                state.chats = vec![chat("live", false), chat("b", true), chat("c", true)];
+                state.chats = vec![
+                    chat("live", false),
+                    chat("b", true),
+                    chat("c", true),
+                    chat("restored", true),
+                ];
                 state.set_test_engine(engine);
                 state
             });
@@ -627,10 +657,15 @@ mod tests {
         });
         window
             .update(cx, |page, _, cx| {
+                // Escape closes the dialog before it can close Settings.
+                page.request_delete_all(cx);
+                assert!(page.dismiss_on_escape(cx));
+                assert!(page.delete_all_confirm.is_none());
+                assert!(!page.dismiss_on_escape(cx));
                 page.request_delete_all(cx);
                 assert_eq!(
                     page.delete_all_confirm.as_deref(),
-                    Some(&["b".to_string(), "c".to_string()][..])
+                    Some(&["b".to_string(), "c".to_string(), "restored".to_string()][..])
                 );
                 // Archived while the dialog was open: not part of what the
                 // user confirmed, so it must survive.
@@ -650,6 +685,20 @@ mod tests {
             .unwrap();
             assert_eq!(request["params"]["op"], "deleteChat");
             assert_eq!(request["params"]["chatId"], expected);
+            if index == 0 {
+                // Unarchived mid-run (e.g. on another device): spared.
+                window
+                    .update(cx, |page, _, cx| {
+                        page.state.update(cx, |state, _| {
+                            state
+                                .chats
+                                .iter_mut()
+                                .filter(|chat| chat.id == "restored")
+                                .for_each(|chat| chat.archived = false)
+                        })
+                    })
+                    .unwrap();
+            }
             let reply = if index == 0 {
                 serde_json::json!({"id":request["id"],"err":"rejected"})
             } else {

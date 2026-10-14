@@ -5121,6 +5121,10 @@ impl Shell {
                 .appearance_page
                 .as_ref()
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
+            SettingsSection::Archived => self
+                .archived_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             _ => false,
         }
     }
