@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct SideChatTab {
     pub state: Entity<AppState>,
-    transcript: Entity<Transcript>,
+    pub(super) transcript: Entity<Transcript>,
     pub(super) composer: Entity<Composer>,
     _events: Vec<Subscription>,
 }
