@@ -930,6 +930,10 @@ pub struct UiSettings {
     pub settings_section: crate::shell::SettingsSection,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// First-run setup was finished or skipped. A file written before this
+    /// field existed reads as done (existing users never see it); only a
+    /// fresh install, with no settings file yet, starts it.
+    pub onboarding_completed: bool,
     /// Optional columns shown in every Git History pane.
     pub git_history_columns: GitHistoryColumns,
     /// User-adjusted widths for the resizable Git History columns.
@@ -1069,6 +1073,7 @@ impl Default for UiSettings {
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appearance: crate::appearance::AppearanceMode::default(),
+            onboarding_completed: true,
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
             git_history_column_order: GitHistoryColumnOrder::default(),
@@ -1717,6 +1722,7 @@ impl UiSettings {
             escape_stops_active_agent,
             settings_section,
             appearance,
+            onboarding_completed,
             git_history_columns,
             git_history_column_widths,
             git_history_column_order,
@@ -1920,6 +1926,11 @@ impl UiSettings {
                     }
                 }
             }
+            // No settings file yet: a fresh install, so first-run setup runs.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self {
+                onboarding_completed: false,
+                ..Self::default()
+            },
             Err(_) => Self::default(),
         }
     }
@@ -2701,6 +2712,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_fresh_install_starts_first_run_setup() {
+        let fresh = tempfile::tempdir().unwrap();
+        assert!(!UiSettings::load(fresh.path()).onboarding_completed);
+        // A settings file from before setup existed: that user is past it.
+        let existing = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(existing.path()),
+            r#"{"sidebarWidth": 280}"#,
+        )
+        .unwrap();
+        assert!(UiSettings::load(existing.path()).onboarding_completed);
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
@@ -2840,6 +2865,7 @@ mod tests {
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
             legacy_accent_color: None,
+            onboarding_completed: false,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
@@ -3138,7 +3164,14 @@ mod tests {
     #[test]
     fn missing_and_corrupt_files_yield_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+        // Defaults, except that a fresh install still has setup ahead of it.
+        assert_eq!(
+            UiSettings::load(dir.path()),
+            UiSettings {
+                onboarding_completed: false,
+                ..UiSettings::default()
+            }
+        );
         std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
     }

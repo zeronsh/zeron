@@ -2203,6 +2203,11 @@ pub struct Shell {
     _app_update_observation: Option<Subscription>,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
+    /// First-run setup over the Ready shell; built on first Ready render from
+    /// `onboarding_pending` (a fresh install, or `ZERON_ONBOARDING=<step>`).
+    onboarding: Option<Entity<crate::onboarding::Onboarding>>,
+    onboarding_pending: Option<crate::onboarding::Step>,
+    _onboarding_events: Option<Subscription>,
     mutate_task: Option<Task<()>>,
     auth_task: Option<Task<()>>,
     runtime_change_task: Option<Task<()>>,
@@ -2508,6 +2513,14 @@ impl Shell {
         // send on the selected chat (echo bubble + frozen thumbnail progress
         // ring) — display-only; a real upload can't be paused for a capture.
         let debug_upload = std::env::var("ZERON_DEMO_UPLOAD").ok();
+        // `ZERON_ONBOARDING=<step>` opens first-run setup at that step
+        // (welcome, appearance, sync, providers, done) even when finished.
+        let onboarding_pending = std::env::var("ZERON_ONBOARDING")
+            .ok()
+            .map(|step| crate::onboarding::Step::parse(&step))
+            .or_else(|| {
+                (!settings.onboarding_completed).then_some(crate::onboarding::Step::Welcome)
+            });
         let debug_gate = match std::env::var("ZERON_FORCE_GATE").ok().as_deref() {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
@@ -2679,6 +2692,9 @@ impl Shell {
                 .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
             org: None,
             sync_flow: SyncFlow::Idle,
+            onboarding: None,
+            onboarding_pending,
+            _onboarding_events: None,
             mutate_task: None,
             auth_task: None,
             runtime_change_task: None,
@@ -6893,6 +6909,50 @@ impl Shell {
             })
             .ok();
         }));
+        cx.notify();
+    }
+
+    // ---- first-run setup ----
+
+    /// The setup card over the Ready shell. Steps aside while the sign-in
+    /// wizard it started is showing; the wizard's signed-in edge moves it on.
+    fn render_onboarding(
+        &mut self,
+        gate: &GatePhase,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if *gate != GatePhase::Ready {
+            return None;
+        }
+        if self.onboarding.is_none()
+            && let Some(step) = self.onboarding_pending.take()
+        {
+            let state = self.state.clone();
+            let onboarding = cx.new(|cx| crate::onboarding::Onboarding::new(state, step, cx));
+            use crate::onboarding::OnboardingEvent;
+            let events = cx.subscribe(&onboarding, |this, _, event, cx| match *event {
+                OnboardingEvent::SignIn => this.start_sign_in(cx),
+                OnboardingEvent::Finish { add_project } => this.finish_onboarding(add_project, cx),
+            });
+            self._onboarding_events = Some(events);
+            self.onboarding = Some(onboarding);
+        }
+        let onboarding = self.onboarding.clone()?;
+        if self.sync_flow.has_visible_overlay() {
+            return None;
+        }
+        Some(onboarding.into_any_element())
+    }
+
+    fn finish_onboarding(&mut self, add_project: bool, cx: &mut Context<Self>) {
+        self.onboarding = None;
+        self._onboarding_events = None;
+        settings::update(settings::SavePolicy::Immediate, cx, |s| {
+            s.onboarding_completed = true;
+        });
+        if add_project {
+            self.open_add_space(cx);
+        }
         cx.notify();
     }
 
@@ -12949,7 +13009,7 @@ impl Shell {
 /// The sign-in gate's faint grid backdrop (zeron styles.css `.bg-grid`):
 /// 44px hairlines at white 3.5%, with the radial mask approximated by edge
 /// gradients back into the page background (gpui has no mask-image).
-fn grid_backdrop(theme: &Theme) -> AnyElement {
+pub(crate) fn grid_backdrop(theme: &Theme) -> AnyElement {
     let line = crate::theme::hairline(0.035);
     let bg = theme.bg;
     const STEP: f32 = 44.0;
@@ -14107,6 +14167,10 @@ impl Render for Shell {
             root.child(restart)
         } else {
             root
+        };
+        let root = match self.render_onboarding(&render_gate, cx) {
+            Some(onboarding) => root.child(onboarding),
+            None => root,
         };
         // Toasts float over every phase and route.
         let root = root.children(crate::toast::render_toaster(window, cx));

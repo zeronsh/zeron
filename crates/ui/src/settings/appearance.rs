@@ -1502,7 +1502,7 @@ fn miniature_split(
         .into_any_element()
 }
 
-fn preview(
+pub(crate) fn preview(
     mode: AppearanceMode,
     themes: &ThemeSelection,
     accent: AccentSelection,
@@ -1719,7 +1719,7 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> impl IntoElement {
     )
 }
 
-fn accent_swatch(
+pub(crate) fn accent_swatch(
     page_theme: &Theme,
     selection: AccentSelection,
     selected: bool,
