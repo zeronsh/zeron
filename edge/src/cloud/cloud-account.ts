@@ -43,15 +43,21 @@ import {
 } from "./crypto";
 import { isBranch, isCheckoutPath, isRepoUrl } from "./install-script";
 import {
-  CREDIT_SECONDS,
   RECONCILE_EVERY_MS,
+  creditSeconds,
   STARTING_CREDITS,
   addCredits,
   appendLedger,
+  creditBreakdown,
   creditsGranted,
   creditsPerDay,
-  creditsUsed,
+  ensureBillingTables,
+  firstSeen,
   hasGrant,
+  listPeriods,
+  readBillingState,
+  upsertPeriod,
+  writeBillingState,
   closeUsageRow,
   ensureMeteringTables,
   listLedger,
@@ -88,6 +94,20 @@ import {
   type WorkflowKind
 } from "./policy";
 import { activeProviderName, sandboxProvider } from "./providers";
+import {
+  CREDIT_PACK,
+  PLANS,
+  StripeError,
+  createCheckout,
+  createPortal,
+  planById,
+  type BillingEvent,
+  type CheckoutRequest,
+  type CreditPack,
+  type Plan,
+  type StripeEnv,
+  type SubscriptionState
+} from "./stripe";
 import { SandboxError, effectiveTtl, type SandboxUsage } from "./sandbox-provider";
 
 export interface CloudCaller {
@@ -118,6 +138,38 @@ export interface CloudStatusView {
   /** Credits left (a minute of a small machine each); sessions don't start
    * or wake at zero or below. */
   readonly credits: number;
+}
+
+/** Subscription statuses that still grant the plan (a failed renewal stays
+ * `past_due` while Stripe retries). */
+const SUBSCRIBED: ReadonlySet<string> = new Set(["active", "trialing", "past_due"]);
+
+const stripeFailure = (e: unknown): CloudResult<never> => {
+  if (e instanceof StripeError) return fail(e.status, e.status === 503 ? "unavailable" : "billing_failed", e.message);
+  console.error("billing: Stripe call failed", String(e));
+  return fail(502, "billing_failed", "Couldn't reach the payment service; try again.");
+};
+
+/** Wire shape of `BillingStatus` (crates/proto/src/cloud.rs). */
+export interface BillingView {
+  /** Billing is configured on this server. */
+  readonly available: boolean;
+  readonly plan?: Plan & {
+    readonly status: string;
+    readonly periodEnd: number;
+    readonly cancelAtPeriodEnd: boolean;
+  };
+  readonly credits: {
+    readonly monthly: number;
+    readonly monthlyTotal: number;
+    readonly monthlyEndsAt?: number;
+    readonly extra: number;
+    /** What sessions can spend now (both, less unmetered awake time). */
+    readonly total: number;
+  };
+  readonly plans: readonly Plan[];
+  readonly pack: CreditPack;
+  readonly hasCustomer: boolean;
 }
 
 /** Wire shape of `CloudSession`. */
@@ -347,6 +399,7 @@ export class CloudAccount extends DurableObject<Env> {
   private sql(): SqlStorage {
     if (!this.tablesReady) {
       ensureMeteringTables(this.ctx.storage.sql);
+      ensureBillingTables(this.ctx.storage.sql);
       this.tablesReady = true;
     }
     return this.ctx.storage.sql;
@@ -454,18 +507,29 @@ export class CloudAccount extends DurableObject<Env> {
    * meters were last read (a running machine is never free). */
   private balance(now = Date.now()): number {
     if (!this.acct.orgId) return 0;
-    const sql = this.sql();
+    const credits = this.breakdown(now);
     let unmetered = 0;
     for (const s of this.sessions.values()) {
       if (!AWAKE_STATES.has(s.state)) continue;
       const since = Math.max(s.awakeSince ?? now, this.acct.lastReconcileAt ?? 0);
       unmetered += Math.max(0, now - since) / 1000;
     }
-    return creditsGranted(sql) - creditsUsed(sql) - unmetered / CREDIT_SECONDS;
+    return credits.monthly + credits.extra - unmetered / this.perCredit();
+  }
+
+  /** Plan credits this period and credits that never expire. */
+  private breakdown(now = Date.now()) {
+    const sql = this.sql();
+    return creditBreakdown(creditsGranted(sql), listPeriods(sql), listUsage(sql), now, this.perCredit());
+  }
+
+  /** Billable seconds per credit (`CLOUD_CREDIT_SECONDS`). */
+  private perCredit(): number {
+    return creditSeconds(this.env.CLOUD_CREDIT_SECONDS);
   }
 
   private outOfCredits(): CloudResult<never> {
-    return fail(402, "no_credits", "You're out of Cloud credits.");
+    return fail(402, "no_credits", "You're out of Cloud credits. Add more in Settings → Billing.");
   }
 
   private sessionView(s: SessionRecord): CloudSessionView {
@@ -1341,7 +1405,7 @@ export class CloudAccount extends DurableObject<Env> {
   usage(caller: CloudCaller, from: string, to: string, now = Date.now()): CloudResult<CloudUsage> {
     if (this.acct.orgId !== undefined && !this.matches(caller)) return fail(403, "forbidden", "Not your Cloud.");
     const rows = this.acct.orgId ? listUsage(this.sql(), { from, to }) : [];
-    const days = creditsPerDay(from, to, rows);
+    const days = creditsPerDay(from, to, rows, this.perCredit());
     return {
       ok: true,
       value: {
@@ -1381,6 +1445,105 @@ export class CloudAccount extends DurableObject<Env> {
   /** Lifecycle ledger, newest last (operator/debug). */
   ledgerEntries(limit = 500): LedgerEntry[] {
     return this.acct.orgId ? listLedger(this.sql(), limit) : [];
+  }
+
+  // ── billing (cloud/stripe.ts) ─────────────────────────────────────────────
+
+  private subscription(): SubscriptionState | undefined {
+    return this.acct.orgId ? readBillingState<SubscriptionState>(this.sql(), "subscription") : undefined;
+  }
+
+  private customer(): string | undefined {
+    return this.acct.orgId ? readBillingState<string>(this.sql(), "customer") : undefined;
+  }
+
+  /** `GET /cloud/{org}/billing` — plan, credits and what can be bought. */
+  billingStatus(caller: CloudCaller, available: boolean, now = Date.now()): CloudResult<BillingView> {
+    if (this.acct.orgId !== undefined && !this.matches(caller)) return fail(403, "forbidden", "Not your Cloud.");
+    const subscription = this.subscription();
+    const plan = subscription && SUBSCRIBED.has(subscription.status) ? planById(subscription.plan) : undefined;
+    const credits = this.acct.orgId ? this.breakdown(now) : { monthly: 0, monthlyTotal: 0, extra: 0 };
+    const total = Math.floor(this.balance(now) * 100) / 100;
+    return {
+      ok: true,
+      value: {
+        available,
+        ...(plan && subscription
+          ? {
+              plan: {
+                ...plan,
+                status: subscription.status,
+                periodEnd: subscription.periodEnd,
+                cancelAtPeriodEnd: subscription.cancelAtPeriodEnd
+              }
+            }
+          : {}),
+        credits: { ...credits, total },
+        plans: PLANS,
+        pack: CREDIT_PACK,
+        hasCustomer: this.customer() !== undefined
+      }
+    };
+  }
+
+  /** A Stripe Checkout page for a plan or credit packs. */
+  async checkout(caller: CloudCaller, request: CheckoutRequest, returnUrl: string): Promise<CloudResult<{ url: string }>> {
+    if (!this.bind(caller)) return fail(403, "forbidden", "Not your Cloud.");
+    await this.saveAccount();
+    const subscription = this.subscription();
+    if (request.kind === "subscription" && subscription && SUBSCRIBED.has(subscription.status)) {
+      return fail(409, "already_subscribed", "You already have a plan. Change it from Manage subscription.");
+    }
+    try {
+      return { ok: true, value: { url: await createCheckout(this.env as StripeEnv, caller, request, returnUrl, this.customer()) } };
+    } catch (e) {
+      return stripeFailure(e);
+    }
+  }
+
+  /** The Stripe Billing Portal for the user's customer. */
+  async portal(caller: CloudCaller, returnUrl: string): Promise<CloudResult<{ url: string }>> {
+    if (this.acct.orgId !== undefined && !this.matches(caller)) return fail(403, "forbidden", "Not your Cloud.");
+    const customer = this.customer();
+    if (!customer) return fail(409, "no_customer", "Subscribe or buy credits first.");
+    try {
+      return { ok: true, value: { url: await createPortal(this.env as StripeEnv, customer, returnUrl) } };
+    } catch (e) {
+      return stripeFailure(e);
+    }
+  }
+
+  /** Apply one verified webhook event (each event once). */
+  async applyBillingEvent(event: BillingEvent, now = Date.now()): Promise<{ applied: boolean }> {
+    // A purchase may come before Cloud was ever turned on: it names the account.
+    if (!this.bind(event.account)) {
+      console.warn("billing: event for another account", event.eventId);
+      return { applied: false };
+    }
+    const sql = this.sql();
+    if (!firstSeen(sql, event.eventId, now)) return { applied: false };
+    if (event.customer) writeBillingState(sql, "customer", event.customer);
+    switch (event.type) {
+      case "credits_purchased": {
+        const reason = `purchase ${event.reference}`;
+        if (!hasGrant(sql, reason)) addCredits(sql, { at: now, credits: event.credits, reason });
+        break;
+      }
+      case "subscription":
+        writeBillingState(sql, "subscription", event.subscription);
+        break;
+      case "period_paid": {
+        const plan = planById(event.plan);
+        if (plan) {
+          upsertPeriod(sql, { invoice: event.invoice, plan: plan.id, start: event.start, end: event.end, credits: plan.monthlyCredits });
+        }
+        break;
+      }
+      case "customer":
+        break;
+    }
+    await this.saveAccount();
+    return { applied: true };
   }
 
   // ── workflow reports (workflows.ts) ───────────────────────────────────────

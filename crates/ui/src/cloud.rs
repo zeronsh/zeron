@@ -408,6 +408,23 @@ impl UsageRange {
     }
 }
 
+/// "45,000" — a whole number with thousands separators (negative kept).
+pub fn group_number(value: f64) -> String {
+    let digits = (value.abs().round() as u64).to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    if value < 0.0 && grouped != "0" {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
 /// "1,240 credits" — whole credits (a minute each), with a decimal only
 /// under ten so a short session still reads as something.
 pub fn format_credits(credits: f64) -> String {
@@ -416,16 +433,7 @@ pub fn format_credits(credits: f64) -> String {
     let number = if value > 0.0 && value < 10.0 && value.fract() >= 0.05 {
         format!("{value:.1}")
     } else {
-        let whole = value.round() as u64;
-        let digits = whole.to_string();
-        let mut grouped = String::new();
-        for (i, c) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i) % 3 == 0 {
-                grouped.push(',');
-            }
-            grouped.push(c);
-        }
-        grouped
+        group_number(value)
     };
     let unit = if number == "1" { "credit" } else { "credits" };
     format!("{}{number} {unit}", if negative { "-" } else { "" })

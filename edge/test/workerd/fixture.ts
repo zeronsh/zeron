@@ -2,7 +2,12 @@ import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
 import { handleAdminRoute } from "../../src/cloud/billing";
-import { autoWakeCloudDevice, handleCloudRoute, handleRunnerPublicRoute } from "../../src/cloud/routes";
+import {
+  autoWakeCloudDevice,
+  handleBillingPublicRoute,
+  handleCloudRoute,
+  handleRunnerPublicRoute
+} from "../../src/cloud/routes";
 import type { Env } from "../../src/env";
 import { deviceParam, forward } from "../../src/forward";
 import { runnerChatGate } from "../../src/runner-access";
@@ -105,6 +110,8 @@ export default {
     const url = new URL(request.url);
     const admin = await handleAdminRoute(request, env, url);
     if (admin) return admin;
+    const billing = await handleBillingPublicRoute(request, env, url);
+    if (billing) return billing;
     const runner = await handleRunnerPublicRoute(request, env, url);
     if (runner) return runner;
     const auth = await authenticate(env, request);

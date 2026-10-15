@@ -42,10 +42,19 @@ const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 const DAY_RE = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 export const DAY_MS = 24 * 60 * 60_000;
 
-/** Billable seconds per credit: a minute of a small machine. */
+/** Billable seconds per credit by default: a minute of a machine the
+ * provider bills at 1×. `CLOUD_CREDIT_SECONDS` overrides it, so a credit is
+ * a minute of the default machine whatever its provider multiplier. */
 export const CREDIT_SECONDS = 60;
 
-export const creditsOf = (seconds: number): number => Math.round((seconds / CREDIT_SECONDS) * 100) / 100;
+/** `CLOUD_CREDIT_SECONDS`, when a positive number; else [`CREDIT_SECONDS`]. */
+export const creditSeconds = (configured: string | undefined): number => {
+  const value = Number(configured);
+  return Number.isFinite(value) && value > 0 ? value : CREDIT_SECONDS;
+};
+
+export const creditsOf = (seconds: number, perCredit = CREDIT_SECONDS): number =>
+  Math.round((seconds / perCredit) * 100) / 100;
 
 export const isDayKey = (value: string): boolean => DAY_RE.test(value) && dayKey(Date.parse(`${value}T00:00:00Z`)) === value;
 
@@ -278,11 +287,15 @@ export const summarizeMonth = (
 export const creditsPerDay = (
   from: string,
   to: string,
-  rows: readonly UsageRow[]
+  rows: readonly UsageRow[],
+  perCredit = CREDIT_SECONDS
 ): { readonly day: string; readonly credits: number }[] => {
   const seconds = new Map<string, number>();
   for (const row of rows) seconds.set(row.day, (seconds.get(row.day) ?? 0) + row.seconds);
-  return daysBetween(dayStart(from), dayStart(to)).map((day) => ({ day, credits: creditsOf(seconds.get(day) ?? 0) }));
+  return daysBetween(dayStart(from), dayStart(to)).map((day) => ({
+    day,
+    credits: creditsOf(seconds.get(day) ?? 0, perCredit)
+  }));
 };
 
 /** Wire shape of `CloudUsage` (crates/proto/src/cloud.rs): the caller's
@@ -357,9 +370,114 @@ export const hasGrant = (sql: SqlStorage, reason: string): boolean =>
 export const creditsGranted = (sql: SqlStorage): number =>
   ([...sql.exec("SELECT COALESCE(SUM(credits), 0) AS total FROM credit_grants")][0]?.total as number) ?? 0;
 
-/** Every credit used so far (reconciled figures). */
-export const creditsUsed = (sql: SqlStorage): number =>
-  creditsOf(([...sql.exec("SELECT COALESCE(SUM(seconds), 0) AS total FROM usage_days")][0]?.total as number) ?? 0);
+/** One paid plan period: its credits, spendable until it ends. */
+export interface CreditPeriod {
+  /** The invoice that paid for it (one row per invoice). */
+  readonly invoice: string;
+  readonly plan: string;
+  /** Unix ms, `[start, end)`. */
+  readonly start: number;
+  readonly end: number;
+  readonly credits: number;
+}
+
+export interface CreditBreakdown {
+  /** Plan credits left in the current period (0 without one). */
+  readonly monthly: number;
+  /** The current period's plan credits. */
+  readonly monthlyTotal: number;
+  /** When they expire (the current period's end). */
+  readonly monthlyEndsAt?: number;
+  /** Credits that never expire (bought, granted), after what they covered. */
+  readonly extra: number;
+}
+
+/**
+ * Where the balance stands. Each day's use is charged to the plan period
+ * that day falls in (the latest-starting one, after a mid-period plan
+ * change) up to its credits; whatever a period doesn't cover — and all use
+ * outside a period — comes out of the credits that never expire. Unused
+ * plan credits simply lapse with their period. Pure.
+ */
+export const creditBreakdown = (
+  extraGranted: number,
+  periods: readonly CreditPeriod[],
+  rows: readonly UsageRow[],
+  now: number,
+  perCredit = CREDIT_SECONDS
+): CreditBreakdown => {
+  const byStart = [...periods].sort((a, b) => a.start - b.start);
+  const used = new Map<CreditPeriod, number>();
+  let uncovered = 0;
+  for (const row of rows) {
+    const credits = creditsOf(row.seconds, perCredit);
+    if (credits === 0) continue;
+    let period: CreditPeriod | undefined;
+    for (const p of byStart) {
+      if (dayKey(p.start) <= row.day && row.day < dayKey(p.end)) period = p;
+    }
+    if (period) used.set(period, (used.get(period) ?? 0) + credits);
+    else uncovered += credits;
+  }
+  for (const [period, credits] of used) uncovered += Math.max(0, credits - period.credits);
+  let current: CreditPeriod | undefined;
+  for (const p of byStart) if (p.start <= now && now < p.end) current = p;
+  const round = (value: number) => Math.round(value * 100) / 100;
+  return {
+    monthly: current ? round(Math.max(0, current.credits - (used.get(current) ?? 0))) : 0,
+    monthlyTotal: current?.credits ?? 0,
+    ...(current ? { monthlyEndsAt: current.end } : {}),
+    extra: round(extraGranted - uncovered)
+  };
+};
+
+export const ensureBillingTables = (sql: SqlStorage): void => {
+  sql.exec(`CREATE TABLE IF NOT EXISTS credit_periods (
+    invoice TEXT PRIMARY KEY, plan TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, credits REAL NOT NULL)`);
+  sql.exec("CREATE TABLE IF NOT EXISTS billing_events (id TEXT PRIMARY KEY, at INTEGER NOT NULL)");
+  sql.exec("CREATE TABLE IF NOT EXISTS billing_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+};
+
+export const upsertPeriod = (sql: SqlStorage, period: CreditPeriod): void => {
+  sql.exec(
+    `INSERT INTO credit_periods (invoice, plan, start, end, credits) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (invoice) DO UPDATE SET plan = excluded.plan, start = excluded.start, end = excluded.end, credits = excluded.credits`,
+    period.invoice,
+    period.plan,
+    period.start,
+    period.end,
+    period.credits
+  );
+};
+
+export const listPeriods = (sql: SqlStorage): CreditPeriod[] =>
+  [...sql.exec("SELECT * FROM credit_periods ORDER BY start")].map((row) => ({
+    invoice: row.invoice as string,
+    plan: row.plan as string,
+    start: row.start as number,
+    end: row.end as number,
+    credits: row.credits as number
+  }));
+
+/** Record a webhook event id; `false` when it was already handled. */
+export const firstSeen = (sql: SqlStorage, id: string, at: number): boolean => {
+  if ([...sql.exec("SELECT 1 FROM billing_events WHERE id = ?", id)].length > 0) return false;
+  sql.exec("INSERT INTO billing_events (id, at) VALUES (?, ?)", id, at);
+  return true;
+};
+
+export const readBillingState = <T>(sql: SqlStorage, key: string): T | undefined => {
+  const row = [...sql.exec("SELECT value FROM billing_state WHERE key = ?", key)][0];
+  return row ? (JSON.parse(row.value as string) as T) : undefined;
+};
+
+export const writeBillingState = (sql: SqlStorage, key: string, value: unknown): void => {
+  sql.exec(
+    "INSERT INTO billing_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+    key,
+    JSON.stringify(value)
+  );
+};
 
 export interface SandboxRef {
   readonly provider: string;

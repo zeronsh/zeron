@@ -43,6 +43,7 @@ use crate::rail;
 use crate::settings::accounts::AccountsPage;
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
+use crate::settings::billing::BillingPage;
 use crate::settings::cloud::CloudPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
@@ -541,6 +542,8 @@ pub enum SettingsSection {
     Devices,
     /// The user's Cloud device: lifecycle, its providers, GitHub.
     Cloud,
+    /// Plan and credits for Cloud (Stripe).
+    Billing,
     /// Which harnesses the composer offers (enable/disable toggles) —
     /// labeled "Providers".
     Harnesses,
@@ -560,7 +563,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 11] = [
+    pub const ALL: [SettingsSection; 12] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -569,6 +572,7 @@ impl SettingsSection {
         SettingsSection::Harnesses,
         SettingsSection::Devices,
         SettingsSection::Cloud,
+        SettingsSection::Billing,
         SettingsSection::Files,
         SettingsSection::Appshots,
         SettingsSection::Archived,
@@ -589,9 +593,14 @@ impl SettingsSection {
     }
 
     /// [`Self::visible_in_nav`], plus what depends on the account: Cloud
-    /// only while signed in.
+    /// and Billing only while signed in.
     fn shown_in_nav(self, signed_in: bool) -> bool {
-        self.visible_in_nav() && (self != Self::Cloud || signed_in)
+        self.visible_in_nav() && (!self.needs_account() || signed_in)
+    }
+
+    /// Pages about the signed-in account (they open General when signed out).
+    fn needs_account(self) -> bool {
+        matches!(self, Self::Cloud | Self::Billing)
     }
 
     /// Where a generic "open Settings" lands for a remembered section: legacy
@@ -611,6 +620,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "devices",
             SettingsSection::Cloud => "cloud",
+            SettingsSection::Billing => "billing",
             SettingsSection::Harnesses => "providers",
             SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
@@ -629,6 +639,7 @@ impl SettingsSection {
         Some(match slug {
             "devices" => SettingsSection::Devices,
             "cloud" => SettingsSection::Cloud,
+            "billing" => SettingsSection::Billing,
             "providers" | "harnesses" => SettingsSection::Harnesses,
             "agents" => SettingsSection::Agents,
             "appearance" => SettingsSection::Appearance,
@@ -655,6 +666,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "Devices",
             SettingsSection::Cloud => "Cloud",
+            SettingsSection::Billing => "Billing",
             SettingsSection::Harnesses => "Providers",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
@@ -2082,6 +2094,7 @@ pub struct Shell {
     /// Rebuilt per visit and dropped on leaving, which stops its GitHub
     /// polling and status re-checks.
     cloud_page: Option<Entity<CloudPage>>,
+    billing_page: Option<Entity<BillingPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
@@ -2598,6 +2611,7 @@ impl Shell {
             pull_request_cache: Default::default(),
             devices_page: None,
             cloud_page: None,
+            billing_page: None,
             archived_page: None,
             appearance_page: None,
             files_settings_page: None,
@@ -5378,8 +5392,8 @@ impl Shell {
 
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         let mut section = section.canonical();
-        // Signed out there is no Cloud to manage.
-        if section == SettingsSection::Cloud && !self.state.read(cx).signed_in() {
+        // Signed out there is no Cloud or billing to manage.
+        if section.needs_account() && !self.state.read(cx).signed_in() {
             section = SettingsSection::General;
         }
         self.command_palette = None;
@@ -5394,6 +5408,13 @@ impl Shell {
             && self.route != Route::Settings(SettingsSection::Cloud)
         {
             self.cloud_page = None;
+        }
+        // Billing too: a fresh read per visit (it then follows open Stripe
+        // pages until they land).
+        if section == SettingsSection::Billing
+            && self.route != Route::Settings(SettingsSection::Billing)
+        {
+            self.billing_page = None;
         }
         if !matches!(self.route, Route::Settings(_)) {
             self.settings_focus_pending = true;
@@ -5590,6 +5611,16 @@ impl Shell {
                     self.cloud_page = Some(cx.new(|cx| CloudPage::new(state, cx)));
                 }
                 match &self.cloud_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Billing => {
+                if self.billing_page.is_none() {
+                    let state = self.state.clone();
+                    self.billing_page = Some(cx.new(|cx| BillingPage::new(state, cx)));
+                }
+                match &self.billing_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -7932,6 +7963,7 @@ impl Shell {
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Cloud => icons::CLOUD,
+            SettingsSection::Billing => icons::WALLET,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
@@ -13281,6 +13313,10 @@ impl Render for Shell {
         // GitHub sign-in poll and its slow status re-checks.
         if self.cloud_page.is_some() && self.route != Route::Settings(SettingsSection::Cloud) {
             self.cloud_page = None;
+        }
+        // Leaving Billing stops its checks on open Stripe pages.
+        if self.billing_page.is_some() && self.route != Route::Settings(SettingsSection::Billing) {
+            self.billing_page = None;
         }
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
@@ -18832,6 +18868,7 @@ mod settings_modal_regressions {
         for (route, section) in [
             ("settings/devices", SettingsSection::Devices),
             ("settings/cloud", SettingsSection::Cloud),
+            ("settings/billing", SettingsSection::Billing),
             ("settings/providers", SettingsSection::Harnesses),
             ("settings/agents", SettingsSection::Harnesses),
             ("settings/harnesses", SettingsSection::Harnesses),
@@ -18848,7 +18885,7 @@ mod settings_modal_regressions {
                 "{route}"
             );
         }
-        assert_eq!(settings_open_route("settings/billing", remembered), None);
+        assert_eq!(settings_open_route("settings/payments", remembered), None);
         assert_eq!(settings_open_route("new", remembered), None);
     }
 

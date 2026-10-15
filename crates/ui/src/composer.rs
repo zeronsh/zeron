@@ -8814,7 +8814,7 @@ impl Composer {
             _ if self.out_of_cloud_credits(cx) => crate::toast::show(
                 cx,
                 crate::toast::ToastKind::Error,
-                "You're out of Cloud credits. Add credits in Settings → Cloud to send.",
+                "You're out of Cloud credits. Add credits in Settings → Billing to send.",
             ),
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),

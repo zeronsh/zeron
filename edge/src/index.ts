@@ -44,6 +44,7 @@
  *   *    /vault/:orgId/…                — VAULT service binding
  *   GET  /admin/cloud/usage             — ADMIN_TOKEN (operator export)
  *   POST /admin/cloud/credits           — ADMIN_TOKEN (grant a user credits)
+ *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
@@ -59,7 +60,12 @@ import { ChatRoom } from "./chat-room";
 import { CloudAccount } from "./cloud/cloud-account";
 import { CloudIndex } from "./cloud/cloud-index";
 import { DeleteWorkflow, ProvisionWorkflow, SleepWorkflow, WakeWorkflow } from "./cloud/workflows";
-import { autoWakeCloudDevice, handleCloudRoute, handleRunnerPublicRoute } from "./cloud/routes";
+import {
+  autoWakeCloudDevice,
+  handleBillingPublicRoute,
+  handleCloudRoute,
+  handleRunnerPublicRoute
+} from "./cloud/routes";
 import { handleAdminRoute, runCloudCron } from "./cloud/billing";
 import { sandboxProvider } from "./cloud/providers";
 import { FakeProvider } from "./cloud/providers/fake";
@@ -145,6 +151,8 @@ export default {
     //    its enrollment code / key in order to GET a bearer) ─────────────────
     const adminRouted = await handleAdminRoute(request, env, url);
     if (adminRouted) return adminRouted;
+    const billingRouted = await handleBillingPublicRoute(request, env, url);
+    if (billingRouted) return billingRouted;
     const runnerRouted = await handleRunnerPublicRoute(request, env, url);
     if (runnerRouted) return runnerRouted;
 

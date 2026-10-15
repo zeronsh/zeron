@@ -832,6 +832,32 @@ impl CloudPage {
                 _ => Vec::new(),
             }
         };
+        // Credits are bought on the Billing page.
+        if on && busy.is_none() {
+            actions.push(
+                action(
+                    theme,
+                    "cloud-get-credits",
+                    widgets::ActionTone::Quiet,
+                    "Get credits",
+                    true,
+                )
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.defer(|cx| {
+                        let shell = cx
+                            .windows()
+                            .into_iter()
+                            .find_map(|window| window.downcast::<crate::shell::Shell>());
+                        if let Some(shell) = shell {
+                            let _ = shell.update(cx, |shell, _, cx| {
+                                shell.open_settings(crate::shell::SettingsSection::Billing, cx)
+                            });
+                        }
+                    })
+                }))
+                .into_any_element(),
+            );
+        }
         // On ⇄ off. Turning it off deletes every machine, so it asks first.
         let interactive = busy.is_none() && status.state != CloudState::Deleting;
         let accent = theme.accent;

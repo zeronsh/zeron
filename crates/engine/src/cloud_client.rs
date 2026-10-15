@@ -19,8 +19,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use zeron_proto::{
-    CloudSession, CloudSessions, CloudStatus, CloudUsage, GithubConnectProgress, GithubDeviceFlow,
-    GithubRepo, HarnessId, VaultAccount, VaultAccountProfile, VaultProvider, VaultStatus,
+    BillingLink, BillingStatus, CloudSession, CloudSessions, CloudStatus, CloudUsage,
+    GithubConnectProgress, GithubDeviceFlow, GithubRepo, HarnessId, VaultAccount,
+    VaultAccountProfile, VaultProvider, VaultStatus,
 };
 
 #[derive(Deserialize)]
@@ -402,6 +403,42 @@ impl CloudClient {
         }
     }
 
+    // ── Billing ─────────────────────────────────────────────────────────────
+
+    /// `GET /cloud/{orgId}/billing`. Unavailable (signed out, no edge, an
+    /// edge without billing) reads as `available: false`.
+    pub async fn billing_status(&self) -> Result<BillingStatus, EngineError> {
+        let Some(target) = self.target.as_deref() else {
+            return Ok(BillingStatus::default());
+        };
+        match target
+            .call::<BillingStatus>(
+                reqwest::Method::GET,
+                &["cloud", "billing"],
+                &[],
+                None,
+                "Billing",
+            )
+            .await
+        {
+            Ok(status) => Ok(status),
+            Err(Failure::Missing(..)) => Ok(BillingStatus::default()),
+            Err(Failure::Error(error)) => Err(error),
+        }
+    }
+
+    /// `POST /cloud/{orgId}/billing/{checkout|portal}` → the Stripe page.
+    pub async fn billing_link(
+        &self,
+        path: &[&str],
+        body: serde_json::Value,
+    ) -> Result<BillingLink, EngineError> {
+        self.target()?
+            .call::<BillingLink>(reqwest::Method::POST, path, &[], Some(body), "Billing")
+            .await
+            .map_err(Failure::into_error)
+    }
+
     // ── Credential vault ────────────────────────────────────────────────────
 
     /// `GET /vault/{orgId}`. A vault binding that isn't deployed (404 / 501 /
@@ -702,6 +739,9 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::CLOUD_ENABLE
             | methods::CLOUD_DELETE
             | methods::CLOUD_USAGE
+            | methods::BILLING_STATUS
+            | methods::BILLING_CHECKOUT
+            | methods::BILLING_PORTAL
             | methods::CLOUD_SESSIONS
             | methods::CLOUD_SESSION_WAKE
             | methods::CLOUD_SESSION_SLEEP
@@ -716,6 +756,16 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::GITHUB_CONNECT_START
             | methods::GITHUB_CONNECT_POLL
     )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckoutParams {
+    kind: String,
+    #[serde(default)]
+    plan: Option<String>,
+    #[serde(default)]
+    packs: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -842,6 +892,35 @@ pub(crate) async fn dispatch(
                     .map_err(failed)?,
             )
         }
+        methods::BILLING_STATUS => RpcReply::value(&cloud.billing_status().await.map_err(failed)?),
+        methods::BILLING_CHECKOUT => {
+            let p: CheckoutParams = params(raw)?;
+            let body = match (p.kind.as_str(), p.plan, p.packs) {
+                ("subscription", Some(plan), _) => {
+                    serde_json::json!({ "kind": "subscription", "plan": plan })
+                }
+                ("credits", _, Some(packs)) => {
+                    serde_json::json!({ "kind": "credits", "packs": packs })
+                }
+                _ => {
+                    return Err(RpcError::Failed(
+                        "Expected {kind: subscription, plan} or {kind: credits, packs}".into(),
+                    ));
+                }
+            };
+            RpcReply::value(
+                &cloud
+                    .billing_link(&["cloud", "billing", "checkout"], body)
+                    .await
+                    .map_err(failed)?,
+            )
+        }
+        methods::BILLING_PORTAL => RpcReply::value(
+            &cloud
+                .billing_link(&["cloud", "billing", "portal"], serde_json::json!({}))
+                .await
+                .map_err(failed)?,
+        ),
         methods::VAULT_STATUS => RpcReply::value(&cloud.vault_status().await.map_err(failed)?),
         methods::VAULT_PUT_API_KEY => {
             let p: PutKeyParams = params(raw)?;
@@ -1287,6 +1366,30 @@ mod tests {
                     "credits": 120.0, "balance": 380.5
                 }),
             ),
+            ("GET", "/cloud/org_1/billing") => (
+                200,
+                serde_json::json!({
+                    "available": true,
+                    "plan": {"id": "base", "name": "Base", "priceCents": 2000, "monthlyCredits": 45000,
+                        "status": "active", "periodEnd": 99, "cancelAtPeriodEnd": false},
+                    "credits": {"monthly": 40000, "monthlyTotal": 45000, "monthlyEndsAt": 99,
+                        "extra": 12000, "total": 52000},
+                    "plans": [{"id": "base", "name": "Base", "priceCents": 2000, "monthlyCredits": 45000}],
+                    "pack": {"priceCents": 1000, "credits": 12000},
+                    "hasCustomer": true
+                }),
+            ),
+            ("POST", "/cloud/org_1/billing/checkout") => {
+                assert_eq!(*body, serde_json::json!({"kind": "credits", "packs": 3}));
+                (
+                    200,
+                    serde_json::json!({"url": "https://checkout.stripe.test/c/1"}),
+                )
+            }
+            ("POST", "/cloud/org_1/billing/portal") => (
+                409,
+                serde_json::json!({"error": "no_customer", "message": "Subscribe or buy credits first."}),
+            ),
             ("GET", "/cloud/org_1/usage") => (
                 200,
                 serde_json::json!({"from": "2026-09-06", "to": "2026-10-05", "days": [],
@@ -1443,6 +1546,33 @@ mod tests {
 
         assert!(client.usage(Some("2026-13-01"), None).await.is_err());
         assert!(client.usage(None, Some("../x")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn billing_status_checkout_and_portal_against_the_edge() {
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_1");
+        let status = client.billing_status().await.unwrap();
+        assert!(status.available && status.has_customer);
+        assert_eq!(status.plan.as_ref().unwrap().plan.id, "base");
+        assert_eq!(status.credits.total, 52000.0);
+        assert_eq!(status.pack.credits, 12000.0);
+        let link = client
+            .billing_link(
+                &["cloud", "billing", "checkout"],
+                serde_json::json!({"kind": "credits", "packs": 3}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(link.url, "https://checkout.stripe.test/c/1");
+        let error = client
+            .billing_link(&["cloud", "billing", "portal"], serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Subscribe or buy credits first"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

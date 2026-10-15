@@ -122,6 +122,20 @@
     //                           rotate later
     //   ADMIN_TOKEN             operator bearer for GET /admin/cloud/usage
     //                           (unset ⇒ that route 404s)
+    //   STRIPE_SECRET_KEY       Stripe API key (billing; src/cloud/stripe.ts)
+    //   STRIPE_WEBHOOK_SECRET   signing secret of the webhook endpoint
+    //                           https://<edge>/stripe/webhook, subscribed to
+    //                           checkout.session.completed,
+    //                           checkout.session.async_payment_succeeded,
+    //                           customer.subscription.created/updated/deleted,
+    //                           invoice.paid
+    // Billing vars (Stripe Price ids): STRIPE_PRICE_BASE ($20/mo),
+    // STRIPE_PRICE_PRO ($50/mo), STRIPE_PRICE_MAX ($200/mo) — recurring
+    // monthly — and STRIPE_PRICE_CREDITS ($10, one-off: one 12,000-credit
+    // pack). Enable plan switching and cancellation in the Stripe customer
+    // portal settings. Billing reads as unavailable until all are set.
+    // CLOUD_CREDIT_SECONDS: provider billable seconds per credit (default
+    // 60) — what the provider bills for one minute of CLOUD_MACHINE.
     // Optional var CLOUD_EDGE_URL overrides the origin session engines are
     // pointed at (default: the origin of the request that created the session).
     // Optional CLOUD_TEMPLATE names a provider snapshot (engine pre-installed,

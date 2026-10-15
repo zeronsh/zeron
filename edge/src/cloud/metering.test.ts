@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   CLOSE_GRACE_MS,
+  creditBreakdown,
+  creditSeconds,
   creditsOf,
   creditsPerDay,
   dayKey,
@@ -142,5 +144,70 @@ describe("creditsPerDay", () => {
       { day: "2026-09-29", credits: 3 },
       { day: "2026-09-30", credits: 0 }
     ]);
+  });
+});
+
+describe("creditBreakdown", () => {
+  const period = (invoice: string, start: string, end: string, credits: number) => ({
+    invoice,
+    plan: "base",
+    start: at(start),
+    end: at(end),
+    credits
+  });
+  const use = (day: string, minutes: number) => row(day, `bx_${day}`, { seconds: minutes * 60 });
+
+  it("with no plan, everything comes out of credits that never expire", () => {
+    expect(creditBreakdown(1000, [], [use("2026-10-01", 300)], at("2026-10-02T00:00:00Z"))).toEqual({
+      monthly: 0,
+      monthlyTotal: 0,
+      extra: 700
+    });
+  });
+
+  it("spends the period's plan credits first, then extra; unused plan credits lapse", () => {
+    const periods = [
+      period("in_sep", "2026-09-05T00:00:00Z", "2026-10-05T00:00:00Z", 1000),
+      period("in_oct", "2026-10-05T00:00:00Z", "2026-11-05T00:00:00Z", 1000)
+    ];
+    const rows = [
+      use("2026-09-10", 400), // September: 600 of its 1000 lapse
+      use("2026-10-06", 900),
+      use("2026-10-07", 300), // October: 200 past its 1000 come out of extra
+      use("2026-08-01", 50) // before any plan: extra
+    ];
+    expect(creditBreakdown(500, periods, rows, at("2026-10-08T00:00:00Z"))).toEqual({
+      monthly: 0,
+      monthlyTotal: 1000,
+      monthlyEndsAt: at("2026-11-05T00:00:00Z"),
+      extra: 250
+    });
+    // Mid-October with less use: plan credits left this period.
+    expect(creditBreakdown(0, periods, [use("2026-10-06", 100)], at("2026-10-08T00:00:00Z"))).toMatchObject({
+      monthly: 900,
+      extra: 0
+    });
+    // After the period ends with nothing renewed, the plan credits are gone.
+    expect(creditBreakdown(0, periods, [], at("2026-11-06T00:00:00Z"))).toEqual({ monthly: 0, monthlyTotal: 0, extra: 0 });
+  });
+
+  it("after a mid-period upgrade, the new plan's credits cover the rest of the period", () => {
+    const periods = [
+      period("in_base", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z", 1000),
+      period("in_upgrade", "2026-10-10T12:00:00Z", "2026-11-01T00:00:00Z", 5000)
+    ];
+    const rows = [use("2026-10-05", 800), use("2026-10-11", 2000)];
+    expect(creditBreakdown(0, periods, rows, at("2026-10-12T00:00:00Z"))).toMatchObject({
+      monthly: 3000,
+      monthlyTotal: 5000,
+      extra: 0
+    });
+  });
+
+  it("scales by the configured billable seconds per credit", () => {
+    expect(creditBreakdown(100, [], [use("2026-10-01", 60)], at("2026-10-02T00:00:00Z"), 120).extra).toBe(70);
+    expect(creditSeconds("120")).toBe(120);
+    expect(creditSeconds(undefined)).toBe(60);
+    expect(creditSeconds("-5")).toBe(60);
   });
 });

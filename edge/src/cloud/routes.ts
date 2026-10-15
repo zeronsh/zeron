@@ -6,6 +6,11 @@
  *   POST   /cloud/{orgId}/enable                   turn Cloud on (user)
  *   DELETE /cloud/{orgId}                          turn Cloud off: every session machine (user)
  *   GET    /cloud/{orgId}/usage?from=&to=          credits: balance + use per day (user)
+ *   GET    /cloud/{orgId}/billing                  plan, credits, what can be bought (user)
+ *   POST   /cloud/{orgId}/billing/checkout         {kind: subscription, plan} | {kind: credits, packs} → {url}
+ *   POST   /cloud/{orgId}/billing/portal           → {url} (Stripe Billing Portal)
+ *   POST   /stripe/webhook                         pre-bearer: Stripe-signed events
+ *   GET    /billing/done                           pre-bearer: "return to Zeron" after Checkout
  *   GET    /cloud/{orgId}/projects                 Cloud projects (user)
  *   PUT    /cloud/{orgId}/projects/{spaceId}       add/update a project (user)
  *   DELETE /cloud/{orgId}/projects/{spaceId}       remove a project + its sessions (user)
@@ -32,6 +37,7 @@ import { DAY_MS, dayKey, isDayKey } from "./metering";
 /** The longest range a usage read covers. */
 const MAX_USAGE_DAYS = 366;
 import { CLOUD_DEVICE_PREFIX, cloudAccountName } from "./policy";
+import { MAX_PACKS, billingAvailable, parseEvent, planById, verifySignature, type StripeEnv } from "./stripe";
 import { sandboxProvider, type ProviderEnv } from "./providers";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -52,7 +58,8 @@ type CloudEnv = Pick<
   | "AUTH_MODE"
   | "CLOUD_EDGE_URL"
 > &
-  ProviderEnv;
+  ProviderEnv &
+  StripeEnv;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -84,6 +91,68 @@ const rpc = async <T>(run: () => Promise<CloudResult<T>>): Promise<Response> => 
     console.error("cloud rpc failed", String(e));
     return jsonError(503, "unavailable", "Cloud is temporarily unavailable; try again.");
   }
+};
+
+/** Stripe events are a few KB; anything larger isn't one. */
+const MAX_WEBHOOK_BODY = 256 * 1024;
+
+/**
+ * `POST /stripe/webhook` (Stripe-signed, no bearer) and `GET /billing/done`
+ * (the page Checkout and the portal return to) — routed BEFORE the bearer
+ * gate. A verified event goes to the CloudAccount its metadata names; one
+ * billing ignores is acknowledged so Stripe stops retrying it.
+ */
+export const handleBillingPublicRoute = async (
+  request: Request,
+  env: CloudEnv,
+  url: URL
+): Promise<Response | undefined> => {
+  if (url.pathname === "/billing/done" && request.method === "GET") return billingDonePage(url);
+  if (url.pathname !== "/stripe/webhook") return undefined;
+  if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+  if (!env.STRIPE_WEBHOOK_SECRET || !env.CLOUD_ACCOUNTS) {
+    return jsonError(503, "unavailable", "Billing isn't set up on this server.");
+  }
+  const payload = await request.text();
+  if (payload.length > MAX_WEBHOOK_BODY) return jsonError(413, "too_large", "Body too large.");
+  if (!(await verifySignature(env.STRIPE_WEBHOOK_SECRET, request.headers.get("stripe-signature"), payload))) {
+    return jsonError(400, "bad_signature", "Signature check failed.");
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(payload);
+  } catch {
+    return jsonError(400, "bad_request", "Body must be JSON.");
+  }
+  if (!isObject(raw)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+  const event = parseEvent(env, raw);
+  if (!event) return json({ received: true });
+  try {
+    const result = await accountStub(env.CLOUD_ACCOUNTS, event.account.orgId, event.account.userId).applyBillingEvent(event);
+    return json({ received: true, applied: result.applied });
+  } catch (e) {
+    console.error("billing: applying a webhook failed", event.eventId, String(e));
+    // Stripe retries a non-2xx: nothing is lost.
+    return jsonError(503, "unavailable", "Try again.");
+  }
+};
+
+/** The page a browser lands on after Checkout or the portal. */
+const billingDonePage = (url: URL): Response => {
+  const result = url.searchParams.get("result");
+  const [title, body] =
+    result === "success"
+      ? ["You're all set", "Your purchase is complete. Head back to Zeron — your credits are on their way."]
+      : result === "canceled"
+        ? ["Checkout canceled", "Nothing was charged. You can head back to Zeron."]
+        : ["Done", "You can head back to Zeron."];
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Zeron</title>
+<style>:root{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif;background:#0d0d0f;color:#ededef}
+@media (prefers-color-scheme:light){body{background:#f7f7f8;color:#18181b}.card{background:#fff;border-color:#e4e4e7}p{color:#52525b}}
+.card{max-width:380px;padding:40px 32px;border:1px solid #27272a;border-radius:14px;background:#161618;text-align:center}
+h1{margin:0 0 8px;font-size:19px;font-weight:600}p{margin:0;color:#a1a1aa}</style></head>
+<body><div class="card"><h1>${title}</h1><p>${body}</p></div></body></html>`;
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
 };
 
 /**
@@ -185,6 +254,40 @@ export const handleCloudRoute = async (
     }
     if (!ns) return json({ from, to, days: [], credits: 0, balance: 0, available: false });
     return rpc(() => accountStub(ns, orgId, auth.userId).usage(caller, from, to));
+  }
+  if (rest[0] === "billing") {
+    if (!ns) return unavailable();
+    const stub = accountStub(ns, orgId, auth.userId);
+    // Checkout and the portal come back to this edge's own page, in the
+    // browser they were opened in.
+    const returnUrl = `${url.origin}/billing/done`;
+    if (rest.length === 1 && request.method === "GET") {
+      return rpc(() => stub.billingStatus(caller, billingAvailable(env)));
+    }
+    if (!billingAvailable(env)) return jsonError(503, "unavailable", "Billing isn't set up on this server yet.");
+    if (rest.length === 2 && rest[1] === "checkout" && request.method === "POST") {
+      const body = await readJsonBody(request, 1024);
+      if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+      if (body.kind === "subscription" && typeof body.plan === "string" && planById(body.plan)) {
+        const plan = planById(body.plan)!.id;
+        return rpc(() => stub.checkout(caller, { kind: "subscription", plan }, returnUrl));
+      }
+      if (
+        body.kind === "credits" &&
+        typeof body.packs === "number" &&
+        Number.isInteger(body.packs) &&
+        body.packs >= 1 &&
+        body.packs <= MAX_PACKS
+      ) {
+        const packs = body.packs;
+        return rpc(() => stub.checkout(caller, { kind: "credits", packs }, returnUrl));
+      }
+      return jsonError(400, "bad_request", `Expected {kind: "subscription", plan} or {kind: "credits", packs: 1–${MAX_PACKS}}.`);
+    }
+    if (rest.length === 2 && rest[1] === "portal" && request.method === "POST") {
+      return rpc(() => stub.portal(caller, returnUrl));
+    }
+    return jsonError(404, "not_found", "Not found.");
   }
   if (!ns) return unavailable();
   const stub = accountStub(ns, orgId, auth.userId);

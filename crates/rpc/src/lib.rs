@@ -277,6 +277,15 @@ pub mod methods {
     /// `{from?: "YYYY-MM-DD", to?: "YYYY-MM-DD"}` (default: the last 30 days)
     /// → `CloudUsage`.
     pub const CLOUD_USAGE: &str = "CloudUsage";
+    /// The signed-in user's plan and credits, and what can be bought:
+    /// `{}` → `BillingStatus`.
+    pub const BILLING_STATUS: &str = "BillingStatus";
+    /// A Stripe Checkout page: `{kind: "subscription", plan}` or
+    /// `{kind: "credits", packs}` → `BillingLink`.
+    pub const BILLING_CHECKOUT: &str = "BillingCheckout";
+    /// The Stripe Billing Portal (change plan, payment method, invoices,
+    /// cancel): `{}` → `BillingLink`.
+    pub const BILLING_PORTAL: &str = "BillingPortal";
     // Credential vault (IPC-only; the edge forwards to the vault Worker).
     /// `{}` → `VaultStatus`.
     pub const VAULT_STATUS: &str = "VaultStatus";

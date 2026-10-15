@@ -62,6 +62,21 @@ export interface Env {
   CLOUD_IDLE_MINUTES?: string;
   /** Credits a user gets the first time they turn Cloud on (default 0). */
   CLOUD_STARTING_CREDITS?: string;
+  /** Provider billable seconds per credit (default 60): set to what the
+   * provider bills for a minute of the default machine, so a credit is a
+   * minute of it. Larger machines scale by the provider's multiplier. */
+  CLOUD_CREDIT_SECONDS?: string;
+  /** Stripe (cloud/stripe.ts): API key, webhook signing secret and the
+   * Price ids of the monthly plans and the credit pack. Billing reads as
+   * unavailable until all are set. */
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_BASE?: string;
+  STRIPE_PRICE_PRO?: string;
+  STRIPE_PRICE_MAX?: string;
+  STRIPE_PRICE_CREDITS?: string;
+  /** Stripe API origin override (tests point it at a fake). */
+  STRIPE_API_URL?: string;
   /** Origin session engines talk to; default = the creating request's
    * origin. For dev tunnels. */
   CLOUD_EDGE_URL?: string;

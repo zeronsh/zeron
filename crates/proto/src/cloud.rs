@@ -198,6 +198,84 @@ pub struct CloudUsage {
     pub available: bool,
 }
 
+/// One monthly plan. A credit is a minute of the default machine.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingPlan {
+    /// `base` · `pro` · `max`.
+    pub id: String,
+    pub name: String,
+    pub price_cents: u32,
+    pub monthly_credits: f64,
+}
+
+/// The plan the user is on.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingSubscription {
+    #[serde(flatten)]
+    pub plan: BillingPlan,
+    /// Stripe status: `active`, `trialing`, `past_due`.
+    pub status: String,
+    /// Unix ms the period ends: renews, or lapses when canceling.
+    pub period_end: i64,
+    pub cancel_at_period_end: bool,
+}
+
+/// Where the credit balance stands.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingCredits {
+    /// Plan credits left this period (they expire when it ends).
+    #[serde(default)]
+    pub monthly: f64,
+    #[serde(default)]
+    pub monthly_total: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_ends_at: Option<i64>,
+    /// Credits that never expire.
+    #[serde(default)]
+    pub extra: f64,
+    /// What sessions can spend now.
+    #[serde(default)]
+    pub total: f64,
+}
+
+/// The one-off credit pack.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingPack {
+    pub price_cents: u32,
+    pub credits: f64,
+}
+
+/// `BillingStatus` reply.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingStatus {
+    /// Billing is configured on the server (purchases can be made).
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<BillingSubscription>,
+    #[serde(default)]
+    pub credits: BillingCredits,
+    #[serde(default)]
+    pub plans: Vec<BillingPlan>,
+    #[serde(default)]
+    pub pack: BillingPack,
+    /// A Stripe customer exists (the portal can open).
+    #[serde(default)]
+    pub has_customer: bool,
+}
+
+/// `BillingCheckout` / `BillingPortal` reply: the page to open.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingLink {
+    pub url: String,
+}
+
 /// Credentials the vault can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
