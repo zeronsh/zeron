@@ -74,6 +74,7 @@ echo "running Zeron Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
 # -W keeps the script attached until the app exits. Runtime logs remain in the
 # isolated data directory (`target/macos-dev/data/logs/zeron-headed.log`).
 OPEN_ENV=(
+  --env "ZERON_AUTO_UPDATE=0"
   --env "ZERON_DATA_DIR=$DATA_DIR"
   --env "ZERON_IPC_PORT=$IPC_PORT"
 )
