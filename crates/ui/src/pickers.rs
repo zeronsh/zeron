@@ -7570,6 +7570,18 @@ mod tests {
                 pickers
                     .state
                     .update(cx, |state, _| state.cloud_status = Some(cloud_on(120.0)));
+                // Signed out, even a (stale) Cloud-on status offers no Cloud.
+                assert_eq!(devices(pickers, cx), [("Studio".to_string(), false)]);
+                pickers.state.update(cx, |state, _| {
+                    state.auth = Some(zeron_proto::AuthState::SignedIn {
+                        user: zeron_proto::UserProfile {
+                            id: "u".into(),
+                            email: "u@example.com".into(),
+                            name: None,
+                        },
+                        org_id: Some("org".into()),
+                    })
+                });
                 // On, and the origin names a repository Cloud reaches (any
                 // case): a device row, never a checkout kind.
                 assert_eq!(

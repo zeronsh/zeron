@@ -8809,6 +8809,13 @@ impl Composer {
             // escape_stops_active_agent is enabled.
             SendButtonMode::Stop => {}
             _ if no_content => {}
+            // Out of credits, a Cloud send can't start or wake its machine:
+            // say so instead of a button that silently does nothing.
+            _ if self.out_of_cloud_credits(cx) => crate::toast::show(
+                cx,
+                crate::toast::ToastKind::Error,
+                "You're out of Cloud credits. Add credits in Settings → Cloud to send.",
+            ),
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),
             // Busy: keep the message queued until the current turn ends.
@@ -10693,8 +10700,10 @@ impl Composer {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
+                // Dimmed when out of Cloud credits, but a click still says why.
+                let explains = self.out_of_cloud_credits(cx);
                 send_circle("composer-send", blocked, theme)
-                    .when(!blocked, |el| {
+                    .when(!blocked || explains, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .tooltip(crate::settings::widgets::text_tooltip(

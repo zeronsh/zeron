@@ -2311,11 +2311,14 @@ impl AppState {
     }
 
     /// Whether Cloud is on for this account (its logical device exists).
+    /// Cloud is on for this account — never while signed out, whatever a
+    /// stale status says.
     pub fn cloud_enabled(&self) -> bool {
-        self.cloud_status
+        self.signed_in()
+            && (self.cloud_status
             .as_ref()
             .is_some_and(crate::cloud::account_enabled)
-            || self.cloud_account_device().is_some()
+                || self.cloud_account_device().is_some())
     }
 
     /// The Cloud session `chat_id` runs in — its own, or for a side chat its
