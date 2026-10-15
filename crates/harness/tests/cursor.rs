@@ -88,6 +88,100 @@ async fn run_to_first_done(
 }
 
 #[tokio::test]
+async fn run_sends_catalog_defaults_when_options_are_implicit() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:model-default");
+    req.model = Some("auto-smart".into());
+    let events = run_to_first_done(&harness(), req, controls).await;
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_preserves_explicit_options_over_catalog_defaults() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:model-override");
+    req.model = Some("auto-smart".into());
+    req.model_options
+        .insert("optimize_for".into(), serde_json::json!("intelligence"));
+    let events = run_to_first_done(&harness(), req, controls).await;
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_preserves_legacy_auto_options_without_duplicate_defaults() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:model-legacy");
+    req.model = Some("auto-smart".into());
+    req.model_options
+        .insert("optimizeFor".into(), serde_json::json!("speed"));
+    let events = run_to_first_done(&harness(), req, controls).await;
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn catalog_failure_does_not_block_an_existing_model_selection() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("shim.sh");
+    let source = include_str!("fixtures/fake-cursor-shim.sh").replacen(
+        "if [ \"$1\" = \"models\" ]; then",
+        "if [ \"$1\" = \"models\" ]; then\n  emit '{\"ev\":\"fatal\",\"message\":\"rate limit\"}'\n  exit 1",
+        1,
+    );
+    std::fs::write(&shim, source).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = CursorHarness::new().with_executable(shim);
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:model-override");
+    req.model = Some("auto-smart".into());
+    req.model_options
+        .insert("optimize_for".into(), serde_json::json!("intelligence"));
+    let events = run_to_first_done(&harness, req, controls).await;
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn happy_path_maps_shim_frames_and_tags_subagents() {
     let (controls, _steer, _token) = controls();
     let events = run_to_first_done(&harness(), request("scenario:happy"), controls).await;

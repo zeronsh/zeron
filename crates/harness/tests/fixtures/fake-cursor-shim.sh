@@ -21,6 +21,36 @@ esac
 
 case "$first" in
 
+*scenario:model-default*)
+  case "$first" in
+    *'"modelOptions":{"optimize_for":"balanced"}'*) ;;
+    *) emit '{"ev":"fatal","message":"missing catalog default"}'; exit 1 ;;
+  esac
+  emit '{"ev":"ready","agentId":"agent-options","model":"auto-smart"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
+
+*scenario:model-legacy*)
+  case "$first" in
+    *'"modelOptions":{"optimizeFor":"speed"}'*) ;;
+    *) emit '{"ev":"fatal","message":"legacy option conflicts with catalog default"}'; exit 1 ;;
+  esac
+  emit '{"ev":"ready","agentId":"agent-options","model":"auto-smart"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
+
+*scenario:model-override*)
+  case "$first" in
+    *'"modelOptions":{"optimize_for":"intelligence"}'*) ;;
+    *) emit '{"ev":"fatal","message":"explicit option was overwritten"}'; exit 1 ;;
+  esac
+  emit '{"ev":"ready","agentId":"agent-options","model":"auto-smart"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
+
 *scenario:mcp*)
   case "$first" in
     *'"mcp":{"args":["mcp"],"command":"/path with spaces/zeron","env":{"ZERON_CHAT_ID":"origin-chat"},"name":"zeron"}'*) ;;

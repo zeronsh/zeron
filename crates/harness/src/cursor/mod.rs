@@ -306,9 +306,26 @@ impl Harness for CursorHarness {
 
     async fn run(
         &self,
-        request: RunRequest,
+        mut request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // plus requires explicit defaults, but catalog outages must not block existing sdk runs.
+        if let Some(model_id) = request.model.as_deref()
+            && let Ok(models) = self.models().await
+            && let Some(model) = models.iter().find(|model| model.id == model_id)
+        {
+            for option in &model.options {
+                if option.id == "optimize_for" && request.model_options.contains_key("optimizeFor")
+                {
+                    continue;
+                }
+                request
+                    .model_options
+                    .entry(option.id.clone())
+                    .or_insert_with(|| Value::String(option.default_choice.clone()));
+            }
+        }
+
         let lease = if self.executable.is_none() {
             Some(state::Lease::acquire(&state::state_root(), request.resume.as_deref()).await?)
         } else {
