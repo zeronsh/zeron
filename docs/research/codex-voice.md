@@ -164,15 +164,15 @@ Data flow:
 - Usage is billed to the user's Codex plan or credits by OpenAI.
 
 The microphone purpose strings (`dist/macos/Info*.plist`,
-`apps/ios/Zeron/Info.plist`) state that voice sessions stream audio to OpenAI;
-dictation stays on device.
+`apps/ios/Zeron/Info.plist`) state that voice sessions stream audio to OpenAI.
+Desktop dictation stays on device; a phone's dictation streams to the chat's
+host over the device relay for that host's own model (see
+[desktop-dictation.md](../reference/desktop-dictation.md#ios)).
 
 Notices: `THIRD_PARTY_NOTICES.md` covers the Apache-2.0 Codex protocol
 adaptation (with its upstream NOTICE and an OpenAI trademark/non-affiliation
-statement), the MIT orb chain (Bezel, gpui-thinking-orbs, thinking-orbs) and
-WebRTC for iOS. macOS, Windows and Linux packages ship `LICENSE` and
-`THIRD_PARTY_NOTICES.md`; the iOS app ships `Voice/WebRTC-LICENSE.txt` and
-`Voice/ThinkingOrbs-LICENSE.txt`. No Codex binaries are redistributed.
+statement) and WebRTC for iOS. macOS, Windows and Linux packages ship `LICENSE` and
+`THIRD_PARTY_NOTICES.md`; the iOS app ships `Voice/WebRTC-LICENSE.txt`. No Codex binaries are redistributed.
 
 Pending before a public release (owner decisions, not code):
 

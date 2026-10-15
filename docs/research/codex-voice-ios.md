@@ -8,8 +8,7 @@ whose Swift package declares binary SHA-256
 `f9890492b0016e4c88ab20f07867b8b420054caedc8a692b2ec6ac041f3cf6b2`.
 Xcode verifies this artifact checksum and records the resolved revision. Retain
 WebRTC's bundled notices when distributing (`Voice/WebRTC-LICENSE.txt` is copied
-from the pinned XCFramework and included as an app resource, as is the orb's MIT
-notice `Voice/ThinkingOrbs-LICENSE.txt`; see `THIRD_PARTY_NOTICES.md` and the
+from the pinned XCFramework and included as an app resource; see `THIRD_PARTY_NOTICES.md` and the
 privacy/legal section of [codex-voice.md](codex-voice.md)). The package wraps the upstream native
 SDK rather than reimplementing its codecs, echo cancellation or audio device.
 
@@ -32,8 +31,8 @@ or failed connection closes it; it never resumes automatically. Cancellation
 invalidates pending continuations so late SDK callbacks cannot return a second
 result or reactivate media.
 
-The orb is the desktop's: `zeron-orb` computes geometry, clock, audio response and
-crossfades for both, and iOS only paints the frames (`OrbView`).
+The glyph is the desktop's: `zeron-orb`'s glyph engine decides every dot (its
+level, colour and motion) for both, and iOS only fills the circles (`GlyphView`).
 
 Required live checks: iPhone on Wi-Fi and cellular, Fedora and Mac hosts, actual
 bidirectional sound, barge-in/AEC, Bluetooth and route changes, background during

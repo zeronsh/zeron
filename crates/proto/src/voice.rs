@@ -1,5 +1,6 @@
 //! Ephemeral local voice contracts. These must never enter the document journal.
 use serde::{Deserialize, Serialize};
+pub mod dictation;
 pub mod remote;
 
 pub const MAX_AUDIO_BYTES: usize = 16_384;
@@ -191,6 +192,10 @@ pub enum VoiceEvent {
         #[serde(default)]
         item_id: Option<String>,
         text: String,
+        /// Who is speaking, when the provider says so as the turn begins:
+        /// before its final, which always does.
+        #[serde(default)]
+        role: Option<VoiceRole>,
     },
     Final {
         transcript: VoiceTranscript,

@@ -14,6 +14,7 @@ zeron-harness.workspace = true
 zeron-rpc.workspace = true
 zeron-update.workspace = true
 zeron-visual.workspace = true
+zeron-voice = { path = "../voice" }
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true

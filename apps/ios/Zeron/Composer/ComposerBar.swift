@@ -63,6 +63,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var onChipTap: ((String, UIView) -> Void)?
     var onHeightChange: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
+    /// Where a dictation's words are written (the chat's host); nil when
+    /// there is none to write them.
+    var dictationTarget: (() -> DictationTarget?)?
     /// `@` file search (nil disables mentions).
     var mentionSearch: ((String) async -> [FileMatch])?
 
@@ -108,6 +111,34 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private let suggestions = MentionSuggestions()
     private var mentionQuery: (range: NSRange, query: String)?
     private var mentionTask: Task<Void, Never>?
+
+    // Dictation (see `Voice/Dictation.swift`): the microphone is offered
+    // while nothing else has it; a voice call takes it away.
+    var dictationEnabled = true {
+        didSet {
+            guard dictationEnabled != oldValue else { return }
+            if !dictationEnabled { cancelDictation() }
+            micWidth.constant = dictationEnabled ? Self.control : 0
+            micGap.constant = dictationEnabled ? -8 : 0
+            micButton.isHidden = !dictationEnabled
+            superview?.layoutIfNeeded()
+        }
+    }
+    private let micButton = UIButton(type: .system)
+    private let track = DictationTrack()
+    private var micWidth: NSLayoutConstraint!
+    private var micGap: NSLayoutConstraint!
+    private var dictation = DictationDraft()
+    private var transcriber: DictationTranscriber?
+    private var dictationLink: CADisplayLink?
+    /// Words are being put in by the dictation, not typed.
+    private var applyingDictation = false
+    private var pendingDelivery: DeliveryMode = .queue
+    /// The track's unrolling, 0 (away) to 1 (across the controls), and
+    /// the passage it is on.
+    private var trackT: CGFloat = 0
+    private var trackMorph: (from: CGFloat, to: CGFloat, start: CFTimeInterval)?
+    private static let trackMorphDuration: CFTimeInterval = 0.42
 
     private let font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 16.5))
     private var maxLines: Int {
@@ -200,11 +231,33 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         actionButton.setContentHuggingPriority(.required, for: .horizontal)
         content.addSubview(actionButton)
 
+        // The microphone: a quiet glyph beside Send. One tap starts the
+        // dictation; the same button, now a stop, ends it.
+        var mic = UIButton.Configuration.plain()
+        mic.image = UIImage(systemName: "microphone", withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))
+        mic.baseForegroundColor = Palette.secondary
+        mic.contentInsets = .zero
+        micButton.configuration = mic
+        micButton.accessibilityIdentifier = "composer-dictation"
+        micButton.accessibilityHint = "Tap to start, tap again to stop and transcribe."
+        micButton.translatesAutoresizingMaskIntoConstraints = false
+        micButton.addAction(UIAction { [weak self] _ in self?.toggleDictation() }, for: .touchUpInside)
+        content.addSubview(micButton)
+        track.alpha = 0
+        track.isHidden = true
+        content.addSubview(track)
+
         let c = Self.control
         textHeight = textView.heightAnchor.constraint(equalToConstant: Self.compactHeight)
         thumbsHeight = thumbsScroll.heightAnchor.constraint(equalToConstant: 0)
         toolbarHeight = toolbar.heightAnchor.constraint(equalToConstant: 0)
+        micWidth = micButton.widthAnchor.constraint(equalToConstant: c)
+        micGap = micButton.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8)
         NSLayoutConstraint.activate([
+            micWidth,
+            micGap,
+            micButton.heightAnchor.constraint(equalToConstant: c),
+            micButton.centerYAnchor.constraint(equalTo: actionButton.centerYAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor),
             glass.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -238,7 +291,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             actionButton.widthAnchor.constraint(greaterThanOrEqualToConstant: c),
 
             chipScroll.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 8),
-            chipScroll.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
+            chipScroll.trailingAnchor.constraint(equalTo: micButton.leadingAnchor, constant: -8),
             chipScroll.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             chipScroll.heightAnchor.constraint(equalToConstant: c),
             chipStrip.topAnchor.constraint(equalTo: chipScroll.contentLayoutGuide.topAnchor),
@@ -254,7 +307,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             actionButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
             actionButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
             textView.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 10),
-            textView.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
+            textView.trailingAnchor.constraint(equalTo: micButton.leadingAnchor, constant: -6),
         ]
         // Card: full-width text, controls in the toolbar row.
         cardConstraints = [
@@ -278,7 +331,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         var v = touch.view
         while let view = v, view !== glass {
-            if view is UIControl { return false }
+            if view is UIControl || view === track { return false }
             v = view.superview
         }
         return true
@@ -303,10 +356,11 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     // MARK: Resting ↔ card
 
-    /// The card is for composing: focused, holding photos, or pinned open
-    /// (new-session canvas). An unfocused draft rests as the capsule.
+    /// The card is for composing: focused, holding photos, pinned open
+    /// (new-session canvas) or taking a dictation, whose words show above
+    /// the track as they land. An unfocused draft rests as the capsule.
     private var wantsCard: Bool {
-        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty
+        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty || dictation.phase.active
     }
 
     private func updateMode(animated: Bool) {
@@ -519,6 +573,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     // MARK: Text
 
     func textViewDidChange(_ textView: UITextView) {
+        // Typing over a dictation ends it: the words typed stay.
+        if !applyingDictation, dictation.phase.active { cancelDictation() }
         textChanged()
         styleMentions()
         updateMentionQuery()
@@ -567,6 +623,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         if textView.bounds.width > 0, !textView.text.isEmpty, abs(textView.contentSize.height - textHeight.constant) > 1 {
             recomputeTextHeight()
         }
+        layoutTrack()
     }
 
     // MARK: Action button
@@ -576,8 +633,10 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     private func refreshAction(animated: Bool) {
-        let action: Action = running ? (hasContent ? .queue : .stop) : .send
-        let enabled = action == .stop || hasContent
+        // Dictating, Send waits for the words and sends them once.
+        let content = hasContent || dictation.phase.active
+        let action: Action = running ? (content ? .queue : .stop) : .send
+        let enabled = action == .stop || content
         let steering = action == .queue && preferredDelivery == .steer && canSteer
         var config = UIButton.Configuration.filled()
         config.cornerStyle = .capsule
@@ -649,6 +708,13 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     private func send(_ mode: DeliveryMode) {
+        // Send during a dictation waits for its final words, then sends
+        // them once, the way they were asked to be delivered.
+        if dictation.phase.active {
+            pendingDelivery = mode
+            finishDictation(send: true)
+            return
+        }
         guard hasContent else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let body = mentions.encode(textView.text.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -664,12 +730,314 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         textChanged()
     }
 
-    // External keyboards: ⌘↩ sends.
+    // External keyboards: ⌘↩ sends; Esc cancels a dictation.
     override var keyCommands: [UIKeyCommand]? {
-        [UIKeyCommand(title: "Send", action: #selector(commandReturn), input: "\r", modifierFlags: .command)]
+        var commands = [UIKeyCommand(title: "Send", action: #selector(commandReturn), input: "\r", modifierFlags: .command)]
+        if dictation.phase.active {
+            commands.append(UIKeyCommand(title: "Cancel dictation", action: #selector(escape), input: UIKeyCommand.inputEscape))
+        }
+        return commands
     }
 
     @objc private func commandReturn() {
-        if hasContent { primaryAction() }
+        if hasContent || dictation.phase.active { primaryAction() }
     }
+
+    @objc private func escape() {
+        cancelDictation()
+    }
+
+    // MARK: Dictation
+
+    /// Put away (a question panel takes the composer's place) or off screen,
+    /// a dictation cannot land anywhere: it ends.
+    override var isHidden: Bool {
+        didSet { if isHidden { cancelDictation() } }
+    }
+
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        if newWindow == nil { cancelDictation() }
+    }
+
+    private func makeTranscriber() -> DictationTranscriber? {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-dictation-preview") { return ScriptedDictation() }
+        #endif
+        guard let target = dictationTarget?() else { return nil }
+        return RemoteDictation(target: target)
+    }
+
+    #if DEBUG
+    /// A scripted dictation, listening for five seconds then transcribing,
+    /// for screenshots and UI work (with `-dictation-preview`).
+    func previewDictation() {
+        beginDictation()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.finishDictation(send: false) }
+    }
+    #endif
+
+    /// The microphone: idle it starts, listening it stops and transcribes,
+    /// opening it cancels; transcribing it waits.
+    private func toggleDictation() {
+        switch dictation.phase {
+        case .listening: finishDictation(send: false)
+        case .requesting: cancelDictation()
+        case .finalizing: break
+        default: beginDictation()
+        }
+    }
+
+    private func beginDictation() {
+        guard dictationEnabled, transcriber == nil, !dictation.phase.active else { return }
+        guard textView.markedTextRange == nil else {
+            explain(.unavailable("Finish composing the current character before dictating."))
+            return
+        }
+        guard let transcriber = makeTranscriber() else {
+            explain(.unavailable("This chat has no host to write the dictation on."))
+            return
+        }
+        dictation.begin(content: textView.text, selection: textView.selectedRange)
+        let generation = dictation.generation
+        transcriber.onEvent = { [weak self] event in self?.dictated(event, generation: generation) }
+        self.transcriber = transcriber
+        track.glyph.orb = .connecting
+        track.isHidden = false
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        transcriber.start()
+        startDictationLink()
+        updateMode(animated: true)
+        morphTrack(to: 1)
+        refreshAction(animated: true)
+        refreshDictationControls()
+    }
+
+    /// Ends capture; the final words follow. `send` submits them once in.
+    private func finishDictation(send: Bool) {
+        guard dictation.phase.active else { return }
+        guard dictation.finish(send: send, now: Date()) else { return }
+        transcriber?.finish()
+        track.glyph.orb = .transcribing
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        refreshDictationControls()
+    }
+
+    /// Drops the dictation and anything it still owed; the words already
+    /// in the draft stay.
+    func cancelDictation() {
+        guard dictation.phase.active || transcriber != nil else { return }
+        dictation.cancel()
+        transcriber?.cancel()
+        transcriber = nil
+        settleDictation()
+    }
+
+    private func completeDictation(_ phase: DictationDraft.Phase) {
+        let send = dictation.complete(phase)
+        transcriber?.cancel()
+        transcriber = nil
+        settleDictation()
+        explain(phase)
+        if send { self.send(pendingDelivery) }
+    }
+
+    private func settleDictation() {
+        morphTrack(to: 0)
+        stopDictationLink()
+        updateMode(animated: true)
+        refreshAction(animated: true)
+        refreshDictationControls()
+    }
+
+    private func dictated(_ event: DictationEvent, generation: UInt64) {
+        guard generation == dictation.generation, dictation.phase.active else { return }
+        switch event {
+        case .listening:
+            dictation.listen(now: Date())
+            track.glyph.orb = .listening
+            UIAccessibility.post(notification: .announcement, argument: "Listening")
+            refreshDictationControls()
+        case let .partial(words):
+            applyDictation(words)
+        case .finalizing:
+            finishDictation(send: false)
+        case .interrupted:
+            dictation.dropPendingSend()
+            finishDictation(send: false)
+        case let .final(words):
+            if words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !dictation.hasPartial {
+                completeDictation(.noSpeech)
+            } else {
+                applyDictation(words)
+                completeDictation(.idle)
+            }
+        case let .denied(message): completeDictation(.denied(message))
+        case let .unavailable(message): completeDictation(.unavailable(message))
+        case let .failed(message): completeDictation(.failed(message))
+        }
+    }
+
+    private func applyDictation(_ words: String) {
+        var content: String = textView.text
+        guard let cursor = dictation.replace(in: &content, with: words) else {
+            if !dictation.phase.active { cancelDictation() }
+            return
+        }
+        applyingDictation = true
+        textView.text = content
+        textView.selectedRange = NSRange(location: cursor, length: 0)
+        applyingDictation = false
+        textChanged()
+        styleMentions()
+    }
+
+    /// What the microphone and the track say of the dictation.
+    private func refreshDictationControls() {
+        let phase = dictation.phase
+        micButton.accessibilityLabel = phase.actionLabel
+        micButton.isEnabled = dictationEnabled && phase != .finalizing
+        var mic = micButton.configuration
+        mic?.image = UIImage(systemName: phase.active ? "stop.fill" : "microphone", withConfiguration: UIImage.SymbolConfiguration(pointSize: phase.active ? 13 : 17, weight: phase.active ? .bold : .medium))
+        mic?.baseForegroundColor = phase.active ? Palette.text : Palette.secondary
+        micButton.configuration = mic
+        showDictationClock()
+    }
+
+    private func showDictationClock() {
+        let phase = dictation.phase
+        let label: String
+        switch phase {
+        case .requesting: label = "Getting ready"
+        case .listening: label = "Listening"
+        case .finalizing: label = "Transcribing"
+        default: label = ""
+        }
+        let elapsed = dictation.elapsed(now: Date())
+        var status = label
+        if let elapsed { status += String(format: ", %d seconds", Int(elapsed)) }
+        track.show(elapsed: elapsed, live: phase == .listening, label: status)
+    }
+
+    private func explain(_ phase: DictationDraft.Phase) {
+        let settings = { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }
+        switch phase {
+        case .noSpeech:
+            Toast.show("No speech detected. Check your microphone, then try again.", in: window)
+        case let .denied(message):
+            Toast.show(message, action: "Settings", in: window, handler: settings)
+        case let .unavailable(message), let .failed(message):
+            Toast.show(message, in: window)
+        default:
+            break
+        }
+    }
+
+    // MARK: Dictation: the track and its clock
+
+    private func startDictationLink() {
+        guard dictationLink == nil else { return }
+        let link = CADisplayLink(target: DictationLinkProxy(self), selector: #selector(DictationLinkProxy.tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        link.add(to: .main, forMode: .common)
+        dictationLink = link
+    }
+
+    private func stopDictationLink() {
+        // The closing morph still needs frames; the link ends with it.
+        guard trackMorph == nil, !dictation.phase.active else { return }
+        dictationLink?.invalidate()
+        dictationLink = nil
+    }
+
+    fileprivate func tickDictation() {
+        let now = Date()
+        if dictation.phase.active {
+            // Capture closed, the beam hears silence and settles.
+            let level = dictation.phase == .listening ? transcriber?.takeLevel() ?? 0 : 0
+            track.glyph.setLevels(microphone: level, speaker: 0)
+            showDictationClock()
+            if dictation.timedOut(now: now) {
+                completeDictation(.failed("Dictation took too long. Your draft is safe. Try a shorter recording."))
+                return
+            }
+        }
+        if let morph = trackMorph {
+            let raw = (CACurrentMediaTime() - morph.start) / Self.trackMorphDuration
+            let t = Self.trackCurve(min(1, max(0, CGFloat(raw))))
+            trackT = morph.from + (morph.to - morph.from) * t
+            if raw >= 1 {
+                trackT = morph.to
+                trackMorph = nil
+            }
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+        if trackMorph == nil, !dictation.phase.active { stopDictationLink() }
+    }
+
+    /// Unrolls the track across the controls (1) or folds it away (0),
+    /// over 420 ms on `cubic-bezier(0.2, 0, 0, 1)`; a retarget starts from
+    /// where it is, so toggling mid-flight reverses without a jump.
+    private func morphTrack(to target: CGFloat) {
+        guard trackMorph?.to != target, trackT != target || trackMorph != nil else { return }
+        if UIAccessibility.isReduceMotionEnabled || window == nil {
+            trackMorph = nil
+            trackT = target
+            setNeedsLayout()
+            return
+        }
+        trackMorph = (from: trackT, to: target, start: CACurrentMediaTime())
+        startDictationLink()
+    }
+
+    /// `cubic-bezier(0.2, 0, 0, 1)` as y of x.
+    private static func trackCurve(_ x: CGFloat) -> CGFloat {
+        let (x1, y1, x2, y2): (CGFloat, CGFloat, CGFloat, CGFloat) = (0.2, 0, 0, 1)
+        func at(_ t: CGFloat, _ a: CGFloat, _ b: CGFloat) -> CGFloat {
+            let u = 1 - t
+            return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t
+        }
+        var t = x
+        for _ in 0..<8 {
+            let u = 1 - t
+            let slope = 3 * u * u * x1 + 6 * u * t * (x2 - x1) + 3 * t * t * (1 - x2)
+            guard slope > 1e-6 else { break }
+            t -= (at(t, x1, x2) - x) / slope
+            t = min(1, max(0, t))
+        }
+        return at(t, y1, y2)
+    }
+
+    /// The track runs from the attach button to the microphone, which
+    /// stays as the stop; what it covers (the chips, or at rest the text)
+    /// waits beneath it.
+    private func layoutTrack() {
+        let t = trackT
+        let content = glass.contentView
+        if track.isHidden, t <= 0, !dictation.phase.active { return }
+        // The controls' frames settle a pass after this view's: ask for them now.
+        content.layoutIfNeeded()
+        let right = micButton.frame.minX - 6
+        let left = attachButton.frame.maxX + 8
+        let span = max(DictationTrack.height, right - left)
+        let width = DictationTrack.height + (span - DictationTrack.height) * t
+        let frame = CGRect(x: right - width, y: actionButton.frame.midY - DictationTrack.height / 2, width: width, height: DictationTrack.height)
+        if track.frame != frame { track.frame = frame }
+        if track.superview === content, content.subviews.last !== track { content.bringSubviewToFront(track) }
+        track.alpha = t
+        track.isHidden = t <= 0 && !dictation.phase.active
+        // Away, the beam holds still and its clock stops.
+        if track.isHidden { track.glyph.orb = .idle }
+        let beneath = 1 - t
+        chipScroll.alpha = isCard ? beneath : 0
+        if !isCard { textView.alpha = beneath } else if textView.alpha != 1 { textView.alpha = 1 }
+    }
+}
+
+/// CADisplayLink retains its target; the proxy keeps the composer releasable.
+private final class DictationLinkProxy: NSObject {
+    weak var bar: ComposerBar?
+    init(_ bar: ComposerBar) { self.bar = bar }
+    @objc func tick() { MainActor.assumeIsolated { bar?.tickDictation() } }
 }

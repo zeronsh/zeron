@@ -71,16 +71,32 @@ pub struct VoiceCallState {
     /// The assistant's voice is playing.
     pub speaking: bool,
     pub caption: String,
-    /// Set once the caption is a final segment; live partials have none.
+    /// Who speaks the caption: known as the turn begins when the provider
+    /// says so, at the latest once its final arrives.
     pub caption_speaker: Option<VoiceSpeaker>,
     /// The utterance the caption belongs to: a change is a new speaker turn.
     pub caption_item: Option<String>,
+    /// The call's recent turns, oldest first: the caption is the last.
+    pub caption_turns: Vec<VoiceCaptionTurn>,
     /// Normalized 0…1 peaks (microphone is 0 while muted).
     pub microphone: f32,
     pub speaker: f32,
     /// Styles the host offers, once it reports them.
     pub voices: Vec<String>,
 }
+/// One turn of a call's recent words.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct VoiceCaptionTurn {
+    /// The utterance: a different one is a different turn, even with the
+    /// same words.
+    pub item: Option<String>,
+    pub text: String,
+    /// Who speaks, once known; `None` only while the provider has not said.
+    pub speaker: Option<VoiceSpeaker>,
+    /// Its final has arrived: the text will not change.
+    pub settled: bool,
+}
+
 /// Why a call ended without the user hanging up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum VoiceEndReason {
@@ -137,6 +153,13 @@ pub fn default_voice_styles() -> Vec<String> {
         .collect()
 }
 
+fn speaker(role: VoiceRole) -> VoiceSpeaker {
+    match role {
+        VoiceRole::User => VoiceSpeaker::User,
+        VoiceRole::Assistant => VoiceSpeaker::Assistant,
+    }
+}
+
 fn call_state(view: &VoiceView) -> VoiceCallState {
     VoiceCallState {
         phase: match view.phase {
@@ -156,10 +179,16 @@ fn call_state(view: &VoiceView) -> VoiceCallState {
         muted: view.muted(),
         speaking: view.playing(),
         caption: view.caption().to_owned(),
-        caption_speaker: view.caption_role().map(|role| match role {
-            VoiceRole::User => VoiceSpeaker::User,
-            VoiceRole::Assistant => VoiceSpeaker::Assistant,
-        }),
+        caption_speaker: view.caption_speaker().map(speaker),
+        caption_turns: view
+            .caption_lines()
+            .map(|line| VoiceCaptionTurn {
+                item: line.item.map(str::to_owned),
+                text: line.text.to_owned(),
+                speaker: line.speaker.map(speaker),
+                settled: line.settled,
+            })
+            .collect(),
         caption_item: view.caption_item().map(str::to_owned),
         microphone: view.microphone_level(),
         speaker: view.speaker_level(),

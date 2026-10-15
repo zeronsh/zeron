@@ -48,6 +48,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let menu = navigationItem.rightBarButtonItem!
         let syncVoice = { [weak self, weak voiceBar] in
             guard let self, let voiceBar else { return }
+            // A call has the microphone: one voice at a time.
+            self.composer.dictationEnabled = !self.app.voice.live
             let items = voiceBar.visible ? [menu, voiceBar.item] : [menu]
             if self.navigationItem.rightBarButtonItems?.count != items.count {
                 self.navigationItem.setRightBarButtonItems(items, animated: self.view.window != nil)
@@ -98,6 +100,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             return .sent
         }
         composer.onStop = { [weak self] in self?.source.stop() }
+        // Dictation is written on the chat's host, by its speech model.
+        composer.dictationTarget = { [weak self] in
+            guard let self, let client = self.app.client, let row = client.sessionRow(chatId: self.chatId) else { return nil }
+            return DictationTarget(client: client, hostId: row.deviceId, hostName: row.deviceName ?? self.app.deviceName(row.deviceId))
+        }
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
@@ -280,6 +287,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         (splitViewController as? SplitRootController)?.sessionDidAppear(chatId)
         list.settleEdgeEffect()
         showTranscriptIfReady()
+        #if DEBUG
+        // `-dictation-start`: a scripted dictation runs as the session
+        // opens, for screenshots and UI work.
+        if ProcessInfo.processInfo.arguments.contains("-dictation-start") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.composer.previewDictation() }
+        }
+        #endif
         if holdingTranscript {
             // Nothing to lay out (an empty or unreachable session): stop
             // holding eventually rather than spin forever.
@@ -294,6 +308,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        // Leaving keeps the words dictated so far and ends the dictation.
+        composer.cancelDictation()
         // Leaving mid-edit: give the queued row back and the draft its place.
         if editingQueueId != nil { endEdit(commit: nil) }
         saveDraft()
@@ -397,6 +413,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func beginEdit(_ id: String) {
         guard !editPending else { return }
         editPending = true
+        // The queued row's text is about to replace the draft.
+        composer.cancelDictation()
         let switching = editingQueueId != nil
         if switching {
             // Row A goes back and the user's own draft returns right away, so

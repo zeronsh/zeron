@@ -18,7 +18,7 @@ struct VoiceGlobal {
 }
 impl Global for VoiceGlobal {}
 pub(crate) fn init(root: PathBuf, cx: &mut App) {
-    let directory = root.join("models/parakeet-tdt-0.6b-v3-int8");
+    let directory = root.join(zeron_voice::MODEL_DIR);
     let card = cx.new(|_| VoiceCard {
         scroll: widgets::PageScroll::default(),
         ready: zeron_voice::installed(&directory),
@@ -46,6 +46,11 @@ pub(crate) fn directory(cx: &App) -> PathBuf {
     cx.global::<VoiceGlobal>().directory.clone()
 }
 pub(crate) fn enabled(cx: &App) -> bool {
+    // A scripted dictation needs no model (see `dictation::start`).
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ZERON_DICTATION_PREVIEW").is_some() {
+        return true;
+    }
     settings::current(cx).dictation_enabled
         && cx
             .try_global::<VoiceGlobal>()

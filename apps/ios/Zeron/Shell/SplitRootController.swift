@@ -4,6 +4,10 @@ import UIKit
 /// shell is on screen (iPhone tabs or the iPad split).
 protocol AppRouter: AnyObject {
     func openSession(_ chatId: String)
+    /// Puts the session in place, without motion, under whatever is
+    /// presented, then lets that slide away: the voice stage leaves straight
+    /// onto its conversation, with nothing in between.
+    func revealSession(_ chatId: String)
     func presentNewSession(prompt: String?)
     func showSettings()
     func showSearch()
@@ -78,6 +82,22 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         currentChatId = chatId
         sidebar.currentChatId = chatId
         detail.setViewControllers([session], animated: false)
+    }
+
+    func revealSession(_ chatId: String) {
+        guard !isCollapsed else { return tabs.revealSession(chatId) }
+        if !(currentChatId == chatId && detail.viewControllers.first is SessionViewController) {
+            guard let session = SessionViewController(app: app, chatId: chatId) else {
+                return showSessionOpenError()
+            }
+            currentChatId = chatId
+            sidebar.currentChatId = chatId
+            UIView.performWithoutAnimation {
+                detail.setViewControllers([session], animated: false)
+                view.layoutIfNeeded()
+            }
+        }
+        if presentedViewController != nil { dismiss(animated: true) }
     }
 
     private func showSessionOpenError() {

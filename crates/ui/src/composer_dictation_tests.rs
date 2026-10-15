@@ -506,12 +506,13 @@ fn dictation_pointer_hold_finishes_on_release_even_outside_the_button(cx: &mut T
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
         let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        // The hold began on the microphone, which the track now covers.
         let button = visual.debug_bounds("composer-dictation").unwrap();
-        visual.simulate_mouse_down(
-            button.center(),
-            MouseButton::Left,
-            gpui::Modifiers::default(),
-        );
+        handle
+            .update(&mut visual, |composer, _, cx| {
+                composer.press_dictation(super::HoldSource::Pointer, cx)
+            })
+            .unwrap();
         assert_eq!(fake.borrow().finishes, 0, "holding keeps recording");
         let up = if release_outside {
             button.origin - point(px(40.0), px(40.0))
@@ -678,9 +679,13 @@ fn dictation_pointer_stop_keeps_capture_until_final_result(cx: &mut TestAppConte
         .unwrap();
     cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
         .unwrap();
-    let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
-    let button = visual.debug_bounds("composer-dictation").unwrap();
-    visual.simulate_click(button.center(), gpui::Modifiers::default());
+    // Letting go of the microphone is Stop.
+    handle
+        .update(cx, |composer, _, cx| {
+            composer.press_dictation(HoldSource::Pointer, cx);
+            composer.release_dictation(HoldSource::Pointer, cx);
+        })
+        .unwrap();
     assert_eq!(
         fake.borrow().drops,
         0,
@@ -830,76 +835,6 @@ fn dictation_focus_within_composer_keeps_capture_but_leaving_cancels(cx: &mut Te
     handle
         .read_with(cx, |composer, cx| {
             assert_eq!(composer.input.read(cx).dictation.phase, Phase::Idle)
-        })
-        .unwrap();
-}
-
-#[gpui::test]
-fn dictation_cancel_control_preserves_draft_and_clears_pending_send(cx: &mut TestAppContext) {
-    let (_dir, handle) = super::tests::composer_focus_window(cx);
-    let (input, fake) = handle
-        .update(cx, |composer, _, cx| {
-            let fake = composer.input.update(cx, |input, cx| {
-                input.set_text("Keep this draft", cx);
-                let fake = start(input, cx);
-                deliver(input, &fake, [Event::Listening], cx);
-                input.finish_dictation(true, cx);
-                fake
-            });
-            (composer.input.clone(), fake)
-        })
-        .unwrap();
-    let mut events = cx.events::<DictationInputEvent, _>(&input);
-    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
-        .unwrap();
-    let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
-    let cancel = visual.debug_bounds("dictation-dismiss").unwrap();
-    visual.simulate_click(cancel.center(), gpui::Modifiers::default());
-    assert_eq!(fake.borrow().drops, 1);
-    input.read_with(cx, |input, _| {
-        assert_eq!(input.text(), "Keep this draft");
-        assert_eq!(input.dictation.phase, Phase::Idle);
-    });
-    while let Ok(event) = events.try_recv() {
-        assert!(!matches!(event, DictationInputEvent::Submit(_)));
-    }
-}
-
-#[gpui::test]
-fn dictation_cancel_control_is_keyboard_operable(cx: &mut TestAppContext) {
-    let (_dir, handle) = super::tests::composer_focus_window(cx);
-    let fake = handle
-        .update(cx, |composer, window, cx| {
-            let fake = composer.input.update(cx, |input, cx| {
-                input.set_text("Keep this draft", cx);
-                let fake = start(input, cx);
-                deliver(input, &fake, [Event::Listening], cx);
-                fake
-            });
-            window.focus(&composer.input.focus_handle(cx), cx);
-            fake
-        })
-        .unwrap();
-    cx.update_window(handle.into(), |_, window, cx| {
-        window.draw(cx).clear();
-        window.focus_next(cx);
-        window.draw(cx).clear();
-    })
-    .unwrap();
-    cx.run_until_parked();
-    assert_eq!(
-        fake.borrow().drops,
-        0,
-        "tabbing to Cancel must retain capture"
-    );
-    cx.simulate_keystrokes(handle.into(), "space");
-    cx.run_until_parked();
-    assert_eq!(fake.borrow().drops, 1);
-    assert_eq!(fake.borrow().finishes, 0, "Cancel must not transcribe");
-    handle
-        .read_with(cx, |composer, cx| {
-            assert_eq!(composer.input.read(cx).text(), "Keep this draft");
-            assert_eq!(composer.input.read(cx).dictation.phase, Phase::Idle);
         })
         .unwrap();
 }
@@ -1194,6 +1129,44 @@ fn dictation_shortcut_falls_through_while_dictation_is_off(cx: &mut TestAppConte
         .read_with(cx, |composer, cx| {
             assert!(composer.dictation_hold.is_none());
             assert!(composer.input.read(cx).dictation_key.is_none());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn a_voice_call_takes_the_microphone_and_muting_it_gives_it_back(cx: &mut TestAppContext) {
+    let (dir, handle) = super::tests::composer_focus_window(cx);
+    enable_dictation(dir.path(), cx);
+    let fake = handle
+        .update(cx, |composer, _, cx| {
+            composer.input.update(cx, |input, cx| {
+                let fake = start(input, cx);
+                deliver(input, &fake, [Event::Listening], cx);
+                fake
+            })
+        })
+        .unwrap();
+    // A call starts listening: dictation ends, keeping what was said.
+    cx.update(|cx| crate::voice::publish_listening(true, cx));
+    cx.run_until_parked();
+    assert_eq!(fake.borrow().drops, 0);
+    assert_eq!(fake.borrow().finishes, 1);
+    handle
+        .update(cx, |composer, _, cx| {
+            composer.input.update(cx, |input, cx| {
+                deliver(input, &fake, [Event::Final("Bonjour".into())], cx);
+            });
+            // While it listens, dictation is not offered at all.
+            assert!(composer.render_dictation_button(0.0, None, cx).is_none());
+            composer.toggle_dictation(false, cx);
+            assert_eq!(composer.input.read(cx).dictation.phase, Phase::Idle);
+        })
+        .unwrap();
+    // Muted, the call hands the microphone back.
+    cx.update(|cx| crate::voice::publish_listening(false, cx));
+    handle
+        .update(cx, |composer, _, cx| {
+            assert!(composer.render_dictation_button(0.0, None, cx).is_some());
         })
         .unwrap();
 }

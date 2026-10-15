@@ -1,36 +1,44 @@
 import AVKit
 import UIKit
 
-/// The full-screen call (desktop `voice_stage.rs`): the session's orb over the
-/// wallpaper, the live caption, and the call controls. Swipe down to get back
-/// to the app; the call continues until End. Held to the ear it behaves like a
-/// phone call — screen off, audio in the earpiece.
+/// The full-screen call (desktop `voice_stage.rs`): over the wallpaper, the
+/// call's orb — a disc of glass filled to its edge with the glyph's dots —
+/// the words beneath it, and the controls in a glass pill: mute, audio
+/// output, the way back to the conversation, and End last. Swipe down to get
+/// back to the app; the call continues until End. Held to the ear it behaves like a phone
+/// call — screen off, audio in the earpiece.
 final class VoiceStageViewController: UIViewController {
     private let app: AppModel
     private var voice: RemoteVoiceController { app.voice }
     private var token: AnyObject?
     private let wallpaper = WallpaperView()
-    private let orb = OrbView(preset: .hero, orb: .connecting)
-    private let dot = UIView()
+    /// The orb: the glass every Zeron surface is made of, as a disc, and the
+    /// glyph filling it.
+    private let orb = Glass.surface(radius: VoiceStageViewController.orbSize / 2)
+    /// Its dots are about 0.02 in across, as the desktop stage's and its
+    /// dictation beam's are: one resolution for every voice glyph.
+    private let glyph = GlyphView(shape: .stage, orb: .connecting, dot: 3)
+    /// A round veil of the page's colour behind the orb, its edge a long
+    /// blur (desktop `STAGE_ORB_VEIL`): the wallpaper recedes evenly all
+    /// around the orb, whatever the picture holds there.
+    private let halo = UIView()
     private let clock = UILabel()
     private let host = UILabel()
-    private let status = UILabel()
+    /// Why the call ended, in place of the transcript once it has. While the
+    /// call lives no line of status is shown: the glyph and the controls say
+    /// what it is doing, and VoiceOver hears it from the orb.
     private let caption = UILabel()
-    /// The previous speaker turn, fading out over the new caption.
-    private let previousCaption = UILabel()
-    /// Streamed words veil in as on desktop (`zeron-veil` through the core).
-    private let captionFader = CaptionFader(maxChars: 160)
-    private var captionLink: CADisplayLink?
-    private var captionSource: (item: String?, text: String, user: Bool) = (nil, "", false)
-    /// The caption holds an end-of-call message instead of the utterance.
-    private var captionShowsMessage = false
-    private lazy var minimize = Glass.circleButton(symbol: "chevron.down", size: 44, pointSize: 16, action: UIAction { [weak self] _ in
-        self?.dismiss(animated: true)
-    })
-    private lazy var transcript = Glass.circleButton(symbol: "text.bubble", size: 44, pointSize: 16, action: UIAction { [weak self] _ in
-        self?.openTranscript()
-    })
+    /// The state VoiceOver last heard announced, so each is said once.
+    private var announced: String?
+    /// The call's words, turn by turn, as they are said.
+    private let transcriptView = CallTranscriptView()
+    /// Back to the call's conversation (where Codex's question waits), or to
+    /// the app without one.
+    private lazy var back = Self.callButton(symbol: "chevron.down", tint: Palette.text, background: Palette.controlFill) { [weak self] in
+        self?.leave()
+    }
     private let badge = UIView()
+    private let header = UIStackView()
     private let bar = Glass.surface()
     private let controls = UIStackView()
     private lazy var mute = Self.callButton(symbol: "mic.fill", tint: Palette.text, background: Palette.controlFill) { [weak self] in
@@ -38,7 +46,7 @@ final class VoiceStageViewController: UIViewController {
     }
     private let route = AVRoutePickerView()
     private lazy var routeWell = Self.well(route)
-    private lazy var end = Self.callButton(symbol: "phone.down.fill", tint: .white, background: .systemRed, width: 88) { [weak self] in
+    private lazy var end = Self.callButton(symbol: "phone.down.fill", tint: .white, background: .systemRed) { [weak self] in
         self?.voice.stop()
     }
     private lazy var retry = Self.pillButton(title: "Call again", tint: .white, background: Palette.accent) { [weak self] in
@@ -58,60 +66,70 @@ final class VoiceStageViewController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// The layout margin, the round controls and the space between them.
+    private static let margin: CGFloat = 24
+    private static let control: CGFloat = 56
+    private static let orbSize: CGFloat = 200
+    private static let rim = Palette.dynamic(0x4A5260, 0xBCC6D2, alpha: 0.12)
+    /// The veil's strength, how far it holds past the orb and its blur, as
+    /// shares of the orb's width (Core Animation's radius is twice the blur's
+    /// spread, desktop's sigma).
+    private static let veil: (strength: Float, spread: CGFloat, blur: CGFloat) = (0.9, 0.25, 0.5)
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
         view.accessibilityIdentifier = "voice-stage"
+
         view.addSubview(wallpaper)
-
+        halo.isUserInteractionEnabled = false
+        halo.layer.shadowOffset = .zero
+        halo.layer.shadowOpacity = Self.veil.strength
+        view.addSubview(halo)
         orb.translatesAutoresizingMaskIntoConstraints = false
+        orb.layer.borderWidth = 1
+        orb.clipsToBounds = true
         view.addSubview(orb)
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        orb.contentView.addSubview(glyph)
 
-        dot.layer.cornerRadius = 3.5
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        clock.font = Fonts.ui(.monoMedium, 13)
+        host.font = Fonts.ui(.sansSemibold, 15)
+        host.textColor = Palette.text
+        host.textAlignment = .center
+        clock.font = Fonts.ui(.monoMedium, 12)
         clock.textColor = Palette.secondary
-        host.font = Fonts.ui(.sansMedium, 13)
-        host.textColor = Palette.tertiary
-        let header = UIStackView(arrangedSubviews: [dot, clock, host])
-        header.spacing = 7
+        clock.textAlignment = .center
+        header.addArrangedSubview(host)
+        header.addArrangedSubview(clock)
+        header.axis = .vertical
         header.alignment = .center
+        header.spacing = 1
         header.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
 
-        status.font = Fonts.ui(.sansMedium, 17)
-        status.textColor = Palette.text
-        status.textAlignment = .center
-        status.accessibilityTraits = .updatesFrequently
-        caption.font = Fonts.ui(.sans, 16)
+        caption.font = Fonts.ui(.sans, 17)
         caption.textColor = Palette.secondary
         caption.textAlignment = .center
-        caption.numberOfLines = 4
-        caption.lineBreakMode = .byTruncatingHead
-        previousCaption.font = caption.font
-        previousCaption.textColor = Palette.secondary
-        previousCaption.textAlignment = .center
-        previousCaption.numberOfLines = 4
-        previousCaption.isAccessibilityElement = false
-        previousCaption.isHidden = true
-        for label in [status, caption, previousCaption] {
-            label.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(label)
-        }
+        caption.numberOfLines = 0
+        caption.isHidden = true
+        caption.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(caption)
+        transcriptView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(transcriptView)
+        // The orb tells VoiceOver what the call is doing, now that the words
+        // "Listening" and "Speaking" are no longer on screen.
+        orb.isAccessibilityElement = true
+        orb.accessibilityLabel = "Voice call"
+        orb.accessibilityTraits = .updatesFrequently
 
-        minimize.accessibilityLabel = "Back to Zeron"
-        minimize.accessibilityIdentifier = "voice-minimize"
-        transcript.accessibilityLabel = "Open the voice transcript"
-        transcript.accessibilityIdentifier = "voice-transcript"
+        back.accessibilityIdentifier = "voice-minimize"
         badge.backgroundColor = Palette.warning
         badge.layer.cornerRadius = 5
         badge.layer.borderWidth = 2
         badge.layer.borderColor = Palette.background.cgColor
         badge.isUserInteractionEnabled = false
         badge.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(minimize)
-        view.addSubview(transcript)
-        view.addSubview(badge)
+        back.addSubview(badge)
 
         route.activeTintColor = Palette.accent
         route.tintColor = Palette.text
@@ -122,72 +140,116 @@ final class VoiceStageViewController: UIViewController {
         end.accessibilityIdentifier = "voice-end"
         retry.accessibilityIdentifier = "voice-retry"
         controls.axis = .horizontal
-        controls.spacing = 14
+        controls.spacing = 12
         controls.alignment = .center
         controls.translatesAutoresizingMaskIntoConstraints = false
-        for v in [mute, routeWell, end, retry, close] { controls.addArrangedSubview(v) }
+        for v in [mute, routeWell, back, end, retry, close] { controls.addArrangedSubview(v) }
         bar.contentView.addSubview(controls)
         bar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bar)
 
-        let side = orb.widthAnchor.constraint(equalToConstant: 340)
-        side.priority = .defaultHigh
+        let margin = Self.margin
         NSLayoutConstraint.activate([
-            minimize.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            minimize.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            transcript.centerYAnchor.constraint(equalTo: minimize.centerYAnchor),
-            transcript.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            orb.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            // A little above where it used to sit, never closer to the header
+            // than this on a small iPhone.
+            orb.topAnchor.constraint(greaterThanOrEqualTo: header.bottomAnchor, constant: 20),
+            orb.widthAnchor.constraint(equalToConstant: Self.orbSize),
+            orb.heightAnchor.constraint(equalToConstant: Self.orbSize),
+            // The dots run to the disc's edge: the orb is the field.
+            glyph.topAnchor.constraint(equalTo: orb.contentView.topAnchor),
+            glyph.bottomAnchor.constraint(equalTo: orb.contentView.bottomAnchor),
+            glyph.leadingAnchor.constraint(equalTo: orb.contentView.leadingAnchor),
+            glyph.trailingAnchor.constraint(equalTo: orb.contentView.trailingAnchor),
+
             badge.widthAnchor.constraint(equalToConstant: 10),
             badge.heightAnchor.constraint(equalToConstant: 10),
-            badge.topAnchor.constraint(equalTo: transcript.topAnchor, constant: 2),
-            badge.trailingAnchor.constraint(equalTo: transcript.trailingAnchor, constant: -2),
-            dot.widthAnchor.constraint(equalToConstant: 7),
-            dot.heightAnchor.constraint(equalToConstant: 7),
+            badge.topAnchor.constraint(equalTo: back.topAnchor, constant: 6),
+            badge.trailingAnchor.constraint(equalTo: back.trailingAnchor, constant: -6),
             header.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            header.centerYAnchor.constraint(equalTo: minimize.centerYAnchor),
-            header.leadingAnchor.constraint(greaterThanOrEqualTo: minimize.trailingAnchor, constant: 12),
-
-            orb.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            orb.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor, constant: -64),
-            side,
-            orb.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -32),
-            orb.heightAnchor.constraint(equalTo: orb.widthAnchor),
-            orb.topAnchor.constraint(greaterThanOrEqualTo: minimize.bottomAnchor, constant: 8),
-
-            status.topAnchor.constraint(equalTo: orb.bottomAnchor, constant: 4),
-            status.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
-            status.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
-            caption.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 10),
-            caption.leadingAnchor.constraint(equalTo: status.leadingAnchor),
-            caption.trailingAnchor.constraint(equalTo: status.trailingAnchor),
-            caption.bottomAnchor.constraint(lessThanOrEqualTo: bar.topAnchor, constant: -16),
-            previousCaption.topAnchor.constraint(equalTo: caption.topAnchor),
-            previousCaption.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
-            previousCaption.trailingAnchor.constraint(equalTo: caption.trailingAnchor),
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            header.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: margin),
 
             bar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             bar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
-            controls.topAnchor.constraint(equalTo: bar.contentView.topAnchor, constant: 10),
-            controls.bottomAnchor.constraint(equalTo: bar.contentView.bottomAnchor, constant: -10),
-            controls.leadingAnchor.constraint(equalTo: bar.contentView.leadingAnchor, constant: 10),
-            controls.trailingAnchor.constraint(equalTo: bar.contentView.trailingAnchor, constant: -10),
+            controls.topAnchor.constraint(equalTo: bar.contentView.topAnchor, constant: 8),
+            controls.bottomAnchor.constraint(equalTo: bar.contentView.bottomAnchor, constant: -8),
+            controls.leadingAnchor.constraint(equalTo: bar.contentView.leadingAnchor, constant: 8),
+            controls.trailingAnchor.constraint(equalTo: bar.contentView.trailingAnchor, constant: -8),
+
+            caption.topAnchor.constraint(equalTo: orb.bottomAnchor, constant: 32),
+            caption.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: margin),
+            caption.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -margin),
+            // The words live in the band between the orb and the controls,
+            // the whole of it: centred in it while they are few, so the
+            // space above and below them always balances, as on desktop.
+            transcriptView.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -20),
+            transcriptView.topAnchor.constraint(equalTo: orb.bottomAnchor, constant: 24),
+            // Centred under the orb, filling the width up to a reading
+            // column, as the desktop stage's transcript is.
+            transcriptView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            transcriptView.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
+            transcriptView.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: margin),
         ])
+        let fill = transcriptView.widthAnchor.constraint(equalTo: view.widthAnchor, constant: -2 * margin)
+        fill.priority = .defaultHigh
+        fill.isActive = true
+        // A fixed step under the header, with the words' room below: the
+        // stage reads top down as one column (host, orb, words, controls)
+        // on every height, and the orb settles here on arrival and never
+        // moves after. On a small iPhone the band below gives way first.
+        let high = orb.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 64)
+        high.priority = .defaultHigh
+        high.isActive = true
 
         let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swipeDown))
         swipe.direction = .down
+        // A swipe that starts in the transcript scrolls it back instead.
+        swipe.delegate = self
         view.addGestureRecognizer(swipe)
 
         token = voice.observe { [weak self] in self?.refresh() }
-        // The veil colors are resolved per appearance.
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: VoiceStageViewController, _) in
-            if !self.captionShowsMessage { self.paintCaption() }
-        }
         refresh()
+    }
+
+    /// The orb's arrival: it grows the last bit of the way and settles,
+    /// once, as the stage comes up.
+    private var arrived = false
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        guard !arrived, animated, !UIAccessibility.isReduceMotionEnabled else { return }
+        for v in [orb, halo] as [UIView] {
+            v.transform = CGAffineTransform(scaleX: 0.84, y: 0.84).translatedBy(x: 0, y: 24)
+            v.alpha = 0
+        }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !arrived else { return }
+        arrived = true
+        let settle = {
+            for v in [self.orb, self.halo] as [UIView] {
+                v.transform = .identity
+                v.alpha = 1
+            }
+        }
+        guard animated, !UIAccessibility.isReduceMotionEnabled else { return settle() }
+        UIView.animate(withDuration: 0.8, delay: 0.05, usingSpringWithDamping: 0.82, initialSpringVelocity: 0.2, options: [.allowUserInteraction], animations: settle)
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         wallpaper.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: min(view.bounds.height * 0.72, 760))
+        halo.frame = orb.frame
+        let spread = orb.bounds.width * Self.veil.spread
+        halo.layer.shadowPath = UIBezierPath(ovalIn: halo.bounds.insetBy(dx: -spread, dy: -spread)).cgPath
+        halo.layer.shadowRadius = orb.bounds.width * Self.veil.blur
+        halo.layer.shadowColor = Palette.background.resolvedColor(with: traitCollection).cgColor
+        // The composer's rim: a faint cool hairline that sets the glass
+        // against any picture.
+        orb.layer.borderColor = Self.rim.resolvedColor(with: traitCollection).cgColor
     }
 
     @objc private func swipeDown() { dismiss(animated: true) }
@@ -200,37 +262,36 @@ final class VoiceStageViewController: UIViewController {
             return
         }
         let state = voice.state
-        orb.orb = voice.live ? voice.orb : .idle
-        orb.setLevels(microphone: state?.microphone ?? 0, speaker: state?.speaker ?? 0)
+        glyph.orb = voice.live ? voice.orb : .idle
+        glyph.setLevels(microphone: state?.microphone ?? 0, speaker: state?.speaker ?? 0)
 
         let awaiting = state?.work == .awaitingInput
-        dot.backgroundColor = !voice.active ? Palette.tertiary : awaiting ? Palette.warning : voice.muted ? Palette.tertiary : Palette.success
         clock.text = voice.elapsedText ?? "–:––"
         host.text = voice.hostName
-        transcript.isHidden = state?.chatId == nil
-        badge.isHidden = transcript.isHidden || !awaiting
-        transcript.accessibilityLabel = awaiting ? "Answer Codex in the transcript" : "Open the voice transcript"
+        badge.isHidden = state?.chatId == nil || !awaiting
+        back.accessibilityLabel = state?.chatId == nil ? "Back to Zeron" : awaiting ? "Answer Codex in the conversation" : "Back to the conversation"
 
+        orb.accessibilityValue = voice.statusText
         if let reason = voice.endReason, !voice.live {
-            status.text = "Call ended"
-            stopCaptionLink()
-            captionShowsMessage = true
-            previousCaption.isHidden = true
-            caption.attributedText = nil
             caption.text = voice.message(for: reason)
-            caption.textColor = Palette.secondary
+            caption.isHidden = false
+            transcriptView.isHidden = true
             retry.configuration?.title = reason == .microphoneDenied ? "Open Settings" : "Call again"
         } else {
-            status.text = voice.statusText
-            let source = (item: state?.captionItem, text: state?.caption ?? "", user: state?.captionSpeaker == .user)
-            if captionShowsMessage || source != captionSource {
-                captionShowsMessage = false
-                captionSource = source
-                paintCaption()
+            caption.isHidden = true
+            // What needs the user is said aloud once, as the badge on the way
+            // back shows it; the rest VoiceOver reads from the orb.
+            if awaiting, announced != voice.statusText {
+                UIAccessibility.post(notification: .announcement, argument: voice.statusText)
+            }
+            announced = voice.statusText
+            transcriptView.isHidden = false
+            if let state {
+                transcriptView.show(state.captionTurns)
             }
         }
         let ended = !voice.live
-        for v in [mute, routeWell, end] { v.isHidden = ended }
+        for v in [mute, routeWell, back, end] { v.isHidden = ended }
         for v in [retry, close] { v.isHidden = !ended }
         if shownMuted != voice.muted {
             shownMuted = voice.muted
@@ -244,10 +305,16 @@ final class VoiceStageViewController: UIViewController {
         }
     }
 
-    private func openTranscript() {
-        guard let chatId = voice.state?.chatId else { return }
-        let router = self.router
-        dismiss(animated: true) { router?.openSession(chatId) }
+    /// The way back: to the call's conversation, or to the app without one.
+    private func leave() {
+        guard let chatId = voice.state?.chatId else {
+            dismiss(animated: true)
+            return
+        }
+        // The conversation is put in place under the stage, then the stage
+        // slides away onto it; the call goes on.
+        guard let router else { return dismiss(animated: true) }
+        router.revealSession(chatId)
     }
 
     private func retryCall() {
@@ -260,38 +327,8 @@ final class VoiceStageViewController: UIViewController {
 
     /// The tail of the utterance, its newest words fading in and the previous
     /// turn fading out; repaints every display frame until settled.
-    private func paintCaption() {
-        let frame = captionFader.frame(item: captionSource.item, text: captionSource.text, reducedMotion: UIAccessibility.isReduceMotionEnabled)
-        let color = (captionSource.user ? Palette.tertiary : Palette.secondary).resolvedColor(with: traitCollection)
-        let text = NSMutableAttributedString(string: frame.text, attributes: [.font: caption.font as Any, .foregroundColor: color])
-        for span in frame.spans where span.alpha < 1 {
-            let range = NSRange(location: Int(span.start), length: Int(span.end) - Int(span.start))
-            guard NSMaxRange(range) <= text.length else { continue }
-            text.addAttribute(.foregroundColor, value: color.withAlphaComponent(color.cgColor.alpha * CGFloat(span.alpha)), range: range)
-        }
-        caption.attributedText = text
-        previousCaption.text = frame.previous
-        previousCaption.alpha = CGFloat(frame.previousAlpha)
-        previousCaption.isHidden = frame.previous == nil
-        if frame.animating, captionLink == nil {
-            let link = CADisplayLink(target: CaptionLinkProxy(self), selector: #selector(CaptionLinkProxy.tick))
-            link.add(to: .main, forMode: .common)
-            captionLink = link
-        } else if !frame.animating {
-            stopCaptionLink()
-        }
-    }
 
-    fileprivate func captionTick() { paintCaption() }
-
-    private func stopCaptionLink() {
-        captionLink?.invalidate()
-        captionLink = nil
-    }
-
-    deinit { captionLink?.invalidate() }
-
-    private static func callButton(symbol: String, tint: UIColor, background: UIColor, width: CGFloat = 60, action: @escaping () -> Void) -> UIButton {
+    private static func callButton(symbol: String, tint: UIColor, background: UIColor, action: @escaping () -> Void) -> UIButton {
         var config = UIButton.Configuration.filled()
         config.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold))
         config.baseForegroundColor = tint
@@ -300,8 +337,8 @@ final class VoiceStageViewController: UIViewController {
         let button = UIButton(configuration: config, primaryAction: UIAction { _ in action() })
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: width),
-            button.heightAnchor.constraint(equalToConstant: 60),
+            button.widthAnchor.constraint(equalToConstant: control),
+            button.heightAnchor.constraint(equalToConstant: control),
         ])
         return button
     }
@@ -328,14 +365,14 @@ final class VoiceStageViewController: UIViewController {
     private static func well(_ picker: AVRoutePickerView) -> UIView {
         let well = UIView()
         well.backgroundColor = Palette.controlFill
-        well.layer.cornerRadius = 30
+        well.layer.cornerRadius = control / 2
         well.isAccessibilityElement = false
         picker.translatesAutoresizingMaskIntoConstraints = false
         well.addSubview(picker)
         well.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            well.widthAnchor.constraint(equalToConstant: 60),
-            well.heightAnchor.constraint(equalToConstant: 60),
+            well.widthAnchor.constraint(equalToConstant: control),
+            well.heightAnchor.constraint(equalToConstant: control),
             picker.centerXAnchor.constraint(equalTo: well.centerXAnchor),
             picker.centerYAnchor.constraint(equalTo: well.centerYAnchor),
             picker.widthAnchor.constraint(equalToConstant: 44),
@@ -424,9 +461,8 @@ extension UIViewController {
     }
 }
 
-/// CADisplayLink retains its target; the proxy keeps the stage releasable.
-private final class CaptionLinkProxy: NSObject {
-    weak var stage: VoiceStageViewController?
-    init(_ stage: VoiceStageViewController) { self.stage = stage }
-    @objc func tick() { MainActor.assumeIsolated { stage?.captionTick() } }
+extension VoiceStageViewController: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        !(touch.view?.isDescendant(of: transcriptView) ?? false)
+    }
 }

@@ -210,9 +210,10 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
     }
 }
 
-/// The settings hero: the desktop orb at rest over a one-line explanation.
+/// The settings hero: the call's glyph breathing at rest over a one-line
+/// explanation.
 private final class VoiceHeroCell: UICollectionViewCell {
-    private let orb = OrbView(preset: .large, orb: .idle)
+    private let orb = GlyphView(shape: .disc, orb: .listening, dot: 8)
     private let title = UILabel()
     private let detail = UILabel()
 

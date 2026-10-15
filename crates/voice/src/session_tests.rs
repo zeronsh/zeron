@@ -51,8 +51,9 @@ impl Fixture {
             stop: stop.clone(),
             cancel: cancel.clone(),
             level: level.clone(),
-            device: None,
+            source: Source::Microphone(None),
             events: events_tx,
+            live: Default::default(),
         };
         let (load, ready) = mpsc::sync_channel::<Result<()>>(1);
         let (loading, started) = mpsc::sync_channel(1);
@@ -242,8 +243,9 @@ fn stop_before_capture_start_never_opens_the_microphone() {
         stop: Arc::new(AtomicBool::new(true)),
         cancel: Arc::new(AtomicBool::new(false)),
         level: Arc::new(AtomicU32::new(0)),
-        device: None,
+        source: Source::Microphone(None),
         events,
+        live: Default::default(),
     };
     let result = run_job::<FakeCapture, _>(
         &job,
@@ -295,4 +297,77 @@ fn audio_buffer_still_caps_recording_at_sixty_seconds() {
     );
     assert_eq!(audio.samples.lock().unwrap().len(), rate as usize * 60);
     assert!(audio.full.load(Ordering::Acquire));
+}
+
+/// A capture whose audio the test grows while it records.
+struct TappedCapture {
+    audio: Arc<Audio>,
+    rate: u32,
+}
+impl Recording for TappedCapture {
+    fn ended(&self) -> bool {
+        false
+    }
+    fn finish(self) -> Result<(Vec<f32>, u32)> {
+        let samples = self.audio.samples.lock().unwrap().clone();
+        Ok((samples, self.rate))
+    }
+    fn tap(&self) -> Option<(Arc<Audio>, u32)> {
+        Some((self.audio.clone(), self.rate))
+    }
+}
+
+#[test]
+fn speech_is_read_again_while_it_is_spoken_and_once_more_at_the_end() {
+    let rate = 16_000;
+    let audio = Arc::new(Audio::with_capacity(rate as usize * 4));
+    audio
+        .samples
+        .lock()
+        .unwrap()
+        .extend(vec![0.1; rate as usize]);
+    let (events_tx, events) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let job = Job {
+        dir: Default::default(),
+        stop: stop.clone(),
+        cancel: Arc::new(AtomicBool::new(false)),
+        level: Arc::new(AtomicU32::new(0)),
+        source: Source::Microphone(None),
+        events: events_tx,
+        live: Default::default(),
+    };
+    let tapped = audio.clone();
+    let worker = std::thread::spawn(move || {
+        run_job(
+            &job,
+            || {
+                Ok(TappedCapture {
+                    audio: tapped,
+                    rate,
+                })
+            },
+            || Ok(|samples: Vec<f32>, _| Ok(format!("{} samples", samples.len()))),
+        )
+    });
+    let next = || loop {
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::Partial(text) => break text,
+            Event::Listening => continue,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(next(), "16000 samples");
+    // More speech, read again with everything said before it.
+    audio
+        .samples
+        .lock()
+        .unwrap()
+        .extend(vec![0.1; rate as usize / 2]);
+    assert_eq!(next(), "24000 samples");
+    stop.store(true, Ordering::Release);
+    assert_eq!(
+        worker.join().unwrap().unwrap().as_deref(),
+        Some("24000 samples")
+    );
 }

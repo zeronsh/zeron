@@ -13,8 +13,11 @@ use std::{
 };
 
 mod resample;
+pub mod spectrum;
 
 pub const MAX_SECONDS: usize = 60;
+/// Where the speech model lives under a data directory, on every device.
+pub const MODEL_DIR: &str = "models/parakeet-tdt-0.6b-v3-int8";
 #[derive(serde::Deserialize)]
 pub struct Artifact {
     pub name: String,
@@ -167,6 +170,47 @@ where
         }
     }
 }
+/// Audio arriving from elsewhere, already mono at `rate`: a host takes a
+/// phone's dictation through one of these in place of a microphone. Samples
+/// are kept in memory for the length of the dictation and nowhere else.
+pub struct Feed {
+    audio: Arc<Audio>,
+    rate: u32,
+    ended: AtomicBool,
+    level: AtomicU32,
+}
+impl Feed {
+    pub fn new(rate: u32) -> Arc<Self> {
+        Arc::new(Self {
+            audio: Arc::new(Audio::with_capacity(rate as usize * MAX_SECONDS)),
+            rate,
+            ended: AtomicBool::new(false),
+            level: AtomicU32::new(0),
+        })
+    }
+    /// Appends PCM16LE samples. Past a minute the rest is dropped and the
+    /// feed ends, as a microphone's capture does.
+    pub fn push(&self, pcm16le: &[u8]) {
+        if self.ended.load(Ordering::Acquire) {
+            return;
+        }
+        let samples: Vec<i16> = pcm16le
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        meter(&samples, 1, &self.level);
+        append(&samples, 1, self.rate, &self.audio);
+    }
+    /// Peak RMS since last read, 0–1.
+    pub fn take_level(&self) -> f32 {
+        f32::from_bits(self.level.swap(0, Ordering::Relaxed))
+    }
+    /// No more audio: what was pushed is transcribed.
+    pub fn end(&self) {
+        self.ended.store(true, Ordering::Release);
+    }
+}
+
 /// A microphone the user can choose: a stable identifier and a display name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputDevice {
@@ -279,30 +323,90 @@ impl Capture {
 #[derive(Debug)]
 pub enum Event {
     Listening,
+    /// Everything said so far, read again while the user is still speaking.
+    Partial(String),
     Finalizing,
     Final(String),
     Failed(String),
 }
+
+/// A live transcript is read again this often at most; a longer recording
+/// that takes longer to read waits twice that long, so it never takes over
+/// the processor.
+const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(800);
+/// Too little audio to be worth reading yet.
+const PARTIAL_FROM: f32 = 0.6;
 struct Job {
     dir: std::path::PathBuf,
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
-    device: Option<String>,
+    source: Source,
     events: std::sync::mpsc::SyncSender<Event>,
+    /// The audio as it is being captured and its rate, while it is, so the
+    /// worker can read a live transcript.
+    live: Mutex<Option<(Arc<Audio>, u32)>>,
 }
 // Capture owns its stream on a separate thread. Model loading and inference
 // remain serialized on WORKER, including after the user cancels native work.
 trait Recording {
     fn ended(&self) -> bool;
     fn finish(self) -> Result<(Vec<f32>, u32)>;
+    /// The audio as it is being captured, for a live transcript.
+    fn tap(&self) -> Option<(Arc<Audio>, u32)> {
+        None
+    }
 }
 impl Recording for Capture {
     fn ended(&self) -> bool {
         self.ended()
     }
+    fn tap(&self) -> Option<(Arc<Audio>, u32)> {
+        Some((self.audio.clone(), self.rate))
+    }
     fn finish(self) -> Result<(Vec<f32>, u32)> {
         self.finish()
+    }
+}
+impl Recording for Arc<Feed> {
+    fn ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire) || self.audio.full.load(Ordering::Acquire)
+    }
+    fn tap(&self) -> Option<(Arc<Audio>, u32)> {
+        Some((self.audio.clone(), self.rate))
+    }
+    fn finish(self) -> Result<(Vec<f32>, u32)> {
+        let mut samples = self.audio.samples.lock().unwrap_or_else(|e| e.into_inner());
+        Ok((std::mem::take(&mut *samples), self.rate))
+    }
+}
+/// Where a job's audio comes from.
+enum Source {
+    Microphone(Option<String>),
+    Feed(Arc<Feed>),
+}
+enum Input {
+    Microphone(Capture),
+    Feed(Arc<Feed>),
+}
+impl Recording for Input {
+    fn ended(&self) -> bool {
+        match self {
+            Self::Microphone(c) => c.ended(),
+            Self::Feed(f) => Recording::ended(f),
+        }
+    }
+    fn tap(&self) -> Option<(Arc<Audio>, u32)> {
+        match self {
+            Self::Microphone(c) => Recording::tap(c),
+            Self::Feed(f) => Recording::tap(f),
+        }
+    }
+    fn finish(self) -> Result<(Vec<f32>, u32)> {
+        match self {
+            Self::Microphone(c) => Recording::finish(c),
+            Self::Feed(f) => Recording::finish(f),
+        }
     }
 }
 
@@ -314,6 +418,7 @@ fn record<C: Recording>(
         return Ok(None);
     }
     let capture = start()?;
+    *job.live.lock().unwrap_or_else(|e| e.into_inner()) = capture.tap();
     // Stop/cancel may arrive while the audio device is opening.
     if job.cancel.load(Ordering::Acquire) {
         return Ok(None);
@@ -329,6 +434,7 @@ fn record<C: Recording>(
     {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    job.live.lock().unwrap_or_else(|e| e.into_inner()).take();
     if job.cancel.load(Ordering::Acquire) {
         return Ok(None);
     }
@@ -344,7 +450,7 @@ fn run_job<C, F>(
 ) -> Result<Option<String>>
 where
     C: Recording,
-    F: FnOnce(Vec<f32>, u32) -> Result<String>,
+    F: FnMut(Vec<f32>, u32) -> Result<String>,
 {
     if job.cancel.load(Ordering::Acquire) {
         return Ok(None);
@@ -362,16 +468,19 @@ where
             }
         }
         let _close_capture = CancelOnDrop(&job.cancel);
-        let model = load();
+        let mut model = load();
         // A load failure must stop capture even if the user has not pressed Stop.
         // Keep the admission guard until the stream has actually been dropped.
         if model.is_err() {
             job.cancel.store(true, Ordering::Release);
         }
+        if let Ok(transcribe) = model.as_mut() {
+            live_transcript(job, &capture, transcribe);
+        }
         let audio = capture
             .join()
             .map_err(|_| anyhow::anyhow!("Microphone worker failed"))?;
-        let transcribe = model?;
+        let mut transcribe = model?;
         if job.cancel.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -381,6 +490,48 @@ where
         let text = transcribe(samples, rate)?;
         Ok((!job.cancel.load(Ordering::Acquire)).then_some(text))
     })
+}
+
+/// While the user speaks, reads what has been captured so far again and
+/// again, one reading at a time, and sends each new reading as a partial.
+/// The samples are copied in small steps, only what is new, so the capture
+/// callback (which never waits for the lock) loses nothing.
+fn live_transcript<T>(
+    job: &Job,
+    capture: &std::thread::ScopedJoinHandle<'_, T>,
+    transcribe: &mut impl FnMut(Vec<f32>, u32) -> Result<String>,
+) {
+    let mut heard: Vec<f32> = Vec::new();
+    let mut said = String::new();
+    let mut next = std::time::Instant::now() + PARTIAL_EVERY;
+    while !capture.is_finished() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let live = job.live.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some((audio, rate)) = live else {
+            continue;
+        };
+        if std::time::Instant::now() < next
+            || job.stop.load(Ordering::Acquire)
+            || job.cancel.load(Ordering::Acquire)
+        {
+            continue;
+        }
+        if let Ok(samples) = audio.samples.try_lock() {
+            heard.extend_from_slice(&samples[heard.len().min(samples.len())..]);
+        }
+        if (heard.len() as f32) < rate as f32 * PARTIAL_FROM {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        if let Ok(text) = transcribe(heard.clone(), rate) {
+            let text = text.trim();
+            if !text.is_empty() && text != said {
+                said = text.to_owned();
+                let _ = job.events.try_send(Event::Partial(said.clone()));
+            }
+        }
+        next = std::time::Instant::now() + PARTIAL_EVERY.max(started.elapsed() * 2);
+    }
 }
 
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -419,6 +570,14 @@ impl Session {
     /// `device` is an [`InputDevice::id`]; `None` or a disconnected device
     /// records from the system default.
     pub fn start(dir: std::path::PathBuf, device: Option<String>) -> Result<Self> {
+        Self::begin(dir, Source::Microphone(device))
+    }
+    /// Transcribes `feed` instead of a microphone: a dictation arriving from
+    /// a phone. Finish by ending the feed (or [`Session::finish`]).
+    pub fn start_fed(dir: std::path::PathBuf, feed: Arc<Feed>) -> Result<Self> {
+        Self::begin(dir, Source::Feed(feed))
+    }
+    fn begin(dir: std::path::PathBuf, source: Source) -> Result<Self> {
         let admission = BusyGuard::acquire()?;
         let sender = WORKER.get_or_init(|| {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Command>(1);
@@ -441,7 +600,13 @@ impl Session {
                         // it every later session, until the app restarts.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(
                         &job,
-                        || Capture::start(job.device.as_deref(), job.level.clone()),
+                        || match &job.source {
+                            Source::Microphone(device) => {
+                                Capture::start(device.as_deref(), job.level.clone())
+                                    .map(Input::Microphone)
+                            }
+                            Source::Feed(feed) => Ok(Input::Feed(feed.clone())),
+                        },
                         || {
                             if cached.as_ref().is_none_or(|(path, _)| *path != job.dir) {
                                 let model = Recognizer::load(&job.dir).context(
@@ -483,8 +648,9 @@ impl Session {
                     stop: stop.clone(),
                     cancel: cancel.clone(),
                     level: level.clone(),
-                    device,
+                    source,
                     events: tx,
+                    live: Default::default(),
                 },
                 admission,
             ))

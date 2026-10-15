@@ -1236,6 +1236,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func workspaceRevision()  -> UInt64
     
     /**
+     * Opens a dictation on `host_device_id`. Returns at once; events
+     * arrive on `listener` from a client thread.
+     */
+    func startDictation(hostDeviceId: String, listener: HostDictationListener)  -> HostDictation
+    
+    /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
      */
@@ -2043,6 +2049,21 @@ open func workspaceRevision() -> UInt64  {
 }
     
     /**
+     * Opens a dictation on `host_device_id`. Returns at once; events
+     * arrive on `listener` from a client thread.
+     */
+open func startDictation(hostDeviceId: String, listener: HostDictationListener) -> HostDictation  {
+    return try!  FfiConverterTypeHostDictation_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_start_dictation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(hostDeviceId),
+        FfiConverterTypeHostDictationListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
      */
@@ -2102,6 +2123,565 @@ public func FfiConverterTypeCoreClient_lift(_ handle: UInt64) throws -> CoreClie
 #endif
 public func FfiConverterTypeCoreClient_lower(_ value: CoreClient) -> UInt64 {
     return FfiConverterTypeCoreClient.lower(value)
+}
+
+
+
+
+
+
+/**
+ * One animated glyph. Calls are cheap and safe from any thread; drive
+ * [`GlyphRenderer::next_frame`] from the display link.
+ */
+public protocol GlyphRendererProtocol: AnyObject, Sendable {
+    
+    /**
+     * Whether the glyph still moves: a sound in it or a mode that
+     * animates on its own. A still glyph needs no display link.
+     */
+    func moving()  -> Bool
+    
+    /**
+     * Advance to now (only while `animating`) and return the dots for a box
+     * `width` × `height`, dots `dot` points across, the box's corners
+     * `corner` round, leaving `rooms`. `accent` is the user's three row
+     * tints, top first, as nine 0–1 components.
+     */
+    func nextFrame(width: Float, height: Float, dot: Float, corner: Float, rooms: [GlyphRoom], accent: [Float], animating: Bool)  -> [Float]
+    
+    /**
+     * The call's peaks, 0–1: each voice is split into its bands by the
+     * rhythm of its loudness, as the desktop does for Codex's.
+     */
+    func setAudioLevels(microphone: Float, speaker: Float) 
+    
+    func setOrb(orb: VoiceOrb) 
+    
+}
+/**
+ * One animated glyph. Calls are cheap and safe from any thread; drive
+ * [`GlyphRenderer::next_frame`] from the display link.
+ */
+open class GlyphRenderer: GlyphRendererProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_glyphrenderer(self.handle, $0) }
+    }
+public convenience init(shape: GlyphShape, orb: VoiceOrb) {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_constructor_glyphrenderer_new(
+        FfiConverterTypeGlyphShape_lower(shape),
+        FfiConverterTypeVoiceOrb_lower(orb),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_glyphrenderer(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Whether the glyph still moves: a sound in it or a mode that
+     * animates on its own. A still glyph needs no display link.
+     */
+open func moving() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_glyphrenderer_moving(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Advance to now (only while `animating`) and return the dots for a box
+     * `width` × `height`, dots `dot` points across, the box's corners
+     * `corner` round, leaving `rooms`. `accent` is the user's three row
+     * tints, top first, as nine 0–1 components.
+     */
+open func nextFrame(width: Float, height: Float, dot: Float, corner: Float, rooms: [GlyphRoom], accent: [Float], animating: Bool) -> [Float]  {
+    return try!  FfiConverterSequenceFloat.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_glyphrenderer_next_frame(
+            self.uniffiCloneHandle(),
+        FfiConverterFloat.lower(width),
+        FfiConverterFloat.lower(height),
+        FfiConverterFloat.lower(dot),
+        FfiConverterFloat.lower(corner),
+        FfiConverterSequenceTypeGlyphRoom.lower(rooms),
+        FfiConverterSequenceFloat.lower(accent),
+        FfiConverterBool.lower(animating),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The call's peaks, 0–1: each voice is split into its bands by the
+     * rhythm of its loudness, as the desktop does for Codex's.
+     */
+open func setAudioLevels(microphone: Float, speaker: Float)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_glyphrenderer_set_audio_levels(
+            self.uniffiCloneHandle(),
+        FfiConverterFloat.lower(microphone),
+        FfiConverterFloat.lower(speaker),uniffiCallStatus
+    )
+}
+}
+    
+open func setOrb(orb: VoiceOrb)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_glyphrenderer_set_orb(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeVoiceOrb_lower(orb),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGlyphRenderer: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = GlyphRenderer
+
+    public static func lift(_ handle: UInt64) throws -> GlyphRenderer {
+        return GlyphRenderer(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: GlyphRenderer) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GlyphRenderer {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: GlyphRenderer, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGlyphRenderer_lift(_ handle: UInt64) throws -> GlyphRenderer {
+    return try FfiConverterTypeGlyphRenderer.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGlyphRenderer_lower(_ value: GlyphRenderer) -> UInt64 {
+    return FfiConverterTypeGlyphRenderer.lower(value)
+}
+
+
+
+
+
+
+/**
+ * One dictation. Dropping it cancels.
+ */
+public protocol HostDictationProtocol: AnyObject, Sendable {
+    
+    func cancel() 
+    
+    /**
+     * No more audio: the host transcribes what it has.
+     */
+    func finish() 
+    
+    /**
+     * Mono PCM16LE at [`wire::SAMPLE_RATE`]; a push the relay cannot keep
+     * up with is dropped rather than held.
+     */
+    func pushAudio(pcm16le: Data) 
+    
+}
+/**
+ * One dictation. Dropping it cancels.
+ */
+open class HostDictation: HostDictationProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_hostdictation(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_hostdictation(handle, $0) }
+    }
+
+    
+
+    
+open func cancel()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hostdictation_cancel(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * No more audio: the host transcribes what it has.
+     */
+open func finish()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hostdictation_finish(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Mono PCM16LE at [`wire::SAMPLE_RATE`]; a push the relay cannot keep
+     * up with is dropped rather than held.
+     */
+open func pushAudio(pcm16le: Data)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hostdictation_push_audio(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(pcm16le),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostDictation: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = HostDictation
+
+    public static func lift(_ handle: UInt64) throws -> HostDictation {
+        return HostDictation(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: HostDictation) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostDictation {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: HostDictation, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostDictation_lift(_ handle: UInt64) throws -> HostDictation {
+    return try FfiConverterTypeHostDictation.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostDictation_lower(_ value: HostDictation) -> UInt64 {
+    return FfiConverterTypeHostDictation.lower(value)
+}
+
+
+
+
+
+
+public protocol HostDictationListener: AnyObject, Sendable {
+    
+    func onDictationEvent(event: HostDictationEvent) 
+    
+}
+open class HostDictationListenerImpl: HostDictationListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_hostdictationlistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_hostdictationlistener(handle, $0) }
+    }
+
+    
+
+    
+open func onDictationEvent(event: HostDictationEvent)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_hostdictationlistener_on_dictation_event(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeHostDictationEvent_lower(event),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceHostDictationListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceHostDictationListener = UniffiVTableCallbackInterfaceHostDictationListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeHostDictationListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface HostDictationListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeHostDictationListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface HostDictationListener: handle missing in uniffiClone")
+            }
+        },
+        onDictationEvent: { (
+            uniffiHandle: UInt64,
+            event: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeHostDictationListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onDictationEvent(
+                     event: try FfiConverterTypeHostDictationEvent_lift(event)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceHostDictationListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceHostDictationListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitHostDictationListener() {
+    uniffi_zeron_mobile_fn_init_callback_vtable_hostdictationlistener(UniffiCallbackInterfaceHostDictationListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostDictationListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<HostDictationListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = HostDictationListener
+
+    public static func lift(_ handle: UInt64) throws -> HostDictationListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return HostDictationListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: HostDictationListener) -> UInt64 {
+         if let rustImpl = value as? HostDictationListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostDictationListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: HostDictationListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostDictationListener_lift(_ handle: UInt64) throws -> HostDictationListener {
+    return try FfiConverterTypeHostDictationListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostDictationListener_lower(_ value: HostDictationListener) -> UInt64 {
+    return FfiConverterTypeHostDictationListener.lower(value)
 }
 
 
@@ -2620,183 +3200,6 @@ public func FfiConverterTypeLayoutListener_lift(_ handle: UInt64) throws -> Layo
 #endif
 public func FfiConverterTypeLayoutListener_lower(_ value: LayoutListener) -> UInt64 {
     return FfiConverterTypeLayoutListener.lower(value)
-}
-
-
-
-
-
-
-/**
- * One animated orb. Calls are cheap and safe from any thread; drive
- * [`OrbRenderer::next_frame`] from the display link.
- */
-public protocol OrbRendererProtocol: AnyObject, Sendable {
-    
-    /**
-     * Advance to now and return the frame to paint. Time only accumulates
-     * while `animating`; reduced motion shows the static representative frame.
-     */
-    func nextFrame(animating: Bool, reducedMotion: Bool)  -> OrbFrame
-    
-    /**
-     * Normalized 0…1 peaks; they speed the motion up, never the geometry.
-     */
-    func setAudioLevels(microphone: Float, speaker: Float) 
-    
-    func setOrb(orb: VoiceOrb) 
-    
-}
-/**
- * One animated orb. Calls are cheap and safe from any thread; drive
- * [`OrbRenderer::next_frame`] from the display link.
- */
-open class OrbRenderer: OrbRendererProtocol, @unchecked Sendable {
-    fileprivate let handle: UInt64
-
-    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public struct NoHandle {
-        public init() {}
-    }
-
-    // TODO: We'd like this to be `private` but for Swifty reasons,
-    // we can't implement `FfiConverter` without making this `required` and we can't
-    // make it `required` without making it `public`.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    required public init(unsafeFromHandle handle: UInt64) {
-        self.handle = handle
-    }
-
-    // This constructor can be used to instantiate a fake object.
-    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
-    //
-    // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public init(noHandle: NoHandle) {
-        self.handle = 0
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_zeron_mobile_fn_clone_orbrenderer(self.handle, $0) }
-    }
-    /**
-     * Crossfades state changes over 300 ms, like the desktop voice orbs.
-     */
-public convenience init(preset: OrbPreset, orb: VoiceOrb) {
-    let handle =
-        try! rustCall() {
-        uniffiCallStatus in
-    uniffi_zeron_mobile_fn_constructor_orbrenderer_new(
-        FfiConverterTypeOrbPreset_lower(preset),
-        FfiConverterTypeVoiceOrb_lower(orb),uniffiCallStatus
-    )
-}
-    self.init(unsafeFromHandle: handle)
-}
-
-    deinit {
-        if handle == 0 {
-            // Mock objects have handle=0 don't try to free them
-            return
-        }
-
-        try! rustCall { uniffi_zeron_mobile_fn_free_orbrenderer(handle, $0) }
-    }
-
-    
-
-    
-    /**
-     * Advance to now and return the frame to paint. Time only accumulates
-     * while `animating`; reduced motion shows the static representative frame.
-     */
-open func nextFrame(animating: Bool, reducedMotion: Bool) -> OrbFrame  {
-    return try!  FfiConverterTypeOrbFrame_lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_zeron_mobile_fn_method_orbrenderer_next_frame(
-            self.uniffiCloneHandle(),
-        FfiConverterBool.lower(animating),
-        FfiConverterBool.lower(reducedMotion),uniffiCallStatus
-    )
-})
-}
-    
-    /**
-     * Normalized 0…1 peaks; they speed the motion up, never the geometry.
-     */
-open func setAudioLevels(microphone: Float, speaker: Float)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_zeron_mobile_fn_method_orbrenderer_set_audio_levels(
-            self.uniffiCloneHandle(),
-        FfiConverterFloat.lower(microphone),
-        FfiConverterFloat.lower(speaker),uniffiCallStatus
-    )
-}
-}
-    
-open func setOrb(orb: VoiceOrb)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_zeron_mobile_fn_method_orbrenderer_set_orb(
-            self.uniffiCloneHandle(),
-        FfiConverterTypeVoiceOrb_lower(orb),uniffiCallStatus
-    )
-}
-}
-    
-
-    
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeOrbRenderer: FfiConverter {
-    typealias FfiType = UInt64
-    typealias SwiftType = OrbRenderer
-
-    public static func lift(_ handle: UInt64) throws -> OrbRenderer {
-        return OrbRenderer(unsafeFromHandle: handle)
-    }
-
-    public static func lower(_ value: OrbRenderer) -> UInt64 {
-        return value.uniffiCloneHandle()
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrbRenderer {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    public static func write(_ value: OrbRenderer, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeOrbRenderer_lift(_ handle: UInt64) throws -> OrbRenderer {
-    return try FfiConverterTypeOrbRenderer.lift(handle)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeOrbRenderer_lower(_ value: OrbRenderer) -> UInt64 {
-    return FfiConverterTypeOrbRenderer.lower(value)
 }
 
 
@@ -6845,6 +7248,92 @@ public func FfiConverterTypeFrontPage_lower(_ value: FrontPage) -> RustBuffer {
 }
 
 
+/**
+ * Room left for something drawn over a screen glyph, in points from its
+ * box's corner: no dots under a control, a quiet patch under words.
+ */
+public struct GlyphRoom: Equatable, Hashable {
+    public var x: Float
+    public var y: Float
+    public var width: Float
+    public var height: Float
+    /**
+     * Its corners' radius; a round control's is half its width.
+     */
+    public var radius: Float
+    /**
+     * Words, over which the grid stays, quieter.
+     */
+    public var text: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(x: Float, y: Float, width: Float, height: Float, 
+        /**
+         * Its corners' radius; a round control's is half its width.
+         */radius: Float, 
+        /**
+         * Words, over which the grid stays, quieter.
+         */text: Bool) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.radius = radius
+        self.text = text
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GlyphRoom: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGlyphRoom: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GlyphRoom {
+        return
+            try GlyphRoom(
+                x: FfiConverterFloat.read(from: &buf), 
+                y: FfiConverterFloat.read(from: &buf), 
+                width: FfiConverterFloat.read(from: &buf), 
+                height: FfiConverterFloat.read(from: &buf), 
+                radius: FfiConverterFloat.read(from: &buf), 
+                text: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GlyphRoom, into buf: inout [UInt8]) {
+        FfiConverterFloat.write(value.x, into: &buf)
+        FfiConverterFloat.write(value.y, into: &buf)
+        FfiConverterFloat.write(value.width, into: &buf)
+        FfiConverterFloat.write(value.height, into: &buf)
+        FfiConverterFloat.write(value.radius, into: &buf)
+        FfiConverterBool.write(value.text, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGlyphRoom_lift(_ buf: RustBuffer) throws -> GlyphRoom {
+    return try FfiConverterTypeGlyphRoom.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGlyphRoom_lower(_ value: GlyphRoom) -> RustBuffer {
+    return FfiConverterTypeGlyphRoom.lower(value)
+}
+
+
 public struct HarnessInfo: Equatable, Hashable {
     public var id: String
     public var label: String
@@ -7587,70 +8076,6 @@ public func FfiConverterTypeNewSession_lift(_ buf: RustBuffer) throws -> NewSess
 #endif
 public func FfiConverterTypeNewSession_lower(_ value: NewSession) -> RustBuffer {
     return FfiConverterTypeNewSession.lower(value)
-}
-
-
-public struct OrbFrame: Equatable, Hashable {
-    /**
-     * Edge length of the artwork box, in logical points.
-     */
-    public var size: Float
-    public var lines: [Float]
-    public var dots: [Float]
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Edge length of the artwork box, in logical points.
-         */size: Float, lines: [Float], dots: [Float]) {
-        self.size = size
-        self.lines = lines
-        self.dots = dots
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension OrbFrame: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeOrbFrame: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrbFrame {
-        return
-            try OrbFrame(
-                size: FfiConverterFloat.read(from: &buf), 
-                lines: FfiConverterSequenceFloat.read(from: &buf), 
-                dots: FfiConverterSequenceFloat.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: OrbFrame, into buf: inout [UInt8]) {
-        FfiConverterFloat.write(value.size, into: &buf)
-        FfiConverterSequenceFloat.write(value.lines, into: &buf)
-        FfiConverterSequenceFloat.write(value.dots, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeOrbFrame_lift(_ buf: RustBuffer) throws -> OrbFrame {
-    return try FfiConverterTypeOrbFrame.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeOrbFrame_lower(_ value: OrbFrame) -> RustBuffer {
-    return FfiConverterTypeOrbFrame.lower(value)
 }
 
 
@@ -10258,13 +10683,18 @@ public struct VoiceCallState: Equatable, Hashable {
     public var speaking: Bool
     public var caption: String
     /**
-     * Set once the caption is a final segment; live partials have none.
+     * Who speaks the caption: known as the turn begins when the provider
+     * says so, at the latest once its final arrives.
      */
     public var captionSpeaker: VoiceSpeaker?
     /**
      * The utterance the caption belongs to: a change is a new speaker turn.
      */
     public var captionItem: String?
+    /**
+     * The call's recent turns, oldest first: the caption is the last.
+     */
+    public var captionTurns: [VoiceCaptionTurn]
     /**
      * Normalized 0…1 peaks (microphone is 0 while muted).
      */
@@ -10285,11 +10715,15 @@ public struct VoiceCallState: Equatable, Hashable {
          * The assistant's voice is playing.
          */speaking: Bool, caption: String, 
         /**
-         * Set once the caption is a final segment; live partials have none.
+         * Who speaks the caption: known as the turn begins when the provider
+         * says so, at the latest once its final arrives.
          */captionSpeaker: VoiceSpeaker?, 
         /**
          * The utterance the caption belongs to: a change is a new speaker turn.
          */captionItem: String?, 
+        /**
+         * The call's recent turns, oldest first: the caption is the last.
+         */captionTurns: [VoiceCaptionTurn], 
         /**
          * Normalized 0…1 peaks (microphone is 0 while muted).
          */microphone: Float, speaker: Float, 
@@ -10305,6 +10739,7 @@ public struct VoiceCallState: Equatable, Hashable {
         self.caption = caption
         self.captionSpeaker = captionSpeaker
         self.captionItem = captionItem
+        self.captionTurns = captionTurns
         self.microphone = microphone
         self.speaker = speaker
         self.voices = voices
@@ -10335,6 +10770,7 @@ public struct FfiConverterTypeVoiceCallState: FfiConverterRustBuffer {
                 caption: FfiConverterString.read(from: &buf), 
                 captionSpeaker: FfiConverterOptionTypeVoiceSpeaker.read(from: &buf), 
                 captionItem: FfiConverterOptionString.read(from: &buf), 
+                captionTurns: FfiConverterSequenceTypeVoiceCaptionTurn.read(from: &buf), 
                 microphone: FfiConverterFloat.read(from: &buf), 
                 speaker: FfiConverterFloat.read(from: &buf), 
                 voices: FfiConverterSequenceString.read(from: &buf)
@@ -10351,6 +10787,7 @@ public struct FfiConverterTypeVoiceCallState: FfiConverterRustBuffer {
         FfiConverterString.write(value.caption, into: &buf)
         FfiConverterOptionTypeVoiceSpeaker.write(value.captionSpeaker, into: &buf)
         FfiConverterOptionString.write(value.captionItem, into: &buf)
+        FfiConverterSequenceTypeVoiceCaptionTurn.write(value.captionTurns, into: &buf)
         FfiConverterFloat.write(value.microphone, into: &buf)
         FfiConverterFloat.write(value.speaker, into: &buf)
         FfiConverterSequenceString.write(value.voices, into: &buf)
@@ -10370,6 +10807,91 @@ public func FfiConverterTypeVoiceCallState_lift(_ buf: RustBuffer) throws -> Voi
 #endif
 public func FfiConverterTypeVoiceCallState_lower(_ value: VoiceCallState) -> RustBuffer {
     return FfiConverterTypeVoiceCallState.lower(value)
+}
+
+
+/**
+ * One turn of a call's recent words.
+ */
+public struct VoiceCaptionTurn: Equatable, Hashable {
+    /**
+     * The utterance: a different one is a different turn, even with the
+     * same words.
+     */
+    public var item: String?
+    public var text: String
+    /**
+     * Who speaks, once known; `None` only while the provider has not said.
+     */
+    public var speaker: VoiceSpeaker?
+    /**
+     * Its final has arrived: the text will not change.
+     */
+    public var settled: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The utterance: a different one is a different turn, even with the
+         * same words.
+         */item: String?, text: String, 
+        /**
+         * Who speaks, once known; `None` only while the provider has not said.
+         */speaker: VoiceSpeaker?, 
+        /**
+         * Its final has arrived: the text will not change.
+         */settled: Bool) {
+        self.item = item
+        self.text = text
+        self.speaker = speaker
+        self.settled = settled
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension VoiceCaptionTurn: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVoiceCaptionTurn: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VoiceCaptionTurn {
+        return
+            try VoiceCaptionTurn(
+                item: FfiConverterOptionString.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                speaker: FfiConverterOptionTypeVoiceSpeaker.read(from: &buf), 
+                settled: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VoiceCaptionTurn, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.item, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterOptionTypeVoiceSpeaker.write(value.speaker, into: &buf)
+        FfiConverterBool.write(value.settled, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoiceCaptionTurn_lift(_ buf: RustBuffer) throws -> VoiceCaptionTurn {
+    return try FfiConverterTypeVoiceCaptionTurn.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoiceCaptionTurn_lower(_ value: VoiceCaptionTurn) -> RustBuffer {
+    return FfiConverterTypeVoiceCaptionTurn.lower(value)
 }
 
 
@@ -12182,6 +12704,95 @@ public func FfiConverterTypeDemoFixture_lower(_ value: DemoFixture) -> RustBuffe
 
 
 
+
+public enum DictationUnavailable: Equatable, Hashable {
+    
+    /**
+     * The host has no speech model: download it in its Settings → Voice.
+     */
+    case modelMissing
+    /**
+     * The host is already taking a dictation.
+     */
+    case busy
+    case hostUnreachable
+    /**
+     * The host's Zeron is too old to take dictations.
+     */
+    case hostIncompatible
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DictationUnavailable: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDictationUnavailable: FfiConverterRustBuffer {
+    typealias SwiftType = DictationUnavailable
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DictationUnavailable {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .modelMissing
+        
+        case 2: return .busy
+        
+        case 3: return .hostUnreachable
+        
+        case 4: return .hostIncompatible
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DictationUnavailable, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .modelMissing:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .busy:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .hostUnreachable:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .hostIncompatible:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDictationUnavailable_lift(_ buf: RustBuffer) throws -> DictationUnavailable {
+    return try FfiConverterTypeDictationUnavailable.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDictationUnavailable_lower(_ value: DictationUnavailable) -> RustBuffer {
+    return FfiConverterTypeDictationUnavailable.lower(value)
+}
+
+
+
 /**
  * Faces the platform registers (same bytes it hands CoreText/Skia).
  */
@@ -12399,15 +13010,25 @@ public func FfiConverterTypeFadeEdge_lower(_ value: FadeEdge) -> RustBuffer {
 
 
 /**
- * The four tuned size presets (inline 20, avatar 64, large 96, hero 128).
+ * What a glyph is drawn as.
  */
 
-public enum OrbPreset: Equatable, Hashable {
+public enum GlyphShape: Equatable, Hashable {
     
-    case inline
-    case avatar
-    case large
-    case hero
+    /**
+     * A disc of dots, its rings round from the centre: a control.
+     */
+    case disc
+    /**
+     * A call's stage: a disc of dots to its edge, its rim easing into what
+     * holds it.
+     */
+    case stage
+    /**
+     * A dictation's track: a strip that fills its box and rises from its
+     * bottom as the voice does, the desktop composer's own beam.
+     */
+    case beam
 
 
 
@@ -12416,49 +13037,43 @@ public enum OrbPreset: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension OrbPreset: Sendable {}
+extension GlyphShape: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeOrbPreset: FfiConverterRustBuffer {
-    typealias SwiftType = OrbPreset
+public struct FfiConverterTypeGlyphShape: FfiConverterRustBuffer {
+    typealias SwiftType = GlyphShape
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrbPreset {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GlyphShape {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .inline
+        case 1: return .disc
         
-        case 2: return .avatar
+        case 2: return .stage
         
-        case 3: return .large
-        
-        case 4: return .hero
+        case 3: return .beam
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
-    public static func write(_ value: OrbPreset, into buf: inout [UInt8]) {
+    public static func write(_ value: GlyphShape, into buf: inout [UInt8]) {
         switch value {
         
         
-        case .inline:
+        case .disc:
             writeInt(&buf, Int32(1))
         
         
-        case .avatar:
+        case .stage:
             writeInt(&buf, Int32(2))
         
         
-        case .large:
+        case .beam:
             writeInt(&buf, Int32(3))
-        
-        
-        case .hero:
-            writeInt(&buf, Int32(4))
         
         }
     }
@@ -12468,15 +13083,127 @@ public struct FfiConverterTypeOrbPreset: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeOrbPreset_lift(_ buf: RustBuffer) throws -> OrbPreset {
-    return try FfiConverterTypeOrbPreset.lift(buf)
+public func FfiConverterTypeGlyphShape_lift(_ buf: RustBuffer) throws -> GlyphShape {
+    return try FfiConverterTypeGlyphShape.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeOrbPreset_lower(_ value: OrbPreset) -> RustBuffer {
-    return FfiConverterTypeOrbPreset.lower(value)
+public func FfiConverterTypeGlyphShape_lower(_ value: GlyphShape) -> RustBuffer {
+    return FfiConverterTypeGlyphShape.lower(value)
+}
+
+
+
+
+public enum HostDictationEvent: Equatable, Hashable {
+    
+    /**
+     * The host takes audio from now on.
+     */
+    case listening
+    case partial(text: String
+    )
+    /**
+     * The host closed the capture itself (the limit): the final follows.
+     */
+    case finalizing
+    case final(text: String
+    )
+    case unavailable(reason: DictationUnavailable
+    )
+    case failed(message: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HostDictationEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostDictationEvent: FfiConverterRustBuffer {
+    typealias SwiftType = HostDictationEvent
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostDictationEvent {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .listening
+        
+        case 2: return .partial(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .finalizing
+        
+        case 4: return .final(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 5: return .unavailable(reason: try FfiConverterTypeDictationUnavailable.read(from: &buf)
+        )
+        
+        case 6: return .failed(message: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HostDictationEvent, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .listening:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .partial(text):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case .finalizing:
+            writeInt(&buf, Int32(3))
+        
+        
+        case let .final(text):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case let .unavailable(reason):
+            writeInt(&buf, Int32(5))
+            FfiConverterTypeDictationUnavailable.write(reason, into: &buf)
+            
+        
+        case let .failed(message):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(message, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostDictationEvent_lift(_ buf: RustBuffer) throws -> HostDictationEvent {
+    return try FfiConverterTypeHostDictationEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostDictationEvent_lower(_ value: HostDictationEvent) -> RustBuffer {
+    return FfiConverterTypeHostDictationEvent.lower(value)
 }
 
 
@@ -14346,7 +15073,7 @@ public func FfiConverterTypeVoiceMediaOperation_lower(_ value: VoiceMediaOperati
 
 
 /**
- * What the voice orb is showing, in call terms.
+ * What the voice glyph is showing, in call terms.
  */
 
 public enum VoiceOrb: Equatable, Hashable {
@@ -14361,6 +15088,10 @@ public enum VoiceOrb: Equatable, Hashable {
     case working
     case awaitingInput
     case muted
+    /**
+     * A dictation's capture has ended and is being turned into words.
+     */
+    case transcribing
 
 
 
@@ -14396,6 +15127,8 @@ public struct FfiConverterTypeVoiceOrb: FfiConverterRustBuffer {
         
         case 7: return .muted
         
+        case 8: return .transcribing
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -14430,6 +15163,10 @@ public struct FfiConverterTypeVoiceOrb: FfiConverterRustBuffer {
         
         case .muted:
             writeInt(&buf, Int32(7))
+        
+        
+        case .transcribing:
+            writeInt(&buf, Int32(8))
         
         }
     }
@@ -15861,6 +16598,31 @@ fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeGlyphRoom: FfiConverterRustBuffer {
+    typealias SwiftType = [GlyphRoom]
+
+    public static func write(_ value: [GlyphRoom], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGlyphRoom.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GlyphRoom] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GlyphRoom]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGlyphRoom.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHarnessInfo: FfiConverterRustBuffer {
     typealias SwiftType = [HarnessInfo]
 
@@ -16428,6 +17190,31 @@ fileprivate struct FfiConverterSequenceTypeVisualSurface: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeVisualSurface.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeVoiceCaptionTurn: FfiConverterRustBuffer {
+    typealias SwiftType = [VoiceCaptionTurn]
+
+    public static func write(_ value: [VoiceCaptionTurn], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeVoiceCaptionTurn.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [VoiceCaptionTurn] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [VoiceCaptionTurn]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeVoiceCaptionTurn.read(from: &buf))
         }
         return seq
     }
@@ -17141,10 +17928,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_start_dictation() != 61930) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hostdictation_cancel() != 63368) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hostdictation_finish() != 48276) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hostdictation_push_audio() != 35729) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_hostdictationlistener_on_dictation_event() != 42278) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_begin_queued_edit() != 9014) {
@@ -17223,6 +18025,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_voicesessionlistener_on_voice_closed() != 14100) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_glyphrenderer_moving() != 12481) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_glyphrenderer_next_frame() != 18570) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_glyphrenderer_set_audio_levels() != 57909) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_glyphrenderer_set_orb() != 35298) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_layoutframe_build_micros() != 17231) {
@@ -17306,15 +18120,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_transcriptview_visual() != 55147) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_method_orbrenderer_next_frame() != 6064) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_zeron_mobile_checksum_method_orbrenderer_set_audio_levels() != 53067) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_zeron_mobile_checksum_method_orbrenderer_set_orb() != 18211) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_zeron_mobile_checksum_method_visuallistener_display() != 33821) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17348,17 +18153,18 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_constructor_coreclient_new() != 27504) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_constructor_glyphrenderer_new() != 18396) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_constructor_textsystem_new() != 55727) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_constructor_transcriptview_new() != 26914) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_constructor_orbrenderer_new() != 46989) {
-        return InitializationResult.apiChecksumMismatch
-    }
 
     uniffiCallbackInitClientListener()
+    uniffiCallbackInitHostDictationListener()
     uniffiCallbackInitLayoutListener()
     uniffiCallbackInitPlatformMeasurer()
     uniffiCallbackInitUploadProgress()

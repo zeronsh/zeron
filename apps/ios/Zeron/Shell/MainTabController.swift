@@ -208,6 +208,27 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     }
 
     /// Push a session on the Sessions tab (from new-session, deep links, search).
+    func revealSession(_ chatId: String) {
+        guard let tab = tabs.first(where: { $0.identifier == "sessions" }),
+              let nav = tab.viewController as? UINavigationController
+        else { return }
+        let open = (nav.topViewController as? SessionViewController)?.chatId == chatId
+        if !open {
+            guard let session = SessionViewController(app: app, chatId: chatId) else {
+                return showSessionOpenError()
+            }
+            UIView.performWithoutAnimation {
+                selectedTab = tab
+                nav.popToRootViewController(animated: false)
+                nav.pushViewController(session, animated: false)
+                view.layoutIfNeeded()
+            }
+        } else {
+            selectedTab = tab
+        }
+        if presentedViewController != nil { dismiss(animated: true) }
+    }
+
     func openSession(_ chatId: String) {
         guard let tab = tabs.first(where: { $0.identifier == "sessions" }) else { return }
         selectedTab = tab

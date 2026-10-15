@@ -93,8 +93,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        composer.cancelDictation()
         rememberDraft()
     }
+
+    private var voiceToken: AnyObject?
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -148,6 +151,19 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         composer.onSend = { [weak self] text, images, _ in
             self?.create(text: text, images: images) ?? false ? .sent : .kept
         }
+        // Dictation is written on the host the session will run on.
+        composer.dictationTarget = { [weak self] in
+            guard let self, let client = self.app.client, !self.deviceId.isEmpty else { return nil }
+            let name = self.project?.deviceName ?? self.app.hostOptions.first { $0.id == self.draft.hostId }?.name ?? self.app.deviceName(self.deviceId)
+            return DictationTarget(client: client, hostId: self.deviceId, hostName: name)
+        }
+        // A call has the microphone: one voice at a time.
+        let syncVoice = { [weak self] in
+            guard let self else { return }
+            self.composer.dictationEnabled = !self.app.voice.live
+        }
+        voiceToken = app.voice.observe(syncVoice)
+        syncVoice()
         view.addSubview(composer)
         heroStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24).isActive = true
         // The headline lives in the free space above the composer — from the

@@ -2,13 +2,35 @@
 //! projectless Codex chat, resumed across calls, and survives navigation
 //! between threads; only an explicit end, an engine change or a provider
 //! failure closes it. No automatic reconnect or microphone resume.
-use crate::orb::OrbState;
 use crate::state::EngineHandle;
 use gpui::{Context, Task};
 use gpui_tokio::Tokio;
+use zeron_orb::OrbState;
 use zeron_proto::voice::*;
+pub mod glyph;
+mod hearing;
 mod permissions;
 mod remote;
+
+/// Whether a voice call is listening to the microphone right now: live and
+/// not muted. Dictation stands aside while it is, so the user never speaks
+/// to two things at once; muting the call hands the microphone back.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct VoiceListening(pub bool);
+impl gpui::Global for VoiceListening {}
+
+/// Tells every composer whether a call has the microphone.
+pub(crate) fn publish_listening(listening: bool, cx: &mut gpui::App) {
+    if cx.try_global::<VoiceListening>().copied() != Some(VoiceListening(listening)) {
+        cx.set_global(VoiceListening(listening));
+    }
+}
+
+/// Whether a call is listening (see [`VoiceListening`]).
+pub fn listening(cx: &gpui::App) -> bool {
+    cx.try_global::<VoiceListening>()
+        .is_some_and(|listening| listening.0)
+}
 
 pub enum VoiceControl {
     Mute(bool),
@@ -42,6 +64,12 @@ pub struct VoiceController {
     codex_check: Option<Task<()>>,
     /// This call played its start sound and owes its end sound.
     cued: bool,
+    /// Both voices, band by band, as the glyph follows them.
+    hearing: hearing::Hearing,
+    /// A scripted call ([`Self::preview`]): its voices are made up, so the
+    /// microphone is not read. The turn it is in and the words it has said.
+    previewing: bool,
+    preview_said: (String, usize),
 }
 impl Default for VoiceController {
     fn default() -> Self {
@@ -66,10 +94,23 @@ impl Default for VoiceController {
             codex_engine: None,
             codex_check: None,
             cued: false,
+            hearing: Default::default(),
+            previewing: false,
+            preview_said: Default::default(),
         }
     }
 }
 impl VoiceController {
+    /// A scripted call ([`Self::preview`]), which no engine holds.
+    pub fn previewing(&self) -> bool {
+        self.previewing
+    }
+
+    /// Whether the call has the microphone: live and not muted.
+    pub(crate) fn has_microphone(&self) -> bool {
+        self.is_live() && !self.muted()
+    }
+
     /// Voice can be offered here. An unread catalog counts as yes, so a slow
     /// or failed read never hides it; a live call or its failure stays.
     pub fn offered(&self) -> bool {
@@ -134,9 +175,6 @@ impl VoiceController {
         cx: &mut Context<Self>,
     ) {
         self.cancel(cx);
-        // The call sounds as it is placed, well before the microphone opens.
-        crate::sound::play_voice(true);
-        self.cued = true;
         self.engine = Some(engine.clone());
         self.phase = VoicePhase::Checking;
         self.chat_id = None;
@@ -199,10 +237,10 @@ impl VoiceController {
         cx.notify();
     }
 
-    /// Ending now sounds: a hang-up or a connected call ending. A failure to
-    /// connect only explains itself.
+    /// Ending now sounds: only a call that connected, and so sounded its
+    /// start, sounds its end. A failure to connect only explains itself.
     fn end_sounds(&self) -> bool {
-        self.cued && (self.active_since.is_some() || self.reason.is_none())
+        self.cued
     }
 
     fn reset_session(&mut self) {
@@ -218,6 +256,185 @@ impl VoiceController {
         self.task = None;
         self.stage_open = false;
         self.active_since = None;
+        self.hearing.follow(false, false, false);
+        self.previewing = false;
+    }
+
+    /// A scripted call, for looking at the call's surfaces without a provider
+    /// or any usage: `ZERON_VOICE_PREVIEW=1` in a debug build, as the phone's
+    /// `-voice-preview`. Codex speaks, the user answers, Codex works and then
+    /// waits on an answer, every 14 seconds; the stage opens on it.
+    #[cfg(debug_assertions)]
+    pub fn preview(&mut self, cx: &mut Context<Self>) {
+        self.cancel(cx);
+        let epoch = self.epoch;
+        self.previewing = true;
+        self.host_name = Some("This Mac".into());
+        self.reduce(
+            VoiceEvent::Snapshot {
+                snapshot: VoiceSnapshot {
+                    session_id: "voice-preview".into(),
+                    chat_id: "voice-preview".into(),
+                    generation: 1,
+                    phase: VoicePhase::Active,
+                    muted: false,
+                    playing: false,
+                    work: VoiceWork::Idle,
+                    reason: None,
+                    voice: None,
+                    voices: Vec::new(),
+                },
+            },
+            cx,
+        );
+        // `ZERON_VOICE_PREVIEW=<chat id>` holds the preview in that chat, so
+        // its tray shows over the composer; any other value holds it in
+        // none. Either way no engine change ends it. `ZERON_VOICE_PREVIEW_STAGE=0`
+        // starts with the stage closed.
+        self.chat_id = std::env::var("ZERON_VOICE_PREVIEW")
+            .ok()
+            .filter(|chat| chat != "1");
+        self.stage_open = std::env::var("ZERON_VOICE_PREVIEW_STAGE").as_deref() != Ok("0");
+        // `ZERON_VOICE_PREVIEW_CONNECTING=<secs>` starts the call connecting
+        // for that long first.
+        if preview_secs("ZERON_VOICE_PREVIEW_CONNECTING").is_some() {
+            self.phase = VoicePhase::Starting;
+            if let Some(snapshot) = &mut self.snapshot {
+                snapshot.phase = VoicePhase::Starting;
+            }
+        }
+        let started = std::time::Instant::now();
+        self.task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(40))
+                    .await;
+                let t = started.elapsed().as_secs_f32();
+                let going = this.update(cx, |voice, cx| {
+                    voice.epoch == epoch && {
+                        voice.preview_at(t, cx);
+                        true
+                    }
+                });
+                if !going.unwrap_or(false) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// The preview's script at `t` seconds.
+    #[cfg(debug_assertions)]
+    fn preview_at(&mut self, t: f32, cx: &mut Context<Self>) {
+        // Connecting first (`ZERON_VOICE_PREVIEW_CONNECTING=<secs>`), then
+        // the call goes live.
+        if let Some(connecting) = preview_secs("ZERON_VOICE_PREVIEW_CONNECTING") {
+            if t < connecting {
+                cx.notify();
+                return;
+            }
+            if self.phase != VoicePhase::Active
+                && let Some(mut snapshot) = self.snapshot.clone()
+            {
+                snapshot.phase = VoicePhase::Active;
+                self.reduce(VoiceEvent::Snapshot { snapshot }, cx);
+            }
+        }
+        let t = t - preview_secs("ZERON_VOICE_PREVIEW_CONNECTING").unwrap_or(0.0);
+        const SCRIPT: [(f32, VoiceWork, &str, &str); 5] = [
+            (
+                4.0,
+                VoiceWork::Idle,
+                "codex",
+                "Three tests fail in the parser. Want me to fix them and open a PR?",
+            ),
+            (
+                4.0,
+                VoiceWork::Idle,
+                "user",
+                "Yes, go ahead, and ping me when it's green.",
+            ),
+            (
+                3.0,
+                VoiceWork::Working,
+                "codex",
+                "Running the parser tests…",
+            ),
+            (
+                3.0,
+                VoiceWork::AwaitingInput,
+                "codex",
+                "Should I update the fixture or the parser?",
+            ),
+            // The user mutes to think: the call stays, the microphone rests.
+            (2.0, VoiceWork::Idle, "muted", ""),
+        ];
+        let lap: f32 = SCRIPT.iter().map(|turn| turn.0).sum();
+        let (mut at, mut into) = (t % lap, 0usize);
+        while at >= SCRIPT[into].0 {
+            at -= SCRIPT[into].0;
+            into += 1;
+        }
+        let (length, work, who, said) = SCRIPT[into];
+        // Syllables about five a second inside phrases.
+        let phrase = (at / length * std::f32::consts::PI)
+            .sin()
+            .max(0.0)
+            .powf(0.5);
+        let syllable = (t * 4.7 * std::f32::consts::TAU).sin().max(0.0).powf(1.4);
+        let level = (phrase * (0.2 + 0.8 * syllable) * f32::from(u16::MAX) * 0.5) as u16;
+        let talking = work == VoiceWork::Idle && who != "muted";
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.muted = who == "muted";
+        }
+        let (microphone, speaker) = match (talking, who) {
+            (true, "user") => (level, 0),
+            (true, _) => (0, level),
+            _ => (0, 0),
+        };
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.work = work;
+        }
+        // Words stream in as deltas, as a provider's partials do.
+        let words: Vec<&str> = said.split(' ').filter(|word| !word.is_empty()).collect();
+        let shown = ((at / length * 1.4 * words.len() as f32) as usize + 1).min(words.len());
+        let item = format!("preview-{into}-{}", (t / lap) as u32);
+        if self.preview_said.0 != item {
+            self.preview_said = (item.clone(), 0);
+        }
+        let from = self.preview_said.1;
+        if shown > from {
+            let delta = words[from..shown].join(" ");
+            let delta = if from == 0 {
+                delta
+            } else {
+                format!(" {delta}")
+            };
+            self.preview_said.1 = shown;
+            self.reduce(
+                VoiceEvent::Partial {
+                    generation: 1,
+                    item_id: Some(item),
+                    text: delta,
+                    // Named as the turn begins, as the provider does.
+                    role: Some(if who == "user" {
+                        VoiceRole::User
+                    } else {
+                        VoiceRole::Assistant
+                    }),
+                },
+                cx,
+            );
+        }
+        self.reduce(
+            VoiceEvent::Levels {
+                generation: 1,
+                microphone,
+                speaker,
+            },
+            cx,
+        );
     }
 
     /// End the session (any phase). The provider stop runs in the background.
@@ -264,6 +481,8 @@ impl VoiceController {
         if let Some(snapshot) = &mut self.snapshot {
             snapshot.muted = !muted;
         }
+        self.hearing
+            .follow(self.phase == VoicePhase::Active, !self.previewing, !muted);
         cx.notify();
         if let Some(controls) = &self.controls {
             if controls.try_send(VoiceControl::Mute(!muted)).is_err() {
@@ -280,6 +499,24 @@ impl VoiceController {
 
     pub fn orb_state(&self) -> OrbState {
         orb_state(self.phase, self.snapshot.as_ref())
+    }
+
+    /// Both voices right now, band by band, for the glyph to follow.
+    pub(crate) fn heard(&self) -> glyph::Voice {
+        self.hearing.voice()
+    }
+
+    /// What the glyph shows between voices.
+    pub(crate) fn glyph_mode(&self) -> glyph::Mode {
+        if self.muted() {
+            return glyph::Mode::Muted;
+        }
+        match self.orb_state() {
+            OrbState::Connecting => glyph::Mode::Connecting,
+            OrbState::Working | OrbState::Searching => glyph::Mode::Thinking,
+            OrbState::Solving => glyph::Mode::Asking,
+            _ => glyph::Mode::Listening,
+        }
     }
 
     /// Normalized 0…1 microphone loudness; zero while muted.
@@ -316,6 +553,13 @@ impl VoiceController {
                 self.phase = snapshot.phase;
                 if self.phase == VoicePhase::Active && self.active_since.is_none() {
                     self.active_since = Some(std::time::Instant::now());
+                    // The call sounds once it connects, not as it is placed.
+                    if !self.previewing && !cfg!(test) {
+                        crate::sound::play_voice(true);
+                    }
+                    if !self.previewing {
+                        self.cued = true;
+                    }
                 }
                 self.snapshot = Some(snapshot);
             }
@@ -323,12 +567,15 @@ impl VoiceController {
                 generation,
                 item_id,
                 text,
+                role,
             } if self
                 .snapshot
                 .as_ref()
                 .is_some_and(|s| s.generation == generation) =>
             {
-                if !self.caption.partial(item_id, &text) {
+                // A turn past the caption's ceiling is a stream that never
+                // ends, not speech: the call is given up rather than fed.
+                if !self.caption.partial(item_id, &text, role) {
                     self.cancel(cx);
                     self.phase = VoicePhase::Failed;
                     self.reason = Some(VoiceRejection::Overflow);
@@ -345,6 +592,9 @@ impl VoiceController {
             {
                 self.microphone_level = microphone;
                 self.speaker_level = speaker;
+                let levels = (self.microphone_level(), self.speaker_level());
+                self.hearing
+                    .levels(levels.0, levels.1, std::time::Instant::now());
                 if let Some(snapshot) = &mut self.snapshot {
                     let threshold = if snapshot.playing { 328 } else { 655 };
                     if speaker >= threshold {
@@ -384,6 +634,12 @@ impl VoiceController {
             }
             _ => return,
         }
+        // The microphone's spectrum is read while the call is live and heard.
+        self.hearing.follow(
+            self.phase == VoicePhase::Active,
+            !self.previewing,
+            self.muted(),
+        );
         cx.notify();
     }
     pub fn reason_text(&self) -> &'static str {
@@ -475,16 +731,30 @@ mod tests {
         assert!(voice.offered(), "a call in progress keeps its trigger");
     }
 
-    #[test]
-    fn only_a_hang_up_or_a_connected_call_sounds_its_end() {
-        let mut voice = VoiceController::default();
-        assert!(!voice.end_sounds(), "no call was placed");
-        voice.cued = true;
-        assert!(voice.end_sounds(), "hanging up while connecting");
-        voice.reason = Some(VoiceRejection::Busy);
-        assert!(!voice.end_sounds(), "a failure to connect stays quiet");
-        voice.active_since = Some(std::time::Instant::now());
-        assert!(voice.end_sounds(), "a connected call that drops");
+    #[gpui::test]
+    fn a_call_sounds_once_it_connects_and_only_then_sounds_its_end(cx: &mut gpui::TestAppContext) {
+        let voice = cx.new(|_| VoiceController::default());
+        voice.update(cx, |voice, cx| {
+            let mut connecting = snapshot();
+            connecting.phase = VoicePhase::Starting;
+            voice.reduce(
+                VoiceEvent::Snapshot {
+                    snapshot: connecting,
+                },
+                cx,
+            );
+            assert!(!voice.end_sounds(), "placed, not connected: silent");
+            voice.reduce(
+                VoiceEvent::Snapshot {
+                    snapshot: snapshot(),
+                },
+                cx,
+            );
+            assert!(
+                voice.end_sounds(),
+                "connected: it sounded, and owes its end"
+            );
+        });
     }
 
     #[gpui::test]
@@ -504,6 +774,7 @@ mod tests {
                     generation: 1,
                     item_id: None,
                     text: "old".into(),
+                    role: None,
                 },
                 cx,
             );
@@ -513,6 +784,7 @@ mod tests {
                     generation: 2,
                     item_id: None,
                     text: "current".into(),
+                    role: None,
                 },
                 cx,
             );
@@ -558,6 +830,7 @@ mod tests {
                 generation: 2,
                 item_id: Some(item.into()),
                 text: text.into(),
+                role: None,
             };
             voice.reduce(partial("user", "Open the test"), cx);
             voice.reduce(partial("answer", "Sure, "), cx);
@@ -632,4 +905,10 @@ mod tests {
             OrbState::Connecting
         );
     }
+}
+
+/// A preview moment from the environment, in seconds.
+#[cfg(debug_assertions)]
+fn preview_secs(name: &str) -> Option<f32> {
+    std::env::var(name).ok()?.parse().ok()
 }

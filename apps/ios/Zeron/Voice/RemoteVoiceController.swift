@@ -259,6 +259,7 @@ final class RemoteVoiceController {
     #if DEBUG
     private var previewing = false
     private var previewTimer: Timer?
+    private var step = 0
 
     /// `-voice-preview`: a scripted call for screenshots and UI work — the
     /// orb walks through listening, speaking and working with synthetic
@@ -267,24 +268,50 @@ final class RemoteVoiceController {
         previewing = true
         hostName = "Fedora"
         activeSince = Date().addingTimeInterval(-83)
-        let script: [(VoiceOrb, VoiceCallWork, String, VoiceSpeaker?)] = [
+        // Each turn names its speaker as it begins, as the provider does.
+        let script: [(VoiceOrb, VoiceCallWork, String, VoiceSpeaker)] = [
             (.listening, .idle, "Open a chat on the Mac and ask Claude to fix the failing sync test", .user),
-            (.speaking, .idle, "On it. I'm starting a Claude session in the comet project to look at the sync test.", nil),
-            (.working, .working, "On it. I'm starting a Claude session in the comet project to look at the sync test.", .assistant),
+            (.speaking, .idle, "On it. I'm starting a Claude session in the comet project to look at the sync test.", .assistant),
+            (.working, .working, "Thanks, tell me when it has something.", .user),
             (.awaitingInput, .awaitingInput, "Claude wants to know whether to update the fixture or the parser.", .assistant),
+            // The user mutes to think: the call stays, the microphone rests.
+            (.muted, .idle, "", .user),
         ]
-        var step = 0
+        // `-voice-preview-connecting`: the call connects for three seconds first.
+        let connecting = ProcessInfo.processInfo.arguments.contains("-voice-preview-connecting") ? 30 : 0
+        step = 0
         previewTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                if self.step < connecting {
+                    self.state = VoiceCallState(phase: .connecting, orb: .connecting, chatId: nil, work: .idle, muted: false, speaking: false, caption: "", captionSpeaker: nil, captionItem: nil, captionTurns: [], microphone: 0, speaker: 0, voices: [])
+                    self.step += 1
+                    self.changed()
+                    return
+                }
+                if self.step == connecting { self.activeSince = Date() }
+                let step = self.step - connecting
                 let turn = (step / 40) % script.count
                 let (orb, work, caption, speaker) = script[turn]
                 let wave = Float(abs(sin(Double(step) / 2.3)))
-                // Words stream in, about three per second, like a live partial.
+                // Words stream in, about three per second, like a live partial;
+                // the turns before have settled.
                 let words = caption.split(separator: " ")
                 let streamed = words.prefix(1 + (step % 40) / 3).joined(separator: " ")
-                self.state = VoiceCallState(phase: .active, orb: orb, chatId: "voice-orchestrator-preview", work: work, muted: self.muted, speaking: orb == .speaking, caption: streamed, captionSpeaker: speaker, captionItem: "preview-\(turn)", microphone: orb == .listening ? wave : 0, speaker: orb == .speaking ? wave : 0, voices: [])
-                step += 1
+                let round = step / (40 * script.count)
+                // Every round's turns stay, as a call's do: the transcript
+                // grows past its band and scrolls.
+                let before = (0..<round).flatMap { past in
+                    script.enumerated().filter { !$0.element.2.isEmpty }.map { index, said in
+                        VoiceCaptionTurn(item: "preview-\(past)-\(index)", text: said.2, speaker: said.3, settled: true)
+                    }
+                }
+                let turns = before + script.prefix(turn).enumerated().filter { !$0.element.2.isEmpty }.map { index, said in
+                    VoiceCaptionTurn(item: "preview-\(round)-\(index)", text: said.2, speaker: said.3, settled: true)
+                } + (caption.isEmpty ? [] : [VoiceCaptionTurn(item: "preview-\(round)-\(turn)", text: streamed, speaker: speaker, settled: streamed == caption)])
+                self.muted = orb == .muted
+                self.state = VoiceCallState(phase: .active, orb: orb, chatId: "voice-orchestrator-preview", work: work, muted: self.muted, speaking: orb == .speaking, caption: streamed, captionSpeaker: caption.isEmpty ? nil : speaker, captionItem: caption.isEmpty ? nil : "preview-\(round)-\(turn)", captionTurns: turns, microphone: orb == .listening ? wave : 0, speaker: orb == .speaking ? wave : 0, voices: [])
+                self.step += 1
                 self.changed()
             }
         }
@@ -316,13 +343,30 @@ private enum CallSound: String {
     }
 }
 
+/// Each state is the whole call, sent ten times a second with its levels: only
+/// the newest is worth showing. One hop to the main actor at a time carries
+/// whatever is newest when it runs, so a busy frame never leaves a queue of
+/// stale states (and stale levels) for the glyph to work through.
 private final class VoiceListenerBridge: VoiceSessionListener, @unchecked Sendable {
     private weak var controller: RemoteVoiceController?
     private let generation: UInt64
+    private let lock = NSLock()
+    private var latest: VoiceCallState?
     init(controller: RemoteVoiceController, generation: UInt64) { self.controller = controller; self.generation = generation }
     func onVoiceState(state: VoiceCallState) {
+        lock.lock()
+        let scheduled = latest != nil
+        latest = state
+        lock.unlock()
+        guard !scheduled else { return }
         let controller = controller; let generation = generation
-        Task { @MainActor [weak controller] in controller?.receive(state, generation: generation) }
+        Task { @MainActor [weak controller] in
+            self.lock.lock()
+            let state = self.latest
+            self.latest = nil
+            self.lock.unlock()
+            if let state { controller?.receive(state, generation: generation) }
+        }
     }
     func onVoiceClosed(reason: VoiceEndReason?) {
         let controller = controller; let generation = generation

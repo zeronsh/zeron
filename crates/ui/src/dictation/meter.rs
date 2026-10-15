@@ -16,8 +16,6 @@ const CAPACITY: usize = 320;
 /// A bar never drops below its neighbour faster than this, so syllables leave
 /// a short tail instead of flickering between loud and silent.
 const RELEASE: f32 = 0.62;
-/// The quietest bar still reads as a dot on the baseline.
-pub(crate) const FLOOR: f32 = 0.08;
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Meter {

@@ -36,16 +36,15 @@ final class RemoteVoiceLifecycleTests: XCTestCase {
     }
 
     @MainActor
-    func testOrbFramesMatchTheDesktopArtworkBox() {
+    func testGlyphFramesFillTheirBoxInEveryCallState() {
+        let accent: [Float] = [0.7, 0.6, 1, 0.5, 0.4, 0.9, 0.3, 0.2, 0.7]
         for orb: VoiceOrb in [.idle, .connecting, .listening, .speaking, .working, .awaitingInput, .muted] {
-            let renderer = OrbRenderer(preset: .hero, orb: orb)
+            let renderer = GlyphRenderer(shape: .disc, orb: orb)
             renderer.setAudioLevels(microphone: 0.4, speaker: 0.9)
-            let frame = renderer.nextFrame(animating: true, reducedMotion: false)
-            XCTAssertEqual(frame.size, 128)
-            XCTAssertFalse(frame.dots.isEmpty)
-            XCTAssertEqual(frame.dots.count % 5, 0)
-            XCTAssertEqual(frame.lines.count % 7, 0)
-            XCTAssertTrue((frame.dots + frame.lines).allSatisfy(\.isFinite))
+            let frame = renderer.nextFrame(width: 64, height: 64, dot: 6, corner: 0, rooms: [], accent: accent, animating: true)
+            XCTAssertFalse(frame.isEmpty)
+            XCTAssertEqual(frame.count % 7, 0)
+            XCTAssertTrue(frame.allSatisfy(\.isFinite))
         }
     }
 

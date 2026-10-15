@@ -50,6 +50,10 @@ jobs:
         with:
           rust-cache: core
           save-rust-cache: 'true'
+          # The engine hosts phone dictation on zeron-voice, whose microphone
+          # capture (cpal) links ALSA on Linux.
+          apt-cache: alsa
+          apt-packages: libasound2-dev pkg-config
       - name: Harness, engine, sync, update, doc and preview tests
         run: scripts/ci/test-core.sh
 
@@ -69,7 +73,7 @@ jobs:
             libfontconfig1-dev libfreetype-dev libasound2-dev
             libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
       - name: UI and headless layout regressions
-        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib --test voice_orb_geometry
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib
 
   linux-browser:
     runs-on: ubuntu-24.04

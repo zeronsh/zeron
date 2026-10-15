@@ -49,8 +49,8 @@ Zeron/
                with live summary), sign-in
   Debug/       Transcript lab + hitch meter
 ZeronLiveActivity/  Widget extension: the voice call's Live Activity (Dynamic
-               Island + Lock Screen), with the orb's states exported from
-               zeron-orb as vector assets
+               Island + Lock Screen), with the voice glyph's states exported
+               from zeron-orb's glyph engine as vector assets
 ZeronShared/   Compiled into the app and the extension: the activity's
                attributes and its mute/end App Intents
 ```
@@ -90,6 +90,8 @@ ZeronShared/   Compiled into the app and the extension: the activity's
 | `-harness <id>` | Default harness for new sessions (`mock` for live-stack tests) |
 | `-bench` (with `-lab`) | Display-link fling benchmark; writes `Documents/bench.json` |
 | `-measureopen` | Session open latency; writes `Documents/open.json` |
+| `-voice-preview [-voice-stage]` | A scripted voice call (no audio, host or relay); `-voice-stage` opens its stage |
+| `-dictation-preview [-dictation-start]` | Dictation over a scripted transcriber (no microphone or host); `-dictation-start` runs one as a session opens |
 | `-lab [-turns N] [-autostream] [-autoscroll] [-top] [-meter]` | Transcript lab over fixture markdown, with an on-screen hitch meter |
 
 ## Tests

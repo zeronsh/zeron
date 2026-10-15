@@ -29,6 +29,7 @@ pub mod capabilities {
         HARNESS_UPDATES_V1,
         PROJECTLESS_SCRATCH_V1,
         crate::voice::remote::CAPABILITY,
+        crate::voice::dictation::CAPABILITY,
     ];
 
     pub fn current() -> Vec<String> {
@@ -110,7 +111,8 @@ mod tests {
                     "message-queue-edit-lease-v1",
                     "harness-updates-v1",
                     "projectless-scratch-v1",
-                    "voice-client-media-v1"
+                    "voice-client-media-v1",
+                    "dictation-host-v1"
                 ],
             })
         );

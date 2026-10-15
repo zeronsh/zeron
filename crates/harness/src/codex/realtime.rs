@@ -594,6 +594,26 @@ pub(crate) fn normalize(
                 generation,
                 item_id: p.get("itemId").and_then(Value::as_str).map(str::to_owned),
                 text: text.to_owned(),
+                role: None,
+            })
+        }
+        // A turn begins: its deltas name no speaker, this does, so a live
+        // caption knows who speaks long before the turn's final arrives.
+        "thread/realtime/item/started" => {
+            let item = p.get("item")?;
+            if item.get("type")?.as_str()? != "transcriptSegment" {
+                return None;
+            }
+            let role = match item.get("role")?.as_str()? {
+                "user" => VoiceRole::User,
+                "assistant" => VoiceRole::Assistant,
+                _ => return None,
+            };
+            Some(VoiceEvent::Partial {
+                generation,
+                item_id: Some(item.get("id")?.as_str()?.to_owned()),
+                text: String::new(),
+                role: Some(role),
             })
         }
         "thread/realtime/itemAdded"

@@ -22,6 +22,9 @@ bindgen = ["uniffi/cli"]
 
 [dependencies]
 zeron-voice-session.workspace = true
+zeron-rpc.workspace = true
+base64 = "0.22"
+uuid.workspace = true
 zeron-orb.workspace = true
 zeron-veil.workspace = true
 tokio.workspace = true

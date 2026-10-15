@@ -148,45 +148,6 @@ Parakeet TDT 0.6B v3 model weights are by NVIDIA under CC BY 4.0. The optional d
 
 Native runtime dependencies: parakeet-rs 0.3.8 (MIT OR Apache-2.0), ort/ort-sys 2.0.0-rc.13 (MIT OR Apache-2.0), ONNX Runtime 1.28.0 (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). See `crates/voice/NOTICE.md` for exact conversion provenance, changes, runtime/platform limitations and supported languages. Models are not included in the application bundle.
 
-## Bezel thinking orbs
-
-`crates/orb/` and `crates/ui/src/orb/` were extracted from Bezel
-(https://github.com/clearloop/bezel), revision
-`6141af9c16f7353cdf36003f7404e0a94566a163`, `crates/agent/src/orbs/`.
-This code is compiled into the desktop app and, through the mobile core,
-the iOS app; Bezel is not a dependency. The upstream module is a port of
-gpui-thinking-orbs (https://github.com/FrancoEscob/gpui-thinking-orbs), itself
-a port of Jakub Antalik's thinking-orbs
-(https://github.com/Jakubantalik/thinking-orbs); the orb algorithms and
-per-state tunings originate there. All three are MIT-licensed. Original
-attribution comments are retained. The iOS app carries this notice as
-`Voice/ThinkingOrbs-LICENSE.txt`.
-
-MIT License
-
-Copyright (c) 2026 clearloop
-Copyright (c) 2026 Wing (portions extracted from zeronsh/comet)
-Copyright (c) 2026 gpui-thinking-orbs contributors
-Copyright (c) 2026 Jakub Antalik
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
 ## Codex native voice protocol
 
 The bounded helper control protocol and native runtime environment in

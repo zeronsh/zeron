@@ -50,6 +50,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod dictation;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -681,6 +682,7 @@ enum MutateParams {
 #[derive(Clone)]
 pub struct EngineRpc {
     voice: crate::voice::VoiceManager,
+    dictation: std::sync::Arc<crate::dictation::DictationHost>,
     sessions: SessionsEngine,
     doc_host: DocHost,
     workspace: WorkspaceHost,
@@ -729,6 +731,9 @@ impl EngineRpc {
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
             voice: sessions.voice_manager(),
+            dictation: std::sync::Arc::new(crate::dictation::DictationHost::new(
+                repos.data_dir().to_path_buf(),
+            )),
             sessions,
             doc_host,
             workspace,
@@ -1112,6 +1117,7 @@ impl EngineRpc {
             if matches!(
                 method,
                 methods::OWN_VOICE_V2
+                    | methods::OWN_DICTATION_V1
                     | methods::WATCH_CHECKOUT_CHANGE_REQUEST
                     | methods::WATCH_WORKSPACE_GIT_STATUS
                     | methods::WATCH_HARNESS_UPDATES
@@ -1485,7 +1491,7 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
 fn forwardable(method: &str) -> bool {
-    if voice_remote::handles(method) {
+    if voice_remote::handles(method) || dictation::handles(method) {
         return true;
     }
     matches!(
@@ -1597,7 +1603,7 @@ fn forwardable(method: &str) -> bool {
 
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
 fn is_stream_method(method: &str) -> bool {
-    if method == methods::OWN_VOICE_V2 {
+    if method == methods::OWN_VOICE_V2 || method == methods::OWN_DICTATION_V1 {
         return true;
     }
     matches!(
@@ -1882,6 +1888,9 @@ impl RpcService for EngineRpc {
         }
         if voice_remote::handles(method) {
             return self.voice_remote(method, params).await;
+        }
+        if dictation::handles(method) {
+            return self.dictation(method, params).await;
         }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())

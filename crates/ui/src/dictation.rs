@@ -7,7 +7,7 @@ pub(crate) mod glass;
 mod meter;
 mod model;
 pub(crate) mod waveform;
-pub(crate) use meter::{Bar, FLOOR, Meter};
+pub(crate) use meter::Meter;
 pub(crate) use model::{card, enabled, init};
 
 pub(crate) const FINALIZE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -109,6 +109,7 @@ impl Transcriber for Native {
         }
         self.session.as_mut()?.poll().map(|event| match event {
             zeron_voice::Event::Listening => Event::Listening,
+            zeron_voice::Event::Partial(t) => Event::Partial(t),
             zeron_voice::Event::Finalizing => Event::Finalizing,
             zeron_voice::Event::Final(t) => Event::Final(t),
             zeron_voice::Event::Failed(e) => Event::Failed(e),
@@ -126,7 +127,65 @@ impl Transcriber for Native {
         }
     }
 }
+/// A dictation made up, for looking at its surfaces without a microphone or a
+/// model: `ZERON_DICTATION_PREVIEW=1` in a debug build. Words stream in as a
+/// live transcript does, over a voice that rises and falls, until stopped.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct Scripted {
+    started: Option<std::time::Instant>,
+    said: usize,
+    listening: bool,
+    /// When it was let go: the final comes a moment later, as a model's does.
+    finished: Option<std::time::Instant>,
+}
+
+#[cfg(debug_assertions)]
+impl Scripted {
+    const WORDS: &'static str = "Run the parser tests and open a pull request once they pass";
+}
+
+#[cfg(debug_assertions)]
+impl Transcriber for Scripted {
+    fn poll(&mut self) -> Option<Event> {
+        let started = *self.started.get_or_insert_with(std::time::Instant::now);
+        if !self.listening {
+            self.listening = true;
+            return Some(Event::Listening);
+        }
+        let words: Vec<&str> = Self::WORDS.split(' ').collect();
+        if let Some(at) = self.finished {
+            if at.elapsed() < std::time::Duration::from_millis(1500) {
+                return None;
+            }
+            self.finished = None;
+            return Some(Event::Final(words[..self.said.max(1)].join(" ")));
+        }
+        let due = ((started.elapsed().as_secs_f32() * 2.5) as usize).min(words.len());
+        (due > self.said).then(|| {
+            self.said = due;
+            Event::Partial(words[..due].join(" "))
+        })
+    }
+
+    fn finish(&mut self) {
+        self.finished = Some(std::time::Instant::now());
+    }
+
+    fn level(&mut self) -> f32 {
+        if self.finished.is_some() {
+            return 0.0;
+        }
+        let t = self.started.map_or(0.0, |at| at.elapsed().as_secs_f32());
+        0.02 + 0.06 * (t * 4.7 * std::f32::consts::TAU).sin().max(0.0)
+    }
+}
+
 pub(crate) fn start(cx: &gpui::App) -> Option<Box<dyn Transcriber>> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ZERON_DICTATION_PREVIEW").is_some() {
+        return Some(Box::new(Scripted::default()));
+    }
     if !enabled(cx) {
         return None;
     }
@@ -171,8 +230,8 @@ impl Phase {
     pub fn action_label(&self) -> &'static str {
         match self {
             Self::Idle | Self::Tapped => "Hold to dictate",
-            Self::Requesting | Self::Listening => "Release to transcribe",
-            Self::Finalizing => "Transcribing",
+            Self::Requesting | Self::Listening => "Stop dictation",
+            Self::Finalizing => "Cancel transcription",
             Self::NoSpeech | Self::Denied(_) | Self::Unavailable(_) | Self::Failed(_) => {
                 "Hold to retry dictation"
             }

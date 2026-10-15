@@ -48,10 +48,25 @@ impl SpeakerActivity {
         }
         self.playing
     }
+
+    /// Whether the assistant's voice is loud right now (held a moment).
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    /// Whether the assistant's voice was loud within `window` of `now`.
+    pub fn played_within(&self, now: Instant, window: Duration) -> bool {
+        self.playing
+            || self
+                .last_loud
+                .is_some_and(|last| now.saturating_duration_since(last) < window)
+    }
 }
 
-/// Speaker turns the caption remembers; older ones can no longer complete.
-const CAPTION_TURNS: usize = 8;
+/// The most a turn's words may take in the caption: far past any spoken
+/// turn (an hour of speech is well under 100 KiB), so only a stream that
+/// never ends reaches it.
+pub const CAPTION_TURN_BYTES: usize = 1 << 20;
 
 /// The live caption across speaker turns. Codex interleaves them: a user
 /// turn's final often lands after the assistant has started answering. Each
@@ -68,6 +83,23 @@ struct CaptionTurn {
     text: String,
     /// Known once the turn's final arrives.
     role: Option<VoiceRole>,
+    /// When the turn's first unnamed words arrived: after a grace the turn
+    /// is taken to be the user's.
+    guessed: Option<Instant>,
+    /// Who speaks: from the turn's start when the provider says so, else
+    /// from its final.
+    speaker: Option<VoiceRole>,
+}
+
+/// One turn of the call's recent words, for a call screen that shows more
+/// than the latest: its utterance, its text so far, who speaks (if known
+/// yet) and whether its final has settled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptionLine<'a> {
+    pub item: Option<&'a str>,
+    pub text: &'a str,
+    pub speaker: Option<VoiceRole>,
+    pub settled: bool,
 }
 
 impl Caption {
@@ -85,6 +117,27 @@ impl Caption {
         self.turns.last().and_then(|t| t.role)
     }
 
+    /// The shown turn's speaker as soon as it is known.
+    pub fn speaker(&self) -> Option<VoiceRole> {
+        self.turns.last().and_then(|t| t.speaker)
+    }
+
+    /// The recent turns, oldest first.
+    /// The turns to show, oldest first: those whose speaker is known. A
+    /// turn still unnamed is kept back for its grace rather than shown on
+    /// one side and moved.
+    pub fn lines(&self) -> impl Iterator<Item = CaptionLine<'_>> {
+        self.turns
+            .iter()
+            .filter(|turn| turn.speaker.is_some())
+            .map(|turn| CaptionLine {
+                item: turn.item.as_deref(),
+                text: &turn.text,
+                speaker: turn.speaker,
+                settled: turn.role.is_some(),
+            })
+    }
+
     pub fn clear(&mut self) {
         self.turns.clear();
     }
@@ -95,17 +148,51 @@ impl Caption {
             .rposition(|t| t.item.as_deref() == Some(item))
     }
 
+    /// Every turn of the call is kept: the stage shows them all, the oldest
+    /// a scroll away, and a call's words are small beside its audio.
     fn push(&mut self, turn: CaptionTurn) {
         self.turns.push(turn);
-        let excess = self.turns.len().saturating_sub(CAPTION_TURNS);
-        self.turns.drain(..excess);
     }
 
     /// Append a streamed delta to its turn; a new item starts a new turn. A
     /// delta without an item continues the shown turn while it streams.
-    /// Returns false when the turn outgrew [`MAX_TRANSCRIPT_BYTES`]: it then
-    /// restarts from this delta, showing the tail rather than growing.
-    pub fn partial(&mut self, item: Option<String>, delta: &str) -> bool {
+    /// A turn keeps every word said in it, however long: the transport's
+    /// own bound ([`MAX_TRANSCRIPT_BYTES`]) is per delta and per final, not
+    /// per turn. Returns false once a turn passes [`CAPTION_TURN_BYTES`], a
+    /// runaway stream no voice reaches: what was said is kept and the delta
+    /// is left out, so the beginning is never lost.
+    ///
+    /// `speaker` names who speaks when the provider says so; a turn that
+    /// begins with no text yet is still a turn, known to be someone's.
+    /// A turn the provider has not named after [`Self::GRACE`] is the
+    /// user's: Codex's turns are announced as they begin, the user's own
+    /// transcription is not. Until then the turn is kept back, so no words
+    /// show on one side and move to the other. The provider's word, when it
+    /// comes, still wins.
+    pub const GRACE: Duration = Duration::from_millis(220);
+    pub fn assume(&mut self, item: Option<&str>, now: Instant) {
+        let index = match item {
+            Some(item) => self.position(item),
+            None => self.turns.len().checked_sub(1),
+        };
+        let Some(turn) = index.and_then(|i| self.turns.get_mut(i)) else {
+            return;
+        };
+        if turn.speaker.is_some() {
+            return;
+        }
+        let since = *turn.guessed.get_or_insert(now);
+        if now.saturating_duration_since(since) >= Self::GRACE {
+            turn.speaker = Some(VoiceRole::User);
+        }
+    }
+
+    pub fn partial(
+        &mut self,
+        item: Option<String>,
+        delta: &str,
+        speaker: Option<VoiceRole>,
+    ) -> bool {
         let index = match item {
             Some(ref item) => self.position(item),
             None => self
@@ -119,19 +206,24 @@ impl Caption {
                 item,
                 text: String::new(),
                 role: None,
+                guessed: None,
+                speaker: None,
             });
             self.turns.len() - 1
         });
         let turn = &mut self.turns[index];
+        if speaker.is_some() {
+            turn.speaker = speaker;
+            turn.guessed = None;
+        }
         if turn.role.is_some() {
             // The final already settled this turn.
             return true;
         }
-        let fits = turn.text.len() + delta.len() <= MAX_TRANSCRIPT_BYTES;
-        if !fits {
-            turn.text.clear();
+        let fits = turn.text.len() + delta.len() <= CAPTION_TURN_BYTES;
+        if fits {
+            turn.text.push_str(delta);
         }
-        turn.text.push_str(delta);
         fits
     }
 
@@ -150,19 +242,21 @@ impl Caption {
             turn.item = Some(transcript.item_id.clone());
             turn.text.clone_from(&transcript.text);
             turn.role = Some(transcript.role);
+            turn.speaker = Some(transcript.role);
+            turn.guessed = None;
             return;
         }
         let turn = CaptionTurn {
             item: Some(transcript.item_id.clone()),
             text: transcript.text.clone(),
             role: Some(transcript.role),
+            guessed: None,
+            speaker: Some(transcript.role),
         };
         match self.turns.last() {
             Some(last) if last.role.is_none() => {
                 let streaming = self.turns.len() - 1;
                 self.turns.insert(streaming, turn);
-                let excess = self.turns.len().saturating_sub(CAPTION_TURNS);
-                self.turns.drain(..excess);
             }
             _ => self.push(turn),
         }
@@ -202,6 +296,16 @@ impl VoiceView {
     /// Set once the caption is a final segment; live deltas have none.
     pub fn caption_role(&self) -> Option<VoiceRole> {
         self.caption.role()
+    }
+
+    /// Who speaks the caption, as soon as it is known.
+    pub fn caption_speaker(&self) -> Option<VoiceRole> {
+        self.caption.speaker()
+    }
+
+    /// The call's recent turns, oldest first.
+    pub fn caption_lines(&self) -> impl Iterator<Item = CaptionLine<'_>> {
+        self.caption.lines()
     }
 
     /// The utterance (speaker turn) the caption belongs to, if named.
@@ -275,9 +379,14 @@ impl VoiceView {
                 generation,
                 item_id,
                 text,
+                role,
             } if self.current(generation) => {
-                // A runaway utterance shows its tail rather than grow.
-                self.caption.partial(item_id, &text);
+                // Every word of a turn is kept; only a stream that never
+                // ends is left to stop growing. An unnamed turn is the
+                // user's once a grace has passed with no word from the
+                // provider (see `Caption::assume`).
+                self.caption.partial(item_id.clone(), &text, role);
+                self.caption.assume(item_id.as_deref(), now);
             }
             VoiceEvent::Final { transcript }
                 if self
@@ -294,6 +403,9 @@ impl VoiceView {
             } if self.current(generation) => {
                 self.microphone = microphone;
                 self.speaker = speaker;
+                // Ten times a second: a grace that has run out releases the
+                // newest turn even with no new words.
+                self.caption.assume(None, now);
                 let playing = self.speaker_activity.update(speaker, now);
                 if let Some(snapshot) = &mut self.snapshot {
                     snapshot.playing = playing;
@@ -390,7 +502,8 @@ mod tests {
             VoiceEvent::Partial {
                 generation: 1,
                 item_id: None,
-                text: "early".into()
+                text: "early".into(),
+                role: None,
             },
             now
         ));
@@ -413,17 +526,23 @@ mod tests {
             },
             now
         ));
-        for _ in 0..5 {
+        // A long turn keeps every delta, past the transport's per-delta
+        // bound, its first words as surely as its last, in whole characters.
+        for i in 0..5 {
             view.reduce(
                 VoiceEvent::Partial {
                     generation: 2,
                     item_id: Some("item".into()),
-                    text: "x".repeat(MAX_TRANSCRIPT_BYTES / 2),
+                    text: format!("{i}") + &"é".repeat(MAX_TRANSCRIPT_BYTES / 4),
+                    role: None,
                 },
                 now,
             );
+            assert!(view.caption().ends_with("é"));
         }
-        assert!(view.caption().len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(view.caption().len() > MAX_TRANSCRIPT_BYTES);
+        assert!(view.caption().starts_with("0é"));
+        assert!(view.caption().contains("4é"));
         view.reduce(
             VoiceEvent::Final {
                 transcript: VoiceTranscript {
@@ -443,6 +562,7 @@ mod tests {
                 generation: 2,
                 item_id: Some("next-item".into()),
                 text: "next".into(),
+                role: None,
             },
             now,
         );
@@ -473,16 +593,16 @@ mod tests {
     #[test]
     fn a_late_user_final_never_takes_the_caption_from_the_assistant() {
         let mut caption = Caption::default();
-        caption.partial(Some("user".into()), "Open the ");
-        caption.partial(Some("user".into()), "sync test");
-        caption.partial(Some("assistant".into()), "Sure, ");
-        caption.partial(Some("assistant".into()), "opening it");
+        caption.partial(Some("user".into()), "Open the ", None);
+        caption.partial(Some("user".into()), "sync test", None);
+        caption.partial(Some("assistant".into()), "Sure, ", None);
+        caption.partial(Some("assistant".into()), "opening it", None);
         assert_eq!(caption.text(), "Sure, opening it");
         caption.complete(&final_of("user", VoiceRole::User, "Open the sync test."));
         assert_eq!(caption.text(), "Sure, opening it");
         assert_eq!(caption.item(), Some("assistant"));
         assert_eq!(caption.role(), None);
-        caption.partial(Some("assistant".into()), " now.");
+        caption.partial(Some("assistant".into()), " now.", None);
         assert_eq!(caption.text(), "Sure, opening it now.");
         caption.complete(&final_of(
             "assistant",
@@ -497,7 +617,7 @@ mod tests {
     #[test]
     fn an_unseen_final_is_older_than_the_streaming_turn() {
         let mut caption = Caption::default();
-        caption.partial(Some("assistant".into()), "On it");
+        caption.partial(Some("assistant".into()), "On it", None);
         caption.complete(&final_of("user", VoiceRole::User, "Open the test"));
         assert_eq!(caption.text(), "On it");
         assert_eq!(caption.item(), Some("assistant"));
@@ -511,31 +631,30 @@ mod tests {
     #[test]
     fn deltas_without_an_item_continue_the_streaming_turn() {
         let mut caption = Caption::default();
-        caption.partial(None, "Hello ");
-        caption.partial(None, "there");
+        caption.partial(None, "Hello ", None);
+        caption.partial(None, "there", None);
         assert_eq!(caption.text(), "Hello there");
         caption.complete(&final_of("a", VoiceRole::Assistant, "Hello there."));
         assert_eq!(caption.item(), Some("a"));
         // A settled turn is not continued: the next delta starts a new one.
-        caption.partial(None, "Next");
+        caption.partial(None, "Next", None);
         assert_eq!(caption.text(), "Next");
         assert_eq!(caption.role(), None);
     }
 
     #[test]
-    fn a_settled_turn_ignores_late_deltas_and_old_turns_are_forgotten() {
+    fn a_settled_turn_ignores_late_deltas_and_every_turn_is_kept() {
         let mut caption = Caption::default();
-        caption.partial(Some("a".into()), "Done");
+        caption.partial(Some("a".into()), "Done", None);
         caption.complete(&final_of("a", VoiceRole::Assistant, "Done."));
-        caption.partial(Some("a".into()), " again");
+        caption.partial(Some("a".into()), " again", None);
         assert_eq!(caption.text(), "Done.");
-        for i in 0..CAPTION_TURNS * 2 {
-            caption.partial(Some(format!("turn-{i}")), "x");
+        // A long call keeps its first words as surely as its last.
+        for i in 0..200 {
+            caption.partial(Some(format!("turn-{i}")), "x", None);
         }
-        assert_eq!(caption.turns.len(), CAPTION_TURNS);
-        assert_eq!(
-            caption.item(),
-            Some(format!("turn-{}", CAPTION_TURNS * 2 - 1).as_str())
-        );
+        assert_eq!(caption.turns.len(), 201);
+        assert_eq!(caption.turns[0].text, "Done.");
+        assert_eq!(caption.item(), Some("turn-199"));
     }
 }

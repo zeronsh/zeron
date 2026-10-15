@@ -5,6 +5,6 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# The thinking-orb animation engine without a renderer: desktop paints its
-# frames through GPUI, mobile through Core Graphics, from identical geometry.
+# The voice glyph's engine without a renderer: desktop paints its frames
+# through GPUI, mobile through Core Graphics, from identical dots.
 [dependencies]

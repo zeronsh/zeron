@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 import WidgetKit
 
-/// The orchestrator call outside the app. The Dynamic Island keeps the orb
+/// The orchestrator call outside the app. The Dynamic Island keeps the glyph
 /// and the call clock beside the camera; expanded, and on the Lock Screen, it
 /// adds what Codex is doing, the host and the stage's mute and end controls.
 /// Tapping it returns to the full-screen stage.
@@ -111,19 +111,19 @@ private struct LockScreenCall: View {
 
 // MARK: Pieces
 
-/// The desktop orb's drawing for this state, in the surrounding ink. Waiting
-/// on an answer it takes the stage's warning tone; muted it rests dimmer.
+/// The call's glyph for this state, as the app draws it: the same engine's
+/// dots, frozen on one representative frame (a Live Activity redraws only
+/// when its state changes). Small, the 3×3 of every minified glyph; large, a
+/// disc. Codex in sunrise, the user in the accent, a muted call at rest.
 private struct OrbGlyph: View {
     let orb: VoiceActivityOrb
     let large: Bool
 
     var body: some View {
-        Image("orb-\(orb.rawValue)-\(large ? "avatar" : "inline")")
+        Image("glyph-\(orb.rawValue)-\(large ? "avatar" : "inline")")
             .resizable()
-            .renderingMode(.template)
+            .renderingMode(.original)
             .scaledToFit()
-            .foregroundStyle(orb == .awaiting ? AnyShapeStyle(Tone.warning) : AnyShapeStyle(.primary))
-            .opacity(orb == .muted ? 0.55 : 1)
             .id(orb)
             .transition(.opacity.combined(with: .scale(scale: 0.8)))
             .accessibilityLabel(orb.status)

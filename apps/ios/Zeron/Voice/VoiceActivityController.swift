@@ -97,7 +97,7 @@ final class VoiceActivityController {
         case .awaitingInput: return .awaiting
         case .listening: return .listening
         case .connecting: return .connecting
-        case .muted, .idle: return .muted
+        case .muted, .idle, .transcribing: return .muted
         }
     }
 }

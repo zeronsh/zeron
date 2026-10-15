@@ -138,10 +138,11 @@ final class CodexVoicePeer: NSObject {
         let report: RTCStatisticsReport = try await callback { complete in peer.statistics { complete(.success($0)) } }
         var microphone: Double = 0
         var speaker: Double = 0
-        for stat in report.statistics.values {
+        // Ten times a second: only the two kinds that carry a level are read
+        // (bridging every stat's values costs the main thread for nothing).
+        for stat in report.statistics.values where stat.type == "media-source" || stat.type == "inbound-rtp" {
             guard let level = stat.values["audioLevel"] as? NSNumber else { continue }
-            if stat.type == "media-source" { microphone = max(microphone, level.doubleValue) }
-            if stat.type == "inbound-rtp" { speaker = max(speaker, level.doubleValue) }
+            if stat.type == "media-source" { microphone = max(microphone, level.doubleValue) } else { speaker = max(speaker, level.doubleValue) }
         }
         return (UInt16(min(1, max(0, microphone)) * 65535), UInt16(min(1, max(0, speaker)) * 65535))
     }

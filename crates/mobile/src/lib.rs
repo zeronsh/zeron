@@ -11,6 +11,7 @@ uniffi::setup_scaffolding!("zeron_core");
 mod client_ffi;
 pub mod layout;
 pub mod caption;
+pub mod glyph;
 pub mod orb;
 pub mod wallpaper;
 pub mod visual;

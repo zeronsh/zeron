@@ -1,23 +1,27 @@
-// Extracted from Bezel 6141af9c16f7353cdf36003f7404e0a94566a163; MIT. See THIRD_PARTY_NOTICES.md.
-//! Thinking orbs — dotted loading indicators for AI & agent UIs, ported from
-//! gpui-thinking-orbs (MIT), itself a port of Jakub Antalik's thinking-orbs.
-//!
-//! Twelve hand-tuned animated states and four size presets, emitted as
-//! monochrome geometry ([`engine::Frame`]). Nothing here paints: the desktop
-//! widget renders frames through GPUI and the mobile apps through their native
-//! 2-D APIs, so every platform shows the same artwork.
+//! The voice glyph's engine ([`glyph`]) and the state a call shows, shared by
+//! the desktop and the mobile apps so every surface reads a call the same way.
+//! Nothing here paints: the desktop draws its dots through GPUI, the phone
+//! through Core Graphics, from the same frames.
 
-mod animator;
-mod motion;
-mod presets;
-mod types;
+pub mod glyph;
 
-pub mod engine;
-
-pub use animator::{OrbAnimator, crossfade};
-pub use motion::{AnimationClock, AudioResponse};
-pub use presets::{Resolved, resolve_preset};
-pub use types::{ModeKey, OrbSize, OrbState, OrbTheme};
-
-/// Reduced motion freezes every orb on this representative frame.
-pub const REDUCED_MOTION_T: f32 = 0.6;
+/// What a call is doing, as its glyph shows it.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OrbState {
+    /// Codex works on the user's behalf.
+    #[default]
+    Working,
+    /// Codex looks something up.
+    Searching,
+    /// Codex waits on the user's answer.
+    Solving,
+    /// The user has the floor.
+    Listening,
+    /// The call is being placed.
+    Connecting,
+    /// Codex speaks.
+    Composing,
+    /// The call rests: muted, or not yet heard.
+    Breathing,
+}
