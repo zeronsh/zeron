@@ -26,6 +26,10 @@
 //! that provider's entry alone — a ChatGPT switch never touches the Claude
 //! or Copilot login beside it.
 //!
+//! Oh My Pi is not in the table: it keeps its logins in its own `agent.db`
+//! (under `~/.omp/agent`), which zeron neither reads nor switches. Sign in
+//! with `omp login`.
+//!
 //! The original four providers each store exactly one live login:
 //!
 //! - **Claude Code** — credentials in `~/.claude/.credentials.json`
@@ -3951,6 +3955,7 @@ fn harness_slug(harness: HarnessId) -> &'static str {
         HarnessId::Hermes => "hermes",
         HarnessId::Fx => "fx",
         HarnessId::Pi => "pi",
+        HarnessId::Omp => "omp",
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "antigravity",
         HarnessId::Muse => "muse",

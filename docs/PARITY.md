@@ -61,6 +61,7 @@ not built yet).
 | Grok (ACP) | done | Shared `AcpHarness` spec; `grok agent stdio`, turn-boundary steering. |
 | Hermes (ACP) | done | Shared `AcpHarness` spec; `hermes acp` (Nous Research's native ACP server), turn-boundary steering, no effort ladder yet. |
 | Pi (RPC) | done | Native `PiHarness` (Pi ≥0.85.1), step-boundary steering, native/legacy session resume, per-model thinking levels including off, extension dialogs and Zeron MCP delegation. See [Pi integration](pi.md). |
+| Oh My Pi (RPC) | done | Native `OmpHarness` over `omp --mode rpc-ui` (omp ≥18.11.0), sharing Pi's transport, dialogs and MCP delegation; step-boundary steering, native session resume and per-model thinking levels. Logins stay with `omp login`. See [Oh My Pi integration](omp.md). |
 | Mock harness | done | Scripted event replay; powers tests + the e2e smoke. |
 
 ## §5 Session doc schema
