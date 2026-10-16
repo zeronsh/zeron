@@ -106,14 +106,13 @@ impl OmpHarness {
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Process, HarnessError> {
         let exe = self.resolve_executable()?;
-        if self.executable.is_none() {
-            if let Some(version) = crate::executable::binary_version(&exe) {
-                if version < MIN_VERSION {
-                    return Err(HarnessError::Protocol(format!(
-                        "Oh My Pi {version} is unsupported; update omp to {MIN_VERSION} or newer"
-                    )));
-                }
-            }
+        if self.executable.is_none()
+            && let Some(version) = crate::executable::binary_version(&exe)
+            && version < MIN_VERSION
+        {
+            return Err(HarnessError::Protocol(format!(
+                "Oh My Pi {version} is unsupported; update omp to {MIN_VERSION} or newer"
+            )));
         }
         // `rpc-ui` lets the agent's `ask` tool reach Zeron's input requests.
         // `--allow-home` stops OMP from moving a home-directory chat to a temp dir.
