@@ -280,11 +280,10 @@ pub(crate) fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
     String::from_utf8_lossy(bytes)
         .split_whitespace()
         .find_map(|word| {
-            semver::Version::parse(
-                word.trim_matches(|c: char| matches!(c, '(' | ')' | ','))
-                    .trim_start_matches('v'),
-            )
-            .ok()
+            let word = word.trim_matches(|c: char| matches!(c, '(' | ')' | ','));
+            // `omp --version` prints `omp/18.11.1`.
+            let word = word.rsplit_once('/').map_or(word, |(_, version)| version);
+            semver::Version::parse(word.trim_start_matches('v')).ok()
         })
 }
 
@@ -546,6 +545,10 @@ mod tests {
         );
         assert!(
             parse_version(b"codex-cli 0.100.0-beta.2").unwrap() < semver::Version::new(0, 100, 0)
+        );
+        assert_eq!(
+            parse_version(b"omp/18.11.1\n"),
+            Some(semver::Version::new(18, 11, 1))
         );
         assert!(parse_version(b"unknown").is_none());
     }

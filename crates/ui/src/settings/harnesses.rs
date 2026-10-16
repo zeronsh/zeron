@@ -110,6 +110,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Grok => "grok",
         HarnessId::Hermes => "hermes",
         HarnessId::Pi => "pi",
+        HarnessId::Omp => "omp",
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Mock => "mock",
@@ -1381,6 +1382,7 @@ fn install_visibility_and_hint_follow_target_capabilities() {
         HarnessId::ClaudeCode,
         HarnessId::Cursor,
         HarnessId::Pi,
+        HarnessId::Omp,
         HarnessId::Grok,
         HarnessId::Hermes,
         HarnessId::Devin,
@@ -1418,6 +1420,7 @@ fn install_phase_copy_and_cancel_target_match_install() {
             serde_json::to_value(&target).unwrap()
         );
     }
+    assert_eq!(install_params(HarnessId::Omp, &None)["harness"], "omp");
     assert_eq!(
         install_hint(HarnessId::Codex, false, false),
         "Install the codex CLI to enable. Install with `npm install -g @openai/codex`"

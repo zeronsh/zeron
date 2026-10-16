@@ -2,8 +2,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use zeron_proto::{AgentEvent, DoneStatus, ToolCall, ToolDiff};
 
-#[derive(Default)]
-pub(super) struct Normalizer {
+pub(crate) struct Normalizer {
+    label: &'static str,
     text: HashMap<usize, String>,
     thinking: HashMap<usize, String>,
     tools: HashMap<String, (String, Value)>,
@@ -11,7 +11,23 @@ pub(super) struct Normalizer {
     pub aborted: bool,
     pub window: Option<u64>,
 }
+impl Default for Normalizer {
+    fn default() -> Self {
+        Self::new("Pi")
+    }
+}
 impl Normalizer {
+    pub fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            text: HashMap::new(),
+            thinking: HashMap::new(),
+            tools: HashMap::new(),
+            error: None,
+            aborted: false,
+            window: None,
+        }
+    }
     pub fn reset(&mut self) {
         self.error = None;
         self.aborted = false;
@@ -55,8 +71,8 @@ impl Normalizer {
                 self.error = (message["stopReason"] == "error").then(|| {
                     message["errorMessage"]
                         .as_str()
-                        .unwrap_or("Pi provider failed")
-                        .to_owned()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{} provider failed", self.label))
                 });
                 self.aborted = message["stopReason"] == "aborted";
                 if let Some(content) = message["content"].as_array() {
@@ -126,10 +142,11 @@ impl Normalizer {
                         return None;
                     }
                     match name.as_str() {
-                        "edit" => Some(ToolDiff {
+                        // OMP's patch/hashline edit modes carry no old/new pair.
+                        "edit" if edit_text(args, "new").is_some() => Some(ToolDiff {
                             path: string(args, "path").into(),
-                            old_text: Some(cap(string(args, "oldText"), 65536)),
-                            new_text: cap(string(args, "newText"), 65536),
+                            old_text: Some(cap(edit_text(args, "old").unwrap_or(""), 65536)),
+                            new_text: cap(edit_text(args, "new").unwrap_or(""), 65536),
                         }),
                         "write" => Some(ToolDiff {
                             path: string(args, "path").into(),
@@ -146,7 +163,8 @@ impl Normalizer {
                     diff,
                 });
             }
-            "compaction_end" => {
+            // Pi and OMP names; OMP's result carries no token estimate.
+            "compaction_end" | "auto_compaction_end" => {
                 if let Some(tokens) = frame["result"]["estimatedTokensAfter"].as_u64() {
                     events.push(AgentEvent::ContextUsage {
                         tokens: Some(tokens),
@@ -157,7 +175,7 @@ impl Normalizer {
             "extension_error" => {
                 self.error = Some(string(frame, "error").into());
                 events.push(AgentEvent::Error {
-                    message: format!("Pi extension: {}", string(frame, "error")),
+                    message: format!("{} extension: {}", self.label, string(frame, "error")),
                 });
             }
             _ => {}
@@ -165,7 +183,7 @@ impl Normalizer {
         events
     }
 }
-pub(super) fn string<'a>(v: &'a Value, key: &str) -> &'a str {
+pub(crate) fn string<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
 }
 fn cap(text: &str, limit: usize) -> String {
@@ -177,6 +195,16 @@ fn cap(text: &str, limit: usize) -> String {
         at -= 1;
     }
     format!("{}\n… [truncated]", &text[..at])
+}
+/// Edit text under Pi's (`oldText`/`newText`) or OMP's replace-mode
+/// (`old_string`/`new_string`) argument names.
+fn edit_text<'a>(args: &'a Value, side: &str) -> Option<&'a str> {
+    let (pi, omp) = if side == "old" {
+        ("oldText", "old_string")
+    } else {
+        ("newText", "new_string")
+    };
+    args[pi].as_str().or_else(|| args[omp].as_str())
 }
 fn tool(name: &str, args: &Value) -> ToolCall {
     match name {
@@ -192,14 +220,15 @@ fn tool(name: &str, args: &Value) -> ToolCall {
         },
         "edit" => ToolCall::EditFile {
             path: string(args, "path").into(),
-            old_string: args["oldText"].as_str().map(str::to_owned),
-            new_string: args["newText"].as_str().map(str::to_owned),
+            old_string: edit_text(args, "old").map(str::to_owned),
+            new_string: edit_text(args, "new").map(str::to_owned),
         },
         "grep" => ToolCall::Search {
             pattern: string(args, "pattern").into(),
             path: args["path"].as_str().map(str::to_owned),
         },
-        "find" => ToolCall::Glob {
+        // OMP has both; Pi only `find`.
+        "find" | "glob" => ToolCall::Glob {
             pattern: string(args, "pattern").into(),
         },
         name if name.starts_with("zeron_") => ToolCall::Mcp {
@@ -237,5 +266,27 @@ mod tests {
         assert!(
             matches!(&events[0],AgentEvent::ToolResult{id,diff:Some(diff),..} if id=="t" && diff.new_text=="new")
         );
+    }
+    #[test]
+    fn omp_replace_edits_keep_their_diff_and_patch_edits_do_not_invent_one() {
+        let mut n = Normalizer::new("Oh My Pi");
+        n.map(&json!({"type":"tool_execution_start","toolCallId":"r","toolName":"edit","args":{"path":"a","old_string":"old","new_string":"new"}}));
+        let events = n.map(&json!({"type":"tool_execution_end","toolCallId":"r","isError":false,"result":{"content":[]}}));
+        assert!(
+            matches!(&events[0],AgentEvent::ToolResult{diff:Some(diff),..} if diff.old_text.as_deref()==Some("old") && diff.new_text=="new")
+        );
+        n.map(&json!({"type":"tool_execution_start","toolCallId":"p","toolName":"edit","args":{"path":"a","edits":[{"op":"update","diff":"@@"}]}}));
+        let events = n.map(&json!({"type":"tool_execution_end","toolCallId":"p","isError":false,"result":{"content":[]}}));
+        assert!(matches!(
+            &events[0],
+            AgentEvent::ToolResult { diff: None, .. }
+        ));
+        let glob = n.map(&json!({"type":"tool_execution_start","toolCallId":"g","toolName":"glob","args":{"pattern":"*.rs"}}));
+        assert!(
+            matches!(&glob[0], AgentEvent::ToolCall { call: ToolCall::Glob { pattern }, .. } if pattern == "*.rs")
+        );
+        let error = n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"error","content":[]}}));
+        assert!(error.is_empty());
+        assert_eq!(n.error.as_deref(), Some("Oh My Pi provider failed"));
     }
 }

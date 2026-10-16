@@ -21,6 +21,11 @@ name = "harness-pi-fixture"
 path = "tests/fixtures/pi_rpc.rs"
 required-features = ["native-fixture"]
 
+[[bin]]
+name = "harness-omp-fixture"
+path = "tests/fixtures/omp_rpc.rs"
+required-features = ["native-fixture"]
+
 [dependencies]
 zeron-voice-media.workspace = true
 zeron-proto.workspace = true
@@ -40,6 +45,7 @@ thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 semver = "1"
+rusqlite.workspace = true
 zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]

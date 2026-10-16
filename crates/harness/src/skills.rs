@@ -59,7 +59,7 @@ pub(crate) fn is_shared_skill(path: &str) -> bool {
     })
 }
 
-/// ACP has no standard skill catalog. Pi labels its skill commands explicitly;
+/// ACP has no standard skill catalog. Pi and OMP label their skill commands explicitly;
 /// other agents can bind a discovered skill only to a command they advertised.
 pub(crate) fn attach_advertised_commands(
     harness: HarnessId,
@@ -71,7 +71,8 @@ pub(crate) fn attach_advertised_commands(
         if !zeron_proto::invocation::valid_skill_command_name(&command.name) {
             continue;
         }
-        let name = if harness == HarnessId::Pi {
+        let labelled = matches!(harness, HarnessId::Pi | HarnessId::Omp);
+        let name = if labelled {
             let Some(name) = command.name.strip_prefix("skill:") else {
                 continue;
             };
@@ -83,17 +84,22 @@ pub(crate) fn attach_advertised_commands(
             // A shared skill named `compact` is not evidence that the
             // provider's built-in /compact invokes that file. Pi's explicit
             // skill: namespace supplies the classification other ACP catalogs lack.
-            if harness != HarnessId::Pi && is_shared_skill(&skill.path) {
+            if !labelled && is_shared_skill(&skill.path) {
                 continue;
             }
             skill.command = Some(SkillCommand {
                 name: command.name.clone(),
                 harness,
             });
-        } else if harness == HarnessId::Pi && !name.is_empty() {
+        } else if labelled && !name.is_empty() {
+            let prefix = if harness == HarnessId::Omp {
+                "omp"
+            } else {
+                "pi"
+            };
             skills.push(Skill {
                 name: name.into(),
-                path: format!("harness-skill:pi:{name}"),
+                path: format!("harness-skill:{prefix}:{name}"),
                 description: command.description.clone(),
                 enabled: true,
                 command: Some(SkillCommand {
@@ -118,6 +124,13 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
         HarnessId::Grok => &[".agents/skills", ".claude/skills", ".grok/skills"],
         HarnessId::Hermes => &[".agents/skills"],
         HarnessId::Pi => &[".agents/skills", ".pi/skills"],
+        // OMP provider priority: native .omp > claude > agents/codex.
+        HarnessId::Omp => &[
+            ".codex/skills",
+            ".agents/skills",
+            ".claude/skills",
+            ".omp/skills",
+        ],
         HarnessId::Devin => &[".agents/skills"],
         HarnessId::Antigravity => &[".agents/skills", ".gemini/skills"],
         HarnessId::Codex => &[".agents/skills", ".codex/skills"],
@@ -142,6 +155,11 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
             std::env::var_os("PI_CODING_AGENT_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".pi/agent"))
+                .join("skills"),
+            String::new(),
+        )),
+        HarnessId::Omp => roots.push((
+            crate::omp::sessions::agent_dir_in(None, home, &|key| std::env::var_os(key))
                 .join("skills"),
             String::new(),
         )),
@@ -577,6 +595,7 @@ mod tests {
             HarnessId::Hermes,
             HarnessId::Antigravity,
             HarnessId::Pi,
+            HarnessId::Omp,
         ] {
             let mut skills = vec![Skill {
                 name: "compact".into(),
@@ -592,7 +611,7 @@ mod tests {
             };
             attach_advertised_commands(harness, &mut skills, &[command("compact")]);
             assert!(skills[0].command.is_none(), "{harness:?}");
-            if harness == HarnessId::Pi {
+            if matches!(harness, HarnessId::Pi | HarnessId::Omp) {
                 attach_advertised_commands(harness, &mut skills, &[command("skill:compact")]);
                 assert_eq!(skills[0].command.as_ref().unwrap().name, "skill:compact");
             }
@@ -725,6 +744,7 @@ mod tests {
             HarnessId::Grok,
             HarnessId::Hermes,
             HarnessId::Pi,
+            HarnessId::Omp,
             HarnessId::Antigravity,
             HarnessId::Opencode,
         ] {
@@ -754,6 +774,7 @@ mod tests {
             HarnessId::Grok,
             HarnessId::Hermes,
             HarnessId::Pi,
+            HarnessId::Omp,
             HarnessId::Antigravity,
             HarnessId::Opencode,
         ] {
@@ -789,6 +810,7 @@ mod tests {
             (HarnessId::Cursor, ".cursor"),
             (HarnessId::Grok, ".grok"),
             (HarnessId::Pi, ".pi"),
+            (HarnessId::Omp, ".omp"),
             (HarnessId::Opencode, ".opencode"),
         ] {
             let native_path = write(

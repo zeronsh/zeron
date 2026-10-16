@@ -56,18 +56,7 @@ impl Store {
         self.write(id, &json!({"sessionId":id,"sessionFile":file}))
     }
     fn write(&self, id: &str, value: &Value) -> Result<(), HarnessError> {
-        std::fs::create_dir_all(&self.root)?;
-        let path = self.key(id);
-        if json_file(&path) == *value {
-            return Ok(());
-        }
-        let temp = self.root.join(format!("{}.tmp", uuid::Uuid::new_v4()));
-        std::fs::write(&temp, serde_json::to_vec(value).unwrap())?;
-        let result = std::fs::rename(&temp, &path);
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
-        result.map_err(Into::into)
+        write_record(&self.root, &self.key(id), value)
     }
     pub fn mark_submitted(&self, id: &str) -> Result<(), HarnessError> {
         let mut record = json_file(&self.key(id));
@@ -151,65 +140,94 @@ impl Store {
                 roots.push(path);
             }
         }
-        for file in candidates {
-            if matches_id(&file, id) {
-                return Ok(file.canonicalize()?);
-            }
+        find_session(candidates, roots, id)
+    }
+}
+/// Atomically replace one index record (skipped when unchanged).
+pub(crate) fn write_record(root: &Path, path: &Path, value: &Value) -> Result<(), HarnessError> {
+    std::fs::create_dir_all(root)?;
+    if json_file(path) == *value {
+        return Ok(());
+    }
+    let temp = root.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temp, serde_json::to_vec(value).unwrap())?;
+    let result = std::fs::rename(&temp, path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(Into::into)
+}
+/// The first candidate, else the first `*.jsonl` up to two levels under a
+/// root, whose session header carries `id`.
+pub(crate) fn find_session(
+    candidates: Vec<PathBuf>,
+    roots: Vec<PathBuf>,
+    id: &str,
+) -> Result<PathBuf, HarnessError> {
+    for file in candidates {
+        if matches_id(&file, id) {
+            return Ok(file.canonicalize()?);
         }
-        for root in roots {
-            // Pi stores session files under per-project directories. No symlink traversal.
-            let mut dirs = vec![(root, 0)];
-            let mut seen = 0;
-            while let Some((dir, depth)) = dirs.pop() {
-                let Ok(entries) = std::fs::read_dir(dir) else {
+    }
+    for root in roots {
+        // Pi and OMP store session files under per-project directories. No symlink traversal.
+        let mut dirs = vec![(root, 0)];
+        let mut seen = 0;
+        while let Some((dir, depth)) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                seen += 1;
+                if seen > 20000 {
+                    return Err(HarnessError::Protocol(
+                        "session search exceeded 20000 entries".into(),
+                    ));
+                }
+                let Ok(kind) = entry.file_type() else {
                     continue;
                 };
-                for entry in entries.flatten() {
-                    seen += 1;
-                    if seen > 20000 {
-                        return Err(HarnessError::Protocol(
-                            "Pi session search exceeded 20000 entries".into(),
-                        ));
-                    }
-                    let Ok(kind) = entry.file_type() else {
-                        continue;
-                    };
-                    let path = entry.path();
-                    if kind.is_dir() && depth < 2 {
-                        dirs.push((path, depth + 1));
-                    } else if kind.is_file()
-                        && path.extension().is_some_and(|e| e == "jsonl")
-                        && matches_id(&path, id)
-                    {
-                        return Ok(path.canonicalize()?);
-                    }
+                let path = entry.path();
+                if kind.is_dir() && depth < 2 {
+                    dirs.push((path, depth + 1));
+                } else if kind.is_file()
+                    && path.extension().is_some_and(|e| e == "jsonl")
+                    && matches_id(&path, id)
+                {
+                    return Ok(path.canonicalize()?);
                 }
             }
         }
-        Err(HarnessError::Protocol(format!(
-            "native session file for {id} was not found"
-        )))
     }
+    Err(HarnessError::Protocol(format!(
+        "native session file for {id} was not found"
+    )))
 }
-fn json_file(path: &Path) -> Value {
+pub(crate) fn json_file(path: &Path) -> Value {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or(Value::Null)
 }
+/// Pi's header is line 1. OMP puts a padded `{"type":"title"}` slot first.
 fn matches_id(path: &Path, id: &str) -> bool {
     use std::io::Read;
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
-    let mut line = String::new();
-    if BufReader::new(file.take(65536))
-        .read_line(&mut line)
-        .is_err()
-    {
-        return false;
+    let mut reader = BufReader::new(file.take(65536));
+    for _ in 0..2 {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            return false;
+        }
+        match serde_json::from_str::<Value>(&line) {
+            Ok(v) if v["type"] == "title" => continue,
+            Ok(v) => return v["type"] == "session" && v["id"] == id,
+            Err(_) => return false,
+        }
     }
-    serde_json::from_str::<Value>(&line).is_ok_and(|v| v["type"] == "session" && v["id"] == id)
+    false
 }
 #[cfg(test)]
 mod tests {

@@ -252,6 +252,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update", "--self"]),
             manual_command: "pi update --self",
         },
+        HarnessId::Omp => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Npm("@oh-my-pi/pi-coding-agent"),
+            update_args: Some(&["update"]),
+            manual_command: "omp update",
+        },
         HarnessId::Opencode => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Opencode,
@@ -2631,6 +2637,16 @@ esac
             provider(HarnessId::Pi).latest,
             LatestSource::Npm("@earendil-works/pi-coding-agent")
         ));
+    }
+
+    #[test]
+    fn omp_checks_its_own_package_and_updates_itself() {
+        let spec = provider(HarnessId::Omp);
+        assert!(matches!(
+            spec.latest,
+            LatestSource::Npm("@oh-my-pi/pi-coding-agent")
+        ));
+        assert_eq!(spec.update_args, Some(&["update"][..]));
     }
 
     #[test]

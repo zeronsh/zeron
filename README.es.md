@@ -1,6 +1,6 @@
 # Zeron
 
-Controla tus agentes de programación (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) de forma local por defecto, con sincronización opcional entre varios dispositivos.
+Controla tus agentes de programación (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Oh My Pi, Antigravity) de forma local por defecto, con sincronización opcional entre varios dispositivos.
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | Español*
 

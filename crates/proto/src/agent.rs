@@ -23,6 +23,9 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Oh My Pi (omp.sh), the Pi fork, driven over its native JSONL RPC
+    /// dialect (`omp --mode rpc-ui`).
+    Omp,
     /// Test harness; never shown in production pickers.
     Mock,
 }

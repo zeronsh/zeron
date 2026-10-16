@@ -177,8 +177,10 @@ pub(crate) fn usage_resets(
 
 /// The providers zeron can sign into, in display order: (harness, name, CLI
 /// command — named in the empty-state copy, zeron settings.agents.tsx
-/// `PROVIDERS`). Every agent with a login of its own is here; what each one
-/// supports is documented engine-side (`agent_accounts` module docs).
+/// `PROVIDERS`). Every agent whose login zeron manages is here; what each one
+/// supports is documented engine-side (`agent_accounts` module docs). Oh My Pi
+/// keeps its own login store and is signed in with `omp login`, so it has no
+/// Accounts section.
 pub const PROVIDERS: [(HarnessId, &str, &str); 9] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
@@ -2346,6 +2348,7 @@ mod tests {
             }
         }
         assert!(!signs_in(HarnessId::Mock));
+        assert!(!signs_in(HarnessId::Omp));
         // Antigravity has no quota to show and keeps a single login.
         assert!(!reports_usage(HarnessId::Antigravity) && reports_usage(HarnessId::Codex));
         assert!(keeps_one_login(HarnessId::Antigravity) && !keeps_one_login(HarnessId::Cursor));

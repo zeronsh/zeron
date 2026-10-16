@@ -73,6 +73,7 @@ dialect and leaves the user's configured servers alone:
 | Claude  | `--mcp-config <inline json>` (no `--strict-mcp-config`)             |
 | ACP (Devin, Grok, Hermes, Antigravity) | `session/new` and `session/load` → `mcpServers: [{name, command, args, env}]` |
 | Pi | Per-run `--extension` bridges stdio MCP into Pi tools in the native RPC process |
+| Oh My Pi | Per-run `--extension` bridges stdio MCP into Oh My Pi tools, reusing Pi's bridge |
 | OpenCode | Child-only `OPENCODE_CONFIG_CONTENT`: `mcp.zeron` on 1.x, `mcp.servers.zeron` on 2.x |
 | Codex   | `thread/start` config overrides `mcp_servers.zeron.{command,args,env}` |
 | Cursor  | SDK `Agent.create` / `Agent.resume` → inline `mcpServers.zeron`, plus `local.settingSources: ["user", "team", "mdm", "plugins"]` so `~/.cursor/mcp.json` and plugin servers load (not `project`: the SDK skips MCP approvals, so repo-defined servers would run unprompted) |

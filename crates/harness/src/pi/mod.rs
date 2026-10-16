@@ -1,10 +1,12 @@
 //! Native Pi JSONL RPC driver. See PROTOCOL.md for the legacy ACK barrier.
+//! The transport, normalizer, dialogs and MCP extension also serve the
+//! Oh My Pi driver (`crate::omp`), which speaks a Pi-family dialect.
 mod catalog;
 mod mcp;
-mod normalize;
-mod rpc;
-mod sessions;
-mod ui;
+pub(crate) mod normalize;
+pub(crate) mod rpc;
+pub(crate) mod sessions;
+pub(crate) mod ui;
 
 use crate::{
     Harness, HarnessError, RunControls,
@@ -128,55 +130,86 @@ impl PiHarness {
                 }
             }
         }
-        let mut cmd = Command::new(&exe);
-        // Process group plus the same env scrubbing the ACP launch applied.
-        crate::process::owned::configure(&mut cmd);
-        crate::compose_child_path(&mut cmd, &exe);
-        if let Some(dir) = &self.agent_dir {
-            cmd.env("PI_CODING_AGENT_DIR", dir);
-        }
-        cmd.args(["--mode", "rpc", "--no-themes"])
-            .args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let scratch = mcp
-            .map(|config| self::mcp::configure(&mut cmd, config))
-            .transpose()?;
-        let mut child = Child::new(cmd.spawn()?);
-        let tail = crate::StderrTail::default();
-        let mut lines = BufReader::new(child.stderr.take().expect("piped stderr")).lines();
-        let stderr = tail.clone();
-        let stderr_task = tokio::spawn(async move {
-            while let Ok(Some(line)) = lines.next_line().await {
-                stderr.push(&line);
-            }
-            stderr.close();
-        });
-        let transport = rpc::Transport::new(
-            child.stdin.take().expect("piped stdin"),
-            child.stdout.take().expect("piped stdout"),
-        );
-        Ok(Process {
-            child,
-            _scratch: scratch,
-            transport,
-            tail,
-            stderr_task,
-            dialogs: Default::default(),
-            exit_deadline: None,
+        let mut all = vec!["--mode".into(), "rpc".into(), "--no-themes".into()];
+        all.extend_from_slice(args);
+        spawn(Launch {
+            label: "Pi",
+            exe: &exe,
+            args: all,
+            agent_dir: self.agent_dir.clone(),
+            unset: &[],
+            cwd,
+            mcp,
         })
     }
 }
-struct Process {
-    child: Child,
+/// One Pi-family RPC child: `exe args...` in `cwd`, all stdio piped.
+pub(crate) struct Launch<'a> {
+    pub label: &'static str,
+    pub exe: &'a Path,
+    pub args: Vec<String>,
+    /// Exported as `PI_CODING_AGENT_DIR` (Pi and OMP read the same name).
+    pub agent_dir: Option<PathBuf>,
+    /// Inherited variables that would override `agent_dir`.
+    pub unset: &'static [&'static str],
+    pub cwd: &'a Path,
+    pub mcp: Option<&'a zeron_proto::McpServer>,
+}
+pub(crate) fn spawn(launch: Launch<'_>) -> Result<Process, HarnessError> {
+    let mut cmd = Command::new(launch.exe);
+    // Process group plus the same env scrubbing the ACP launch applied.
+    crate::process::owned::configure(&mut cmd);
+    crate::compose_child_path(&mut cmd, launch.exe);
+    if let Some(dir) = &launch.agent_dir {
+        cmd.env("PI_CODING_AGENT_DIR", dir);
+        for key in launch.unset {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.args(&launch.args)
+        .current_dir(launch.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let scratch = launch
+        .mcp
+        .map(|config| self::mcp::configure(&mut cmd, config))
+        .transpose()?;
+    let mut child = Child::new(cmd.spawn()?);
+    let tail = crate::StderrTail::default();
+    let mut lines = BufReader::new(child.stderr.take().expect("piped stderr")).lines();
+    let stderr = tail.clone();
+    let stderr_task = tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            stderr.push(&line);
+        }
+        stderr.close();
+    });
+    let transport = rpc::Transport::new(
+        launch.label,
+        child.stdin.take().expect("piped stdin"),
+        child.stdout.take().expect("piped stdout"),
+    );
+    Ok(Process {
+        label: launch.label,
+        child,
+        _scratch: scratch,
+        transport,
+        tail,
+        stderr_task,
+        dialogs: ui::Dialogs::new(launch.label),
+        exit_deadline: None,
+    })
+}
+pub(crate) struct Process {
+    label: &'static str,
+    pub child: Child,
     _scratch: Option<crate::scratch::ScratchDir>,
-    transport: rpc::Transport,
-    tail: crate::StderrTail,
+    pub transport: rpc::Transport,
+    pub tail: crate::StderrTail,
     stderr_task: tokio::task::JoinHandle<()>,
-    dialogs: ui::Dialogs,
+    pub dialogs: ui::Dialogs,
     exit_deadline: Option<tokio::time::Instant>,
 }
 impl Drop for Process {
@@ -185,7 +218,7 @@ impl Drop for Process {
     }
 }
 impl Process {
-    async fn next(&mut self) -> Result<Value, HarnessError> {
+    pub async fn next(&mut self) -> Result<Value, HarnessError> {
         loop {
             tokio::select! {
                 // Drain buffered output before reporting process death. A descendant
@@ -196,16 +229,16 @@ impl Process {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
-                } => return Err(HarnessError::Protocol("Pi exited".into())),
+                } => return Err(HarnessError::Protocol(format!("{} exited", self.label))),
                 status = self.child.wait(), if self.exit_deadline.is_none() => {
                     status?;
                     self.exit_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(100));
                 }
-                frame = self.transport.incoming.recv() => return frame.unwrap_or_else(|| Err(HarnessError::Protocol("Pi disconnected".into()))),
+                frame = self.transport.incoming.recv() => return frame.unwrap_or_else(|| Err(HarnessError::Protocol(format!("{} disconnected", self.label)))),
             }
         }
     }
-    async fn query(
+    pub async fn query(
         &mut self,
         command: Value,
         backlog: &mut Vec<Value>,
@@ -214,7 +247,7 @@ impl Process {
         loop {
             let frame = self.next().await?;
             if frame["type"] == "response" && frame["id"] == id {
-                return response_data(frame);
+                return response_data(frame, self.label);
             }
             if frame["type"] == "extension_ui_request" {
                 self.dialogs.request(self.transport.client.clone(), &frame);
@@ -223,7 +256,7 @@ impl Process {
             }
         }
     }
-    async fn shutdown(&mut self, grace: Duration) {
+    pub async fn shutdown(&mut self, grace: Duration) {
         self.dialogs.cancel();
         self.child.shutdown(grace).await;
     }
@@ -236,12 +269,12 @@ fn thinking_selected(request: &RunRequest) -> bool {
             .get("pi_thinking")
             .is_some_and(|v| v == "off")
 }
-fn response_data(frame: Value) -> Result<Value, HarnessError> {
+pub(crate) fn response_data(frame: Value, label: &str) -> Result<Value, HarnessError> {
     if frame["success"] == true {
         Ok(frame["data"].clone())
     } else {
         Err(HarnessError::Protocol(format!(
-            "Pi {}: {}",
+            "{label} {}: {}",
             string(&frame, "command"),
             frame["error"].as_str().unwrap_or("command failed")
         )))
@@ -872,7 +905,7 @@ impl Runner {
             if !self.active {
                 // A background notification must not reopen a completed engine turn.
                 // No foreground run can own a dialog here, so cancel it explicitly.
-                ui::Dialogs::default().request(self.process.transport.client.clone(), &frame);
+                ui::Dialogs::new("Pi").request(self.process.transport.client.clone(), &frame);
                 tracing::debug!(method = %string(&frame, "method"), "Pi UI request outside a run");
                 return Ok(());
             }
@@ -891,7 +924,7 @@ impl Runner {
             let Some(pending) = self.pending.remove(string(&frame, "id")) else {
                 return Ok(());
             };
-            let data = response_data(frame)?;
+            let data = response_data(frame, "Pi")?;
             if let Pending::Command(epoch) = pending {
                 if epoch == self.epoch {
                     self.initial_pending = false;
@@ -990,25 +1023,25 @@ impl Runner {
 /// Inline attachments as native image blocks, best-effort like the Claude
 /// driver: the path refs already ride the prompt text, so an unreadable,
 /// oversized or non-inlinable file (SVG, HEIC, TIFF, ...) must not fail the turn.
-async fn load_images(paths: &[String]) -> Value {
+pub(crate) async fn load_images(paths: &[String]) -> Value {
     use base64::Engine;
     let mut images = vec![];
     for path in paths {
         match tokio::fs::metadata(path).await {
             Ok(meta) if meta.len() <= 20 * 1024 * 1024 => {}
             Ok(_) => {
-                tracing::debug!(%path, "Pi attachment over inline cap; path ref only");
+                tracing::debug!(%path, "Attachment over inline cap; path ref only");
                 continue;
             }
             Err(error) => {
-                tracing::warn!(%path, %error, "Pi attachment unreadable; path ref only");
+                tracing::warn!(%path, %error, "Attachment unreadable; path ref only");
                 continue;
             }
         }
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(error) => {
-                tracing::warn!(%path, %error, "Pi attachment unreadable; path ref only");
+                tracing::warn!(%path, %error, "Attachment unreadable; path ref only");
                 continue;
             }
         };
@@ -1021,7 +1054,7 @@ async fn load_images(paths: &[String]) -> Value {
         } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
             "image/webp"
         } else {
-            tracing::debug!(%path, "Pi attachment is not an inlinable image; path ref only");
+            tracing::debug!(%path, "Attachment is not an inlinable image; path ref only");
             continue;
         };
         images.push(json!({"type":"image","data":base64::engine::general_purpose::STANDARD.encode(bytes),"mimeType":mime}));
