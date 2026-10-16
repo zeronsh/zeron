@@ -37,6 +37,7 @@ async fn managed_install_reaches_session_started() {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: "say the word ok and stop".into(),
         harness: None,

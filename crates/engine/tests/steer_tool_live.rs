@@ -112,6 +112,7 @@ async fn steering_never_aborts_a_running_tool() {
         .set_chat_config(
             CHAT,
             &ChatConfig {
+                launch_args: Vec::new(),
                 harness: id,
                 model: model.clone(),
                 reasoning: None,
@@ -135,6 +136,7 @@ async fn steering_never_aborts_a_running_tool() {
             SessionCommandPayload::Run {
                 message_id: "call".into(),
                 request: RunRequest {
+                    launch_args: Vec::new(),
                     mcp: Some(McpServer {
                         name: "slow".into(),
                         command: "python3".into(),

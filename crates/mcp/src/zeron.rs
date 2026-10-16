@@ -264,6 +264,29 @@ impl Zeron {
         })
     }
 
+    /// `{claudeChrome}` for the device, or an error when the engine is too old
+    /// to answer `GetHarnessSettings`.
+    pub async fn harness_settings(&self, device: Option<&str>) -> anyhow::Result<Value> {
+        let mut params = json!({});
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        self.call(methods::GET_HARNESS_SETTINGS, params).await
+    }
+
+    /// Set `{claudeChrome}` on the device and return the updated settings.
+    pub async fn set_harness_settings(
+        &self,
+        device: Option<&str>,
+        claude_chrome: bool,
+    ) -> anyhow::Result<Value> {
+        let mut params = json!({ "claudeChrome": claude_chrome });
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        self.call(methods::SET_HARNESS_SETTINGS, params).await
+    }
+
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
         self.models_on(harness, None).await
     }

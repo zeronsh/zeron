@@ -87,6 +87,21 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
+            name: "set_harness_settings",
+            description: "Device-level harness settings. claude_chrome: start new Claude Code sessions on that device with the Claude in Chrome browser integration (--chrome). Applies to sessions started after the change; running sessions keep their current setting.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "device": device_schema(),
+                    "claude_chrome": {
+                        "type": "boolean",
+                        "description": "Start new Claude Code sessions with the Claude in Chrome browser integration (--chrome)."
+                    }
+                },
+                "required": ["claude_chrome"]
+            }),
+        },
+        ToolDef {
             name: "list_models",
             description: "Models a harness offers on the chosen device (local engine when omitted). Model ids are harness-specific strings; pass one to create_chat.",
             input_schema: json!({
@@ -131,6 +146,7 @@ fn catalog() -> Vec<ToolDef> {
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
+                    "args": { "type": "array", "items": { "type": "string" }, "maxItems": 64, "description": "Extra command-line arguments for the agent CLI, applied to every turn of this chat. claude-code examples: [\"--chrome\"] (Claude in Chrome), [\"--add-dir\", \"../other-repo\"], [\"--agent\", \"reviewer\"]. Flags Zeron manages (stream/permission/resume/model/effort/settings...) are rejected." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
@@ -495,6 +511,12 @@ struct DeviceArgs {
     device: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct SetHarnessSettingsArgs {
+    device: Option<String>,
+    claude_chrome: bool,
+}
+
 /// Messages already in the transcript before a send. Replies are matched by
 /// id, not by time: `createdAt` is stamped on the host's clock, which can run
 /// behind the caller's when the chat lives on another device.
@@ -519,6 +541,9 @@ struct CreateChatArgs {
     model: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
+    /// Launch arguments for the agent CLI (`ChatConfig::launch_args`).
+    #[serde(default)]
+    args: Vec<String>,
     title: Option<String>,
     branch: Option<String>,
     cwd: Option<String>,
@@ -624,7 +649,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         .and_then(|id| spaces.iter().find(|s| s.id == id));
     let session = session_for(sessions, chat);
     let (status, status_age) = status_of(session.as_ref());
-    json!({
+    let mut summary = json!({
         "id": chat.id,
         "title": chat.title,
         "project": space.map(|s| json!({
@@ -645,7 +670,11 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "lastMessageAt": chat.last_message_at,
         "lastMessagePreview": chat.last_message_preview,
         "createdAt": chat.created_at,
-    })
+    });
+    if let Some(config) = chat.config.as_ref().filter(|c| !c.launch_args.is_empty()) {
+        summary["args"] = json!(config.launch_args);
+    }
+    summary
 }
 
 fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
@@ -682,6 +711,7 @@ impl Tools {
             "list_devices" => self.list_devices().await,
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
+            "set_harness_settings" => self.set_harness_settings(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
             "list_chats" => self.list_chats(parse(args)?).await,
             "get_chat" => self.get_chat(parse(args)?).await,
@@ -800,7 +830,7 @@ impl Tools {
             None => None,
         };
         let harnesses = self.zeron.harnesses_on(device.as_deref()).await?;
-        Ok(json!({
+        let mut value = json!({
             "harnesses": harnesses.iter().map(|h| json!({
                 "id": h.id,
                 "name": h.name,
@@ -809,7 +839,22 @@ impl Tools {
                 "steersMidTurn": h.steers_mid_turn(),
                 "reasoningLevels": h.reasoning_levels,
             })).collect::<Vec<_>>()
-        }))
+        });
+        // Older engines have no GetHarnessSettings. The catalog still stands.
+        if let Ok(settings) = self.zeron.harness_settings(device.as_deref()).await {
+            value["settings"] = settings;
+        }
+        Ok(value)
+    }
+
+    async fn set_harness_settings(&self, args: SetHarnessSettingsArgs) -> anyhow::Result<Value> {
+        let device = match args.device.as_deref() {
+            Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
+            None => None,
+        };
+        self.zeron
+            .set_harness_settings(device.as_deref(), args.claude_chrome)
+            .await
     }
 
     async fn list_models(&self, args: ListModelsArgs) -> anyhow::Result<Value> {
@@ -968,7 +1013,21 @@ impl Tools {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
+        if !args.args.is_empty() {
+            zeron_proto::launch_args::validate(harness, &args.args).map_err(anyhow::Error::msg)?;
+            // An older host would drop the field and run without the args.
+            anyhow::ensure!(
+                self.zeron.devices().await?.iter().any(|d| {
+                    d.id == device_id
+                        && d.capabilities
+                            .iter()
+                            .any(|c| c == zeron_proto::capabilities::LAUNCH_ARGS_V1)
+                }),
+                "device {device_id} does not support launch args (args); update Zeron on that device"
+            );
+        }
         let config = ChatConfig {
+            launch_args: args.args.clone(),
             harness,
             model: args.model.clone(),
             reasoning,
@@ -1046,6 +1105,9 @@ impl Tools {
             "title": args.title,
             "parentChatId": parent_chat_id,
         });
+        if !args.args.is_empty() {
+            result["args"] = json!(args.args);
+        }
         if let Some(prompt) = args.prompt.filter(|p| !p.trim().is_empty()) {
             // The row may not have folded into WatchChats yet; build the
             // chat locally from what we just wrote rather than re-reading.
@@ -1355,6 +1417,10 @@ impl Tools {
                     .or_else(|| space.map(|s| s.path.clone()))
                     .unwrap_or_else(|| "~".into());
                 let request = RunRequest {
+                    launch_args: config
+                        .as_ref()
+                        .map(|c| c.launch_args.clone())
+                        .unwrap_or_default(),
                     mcp: None,
                     prompt: text,
                     harness: Some(harness),
@@ -1535,6 +1601,9 @@ mod tests {
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// `None` is an engine that predates Get/SetHarnessSettings.
+        harness_settings: Mutex<Option<bool>>,
+        settings_calls: Mutex<Vec<(String, Value)>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1561,7 +1630,7 @@ mod tests {
                 })),
                 methods::WATCH_DEVICES => stream(json!([{
                     "id": "dev-local", "name": "Laptop", "platform": "linux",
-                    "lastSeenAt": null
+                    "lastSeenAt": null, "capabilities": ["launch-args-v1"]
                 }, {"id": "dev-remote", "name": "Worker", "platform": "linux", "lastSeenAt": null}])),
                 methods::WATCH_SPACES => stream(json!([{
                     "id": "space-1", "deviceId": "dev-local", "path": "/repo/comet",
@@ -1611,6 +1680,32 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
+                methods::GET_HARNESS_SETTINGS => match *self.harness_settings.lock().unwrap() {
+                    Some(on) => {
+                        self.settings_calls
+                            .lock()
+                            .unwrap()
+                            .push((method.into(), params));
+                        RpcReply::Value(json!({"claudeChrome": on}))
+                    }
+                    None => return Err(RpcError::UnknownMethod(method.into())),
+                },
+                methods::SET_HARNESS_SETTINGS => {
+                    let on = params
+                        .get("claudeChrome")
+                        .and_then(Value::as_bool)
+                        .ok_or_else(|| RpcError::BadParams("claudeChrome".into()))?;
+                    let mut slot = self.harness_settings.lock().unwrap();
+                    if slot.is_none() {
+                        return Err(RpcError::UnknownMethod(method.into()));
+                    }
+                    *slot = Some(on);
+                    self.settings_calls
+                        .lock()
+                        .unwrap()
+                        .push((method.into(), params));
+                    RpcReply::Value(json!({"claudeChrome": on}))
+                }
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
@@ -1924,6 +2019,110 @@ mod tests {
         assert_eq!(writes[1].1["op"], "renameChat");
         assert_eq!(writes[2].0, methods::QUEUE_COMMAND);
         assert_eq!(writes[2].1["command"]["request"]["prompt"], "go");
+    }
+
+    #[tokio::test]
+    async fn create_chat_stores_launch_args_in_the_config_and_the_first_run() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let created = tools
+            .call(
+                "create_chat",
+                json!({
+                    "project": "space-1",
+                    "prompt": "go",
+                    "args": ["--chrome", "--add-dir", "../lib"]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["args"], json!(["--chrome", "--add-dir", "../lib"]));
+        {
+            let writes = world.writes.lock().unwrap();
+            assert_eq!(writes.len(), 2, "createChat, run");
+            assert_eq!(
+                writes[0].1["config"]["launchArgs"],
+                json!(["--chrome", "--add-dir", "../lib"])
+            );
+            assert_eq!(
+                writes[1].1["command"]["request"]["launchArgs"],
+                json!(["--chrome", "--add-dir", "../lib"])
+            );
+        }
+
+        // Without args nothing is written or reported.
+        let plain = tools
+            .call("create_chat", json!({ "project": "space-1" }))
+            .await
+            .unwrap();
+        assert!(plain.get("args").is_none());
+        let writes = world.writes.lock().unwrap();
+        assert!(writes[2].1["config"].get("launchArgs").is_none());
+    }
+
+    #[tokio::test]
+    async fn create_chat_rejects_reserved_or_unsupported_args_before_writing() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        for (args, expect) in [
+            (json!(["--chrome", "--model=opus"]), "`--model`"),
+            (json!(["-p"]), "`-p`"),
+            (json!(["--permission-mode", "plan"]), "`--permission-mode`"),
+            (json!([""]), "empty"),
+        ] {
+            let err = tools
+                .call(
+                    "create_chat",
+                    json!({ "project": "space-1", "prompt": "go", "args": args }),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.contains(expect), "{err}");
+        }
+        let err = tools
+            .call(
+                "create_chat",
+                json!({ "project": "space-1", "args": "--chrome" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("invalid arguments"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty(), "nothing written");
+    }
+
+    #[tokio::test]
+    async fn create_chat_args_need_a_host_that_advertises_launch_args() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        // dev-remote advertises no capabilities: it would ignore the args.
+        let err = tools
+            .call(
+                "create_chat",
+                json!({ "project": "space-remote", "args": ["-c", "a=1"] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("does not support launch args"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty());
+        // The same chat without args is fine there.
+        tools
+            .call("create_chat", json!({ "project": "space-remote" }))
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn chat_summaries_report_launch_args_only_when_present() {
+        let mut chat: Chat = serde_json::from_value(json!({
+            "id": "c1", "deviceId": "d", "archived": false,
+            "config": { "harness": "claude-code", "model": null, "reasoning": null,
+                        "sandbox": "workspace-write", "launchArgs": ["--chrome"] },
+            "createdAt": "2026-09-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(summarize_chat(&chat, &[], &[])["args"], json!(["--chrome"]));
+        chat.config.as_mut().unwrap().launch_args.clear();
+        assert!(summarize_chat(&chat, &[], &[]).get("args").is_none());
     }
 
     #[tokio::test]
@@ -2295,6 +2494,65 @@ mod tests {
             );
             assert!(broken.writes.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn harness_settings_round_trip_and_older_devices_omit_them() {
+        let world = Arc::new(World::default());
+        let tools = self::tools(world, Origin::default());
+        let listed = tools.call("list_harnesses", json!({})).await.unwrap();
+        assert!(listed.get("settings").is_none(), "{listed}");
+        assert_eq!(listed["harnesses"][0]["id"], "claude-code");
+        assert!(
+            tools
+                .call("set_harness_settings", json!({"claude_chrome": true}))
+                .await
+                .is_err()
+        );
+        assert!(tools.call("set_harness_settings", json!({})).await.is_err());
+
+        let world = Arc::new(World {
+            harness_settings: Mutex::new(Some(false)),
+            ..Default::default()
+        });
+        let tools = self::tools(world.clone(), Origin::default());
+        let listed = tools.call("list_harnesses", json!({})).await.unwrap();
+        assert_eq!(listed["settings"]["claudeChrome"], false);
+        let updated = tools
+            .call("set_harness_settings", json!({"claude_chrome": true}))
+            .await
+            .unwrap();
+        assert_eq!(updated["claudeChrome"], true);
+        let listed = tools.call("list_harnesses", json!({})).await.unwrap();
+        assert_eq!(listed["settings"]["claudeChrome"], true);
+
+        let updated = tools
+            .call(
+                "set_harness_settings",
+                json!({"device": "Worker", "claude_chrome": false}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["claudeChrome"], false);
+        let calls = world.settings_calls.lock().unwrap();
+        let set = calls
+            .iter()
+            .rev()
+            .find(|(method, _)| method == methods::SET_HARNESS_SETTINGS)
+            .unwrap();
+        assert_eq!(set.1["claudeChrome"], false);
+        assert_eq!(set.1["targetDeviceId"], "dev-remote");
+        drop(calls);
+        let listed = tools
+            .call("list_harnesses", json!({"device": "Worker"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["harnesses"][0]["id"], "codex");
+        assert_eq!(listed["settings"]["claudeChrome"], false);
+        let calls = world.settings_calls.lock().unwrap();
+        let get = calls.last().unwrap();
+        assert_eq!(get.0, methods::GET_HARNESS_SETTINGS);
+        assert_eq!(get.1["targetDeviceId"], "dev-remote");
     }
 
     #[tokio::test]

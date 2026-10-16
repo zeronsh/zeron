@@ -49,6 +49,10 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// Per-device harness settings. `Get` → `{claudeChrome}`. `Set` params
+    /// `{claudeChrome, targetDeviceId?}` → the updated settings.
+    pub const GET_HARNESS_SETTINGS: &str = "GetHarnessSettings";
+    pub const SET_HARNESS_SETTINGS: &str = "SetHarnessSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

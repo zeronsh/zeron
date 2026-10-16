@@ -84,6 +84,7 @@ async fn real_pi_mock_lifecycle() {
             turn: Default::default(),
         };
         let request = RunRequest {
+            launch_args: Vec::new(),
             prompt: prompt.into(),
             harness: None,
             model: Some("zeron-probe/mock".into()),
@@ -185,6 +186,7 @@ async fn real_pi_mock_lifecycle() {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         prompt: "after loss".into(),
         harness: None,
         model: Some("zeron-probe/mock".into()),
@@ -258,6 +260,7 @@ async fn real_pi_steering_bursts_share_the_next_model_call() {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         prompt: "burst hold".into(),
         harness: None,
         model: Some("zeron-probe/mock".into()),

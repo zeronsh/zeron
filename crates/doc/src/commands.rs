@@ -349,6 +349,7 @@ mod tests {
 
     fn run_request() -> RunRequest {
         RunRequest {
+            launch_args: Vec::new(),
             mcp: None,
             prompt: "hello".into(),
             harness: None,

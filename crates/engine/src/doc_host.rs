@@ -4993,6 +4993,35 @@ impl DocHost {
         request.harness.unwrap_or_else(|| self.harness_for(chat_id))
     }
 
+    /// Make `request.launch_args` the chat's own, and refuse to run with args
+    /// the harness does not accept.
+    ///
+    /// Launch args are fixed on the chat row at creation and apply to EVERY
+    /// run of the chat, whatever a client sent: the desktop composer builds
+    /// its own `RunRequest` and knows nothing about them. A chat with a
+    /// stored config is authoritative (its args, or none when the run goes to
+    /// a different harness than the args were written for); a chat without
+    /// one keeps what the request carries, which the config backfill then
+    /// stamps. Every host dispatch crosses `SessionsEngine::dispatch`, which
+    /// calls this, so queue drains, steer and input fallbacks, crash
+    /// recovery and idle starts are all covered.
+    pub(crate) fn apply_chat_launch_args(
+        &self,
+        chat_id: &str,
+        harness: HarnessId,
+        request: &mut zeron_proto::RunRequest,
+    ) -> Result<(), EngineError> {
+        if let Some(config) = self.workspace().and_then(|ws| ws.chat_config(chat_id)) {
+            request.launch_args = if config.harness == harness {
+                config.launch_args
+            } else {
+                Vec::new()
+            };
+        }
+        zeron_proto::launch_args::validate(harness, &request.launch_args)
+            .map_err(|err| EngineError::Other(format!("invalid launch args: {err}")))
+    }
+
     /// Drain pending commands (host-only): evaluate → mark processed BEFORE execute →
     /// execute → write the outcome as the sole outcome writer.
     pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
@@ -5419,6 +5448,7 @@ impl DocHost {
                     );
                 }
                 let harness = self.harness_for_request(chat_id, &request);
+                self.apply_chat_launch_args(chat_id, harness, &mut request)?;
                 // A row with no config renders no harness glyph (and every
                 // later dispatch falls back to the engine default), so stamp
                 // what this run actually executes with. Claimed rows and
@@ -5428,6 +5458,7 @@ impl DocHost {
                     && ws.chat_config(chat_id).is_none()
                 {
                     let config = zeron_proto::ChatConfig {
+                        launch_args: request.launch_args.clone(),
                         harness,
                         model: request.model.clone(),
                         reasoning: request.reasoning,
@@ -5893,6 +5924,10 @@ impl DocHost {
         };
         let config = chat.config;
         Some(zeron_proto::RunRequest {
+            launch_args: config
+                .as_ref()
+                .map(|c| c.launch_args.clone())
+                .unwrap_or_default(),
             mcp: None,
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),

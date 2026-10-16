@@ -34,6 +34,13 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"echoed","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-command-echo"}'
   ;;
 
+*scenario:launch-args*)
+  # Echo the whole argv ('|'-joined) so the test sees the argument ORDER.
+  args=$(printf '%s|' "$@")
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ARGS:$args\"}}}"
+  emit '{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-args"}'
+  ;;
+
 *scenario:title*)
   tools_off=false
   system_set=false
@@ -44,6 +51,7 @@ case "$first" in
       --system-prompt) shift; case "$1" in "You generate session titles."*) system_set=true ;; esac ;;
       --strict-mcp-config) mcp_off=true ;;
       --dangerously-skip-permissions) exit 1 ;;
+      --chrome|--add-dir) exit 1 ;; # title runs carry neither --chrome nor launch args
     esac
     shift
   done
@@ -55,6 +63,23 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"Fix Login Flow","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-title"}'
   ;;
 
+
+*scenario:chrome-flag*)
+  chrome=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --chrome) chrome=true ;;
+    esac
+    shift
+  done
+  if [ "$chrome" = true ]; then
+    text=chrome-on
+  else
+    text=chrome-off
+  fi
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$text\"}}}"
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$text\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-chrome\"}"
+  ;;
 
 *scenario:happy*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","Read"],"cwd":"/tmp","session_id":"sess-1"}'
@@ -383,6 +408,10 @@ case "$first" in
   ;;
 
 *'"subtype":"initialize"'*)
+  # Discovery must not load Claude in Chrome.
+  for arg in "$@"; do
+    [ "$arg" = "--chrome" ] && exit 1
+  done
   if [ -f .command-fixture ]; then
     rid=$(printf '%s' "$first" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
     name=$(cat .command-fixture)

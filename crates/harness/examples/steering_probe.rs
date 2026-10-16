@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let (steer, steering) = mpsc::channel(64);
     let interrupt = CancellationToken::new();
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt,
         harness: None,

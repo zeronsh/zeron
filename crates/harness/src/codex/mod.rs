@@ -222,7 +222,7 @@ impl CodexHarness {
             }
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            shutdown_child(&mut child, self.kill_grace).await;
+            kill_child_now(&mut child).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
         // The receiver must stay alive for the client's reader loop; agent →
@@ -250,7 +250,7 @@ impl CodexHarness {
             Ok::<Value, HarnessError>(skills)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        kill_child_now(&mut child).await;
         match result {
             Ok(inner) => inner,
             Err(_) => Err(HarnessError::Protocol("command discovery timed out".into())),
@@ -278,7 +278,7 @@ impl CodexHarness {
             }
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            shutdown_child(&mut child, self.kill_grace).await;
+            kill_child_now(&mut child).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
         let (client, _incoming) = RpcClient::new(stdin, stdout);
@@ -347,7 +347,7 @@ impl CodexHarness {
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        kill_child_now(&mut child).await;
         match result {
             Ok(inner) => inner,
             Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
@@ -633,6 +633,7 @@ impl Harness for CodexHarness {
     /// to full access, and `serviceTier` is the only model option used.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && live.launch_args == next.launch_args
             && live.model == next.model
             && to_effort(live.reasoning) == to_effort(next.reasoning)
             && service_tier(live) == service_tier(next)
@@ -644,6 +645,7 @@ impl Harness for CodexHarness {
     /// that way (an omitted parameter keeps the previous value).
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && live.launch_args == next.launch_args
             && live.auto_approve == next.auto_approve
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
@@ -733,6 +735,7 @@ impl Harness for CodexHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
+        request.launch_args.clear();
         self.run_with_mode(request, controls, true, false).await
     }
 }
@@ -745,6 +748,8 @@ impl CodexHarness {
         title_only: bool,
         idle: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        zeron_proto::launch_args::validate(HarnessId::Codex, &request.launch_args)
+            .map_err(|err| HarnessError::Protocol(format!("invalid launch args: {err}")))?;
         let native = command_request(&request.prompt, "")?;
         if native
             .as_ref()
@@ -780,7 +785,9 @@ impl CodexHarness {
             zeron_proto::SandboxLevel::DangerFullAccess
         };
         let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
+        // The chat's launch args are global config flags (`-c`, `--enable`,
+        // `--disable`), so they sit before the subcommand.
+        cmd.args(&request.launch_args).arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
@@ -2237,7 +2244,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
     }
 }
 
-use crate::{Signal, send_signal, shutdown_child};
+use crate::{Signal, kill_child_now, send_signal, shutdown_child};
 
 #[cfg(test)]
 mod tests {

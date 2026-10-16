@@ -23,6 +23,7 @@ use gpui::{
     px,
 };
 
+use zeron_engine::HarnessSettings;
 use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
 
 use zeron_proto::{HarnessId, HarnessUpdatePhase, HarnessUpdatePolicy, HarnessUpdateStatus};
@@ -180,6 +181,15 @@ pub struct HarnessesPage {
     pending_toggle: Option<(HarnessId, bool)>,
     installing: Option<HarnessId>,
     install_task: Option<Task<()>>,
+    /// The target device's "Claude in Chrome by default" setting; `None`
+    /// until loaded and for devices that can't answer (older versions), which
+    /// hides the row.
+    claude_chrome: Option<bool>,
+    /// A `claude_chrome` write the device hasn't answered yet: the switch
+    /// shows it at once.
+    claude_chrome_pending: Option<bool>,
+    harness_settings_task: Option<Task<()>>,
+    claude_chrome_task: Option<Task<()>>,
 
     expanded_harness: Option<HarnessId>,
     /// The expanded provider's Accounts section — one page, retargeted as
@@ -208,6 +218,10 @@ impl HarnessesPage {
             pending_toggle: None,
             installing: None,
             install_task: None,
+            claude_chrome: None,
+            claude_chrome_pending: None,
+            harness_settings_task: None,
+            claude_chrome_task: None,
 
             expanded_harness: None,
             accounts_page: None,
@@ -266,6 +280,7 @@ impl HarnessesPage {
             .flex_col()
             .gap(px(20.0))
             .child(self.render_completion_for(harness, theme, cx))
+            .children(self.render_browser_for(harness, theme, cx))
             .children(self.render_updates_for(harness, theme, cx))
             .when_some(accounts, |details, accounts| details.child(accounts));
         if motion::reduced_motion(cx) {
@@ -273,6 +288,77 @@ impl HarnessesPage {
         } else {
             motion::menu_in(format!("agent-details-{harness:?}"), content).into_any_element()
         }
+    }
+
+    /// The expanded Claude Code provider's Browser section: whether new
+    /// sessions start with the Claude in Chrome tools. Hidden until the device
+    /// has answered, and for devices that can't.
+    fn render_browser_for(
+        &self,
+        harness: HarnessId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if harness != HarnessId::ClaudeCode {
+            return None;
+        }
+        let enabled = self.claude_chrome_pending.or(self.claude_chrome)?;
+        let row = div()
+            .id("claude-chrome-setting")
+            .debug_selector(|| "claude-chrome-setting".into())
+            .min_h(px(52.0))
+            .py(px(10.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .role(gpui::Role::Switch)
+            .aria_label("Claude in Chrome")
+            .aria_toggled(if enabled {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .tab_index(0)
+            .cursor_pointer()
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .on_click(cx.listener(|page, _, _, cx| page.toggle_claude_chrome(cx)))
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    page.toggle_claude_chrome(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Claude in Chrome"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(
+                                    "Start new Claude Code sessions with the Claude in Chrome \
+                                     browser tools. Initially follows your Claude setting.",
+                                )
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(widgets::toggle_switch(
+                theme,
+                enabled,
+                "claude-chrome-switch",
+            ));
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(widgets::details_label(theme, "Browser"))
+                .child(row)
+                .into_any_element(),
+        )
     }
 
     /// The expanded provider's Updates section: the update policy, short
@@ -405,6 +491,10 @@ impl HarnessesPage {
         self.error = None;
         self.harnesses = Loadable::Idle;
         self.updates = Loadable::Idle;
+        self.claude_chrome = None;
+        self.claude_chrome_pending = None;
+        self.harness_settings_task = None;
+        self.claude_chrome_task = None;
         self.update_task = None;
         self.update_action_task = None;
         self.load(cx);
@@ -421,6 +511,7 @@ impl HarnessesPage {
         let update_params = params.clone();
         let supports_updates = self.supports_updates(cx);
 
+        self.load_harness_settings(&engine, params.clone(), cx);
         self.harnesses = Loadable::Loading;
         self.updates = if supports_updates {
             Loadable::Loading
@@ -495,6 +586,83 @@ impl HarnessesPage {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// `GetHarnessSettings` against the target device. A device that can't
+    /// answer (an older version: unknown method) leaves the setting unknown,
+    /// which hides its row rather than showing a switch that can't work.
+    fn load_harness_settings(
+        &mut self,
+        engine: &crate::state::EngineHandle,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.claude_chrome = None;
+        self.claude_chrome_pending = None;
+        self.claude_chrome_task = None;
+        let engine = engine.clone();
+        let target = self.target_device.clone();
+        self.harness_settings_task = Some(cx.spawn(async move |this, cx| {
+            let settings = engine
+                .client()
+                .call(methods::GET_HARNESS_SETTINGS, params)
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<HarnessSettings>(value).ok());
+            this.update(cx, |page, cx| {
+                if page.target_device == target {
+                    page.claude_chrome = settings.map(|settings| settings.claude_chrome);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    fn toggle_claude_chrome(&mut self, cx: &mut Context<Self>) {
+        if let Some(current) = self.claude_chrome_pending.or(self.claude_chrome) {
+            self.set_claude_chrome(!current, cx);
+        }
+    }
+
+    /// Optimistic like `set_enabled`: the switch shows `enabled` at once, the
+    /// device's reply is authoritative, and a failure reverts the switch and
+    /// lands in the error strip.
+    fn set_claude_chrome(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.claude_chrome.is_none() || self.claude_chrome_pending.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.with_target(serde_json::json!({ "claudeChrome": enabled }));
+        let target = self.target_device.clone();
+        self.error = None;
+        self.claude_chrome_pending = Some(enabled);
+        cx.notify();
+        self.claude_chrome_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_HARNESS_SETTINGS, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<HarnessSettings>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |page, cx| {
+                if page.target_device != target {
+                    return;
+                }
+                page.claude_chrome_pending = None;
+                match result {
+                    Ok(settings) => page.claude_chrome = Some(settings.claude_chrome),
+                    Err(error) => page.error = Some(error),
+                }
                 cx.notify();
             })
             .ok();
@@ -1286,9 +1454,10 @@ impl Render for HarnessesPage {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext;
+
     #[gpui::test]
     fn expanded_agent_preferences_render_inside_the_agent_row(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             crate::settings::init(Default::default(), dir.path(), cx);
@@ -1367,6 +1536,302 @@ mod tests {
             })
             .unwrap();
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    }
+
+    /// The device side of a page under test: requests out, replies in.
+    struct FakeEngine {
+        runtime: tokio::runtime::Runtime,
+        requests: tokio::sync::mpsc::Receiver<String>,
+        replies: tokio::sync::mpsc::Sender<String>,
+        /// Params of every `GetHarnessSettings` served.
+        gets: Vec<serde_json::Value>,
+    }
+
+    impl FakeEngine {
+        /// Answers every request sent so far — the catalog with an enabled
+        /// Claude Code, `GetHarnessSettings` per `settings` (`Err` = the
+        /// device can't answer) — and returns the other requests.
+        fn serve(
+            &mut self,
+            settings: Result<bool, &str>,
+            cx: &mut gpui::TestAppContext,
+        ) -> Vec<serde_json::Value> {
+            let mut others = Vec::new();
+            loop {
+                cx.run_until_parked();
+                let Ok(request) = self.requests.try_recv() else {
+                    return others;
+                };
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                match request["method"].as_str().unwrap() {
+                    zeron_rpc::methods::LIST_HARNESSES => self.reply(
+                        &request,
+                        serde_json::json!([{
+                            "id": "claude-code",
+                            "name": "Claude Code",
+                            "supportsSteering": false,
+                            "steeringMode": "turn-boundary",
+                            "reasoningLevels": [],
+                            "installed": true,
+                            "canInstall": false,
+                            "enabled": true,
+                        }]),
+                    ),
+                    zeron_rpc::methods::GET_HARNESS_SETTINGS => {
+                        self.gets.push(request["params"].clone());
+                        match settings {
+                            Ok(on) => {
+                                self.reply(&request, serde_json::json!({ "claudeChrome": on }))
+                            }
+                            Err(error) => self.fail(&request, error),
+                        }
+                    }
+                    _ => others.push(request),
+                }
+            }
+        }
+
+        fn reply(&self, request: &serde_json::Value, ok: serde_json::Value) {
+            self.send(serde_json::json!({ "id": request["id"], "ok": ok }));
+        }
+
+        fn fail(&self, request: &serde_json::Value, err: &str) {
+            self.send(serde_json::json!({ "id": request["id"], "err": err }));
+        }
+
+        fn send(&self, reply: serde_json::Value) {
+            // The client's reader task runs on this runtime: let it drain.
+            self.runtime.block_on(async {
+                self.replies.send(reply.to_string()).await.unwrap();
+                while self.replies.capacity() < self.replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+    }
+
+    /// A Providers page wired to a fake engine, loaded with `settings` and
+    /// Claude Code expanded.
+    fn chrome_page(
+        settings: Result<bool, &str>,
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::WindowHandle<super::HarnessesPage>,
+        tempfile::TempDir,
+        FakeEngine,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (out, requests) = tokio::sync::mpsc::channel(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel(64);
+        let engine = {
+            let _guard = runtime.enter();
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = crate::state::AppState::new();
+                state.set_test_engine(engine);
+                state
+            });
+            super::HarnessesPage::new(state, cx)
+        });
+        let mut fake = FakeEngine {
+            runtime,
+            requests,
+            replies,
+            gets: Vec::new(),
+        };
+        assert!(fake.serve(settings, cx).is_empty());
+        expand_claude(window, cx);
+        (window, dir, fake)
+    }
+
+    /// Just the `SetHarnessSettings` writes among `requests`.
+    fn sets(requests: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        requests
+            .into_iter()
+            .filter(|request| request["method"] == zeron_rpc::methods::SET_HARNESS_SETTINGS)
+            .collect()
+    }
+
+    fn expand_claude(
+        window: gpui::WindowHandle<super::HarnessesPage>,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        window
+            .update(cx, |page, _, cx| {
+                if page.expanded_harness != Some(zeron_proto::HarnessId::ClaudeCode) {
+                    page.toggle_agent_details(zeron_proto::HarnessId::ClaudeCode, cx);
+                }
+            })
+            .unwrap();
+        draw(window, cx);
+    }
+
+    fn draw(window: gpui::WindowHandle<super::HarnessesPage>, cx: &mut gpui::TestAppContext) {
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    }
+
+    fn chrome_row(
+        window: gpui::WindowHandle<super::HarnessesPage>,
+        cx: &mut gpui::TestAppContext,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
+        gpui::VisualTestContext::from_window(window.into(), cx)
+            .debug_bounds("claude-chrome-setting")
+    }
+
+    fn click_chrome_row(
+        window: gpui::WindowHandle<super::HarnessesPage>,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let row = chrome_row(window, cx).expect("the Claude in Chrome row is shown");
+        gpui::VisualTestContext::from_window(window.into(), cx)
+            .simulate_click(row.center(), gpui::Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn claude_in_chrome_row_shows_the_loaded_value(cx: &mut gpui::TestAppContext) {
+        for loaded in [true, false] {
+            let (window, _dir, _engine) = chrome_page(Ok(loaded), cx);
+            assert!(chrome_row(window, cx).is_some());
+            window
+                .read_with(cx, |page, _| {
+                    assert_eq!(page.claude_chrome, Some(loaded));
+                    assert_eq!(page.claude_chrome_pending, None);
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn clicking_claude_in_chrome_sends_the_flipped_value(cx: &mut gpui::TestAppContext) {
+        let (window, _dir, mut engine) = chrome_page(Ok(false), cx);
+        click_chrome_row(window, cx);
+        // Optimistic: the switch already shows the new state.
+        window
+            .read_with(cx, |page, _| {
+                assert_eq!(page.claude_chrome, Some(false));
+                assert_eq!(page.claude_chrome_pending, Some(true));
+            })
+            .unwrap();
+        let sent = sets(engine.serve(Ok(false), cx));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["method"], zeron_rpc::methods::SET_HARNESS_SETTINGS);
+        assert_eq!(
+            sent[0]["params"],
+            serde_json::json!({ "claudeChrome": true })
+        );
+        engine.reply(&sent[0], serde_json::json!({ "claudeChrome": true }));
+        cx.run_until_parked();
+        window
+            .read_with(cx, |page, _| {
+                assert_eq!(page.claude_chrome, Some(true));
+                assert_eq!(page.claude_chrome_pending, None);
+            })
+            .unwrap();
+
+        // And back off again from the reconciled state.
+        draw(window, cx);
+        click_chrome_row(window, cx);
+        let sent = engine.serve(Ok(true), cx);
+        assert_eq!(
+            sent[0]["params"],
+            serde_json::json!({ "claudeChrome": false })
+        );
+    }
+
+    #[gpui::test]
+    fn claude_in_chrome_follows_the_selected_device(cx: &mut gpui::TestAppContext) {
+        let (window, _dir, mut engine) = chrome_page(Ok(true), cx);
+        window
+            .update(cx, |page, _, cx| {
+                page.set_target_device(Some("remote-1".into()), cx)
+            })
+            .unwrap();
+        // Switching drops the old device's value until the new one answers.
+        window
+            .read_with(cx, |page, _| assert_eq!(page.claude_chrome, None))
+            .unwrap();
+        // The new device is asked, through the relay passthrough.
+        engine.gets.clear();
+        let others = engine.serve(Ok(false), cx);
+        assert!(
+            others
+                .iter()
+                .all(|request| request["method"] != zeron_rpc::methods::SET_HARNESS_SETTINGS)
+        );
+        assert_eq!(engine.gets.len(), 1);
+        assert_eq!(engine.gets[0]["targetDeviceId"], "remote-1");
+        expand_claude(window, cx);
+        window
+            .read_with(cx, |page, _| assert_eq!(page.claude_chrome, Some(false)))
+            .unwrap();
+        click_chrome_row(window, cx);
+        let sent = engine.serve(Ok(false), cx);
+        let set = sent
+            .iter()
+            .find(|request| request["method"] == zeron_rpc::methods::SET_HARNESS_SETTINGS)
+            .expect("the write is sent");
+        assert_eq!(
+            set["params"],
+            serde_json::json!({ "claudeChrome": true, "targetDeviceId": "remote-1" })
+        );
+    }
+
+    #[gpui::test]
+    fn failed_claude_in_chrome_write_reverts_and_shows_the_error(cx: &mut gpui::TestAppContext) {
+        let (window, _dir, mut engine) = chrome_page(Ok(true), cx);
+        click_chrome_row(window, cx);
+        let sent = sets(engine.serve(Ok(true), cx));
+        assert_eq!(sent.len(), 1);
+        engine.fail(&sent[0], "disk full");
+        cx.run_until_parked();
+        window
+            .read_with(cx, |page, _| {
+                assert_eq!(page.claude_chrome, Some(true));
+                assert_eq!(page.claude_chrome_pending, None);
+            })
+            .unwrap();
+        draw(window, cx);
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                crate::toast::messages(cx)
+                    .iter()
+                    .any(|message| message.contains("disk full"))
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn unsupported_device_hides_the_claude_in_chrome_row(cx: &mut gpui::TestAppContext) {
+        let (window, _dir, _engine) = chrome_page(Err("unknown method: GetHarnessSettings"), cx);
+        window
+            .read_with(cx, |page, _| {
+                assert_eq!(page.claude_chrome, None);
+                assert!(matches!(page.harnesses, super::Loadable::Ready(_)));
+            })
+            .unwrap();
+        assert!(chrome_row(window, cx).is_none());
+        // Other Claude Code details are still there.
+        window
+            .read_with(cx, |page, _| {
+                assert_eq!(
+                    page.expanded_harness,
+                    Some(zeron_proto::HarnessId::ClaudeCode)
+                )
+            })
             .unwrap();
     }
 }

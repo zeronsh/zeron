@@ -251,6 +251,14 @@ pub struct RunRequest {
     /// no Zeron tools; title runs never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
+    /// Extra agent-CLI arguments, appended verbatim at launch (see
+    /// [`crate::launch_args`]). The HOST overlays the chat's stored
+    /// `ChatConfig::launch_args` before dispatch, so a client's value is only
+    /// a fallback for chats without a stored config. Title runs and probes
+    /// never carry them. Additive + serde-defaulted for wire compat — an old
+    /// host ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_args: Vec<String>,
 }
 
 /// A stdio MCP server the harness should add to the agent's session, on top

@@ -9408,6 +9408,7 @@ impl Composer {
                     .is_some();
                 let command = SessionCommandPayload::Run {
                     request: RunRequest {
+                        launch_args: Vec::new(),
                         mcp: None,
                         prompt: content.clone(),
                         harness: resolved.harness,

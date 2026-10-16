@@ -54,6 +54,7 @@ struct ProbeOutcome {
 async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
     let (controls, steer_tx, _token) = controls();
     let req = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: "Use your shell tool to run `echo probe-one`. After you see its output, \
                  run `echo probe-two` as a second separate command. After that, reply \

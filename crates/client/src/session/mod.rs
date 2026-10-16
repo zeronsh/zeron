@@ -1057,6 +1057,7 @@ impl SessionHandle {
             } else {
                 let config = chat.config.as_ref();
                 let request = RunRequest {
+                    launch_args: Vec::new(),
                     prompt: content,
                     harness: config.map(|c| c.harness),
                     model: config.and_then(|c| c.model.clone()),

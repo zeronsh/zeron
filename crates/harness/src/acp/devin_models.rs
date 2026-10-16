@@ -149,8 +149,9 @@ impl Catalog {
         })
         .await;
         // In particular, timeout must reap the probe before its registry
-        // execution lease can be released to an installer.
-        crate::shutdown_child(&mut child, Duration::from_millis(250)).await;
+        // execution lease can be released to an installer. The catalog is
+        // already on stdout, or the probe failed; nothing is worth a graceful exit.
+        crate::kill_child_now(&mut child).await;
         let status = result
             .map_err(|_| HarnessError::Protocol("Devin model discovery timed out".into()))??;
         if !status.success() {

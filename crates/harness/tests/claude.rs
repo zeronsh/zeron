@@ -5,6 +5,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,6 +39,7 @@ fn harness() -> ClaudeHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,
@@ -737,8 +739,17 @@ async fn live_commands_discovery() {
 
 #[tokio::test]
 async fn title_run_disables_tools_and_denies_unexpected_permissions() {
+    // The chrome default is on for one of the runs. Title launches still omit
+    // `--chrome` (the fixture exits if it sees the flag).
+    for chrome in [false, true] {
+        title_run_disables_tools(chrome).await;
+    }
+}
+
+async fn title_run_disables_tools(chrome: bool) {
     let (controls, _steer, token) = controls("Yes");
-    let mut stream = harness()
+    let harness = harness().with_chrome_default(Arc::new(AtomicBool::new(chrome)));
+    let mut stream = harness
         .run_title(request("scenario:title"), controls)
         .await
         .unwrap();
@@ -776,6 +787,81 @@ async fn title_run_disables_tools_and_denies_unexpected_permissions() {
 }
 
 #[tokio::test]
+async fn launch_args_reach_a_normal_run_last_and_never_a_title_run() {
+    let mut req = request("scenario:launch-args");
+    req.launch_args = vec!["--add-dir".into(), "../lib".into(), "--chrome".into()];
+    let (first, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), req, first).await;
+    let argv = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::TextDelta { text } => text.strip_prefix("ARGS:").map(str::to_owned),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no argv echo: {events:?}"));
+    assert!(argv.starts_with("--print|"), "{argv}");
+    assert!(argv.ends_with("--add-dir|../lib|--chrome|"), "{argv}");
+
+    // The fixture's title scenario exits 1 when it sees --chrome/--add-dir.
+    let mut title = request("scenario:title");
+    title.launch_args = vec!["--chrome".into()];
+    let (controls, _steer, token) = controls("Yes");
+    let mut stream = harness().run_title(title, controls).await.unwrap();
+    let mut text = String::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap()
+    {
+        match event.unwrap() {
+            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+            AgentEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    token.cancel();
+    assert_eq!(text, "Fix Login Flow");
+}
+
+#[tokio::test]
+async fn reserved_launch_args_fail_the_run_before_spawning() {
+    let mut req = request("scenario:launch-args");
+    req.launch_args = vec!["--model=other".into()];
+    let (controls, _steer, _token) = controls("A");
+    let err = match harness().run(req, controls).await {
+        Ok(_) => panic!("reserved launch args must not start a run"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, HarnessError::Protocol(_)), "{err:?}");
+    assert!(err.to_string().contains("--model"), "{err}");
+}
+
+#[tokio::test]
+async fn ordinary_runs_pass_chrome_iff_the_default_is_on() {
+    let flag = Arc::new(AtomicBool::new(false));
+    let harness = harness().with_chrome_default(Arc::clone(&flag));
+    for (chrome, expect) in [(false, "chrome-off"), (true, "chrome-on")] {
+        flag.store(chrome, Ordering::Release);
+        let (controls, _steer, _token) = controls("A");
+        let events = run_to_end(&harness, request("scenario:chrome-flag"), controls).await;
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, expect, "flag {chrome}: {events:?}");
+    }
+}
+
+#[tokio::test]
+async fn command_discovery_ignores_the_chrome_default() {
+    let harness = harness().with_chrome_default(Arc::new(AtomicBool::new(true)));
+    let commands = harness.commands().await.expect("discovery succeeds");
+    assert_eq!(commands[0].name, "review");
+}
+
+#[tokio::test]
 async fn command_discovery_tracks_project_changes() {
     let h = harness();
     for name in ["project-a", "project-b"] {
@@ -788,6 +874,64 @@ async fn command_discovery_tracks_project_changes() {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].name, name);
     }
+}
+
+/// A CLI that answers `initialize` and then ignores SIGTERM (live SessionStart
+/// hooks do this) must still return commands without waiting out `kill_grace`.
+#[tokio::test]
+async fn command_discovery_returns_without_waiting_for_a_term_ignoring_cli() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sleep_pid = dir.path().join("sleep.pid");
+    let script = dir.path().join("fake-claude.sh");
+    let body = r#"#!/bin/sh
+trap '' TERM
+read -r line || exit 1
+rid=$(printf '%s\n' "$line" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"'"$rid"'","response":{"commands":[{"name":"review","description":"Review a pull request","argumentHint":"[pr number]"}]}}}'
+sleep 30 &
+echo $! > PIDFILE_PATH
+wait
+"#
+    .replace("PIDFILE_PATH", &format!("\"{}\"", sleep_pid.display()));
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Reap the background sleep if the probe is killed by pid rather than group.
+    struct Reap(std::path::PathBuf);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            if let Ok(text) = std::fs::read_to_string(&self.0)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+    let _reap = Reap(sleep_pid);
+
+    let cwd = tempfile::tempdir().unwrap();
+    // The login-shell PATH snapshot is once per process and can take seconds.
+    // It is not part of probe retirement; pay for it before the clock starts.
+    let _ = zeron_harness::shell_env::login_shell_path();
+    let started = std::time::Instant::now();
+    let commands = ClaudeHarness::new()
+        .with_executable(&script)
+        .commands_for(cwd.path())
+        .await
+        .unwrap_or_else(|error| panic!("discovery failed after {:?}: {error}", started.elapsed()));
+    let elapsed = started.elapsed();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0].name, "review");
+    assert_eq!(commands[0].description, "Review a pull request");
+    assert_eq!(commands[0].input_hint.as_deref(), Some("[pr number]"));
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "command discovery took {elapsed:?}; a TERM-ignoring CLI must be killed immediately"
+    );
 }
 
 #[tokio::test]

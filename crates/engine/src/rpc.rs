@@ -1496,6 +1496,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_HARNESS_SETTINGS
+            | methods::SET_HARNESS_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1913,6 +1915,14 @@ impl RpcService for EngineRpc {
                     .set_title_settings(p)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
+            }
+            methods::GET_HARNESS_SETTINGS => RpcReply::value(&self.registry.harness_settings()),
+            methods::SET_HARNESS_SETTINGS => {
+                let p: crate::registry::HarnessSettings = parse_params(params)?;
+                self.registry
+                    .set_harness_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.harness_settings())
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
@@ -4062,6 +4072,67 @@ mod tests {
             _ => unreachable!(),
         }
         assert!(forwardable(methods::CANCEL_INSTALL));
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn harness_settings_round_trip_tolerates_target_device_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = std::sync::Arc::new(HarnessRegistry::new());
+        registry.set_claude_config_file(temp.path().join("absent-claude.json"));
+        let core = crate::EngineCore::assemble(
+            &temp.path().join("engine"),
+            registry.clone(),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let RpcReply::Value(got) = rpc
+            .handle(methods::GET_HARNESS_SETTINGS, serde_json::json!({}))
+            .await
+            .unwrap()
+        else {
+            panic!("expected settings");
+        };
+        assert_eq!(got["claudeChrome"], false);
+        assert!(!registry.claude_chrome_enabled());
+
+        let missing = rpc
+            .handle(
+                methods::SET_HARNESS_SETTINGS,
+                serde_json::json!({"targetDeviceId": core.device_id}),
+            )
+            .await;
+        assert!(matches!(missing, Err(RpcError::BadParams(_))));
+
+        let RpcReply::Value(set) = rpc
+            .handle(
+                methods::SET_HARNESS_SETTINGS,
+                serde_json::json!({"claudeChrome": true, "targetDeviceId": core.device_id}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected updated settings");
+        };
+        assert_eq!(set["claudeChrome"], true);
+        assert!(registry.claude_chrome_enabled());
+        let RpcReply::Value(again) = rpc
+            .handle(methods::GET_HARNESS_SETTINGS, serde_json::json!({}))
+            .await
+            .unwrap()
+        else {
+            panic!("expected settings");
+        };
+        assert_eq!(again["claudeChrome"], true);
+        let text =
+            std::fs::read_to_string(temp.path().join("engine").join("harness-prefs.json")).unwrap();
+        assert!(text.contains("\"chrome\": true"), "{text}");
+        assert!(forwardable(methods::GET_HARNESS_SETTINGS));
+        assert!(forwardable(methods::SET_HARNESS_SETTINGS));
+        assert!(!is_stream_method(methods::GET_HARNESS_SETTINGS));
+        assert!(!is_stream_method(methods::SET_HARNESS_SETTINGS));
         core.shutdown().await;
     }
 

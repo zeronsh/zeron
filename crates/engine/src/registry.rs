@@ -7,8 +7,10 @@
 //! Per-device because CLI installs are — a viewer retargets the settings page at
 //! another device and edits THAT device's set over the forwarded RPCs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -93,6 +95,9 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    /// Claude Code settings. `chrome: None` means the value has not been
+    /// imported from Claude's own config yet.
+    claude: ClaudeSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -109,6 +114,55 @@ pub struct TitleSettings {
     pub model: Option<String>,
 }
 
+/// Persisted Claude Code settings inside `harness-prefs.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ClaudeSettings {
+    /// `None` until the first load imports Claude's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chrome: Option<bool>,
+}
+
+/// Per-device harness settings exposed over RPC (`claudeChrome`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSettings {
+    /// Start new Claude Code sessions with `--chrome`.
+    pub claude_chrome: bool,
+}
+
+/// `$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set and non-empty,
+/// otherwise `~/.claude.json`.
+fn default_claude_config_file() -> PathBuf {
+    claude_config_path_from(
+        std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
+        &crate::repos::home_dir(),
+    )
+}
+
+fn claude_config_path_from(config_dir: Option<&OsStr>, home: &Path) -> PathBuf {
+    match config_dir {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(".claude.json"),
+        _ => home.join(".claude.json"),
+    }
+}
+
+/// Top-level `claudeInChromeDefaultEnabled`. A missing file, unreadable
+/// file, bad JSON, missing key, or non-bool value is false.
+fn read_claude_in_chrome_default(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("claudeInChromeDefaultEnabled")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
 type InstalledProbe = Box<dyn Fn() -> bool + Send + Sync>;
 
@@ -123,6 +177,35 @@ enum Slot {
     },
 }
 
+type CatalogKey = (HarnessId, PathBuf);
+
+/// Last-known slash-command and skill lists. Entries are small, errors are
+/// never stored, and `generation` lets an in-flight refresh notice that its
+/// harness was updated, disabled, or replaced out from under it.
+struct CatalogCache {
+    commands: HashMap<CatalogKey, Vec<zeron_proto::SlashCommand>>,
+    skills: HashMap<CatalogKey, Option<Vec<zeron_proto::invocation::Skill>>>,
+    refreshing_commands: HashSet<CatalogKey>,
+    refreshing_skills: HashSet<CatalogKey>,
+    generation: HashMap<HarnessId, u64>,
+}
+
+impl CatalogCache {
+    fn generation_of(&self, id: HarnessId) -> u64 {
+        self.generation.get(&id).copied().unwrap_or(0)
+    }
+
+    fn invalidate(&mut self, id: HarnessId) {
+        let next = self.generation_of(id).wrapping_add(1);
+        self.generation.insert(id, next);
+        self.commands.retain(|(harness, _), _| *harness != id);
+        self.skills.retain(|(harness, _), _| *harness != id);
+        self.refreshing_commands
+            .retain(|(harness, _)| *harness != id);
+        self.refreshing_skills.retain(|(harness, _)| *harness != id);
+    }
+}
+
 pub struct HarnessRegistry {
     pub(crate) installs: crate::rpc::Installations,
     slots: Mutex<HashMap<HarnessId, Slot>>,
@@ -131,13 +214,87 @@ pub struct HarnessRegistry {
     prefs: Mutex<HarnessPrefsFile>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
+    /// Shared with the cached Claude harness. Load and set publish into it
+    /// so the next spawned session sees the current default.
+    claude_chrome: Arc<AtomicBool>,
+    /// Overrides the Claude config file read when `claude.chrome` is absent.
+    /// `None` resolves `$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`.
+    claude_config_file: Mutex<Option<PathBuf>>,
     /// Fair per-harness execution gates. Runs and title generation hold a
     /// shared lease; an accepted update queues an exclusive lease. Tokio's
     /// write-preferring FIFO policy prevents a stream of new runs from
     /// starving an update that is already waiting.
     gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::RwLock<()>>>>,
-    pending_updates: Mutex<std::collections::HashSet<HarnessId>>,
+    /// Shared so a catalog refresh can wait out an update without borrowing
+    /// the registry (the menu returns as soon as a cached entry is in hand).
+    pending_updates: Arc<Mutex<HashSet<HarnessId>>>,
     update_generation: tokio::sync::watch::Sender<u64>,
+    catalogs: Arc<Mutex<CatalogCache>>,
+}
+
+async fn execution_lease_from(
+    id: HarnessId,
+    gate: Arc<tokio::sync::RwLock<()>>,
+    pending_updates: Arc<Mutex<HashSet<HarnessId>>>,
+    update_generation: tokio::sync::watch::Sender<u64>,
+) -> tokio::sync::OwnedRwLockReadGuard<()> {
+    let mut updates = update_generation.subscribe();
+    loop {
+        // The marker closes the small begin-update → writer-future polling
+        // gap. Watch retains a generation change, so an update finishing
+        // between this check and `changed()` cannot lose the wakeup.
+        if pending_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id)
+        {
+            let _ = updates.changed().await;
+            continue;
+        }
+        let lease = Arc::clone(&gate).read_owned().await;
+        if !pending_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id)
+        {
+            return lease;
+        }
+        drop(lease);
+    }
+}
+
+fn record_command_refresh(
+    catalogs: &Mutex<CatalogCache>,
+    id: HarnessId,
+    cwd: PathBuf,
+    generation: u64,
+    result: Result<Vec<zeron_proto::SlashCommand>, HarnessError>,
+) {
+    let mut cache = catalogs.lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.generation_of(id) != generation {
+        return;
+    }
+    cache.refreshing_commands.remove(&(id, cwd.clone()));
+    if let Ok(commands) = result {
+        cache.commands.insert((id, cwd), commands);
+    }
+}
+
+fn record_skill_refresh(
+    catalogs: &Mutex<CatalogCache>,
+    id: HarnessId,
+    cwd: PathBuf,
+    generation: u64,
+    result: Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError>,
+) {
+    let mut cache = catalogs.lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.generation_of(id) != generation {
+        return;
+    }
+    cache.refreshing_skills.remove(&(id, cwd.clone()));
+    if let Ok(skills) = result {
+        cache.skills.insert((id, cwd), skills);
+    }
 }
 
 impl Default for HarnessRegistry {
@@ -173,40 +330,191 @@ impl HarnessRegistry {
         .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
     }
 
+    /// Slash commands for `cwd`. A cached entry for this harness and directory
+    /// returns immediately while a background refresh replaces it on success.
+    /// Plugin, skill, and account changes show up one open later (the refresh
+    /// triggered by this open); that's the trade for an instant menu. Errors
+    /// are never cached.
     pub async fn discover_commands(
         &self,
         id: HarnessId,
         cwd: &Path,
     ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
         let cwd = cwd.to_owned();
+        if let Some(cached) = self.cached_commands(id, &cwd) {
+            self.refresh_commands(id, cwd);
+            return Ok(cached);
+        }
         let lease = self.execution_lease(id).await;
+        // After the lease, so a probe that only waited out an update still
+        // caches. Before resolve, so a slot replaced underneath this call
+        // cannot be stored as the replacement's catalog.
+        let generation = self.catalog_generation(id);
         let harness = self.resolve(id)?;
-        tokio::spawn(async move {
+        let store_cwd = cwd.clone();
+        let discovered = tokio::spawn(async move {
             let _lease = lease;
             harness.commands_for(&cwd).await
         })
         .await
         .map_err(|error| {
             HarnessError::Protocol(format!("command discovery task failed: {error}"))
-        })?
+        })?;
+        if let Ok(commands) = &discovered {
+            self.store_commands(id, store_cwd, commands.clone(), generation);
+        }
+        discovered
     }
 
+    /// Project skills for `cwd`. A cached entry for this harness and directory
+    /// returns immediately while a background refresh replaces it on success.
+    /// Plugin, skill, and account changes show up one open later (the refresh
+    /// triggered by this open); that's the trade for an instant menu. Errors
+    /// are never cached. `Ok(None)` is a real answer (this provider does not
+    /// advertise skills) and is cached.
     pub async fn discover_skills(
         &self,
         id: HarnessId,
         cwd: &Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
         let cwd = cwd.to_owned();
+        if let Some(cached) = self.cached_skills(id, &cwd) {
+            self.refresh_skills(id, cwd);
+            return Ok(cached);
+        }
         let lease = self.execution_lease(id).await;
+        let generation = self.catalog_generation(id);
         let harness = self.resolve(id)?;
-        tokio::spawn(async move {
+        let store_cwd = cwd.clone();
+        let discovered = tokio::spawn(async move {
             // Retain the read lease through the adapter's deadline and cleanup,
             // even when the requesting RPC is dropped.
             let _lease = lease;
             harness.skills(&cwd).await
         })
         .await
-        .map_err(|error| HarnessError::Protocol(format!("skill discovery task failed: {error}")))?
+        .map_err(|error| HarnessError::Protocol(format!("skill discovery task failed: {error}")))?;
+        if let Ok(skills) = &discovered {
+            self.store_skills(id, store_cwd, skills.clone(), generation);
+        }
+        discovered
+    }
+
+    fn catalog_generation(&self, id: HarnessId) -> u64 {
+        self.catalogs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .generation_of(id)
+    }
+
+    fn cached_commands(&self, id: HarnessId, cwd: &Path) -> Option<Vec<zeron_proto::SlashCommand>> {
+        self.catalogs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .commands
+            .get(&(id, cwd.to_path_buf()))
+            .cloned()
+    }
+
+    fn cached_skills(
+        &self,
+        id: HarnessId,
+        cwd: &Path,
+    ) -> Option<Option<Vec<zeron_proto::invocation::Skill>>> {
+        self.catalogs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .skills
+            .get(&(id, cwd.to_path_buf()))
+            .cloned()
+    }
+
+    fn store_commands(
+        &self,
+        id: HarnessId,
+        cwd: PathBuf,
+        commands: Vec<zeron_proto::SlashCommand>,
+        generation: u64,
+    ) {
+        let mut cache = self.catalogs.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.generation_of(id) == generation {
+            cache.commands.insert((id, cwd), commands);
+        }
+    }
+
+    fn store_skills(
+        &self,
+        id: HarnessId,
+        cwd: PathBuf,
+        skills: Option<Vec<zeron_proto::invocation::Skill>>,
+        generation: u64,
+    ) {
+        let mut cache = self.catalogs.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.generation_of(id) == generation {
+            cache.skills.insert((id, cwd), skills);
+        }
+    }
+
+    fn invalidate_catalogs(&self, id: HarnessId) {
+        self.catalogs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .invalidate(id);
+    }
+
+    /// Start one background reread of a cached command list. A refresh already
+    /// in flight for this key is left alone. The lease is acquired inside the
+    /// task so this returns without waiting out an update.
+    fn refresh_commands(&self, id: HarnessId, cwd: PathBuf) {
+        // Sample before resolve: a replacement between resolve and the
+        // in-flight insert must not publish the old harness's list.
+        let generation = self.catalog_generation(id);
+        let Ok(harness) = self.resolve(id) else {
+            return;
+        };
+        {
+            let mut cache = self.catalogs.lock().unwrap_or_else(PoisonError::into_inner);
+            if cache.generation_of(id) != generation
+                || !cache.refreshing_commands.insert((id, cwd.clone()))
+            {
+                return;
+            }
+        }
+        let catalogs = Arc::clone(&self.catalogs);
+        let pending = Arc::clone(&self.pending_updates);
+        let updates = self.update_generation.clone();
+        let gate = self.gate(id);
+        tokio::spawn(async move {
+            let lease = execution_lease_from(id, gate, pending, updates).await;
+            let result = harness.commands_for(&cwd).await;
+            drop(lease);
+            record_command_refresh(&catalogs, id, cwd, generation, result);
+        });
+    }
+
+    fn refresh_skills(&self, id: HarnessId, cwd: PathBuf) {
+        let generation = self.catalog_generation(id);
+        let Ok(harness) = self.resolve(id) else {
+            return;
+        };
+        {
+            let mut cache = self.catalogs.lock().unwrap_or_else(PoisonError::into_inner);
+            if cache.generation_of(id) != generation
+                || !cache.refreshing_skills.insert((id, cwd.clone()))
+            {
+                return;
+            }
+        }
+        let catalogs = Arc::clone(&self.catalogs);
+        let pending = Arc::clone(&self.pending_updates);
+        let updates = self.update_generation.clone();
+        let gate = self.gate(id);
+        tokio::spawn(async move {
+            let lease = execution_lease_from(id, gate, pending, updates).await;
+            let result = harness.skills(&cwd).await;
+            drop(lease);
+            record_skill_refresh(&catalogs, id, cwd, generation, result);
+        });
     }
 
     pub fn new() -> Self {
@@ -217,9 +525,18 @@ impl HarnessRegistry {
             order: Mutex::new(Vec::new()),
             prefs: Mutex::new(HarnessPrefsFile::default()),
             prefs_path: Mutex::new(None),
+            claude_chrome: Arc::new(AtomicBool::new(false)),
+            claude_config_file: Mutex::new(None),
             gates: Mutex::new(HashMap::new()),
-            pending_updates: Mutex::new(std::collections::HashSet::new()),
+            pending_updates: Arc::new(Mutex::new(HashSet::new())),
             update_generation,
+            catalogs: Arc::new(Mutex::new(CatalogCache {
+                commands: HashMap::new(),
+                skills: HashMap::new(),
+                refreshing_commands: HashSet::new(),
+                refreshing_skills: HashSet::new(),
+                generation: HashMap::new(),
+            })),
         }
     }
 
@@ -234,21 +551,13 @@ impl HarnessRegistry {
 
     /// Shared lease held for the full lifetime of a harness subprocess.
     pub async fn execution_lease(&self, id: HarnessId) -> tokio::sync::OwnedRwLockReadGuard<()> {
-        let mut updates = self.update_generation.subscribe();
-        loop {
-            // The marker closes the small begin-update → writer-future polling
-            // gap. Watch retains a generation change, so an update finishing
-            // between this check and `changed()` cannot lose the wakeup.
-            if self.update_pending(id) {
-                let _ = updates.changed().await;
-                continue;
-            }
-            let lease = self.gate(id).read_owned().await;
-            if !self.update_pending(id) {
-                return lease;
-            }
-            drop(lease);
-        }
+        execution_lease_from(
+            id,
+            self.gate(id),
+            Arc::clone(&self.pending_updates),
+            self.update_generation.clone(),
+        )
+        .await
     }
 
     /// Exclusive lease held from immediately before update mutation through
@@ -272,6 +581,10 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
+        // Drop catalogs before waking lease waiters, so a probe that was
+        // only blocked on this update stores against the new generation
+        // instead of racing a wipe.
+        self.invalidate_catalogs(id);
         self.update_generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
@@ -330,6 +643,51 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(path);
         self.migrate_legacy_prefs();
+        self.import_claude_chrome_if_unset();
+        self.publish_claude_chrome();
+    }
+
+    /// Point the one-time chrome import at a Claude config file.
+    /// Call this before [`Self::load_prefs`]. Production leaves it unset.
+    #[cfg(test)]
+    pub(crate) fn set_claude_config_file(&self, path: impl Into<PathBuf>) {
+        *self
+            .claude_config_file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(path.into());
+    }
+
+    fn resolved_claude_config_file(&self) -> PathBuf {
+        self.claude_config_file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(default_claude_config_file)
+    }
+
+    /// Import `claudeInChromeDefaultEnabled` once. A later edit of Claude's
+    /// own config must not move the value Zeron already stored.
+    fn import_claude_chrome_if_unset(&self) {
+        if self.prefs().claude.chrome.is_some() {
+            return;
+        }
+        let value = read_claude_in_chrome_default(&self.resolved_claude_config_file());
+        let mut prefs = self.prefs();
+        if prefs.claude.chrome.is_none() {
+            prefs.claude.chrome = Some(value);
+            drop(prefs);
+            self.persist_prefs();
+        }
+    }
+
+    fn publish_claude_chrome(&self) {
+        let enabled = self.prefs().claude.chrome.unwrap_or(false);
+        self.claude_chrome.store(enabled, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claude_chrome_enabled(&self) -> bool {
+        self.claude_chrome.load(Ordering::Acquire)
     }
 
     /// Fold a legacy allow-list into the opt-out shape: a registered harness
@@ -403,6 +761,7 @@ impl HarnessRegistry {
             }
             _ => return Ok(()),
         }
+        self.invalidate_catalogs(id);
         self.persist_prefs();
         Ok(())
     }
@@ -448,9 +807,27 @@ impl HarnessRegistry {
         Ok(())
     }
 
+    pub fn harness_settings(&self) -> HarnessSettings {
+        HarnessSettings {
+            claude_chrome: self.prefs().claude.chrome.unwrap_or(false),
+        }
+    }
+
+    pub fn set_harness_settings(&self, settings: HarnessSettings) -> Result<(), String> {
+        self.prefs().claude.chrome = Some(settings.claude_chrome);
+        self.publish_claude_chrome();
+        self.persist_prefs();
+        Ok(())
+    }
+
     pub fn register(&self, harness: Arc<dyn Harness>) {
         let id = harness.id();
-        if self.slots().insert(id, Slot::Ready(harness)).is_none() {
+        let replaced = self.slots().insert(id, Slot::Ready(harness)).is_some();
+        if replaced {
+            // A cache keyed only by harness id must not survive the slot
+            // being swapped for a different adapter.
+            self.invalidate_catalogs(id);
+        } else {
             self.order().push(id);
         }
     }
@@ -465,7 +842,7 @@ impl HarnessRegistry {
         factory: Factory,
     ) {
         let id = descriptor.id;
-        if self
+        let replaced = self
             .slots()
             .insert(
                 id,
@@ -475,8 +852,10 @@ impl HarnessRegistry {
                     factory,
                 },
             )
-            .is_none()
-        {
+            .is_some();
+        if replaced {
+            self.invalidate_catalogs(id);
+        } else {
             self.order().push(id);
         }
     }
@@ -573,6 +952,9 @@ pub fn default_registry() -> HarnessRegistry {
             },
         ],
     }));
+    // The Arc is the registry's. Load and set publish into it; the factory
+    // captures that same flag so a harness resolved earlier still sees updates.
+    let claude_chrome = Arc::clone(&registry.claude_chrome);
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::ClaudeCode,
@@ -593,7 +975,11 @@ pub fn default_registry() -> HarnessRegistry {
             enabled: None,
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
+        Box::new(move || {
+            Ok(Arc::new(
+                zeron_harness::ClaudeHarness::new().with_chrome_default(Arc::clone(&claude_chrome)),
+            ) as Arc<dyn Harness>)
+        }),
     );
     // Codex, same lazy pattern: the static descriptor mirrors AcpHarness::codex()
     // exactly (`describe()` after the first resolve must not change the
@@ -1284,6 +1670,155 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+        assert_eq!(prefs.claude.chrome, None);
+    }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    fn load(dir: &Path, config: &Path) -> HarnessRegistry {
+        let registry = HarnessRegistry::new();
+        registry.set_claude_config_file(config);
+        registry.load_prefs(dir);
+        registry
+    }
+
+    fn prefs_chrome(dir: &Path) -> Option<bool> {
+        let text = std::fs::read_to_string(dir.join("harness-prefs.json")).unwrap();
+        let prefs: HarnessPrefsFile = serde_json::from_str(&text).unwrap();
+        prefs.claude.chrome
+    }
+
+    #[test]
+    fn claude_config_path_prefers_a_non_empty_config_dir() {
+        let home = Path::new("/home/example");
+        assert_eq!(
+            claude_config_path_from(Some(OsStr::new("/tmp/claude")), home),
+            PathBuf::from("/tmp/claude/.claude.json")
+        );
+        assert_eq!(
+            claude_config_path_from(Some(OsStr::new("")), home),
+            home.join(".claude.json")
+        );
+        assert_eq!(
+            claude_config_path_from(None, home),
+            home.join(".claude.json")
+        );
+    }
+
+    #[test]
+    fn imports_true_once_and_ignores_later_source_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        std::fs::write(
+            &config,
+            r#"{"claudeInChromeDefaultEnabled":true,"theme":"dark"}"#,
+        )
+        .unwrap();
+        let registry = load(dir.path(), &config);
+        assert_eq!(
+            registry.harness_settings(),
+            HarnessSettings {
+                claude_chrome: true
+            }
+        );
+        assert!(registry.claude_chrome_enabled());
+        assert_eq!(prefs_chrome(dir.path()), Some(true));
+
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let reloaded = load(dir.path(), &config);
+        assert!(reloaded.harness_settings().claude_chrome);
+        assert!(reloaded.claude_chrome_enabled());
+        assert_eq!(prefs_chrome(dir.path()), Some(true));
+    }
+
+    #[test]
+    fn imports_false_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let registry = load(dir.path(), &config);
+        assert!(!registry.harness_settings().claude_chrome);
+        assert!(!registry.claude_chrome_enabled());
+        assert_eq!(prefs_chrome(dir.path()), Some(false));
+    }
+
+    #[test]
+    fn missing_file_imports_false_and_stays_false_when_the_file_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("missing.json");
+        let registry = load(dir.path(), &config);
+        assert!(!registry.harness_settings().claude_chrome);
+        assert_eq!(prefs_chrome(dir.path()), Some(false));
+
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":true}"#).unwrap();
+        let reloaded = load(dir.path(), &config);
+        assert!(!reloaded.harness_settings().claude_chrome);
+        assert_eq!(prefs_chrome(dir.path()), Some(false));
+    }
+
+    #[test]
+    fn bad_json_and_missing_or_non_bool_key_import_false() {
+        for body in [
+            "{",
+            "not json",
+            r#"{"theme":"dark"}"#,
+            r#"{"claudeInChromeDefaultEnabled":"yes"}"#,
+            "",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join(".claude.json");
+            std::fs::write(&config, body).unwrap();
+            let registry = load(dir.path(), &config);
+            assert!(
+                !registry.harness_settings().claude_chrome,
+                "body {body:?} imported true"
+            );
+            assert_eq!(prefs_chrome(dir.path()), Some(false), "body {body:?}");
+        }
+    }
+
+    #[test]
+    fn set_harness_settings_persists_and_updates_the_shared_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let registry = load(dir.path(), &config);
+        let flag = Arc::clone(&registry.claude_chrome);
+        registry
+            .set_harness_settings(HarnessSettings {
+                claude_chrome: true,
+            })
+            .unwrap();
+        assert!(registry.claude_chrome_enabled());
+        assert!(flag.load(Ordering::Acquire));
+        assert_eq!(prefs_chrome(dir.path()), Some(true));
+
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let reloaded = load(dir.path(), &config);
+        assert_eq!(
+            reloaded.harness_settings(),
+            HarnessSettings {
+                claude_chrome: true
+            }
+        );
+        assert!(reloaded.claude_chrome_enabled());
+
+        reloaded
+            .set_harness_settings(HarnessSettings {
+                claude_chrome: false,
+            })
+            .unwrap();
+        let again = load(dir.path(), &config);
+        assert!(!again.harness_settings().claude_chrome);
+        assert!(!again.claude_chrome_enabled());
     }
 }
 
@@ -1449,5 +1984,513 @@ mod gate_tests {
         );
         assert!(!called);
         registry.end_update(HarnessId::Codex);
+    }
+}
+
+#[cfg(test)]
+mod catalog_cache_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+
+    struct SlowCatalog {
+        id: HarnessId,
+        hold: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        commands: Mutex<Result<Vec<zeron_proto::SlashCommand>, String>>,
+        skills: Mutex<Result<Option<Vec<zeron_proto::invocation::Skill>>, String>>,
+        hits: AtomicUsize,
+        waiting: AtomicUsize,
+        finished: AtomicUsize,
+        /// When set, a probe returns the value it observed on entry. Tests use
+        /// this so an in-flight refresh keeps the list it started with after
+        /// the live value moves on.
+        freeze: AtomicBool,
+    }
+
+    impl SlowCatalog {
+        fn new(id: HarnessId) -> Self {
+            Self {
+                id,
+                hold: Mutex::new(None),
+                commands: Mutex::new(Ok(Vec::new())),
+                skills: Mutex::new(Ok(None)),
+                hits: AtomicUsize::new(0),
+                waiting: AtomicUsize::new(0),
+                finished: AtomicUsize::new(0),
+                freeze: AtomicBool::new(false),
+            }
+        }
+
+        fn set_commands(&self, commands: Result<Vec<zeron_proto::SlashCommand>, String>) {
+            *self.commands.lock().unwrap() = commands;
+        }
+
+        fn set_skills(&self, skills: Result<Option<Vec<zeron_proto::invocation::Skill>>, String>) {
+            *self.skills.lock().unwrap() = skills;
+        }
+
+        fn arm(&self) -> Arc<tokio::sync::Notify> {
+            let notify = Arc::new(tokio::sync::Notify::new());
+            *self.hold.lock().unwrap() = Some(Arc::clone(&notify));
+            notify
+        }
+
+        fn disarm(&self) {
+            *self.hold.lock().unwrap() = None;
+        }
+
+        async fn wait_if_held(&self) {
+            let hold = self.hold.lock().unwrap().clone();
+            if let Some(hold) = hold {
+                let notified = hold.notified();
+                tokio::pin!(notified);
+                // Register before publishing `waiting`, so a test that observes
+                // the counter can wake this call without losing the permit.
+                if !notified.as_mut().enable() {
+                    self.waiting.fetch_add(1, Ordering::SeqCst);
+                    notified.await;
+                    self.waiting.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        async fn probe<T: Clone>(
+            &self,
+            value: &Mutex<Result<T, String>>,
+        ) -> Result<T, HarnessError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            let captured = value.lock().unwrap().clone();
+            self.wait_if_held().await;
+            let result = if self.freeze.load(Ordering::SeqCst) {
+                captured
+            } else {
+                value.lock().unwrap().clone()
+            };
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            result.map_err(HarnessError::Protocol)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Harness for SlowCatalog {
+        fn id(&self) -> HarnessId {
+            self.id
+        }
+        fn display_name(&self) -> &str {
+            "Slow catalog"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, HarnessError> {
+            Ok(Vec::new())
+        }
+        async fn commands_for(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
+            self.probe(&self.commands).await
+        }
+        async fn skills(
+            &self,
+            _: &Path,
+        ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+            self.probe(&self.skills).await
+        }
+        async fn run(
+            &self,
+            _: zeron_proto::RunRequest,
+            _: zeron_harness::RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+            HarnessError,
+        > {
+            unreachable!("catalog discovery must not start a conversation")
+        }
+    }
+
+    fn command(name: &str) -> zeron_proto::SlashCommand {
+        zeron_proto::SlashCommand {
+            name: name.into(),
+            description: String::new(),
+            input_hint: None,
+        }
+    }
+
+    fn skill(name: &str) -> zeron_proto::invocation::Skill {
+        zeron_proto::invocation::Skill {
+            name: name.into(),
+            path: format!("/skills/{name}"),
+            description: String::new(),
+            enabled: true,
+            command: None,
+        }
+    }
+
+    fn names(commands: &[zeron_proto::SlashCommand]) -> Vec<&str> {
+        commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect()
+    }
+
+    async fn wait_until(mut ready: impl FnMut() -> bool) {
+        let start = tokio::time::Instant::now();
+        while !ready() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timed out waiting for the catalog probe"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn commands_now(
+        registry: &HarnessRegistry,
+        id: HarnessId,
+        cwd: &Path,
+    ) -> Vec<zeron_proto::SlashCommand> {
+        tokio::time::timeout(Duration::from_secs(2), registry.discover_commands(id, cwd))
+            .await
+            .expect("cached commands should return without waiting for discovery")
+            .unwrap()
+    }
+
+    async fn skills_now(
+        registry: &HarnessRegistry,
+        id: HarnessId,
+        cwd: &Path,
+    ) -> Option<Vec<zeron_proto::invocation::Skill>> {
+        tokio::time::timeout(Duration::from_secs(2), registry.discover_skills(id, cwd))
+            .await
+            .expect("cached skills should return without waiting for discovery")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cached_commands_return_immediately_and_refresh_in_background() {
+        let registry = HarnessRegistry::new();
+        let catalog = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&catalog) as Arc<dyn Harness>);
+        catalog.set_commands(Ok(vec![command("review")]));
+        let cwd = Path::new("/work");
+
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+
+        catalog.set_commands(Ok(vec![command("later")]));
+        let hold = catalog.arm();
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+        // The open above already has a refresh in flight. Another open must
+        // not start a second one.
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+        let hits = catalog.hits.load(Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            assert_eq!(
+                catalog.hits.load(Ordering::SeqCst),
+                hits,
+                "refresh was not coalesced"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        hold.notify_waiters();
+        wait_until(|| catalog.finished.load(Ordering::SeqCst) >= 2).await;
+        catalog.disarm();
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["later"]
+        );
+    }
+
+    #[tokio::test]
+    async fn command_cache_is_keyed_by_directory() {
+        let registry = Arc::new(HarnessRegistry::new());
+        let catalog = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&catalog) as Arc<dyn Harness>);
+        catalog.set_commands(Ok(vec![command("review")]));
+        let first = Path::new("/work/a");
+        let second = Path::new("/work/b");
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, first).await),
+            ["review"]
+        );
+
+        catalog.set_commands(Ok(vec![command("other")]));
+        let hold = catalog.arm();
+        let pending = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.discover_commands(HarnessId::Codex, second).await }
+        });
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+        assert!(
+            !pending.is_finished(),
+            "a different directory must not reuse the cached command list"
+        );
+        hold.notify_waiters();
+        let discovered = pending.await.unwrap().unwrap();
+        assert_eq!(names(&discovered), ["other"]);
+
+        catalog.disarm();
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, first).await),
+            ["review"]
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_skills_return_immediately_and_refresh_in_background() {
+        let registry = HarnessRegistry::new();
+        let catalog = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&catalog) as Arc<dyn Harness>);
+        catalog.set_skills(Ok(None));
+        let cwd = Path::new("/work");
+
+        assert!(skills_now(&registry, HarnessId::Codex, cwd).await.is_none());
+
+        catalog.set_skills(Ok(Some(vec![skill("ship")])));
+        let hold = catalog.arm();
+        assert!(
+            skills_now(&registry, HarnessId::Codex, cwd).await.is_none(),
+            "a provider with no skills is a cached answer"
+        );
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+        hold.notify_waiters();
+        wait_until(|| catalog.finished.load(Ordering::SeqCst) >= 2).await;
+        catalog.disarm();
+
+        let refreshed = skills_now(&registry, HarnessId::Codex, cwd).await.unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].name, "ship");
+    }
+
+    #[tokio::test]
+    async fn catalog_errors_are_not_cached() {
+        let registry = HarnessRegistry::new();
+        let catalog = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&catalog) as Arc<dyn Harness>);
+        let cwd = Path::new("/work");
+
+        catalog.set_commands(Err("down".into()));
+        let error = registry
+            .discover_commands(HarnessId::Codex, cwd)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("down"), "{error}");
+
+        catalog.set_commands(Ok(vec![command("review")]));
+        let hold = catalog.arm();
+        let registry = Arc::new(registry);
+        let pending = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.discover_commands(HarnessId::Codex, cwd).await }
+        });
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+        assert!(
+            !pending.is_finished(),
+            "a failed discovery must not be served from the cache"
+        );
+        hold.notify_waiters();
+        assert_eq!(names(&pending.await.unwrap().unwrap()), ["review"]);
+
+        catalog.disarm();
+        catalog.set_commands(Err("refresh failed".into()));
+        let hold = catalog.arm();
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+        hold.notify_waiters();
+        wait_until(|| catalog.finished.load(Ordering::SeqCst) >= 3).await;
+        catalog.disarm();
+        catalog.set_commands(Ok(vec![command("fresh")]));
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"],
+            "a failed refresh must keep the previous command list"
+        );
+    }
+
+    #[tokio::test]
+    async fn end_update_clears_catalog_cache() {
+        let registry = Arc::new(HarnessRegistry::new());
+        let catalog = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&catalog) as Arc<dyn Harness>);
+        catalog.set_commands(Ok(vec![command("review")]));
+        let cwd = Path::new("/work");
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+
+        registry.end_update(HarnessId::Codex);
+        catalog.set_commands(Ok(vec![command("fresh")]));
+        let hold = catalog.arm();
+        let pending = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.discover_commands(HarnessId::Codex, cwd).await }
+        });
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+        assert!(
+            !pending.is_finished(),
+            "an update must drop the cached command list"
+        );
+        hold.notify_waiters();
+        assert_eq!(names(&pending.await.unwrap().unwrap()), ["fresh"]);
+    }
+
+    #[tokio::test]
+    async fn disabling_a_harness_clears_catalog_cache() {
+        let registry = Arc::new(HarnessRegistry::new());
+        let catalog = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&catalog) as Arc<dyn Harness>);
+        registry.register(Arc::new(SlowCatalog::new(HarnessId::ClaudeCode)) as Arc<dyn Harness>);
+        catalog.set_commands(Ok(vec![command("review")]));
+        let cwd = Path::new("/work");
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+
+        registry.set_enabled(HarnessId::Codex, true).unwrap();
+        let hold = catalog.arm();
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+        hold.notify_waiters();
+        wait_until(|| catalog.finished.load(Ordering::SeqCst) >= 2).await;
+        catalog.disarm();
+
+        registry.set_enabled(HarnessId::Codex, false).unwrap();
+        catalog.set_commands(Ok(vec![command("fresh")]));
+        let hold = catalog.arm();
+        let pending = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.discover_commands(HarnessId::Codex, cwd).await }
+        });
+        wait_until(|| catalog.hits.load(Ordering::SeqCst) >= 3).await;
+        assert!(
+            !pending.is_finished(),
+            "disabling a harness must drop its cached command list"
+        );
+        hold.notify_waiters();
+        assert_eq!(names(&pending.await.unwrap().unwrap()), ["fresh"]);
+    }
+
+    #[tokio::test]
+    async fn replacing_a_harness_slot_clears_catalog_cache() {
+        let registry = Arc::new(HarnessRegistry::new());
+        let cwd = Path::new("/work");
+        let first = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&first) as Arc<dyn Harness>);
+        first.set_commands(Ok(vec![command("review")]));
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+
+        let second = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        second.set_commands(Ok(vec![command("fresh")]));
+        let hold = second.arm();
+        registry.register(Arc::clone(&second) as Arc<dyn Harness>);
+        let pending = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.discover_commands(HarnessId::Codex, cwd).await }
+        });
+        wait_until(|| second.waiting.load(Ordering::SeqCst) >= 1).await;
+        assert!(
+            !pending.is_finished(),
+            "replacing a harness must drop the previous catalog"
+        );
+        hold.notify_waiters();
+        assert_eq!(names(&pending.await.unwrap().unwrap()), ["fresh"]);
+
+        let third = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        third.set_commands(Ok(vec![command("lazy")]));
+        let hold = third.arm();
+        let factory_harness = Arc::clone(&third);
+        registry.register_lazy(
+            HarnessDescriptor {
+                id: HarnessId::Codex,
+                name: "Replacement".into(),
+                supports_steering: false,
+                steering_mode: SteeringMode::TurnBoundary,
+                reasoning_levels: Vec::new(),
+                installed: true,
+                can_install: false,
+                enabled: None,
+            },
+            Box::new(|| true),
+            Box::new(move || Ok(Arc::clone(&factory_harness) as Arc<dyn Harness>)),
+        );
+        let pending = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.discover_commands(HarnessId::Codex, cwd).await }
+        });
+        wait_until(|| third.waiting.load(Ordering::SeqCst) >= 1).await;
+        assert!(
+            !pending.is_finished(),
+            "replacing a lazy slot must drop the previous catalog"
+        );
+        hold.notify_waiters();
+        assert_eq!(names(&pending.await.unwrap().unwrap()), ["lazy"]);
+    }
+
+    #[tokio::test]
+    async fn in_flight_refresh_cannot_republish_after_invalidation() {
+        let registry = HarnessRegistry::new();
+        let catalog = Arc::new(SlowCatalog::new(HarnessId::Codex));
+        registry.register(Arc::clone(&catalog) as Arc<dyn Harness>);
+        catalog.set_commands(Ok(vec![command("review")]));
+        let cwd = Path::new("/work");
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+
+        catalog.freeze.store(true, Ordering::SeqCst);
+        catalog.set_commands(Ok(vec![command("stale-refresh")]));
+        let hold = catalog.arm();
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["review"]
+        );
+        wait_until(|| catalog.waiting.load(Ordering::SeqCst) >= 1).await;
+
+        registry.end_update(HarnessId::Codex);
+        catalog.set_commands(Ok(vec![command("fresh")]));
+        catalog.disarm();
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["fresh"]
+        );
+
+        hold.notify_waiters();
+        wait_until(|| catalog.finished.load(Ordering::SeqCst) >= 3).await;
+        assert_eq!(
+            names(&commands_now(&registry, HarnessId::Codex, cwd).await),
+            ["fresh"],
+            "a refresh started before the update must not restore the old list"
+        );
     }
 }

@@ -61,7 +61,7 @@ pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use project_actions::ProjectActionsStore;
-pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
+pub use registry::{HarnessDescriptor, HarnessRegistry, HarnessSettings, default_registry};
 pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};

@@ -32,6 +32,7 @@ async fn turn(
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt,
         harness: None,
@@ -153,6 +154,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: format!(
             "Remember this exact token: {nonce}. Reply only that token. Do not use tools or files."
@@ -266,6 +268,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: if cancel {
             format!(
@@ -407,6 +410,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: format!(
             "Remember this token in conversation history: {}. Run shell command `sleep 3`, then reply only the token. Every later user message adds a token; retain them all without writing files.",

@@ -5352,6 +5352,7 @@ mod tests {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
         let config = zeron_proto::ChatConfig {
+            launch_args: Vec::new(),
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
             reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
@@ -5376,6 +5377,7 @@ mod tests {
         state.apply_chat_config(
             "missing",
             zeron_proto::ChatConfig {
+                launch_args: Vec::new(),
                 harness: HarnessId::ClaudeCode,
                 model: None,
                 reasoning: None,
