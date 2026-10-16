@@ -96,12 +96,12 @@ struct Session {
 impl Session {
     /// OMP writes the file at the first turn: a padded title slot, then the header.
     fn persist(&self) {
-        if let Some(file) = &self.file {
-            if !file.exists() {
-                let title = json!({"type":"title","v":1,"title":"","pad":" ".repeat(64)});
-                let header = json!({"type":"session","version":3,"id":self.id,"cwd":std::env::current_dir().unwrap()});
-                std::fs::write(file, format!("{title}\n{header}\n")).unwrap();
-            }
+        if let Some(file) = &self.file
+            && !file.exists()
+        {
+            let title = json!({"type":"title","v":1,"title":"","pad":" ".repeat(64)});
+            let header = json!({"type":"session","version":3,"id":self.id,"cwd":std::env::current_dir().unwrap()});
+            std::fs::write(file, format!("{title}\n{header}\n")).unwrap();
         }
     }
 }
@@ -419,6 +419,10 @@ fn main() {
                 }
                 #[cfg(unix)]
                 if matches!(text.as_str(), "tree" | "inherited-pipe-crash") {
+                    #[allow(
+                        clippy::zombie_processes,
+                        reason = "the harness must reap this tool child with the process tree"
+                    )]
                     let child = std::process::Command::new("sh")
                         .args(["-c", "sleep 30"])
                         .spawn()
