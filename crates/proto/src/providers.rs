@@ -6,8 +6,10 @@ use crate::HarnessId;
 
 /// The providers zeron can sign into, in display order: (harness, name, CLI
 /// command — named in the empty-state copy, zeron settings.agents.tsx
-/// `PROVIDERS`). Every agent with a login of its own is here; what each one
-/// supports is documented engine-side (`agent_accounts` module docs).
+/// `PROVIDERS`). Every agent whose login zeron manages is here; what each one
+/// supports is documented engine-side (`agent_accounts` module docs). Oh My Pi
+/// keeps its own login store and is signed in with `omp login`, so it has no
+/// Accounts section.
 pub const PROVIDERS: [(HarnessId, &str, &str); 10] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
