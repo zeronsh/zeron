@@ -1433,7 +1433,19 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        let value = serde_json::to_value(config)?;
+        // `launch_args` are fixed at chat creation: a replacement carrying
+        // none (a model-picker write, or a client that predates the field)
+        // keeps the stored ones, unless the harness changed: they were
+        // validated for the old one.
+        let mut config = config.clone();
+        if config.launch_args.is_empty()
+            && let Ok(Some(chat)) = self.chat(chat_id)
+            && let Some(prior) = chat.config
+            && prior.harness == config.harness
+        {
+            config.launch_args = prior.launch_args;
+        }
+        let value = serde_json::to_value(&config)?;
         self.write(
             KIND_CHATS,
             chat_id,

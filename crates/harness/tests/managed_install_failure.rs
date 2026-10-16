@@ -46,6 +46,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: "hi".into(),
         harness: None,

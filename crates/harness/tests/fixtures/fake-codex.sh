@@ -112,6 +112,15 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
+*scenario:argv*)
+  # Report the launch argv ('|'-joined) so the test sees its ORDER.
+  argv=$(printf '%s|' "$@")
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"ARGV:$argv\"}}"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:native-queue-order*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'

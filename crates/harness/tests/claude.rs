@@ -38,6 +38,7 @@ fn harness() -> ClaudeHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,
@@ -773,6 +774,55 @@ async fn title_run_disables_tools_and_denies_unexpected_permissions() {
         )),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn launch_args_reach_a_normal_run_last_and_never_a_title_run() {
+    let mut req = request("scenario:launch-args");
+    req.launch_args = vec!["--add-dir".into(), "../lib".into(), "--chrome".into()];
+    let (first, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), req, first).await;
+    let argv = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::TextDelta { text } => text.strip_prefix("ARGS:").map(str::to_owned),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no argv echo: {events:?}"));
+    assert!(argv.starts_with("--print|"), "{argv}");
+    assert!(argv.ends_with("--add-dir|../lib|--chrome|"), "{argv}");
+
+    // The fixture's title scenario exits 1 when it sees --chrome/--add-dir.
+    let mut title = request("scenario:title");
+    title.launch_args = vec!["--chrome".into()];
+    let (controls, _steer, token) = controls("Yes");
+    let mut stream = harness().run_title(title, controls).await.unwrap();
+    let mut text = String::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap()
+    {
+        match event.unwrap() {
+            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+            AgentEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    token.cancel();
+    assert_eq!(text, "Fix Login Flow");
+}
+
+#[tokio::test]
+async fn reserved_launch_args_fail_the_run_before_spawning() {
+    let mut req = request("scenario:launch-args");
+    req.launch_args = vec!["--model=other".into()];
+    let (controls, _steer, _token) = controls("A");
+    let err = match harness().run(req, controls).await {
+        Ok(_) => panic!("reserved launch args must not start a run"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, HarnessError::Protocol(_)), "{err:?}");
+    assert!(err.to_string().contains("--model"), "{err}");
 }
 
 #[tokio::test]

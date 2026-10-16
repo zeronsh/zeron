@@ -414,11 +414,24 @@ impl WorkspaceDoc {
     }
 
     /// LWW config set. `false` when no such row.
+    ///
+    /// `launch_args` are fixed at chat creation: a replacement that carries
+    /// none (a model-picker write, or a client that predates the field)
+    /// keeps the stored ones instead of silently dropping them. Switching
+    /// harness drops them: they were validated for the old one.
     pub fn set_chat_config(&self, chat_id: &str, config: &ChatConfig) -> Result<bool, DocError> {
         let Some(row) = self.existing_row("chats", chat_id) else {
             return Ok(false);
         };
-        row.insert("config", LoroValue::from(serde_json::to_value(config)?))?;
+        let mut config = config.clone();
+        if config.launch_args.is_empty()
+            && let Ok(Some(chat)) = self.chat(chat_id)
+            && let Some(prior) = chat.config
+            && prior.harness == config.harness
+        {
+            config.launch_args = prior.launch_args;
+        }
+        row.insert("config", LoroValue::from(serde_json::to_value(&config)?))?;
         self.doc.commit();
         Ok(true)
     }
@@ -861,6 +874,7 @@ mod tests {
             checkout_id: None,
             source_context: None,
             config: Some(ChatConfig {
+                launch_args: Vec::new(),
                 harness: HarnessId::Mock,
                 model: Some("mock-1".into()),
                 reasoning: None,
@@ -928,6 +942,7 @@ mod tests {
             serde_json::Value::String("1m".into()),
         );
         let config = ChatConfig {
+            launch_args: Vec::new(),
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
             reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
@@ -940,6 +955,27 @@ mod tests {
         // No such row: false, nothing created.
         assert!(!ws.set_chat_config("nope", &config).unwrap());
         assert!(ws.chat("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn set_chat_config_keeps_launch_args_the_replacement_omits() {
+        let ws = WorkspaceDoc::new();
+        ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+        let mut config = ws.chat("chat-1").unwrap().unwrap().config.unwrap();
+        config.launch_args = vec!["--chrome".into()];
+        ws.set_chat_config("chat-1", &config).unwrap();
+        // A model-picker write rebuilds the config without launch args.
+        config.launch_args.clear();
+        config.model = Some("other".into());
+        ws.set_chat_config("chat-1", &config).unwrap();
+        let stored = ws.chat("chat-1").unwrap().unwrap().config.unwrap();
+        assert_eq!(stored.model.as_deref(), Some("other"));
+        assert_eq!(stored.launch_args, vec!["--chrome".to_string()]);
+        // Switching harness drops them: they were validated for the old one.
+        config.harness = HarnessId::Codex;
+        ws.set_chat_config("chat-1", &config).unwrap();
+        let stored = ws.chat("chat-1").unwrap().unwrap().config.unwrap();
+        assert!(stored.launch_args.is_empty());
     }
 
     #[test]

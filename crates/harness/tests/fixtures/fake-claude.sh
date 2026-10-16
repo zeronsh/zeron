@@ -34,6 +34,13 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"echoed","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-command-echo"}'
   ;;
 
+*scenario:launch-args*)
+  # Echo the whole argv ('|'-joined) so the test sees the argument ORDER.
+  args=$(printf '%s|' "$@")
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ARGS:$args\"}}}"
+  emit '{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-args"}'
+  ;;
+
 *scenario:title*)
   tools_off=false
   system_set=false
@@ -44,6 +51,7 @@ case "$first" in
       --system-prompt) shift; case "$1" in "You generate session titles."*) system_set=true ;; esac ;;
       --strict-mcp-config) mcp_off=true ;;
       --dangerously-skip-permissions) exit 1 ;;
+      --chrome|--add-dir) exit 1 ;; # a chat's launch args never reach a title run
     esac
     shift
   done

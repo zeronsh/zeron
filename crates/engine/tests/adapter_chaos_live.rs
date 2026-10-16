@@ -113,6 +113,7 @@ impl Suite {
 
     fn request(&self, prompt: &str) -> RunRequest {
         RunRequest {
+            launch_args: Vec::new(),
             mcp: None,
             prompt: prompt.into(),
             harness: Some(self.id),
@@ -187,6 +188,7 @@ impl Suite {
             .set_chat_config(
                 &id,
                 &ChatConfig {
+                    launch_args: Vec::new(),
                     harness: self.id,
                     model: self.model.clone(),
                     reasoning: None,
@@ -1177,6 +1179,7 @@ fn send_to(core: &EngineCore, request: RunRequest) {
 
 fn restart_request(name: &str, cwd: &str, prompt: &str) -> RunRequest {
     RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: prompt.into(),
         harness: Some(harness(name).0),
@@ -1273,6 +1276,7 @@ async fn restart_durability() {
         .set_chat_config(
             RESTART_CHAT,
             &ChatConfig {
+                launch_args: Vec::new(),
                 harness: id,
                 model: std::env::var("ZERON_TEST_MODEL").ok(),
                 reasoning: None,

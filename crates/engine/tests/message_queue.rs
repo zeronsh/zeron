@@ -1697,6 +1697,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
     for send_now in [false, true] {
         let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
         let mut config = zeron_proto::ChatConfig {
+            launch_args: Vec::new(),
             harness: HarnessId::Mock,
             model: Some("old-model".into()),
             reasoning: Some(ReasoningLevel::Medium),
@@ -1972,4 +1973,111 @@ async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
     assert_eq!(harness.requests.lock().unwrap().len(), 1);
     let _ = harness.finish.send(());
     core.shutdown().await;
+}
+
+fn launch_args_config(harness: HarnessId, args: &[&str]) -> zeron_proto::ChatConfig {
+    zeron_proto::ChatConfig {
+        launch_args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        harness,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+    }
+}
+
+fn client_request(prompt: &str, cwd: &std::path::Path) -> RunRequest {
+    RunRequest {
+        launch_args: Vec::new(),
+        mcp: None,
+        prompt: prompt.into(),
+        harness: None,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: cwd.to_str().unwrap().into(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+        attachments: Vec::new(),
+        resume: None,
+        worktree: None,
+    }
+}
+
+/// The chat's stored launch args are host-authoritative: a client request that
+/// carries none (the desktop composer) still launches with them, and so does
+/// every later turn the host builds from the chat row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stored_launch_args_override_what_a_client_sends() {
+    let cwd = tempfile::tempdir().unwrap();
+    let (core, harness, prompts) = setup_with(HeldHarness::build_as(
+        HarnessId::ClaudeCode,
+        SteeringMode::TurnBoundary,
+        false,
+    ))
+    .await;
+    core.workspace
+        .set_chat_config(
+            CHAT,
+            &launch_args_config(HarnessId::ClaudeCode, &["--add-dir", "../lib"]),
+        )
+        .unwrap();
+
+    let mut sent = client_request("opening", cwd.path());
+    sent.launch_args = vec!["--chrome".into()]; // a client's own value never wins
+    core.sessions
+        .dispatch(CHAT, HarnessId::ClaudeCode, sent, None)
+        .await
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "first turn").await;
+    let _ = harness.finish.send(());
+
+    core.doc_host
+        .queue_message(CHAT, "follow-up", Vec::new())
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 2, "queued turn").await;
+    {
+        let requests = harness.requests.lock().unwrap();
+        for request in requests.iter() {
+            assert_eq!(request.launch_args, ["--add-dir", "../lib"]);
+        }
+    }
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// The host re-validates before launching: a reserved flag (or args on a
+/// harness without support) fails the run and nothing is started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_stored_launch_args_fail_the_run_before_launch() {
+    let cwd = tempfile::tempdir().unwrap();
+    for (harness_id, args, expect) in [
+        (HarnessId::ClaudeCode, "--model=other", "--model"),
+        (HarnessId::Mock, "--chrome", "not supported for mock"),
+    ] {
+        let (core, harness, prompts) = setup_with(HeldHarness::build_as(
+            harness_id,
+            SteeringMode::TurnBoundary,
+            false,
+        ))
+        .await;
+        core.workspace
+            .set_chat_config(CHAT, &launch_args_config(harness_id, &[args]))
+            .unwrap();
+        let err = core
+            .sessions
+            .dispatch(
+                CHAT,
+                harness_id,
+                client_request("opening", cwd.path()),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(expect), "{err}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(prompts.lock().unwrap().is_empty());
+        assert!(harness.requests.lock().unwrap().is_empty());
+        core.shutdown().await;
+    }
 }

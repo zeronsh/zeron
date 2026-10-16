@@ -52,6 +52,7 @@ async fn main() {
             .into()
     });
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt,
         harness: None,

@@ -99,6 +99,7 @@ impl Rig {
             .set_chat_config(
                 CHAT,
                 &ChatConfig {
+                    launch_args: Vec::new(),
                     harness: id,
                     model: model.clone(),
                     reasoning: None,
@@ -119,6 +120,7 @@ impl Rig {
 
     fn request(&self, prompt: String) -> RunRequest {
         RunRequest {
+            launch_args: Vec::new(),
             mcp: None,
             prompt,
             harness: Some(self.id),

@@ -99,6 +99,7 @@ fn run(
     cwd: &str,
 ) -> RunRequest {
     RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: prompt.into(),
         harness: Some(harness),
@@ -148,6 +149,7 @@ async fn agent_process_survives_sends_and_cancel() {
         .set_chat_config(
             CHAT,
             &ChatConfig {
+                launch_args: Vec::new(),
                 harness: id,
                 model: model.clone(),
                 reasoning: None,

@@ -49,6 +49,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         turn: Default::default(),
     };
     let request = RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: "scenario:prompt-stall".into(),
         harness: None,

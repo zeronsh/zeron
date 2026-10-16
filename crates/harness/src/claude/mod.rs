@@ -265,6 +265,9 @@ impl ClaudeHarness {
             args.push("--settings".into());
             args.push(Value::Object(settings).to_string());
         }
+        // The chat's own launch args go last, verbatim, and are part of the
+        // runtime identity: a changed list never reuses a live process.
+        args.extend(request.launch_args.iter().cloned());
         args
     }
 
@@ -468,7 +471,9 @@ impl Harness for ClaudeHarness {
     /// change on the live process (`set_model`, `apply_flag_settings`). Only
     /// the directory and the permission mode it launched with need a new one.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        live.cwd == next.cwd && live.auto_approve == next.auto_approve
+        live.cwd == next.cwd
+            && live.auto_approve == next.auto_approve
+            && live.launch_args == next.launch_args
     }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
@@ -572,6 +577,7 @@ impl Harness for ClaudeHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
+        request.launch_args.clear();
         self.run_with_mode(request, controls, true).await
     }
 }
@@ -583,6 +589,8 @@ impl ClaudeHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        zeron_proto::launch_args::validate(HarnessId::ClaudeCode, &request.launch_args)
+            .map_err(|err| HarnessError::Protocol(format!("invalid launch args: {err}")))?;
         let exe = self.resolve_executable()?;
         let mut cmd = self.build_command(&exe, &request);
         if title_only {
@@ -1481,6 +1489,47 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+}
+
+#[cfg(test)]
+mod launch_args_tests {
+    use super::*;
+
+    fn request(launch_args: &[&str]) -> RunRequest {
+        RunRequest {
+            launch_args: launch_args.iter().map(|arg| (*arg).to_owned()).collect(),
+            mcp: None,
+            prompt: String::new(),
+            harness: None,
+            model: Some("claude-fable-5".into()),
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: "/tmp".into(),
+            sandbox: zeron_proto::SandboxLevel::DangerFullAccess,
+            auto_approve: true,
+            attachments: Vec::new(),
+            resume: None,
+            worktree: None,
+        }
+    }
+
+    #[test]
+    fn user_launch_args_end_the_argument_list() {
+        let plain = ClaudeHarness::launch_args(&request(&[]));
+        let with = ClaudeHarness::launch_args(&request(&["--add-dir", "../lib", "--chrome"]));
+        assert_eq!(with[..plain.len()], plain[..]);
+        assert_eq!(with[plain.len()..], ["--add-dir", "../lib", "--chrome"]);
+    }
+
+    #[test]
+    fn launch_args_are_part_of_the_runtime_identity() {
+        let harness = ClaudeHarness::new();
+        let (plain, chrome) = (request(&[]), request(&["--chrome"]));
+        assert!(harness.same_runtime(&chrome, &request(&["--chrome"])));
+        assert!(!harness.same_runtime(&plain, &chrome));
+        assert!(!harness.reconfigures_in_place(&plain, &chrome));
+        assert!(harness.reconfigures_in_place(&chrome, &request(&["--chrome"])));
     }
 }
 

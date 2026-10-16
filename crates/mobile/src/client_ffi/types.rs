@@ -817,6 +817,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
 
     fn try_from(c: ChatConfig) -> CoreResult<Self> {
         Ok(zc::ChatConfig {
+            launch_args: Vec::new(),
             harness: from_wire(&c.harness, "harness")?,
             model: c.model,
             reasoning: c

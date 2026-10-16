@@ -397,6 +397,7 @@ impl CoreClient {
                     .await
                     .map_err(|_| VoiceRejection::RemoteHost)?;
                 let config = zeron_proto::ChatConfig {
+                    launch_args: Vec::new(),
                     harness: zeron_proto::HarnessId::Codex,
                     model: None,
                     reasoning: None,

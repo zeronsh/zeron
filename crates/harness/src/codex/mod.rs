@@ -633,6 +633,7 @@ impl Harness for CodexHarness {
     /// to full access, and `serviceTier` is the only model option used.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && live.launch_args == next.launch_args
             && live.model == next.model
             && to_effort(live.reasoning) == to_effort(next.reasoning)
             && service_tier(live) == service_tier(next)
@@ -644,6 +645,7 @@ impl Harness for CodexHarness {
     /// that way (an omitted parameter keeps the previous value).
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && live.launch_args == next.launch_args
             && live.auto_approve == next.auto_approve
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
@@ -733,6 +735,7 @@ impl Harness for CodexHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
+        request.launch_args.clear();
         self.run_with_mode(request, controls, true, false).await
     }
 }
@@ -745,6 +748,8 @@ impl CodexHarness {
         title_only: bool,
         idle: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        zeron_proto::launch_args::validate(HarnessId::Codex, &request.launch_args)
+            .map_err(|err| HarnessError::Protocol(format!("invalid launch args: {err}")))?;
         let native = command_request(&request.prompt, "")?;
         if native
             .as_ref()
@@ -780,7 +785,9 @@ impl CodexHarness {
             zeron_proto::SandboxLevel::DangerFullAccess
         };
         let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
+        // The chat's launch args are global config flags (`-c`, `--enable`,
+        // `--disable`), so they sit before the subcommand.
+        cmd.args(&request.launch_args).arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);

@@ -166,6 +166,12 @@ pub struct ChatConfig {
     #[serde(default)]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub sandbox: SandboxLevel,
+    /// Extra agent-CLI arguments applied to every run of the chat, verbatim
+    /// (see [`crate::launch_args`] for what is accepted). Fixed at chat
+    /// creation. Additive + serde-defaulted for wire compat — an old host
+    /// ignores it (gate on `capabilities::LAUNCH_ARGS_V1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_args: Vec<String>,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.

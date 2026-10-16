@@ -73,6 +73,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
             SessionCommandPayload::Run {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 request: RunRequest {
+                    launch_args: Vec::new(),
                     mcp: None,
                     prompt,
                     harness: Some(HarnessId::Cursor),

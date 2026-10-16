@@ -93,6 +93,7 @@ async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_r
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,
@@ -745,6 +746,27 @@ async fn unresponsive_child_is_reaped_with_interrupted_done() {
             session_id: Some("th-1".into()),
         })
     );
+}
+
+#[tokio::test]
+async fn launch_args_precede_the_app_server_subcommand() {
+    let mut req = request("scenario:argv");
+    req.launch_args = vec!["-c".into(), "foo=1".into(), "--enable".into(), "bar".into()];
+    let (first, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), req, first).await;
+    let argv = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::TextDelta { text } => text.strip_prefix("ARGV:").map(str::to_owned),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no argv echo: {events:?}"));
+    assert_eq!(argv, "-c|foo=1|--enable|bar|app-server|");
+
+    let mut reserved = request("scenario:argv");
+    reserved.launch_args = vec!["--model".into(), "x".into()];
+    let (controls, _steer, _token) = controls("Yes");
+    assert!(harness().run(reserved, controls).await.is_err());
 }
 
 #[tokio::test]

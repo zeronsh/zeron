@@ -232,6 +232,7 @@ fn rig_full(adopts_config: bool, turn_boundary: bool) -> Rig {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        launch_args: Vec::new(),
         mcp: None,
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
