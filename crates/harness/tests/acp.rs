@@ -1636,6 +1636,48 @@ async fn antigravity_auth_path_subprocess() {
 }
 
 #[tokio::test]
+async fn antigravity_profiles_isolate_sign_in_discovery_and_concurrent_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-antigravity-profiles.sh");
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let exercise = |home: PathBuf| {
+        let fixture = fixture.clone();
+        async move {
+            let harness = AcpHarness::antigravity()
+                .with_executable(fixture)
+                .with_antigravity_profile(home.clone(), true);
+            harness.sign_in(None, |_| {}).await.unwrap();
+            assert!(!harness.models().await.unwrap().is_empty());
+            let (controls, _steer, token) = controls();
+            let mut request = request("echo-home");
+            request.model = None;
+            let mut events = harness.run(request, controls).await.unwrap();
+            let mut text = String::new();
+            while let Some(event) = events.next().await {
+                match event.expect("profile event") {
+                    AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                    AgentEvent::Done { .. } => break,
+                    _ => {}
+                }
+            }
+            token.cancel();
+            assert_eq!(text, home.to_string_lossy());
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            exercise(first.path().to_path_buf()),
+            exercise(second.path().to_path_buf())
+        );
+    })
+    .await
+    .expect("isolated profiles timed out");
+}
+
+#[tokio::test]
 async fn antigravity_wedge_emits_one_interrupted_done() {
     let (controls, _steer, token) = controls();
     let harness = AcpHarness::antigravity().with_executable(fixture_path());

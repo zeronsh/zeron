@@ -29,6 +29,7 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod antigravity_errors;
 mod antigravity_paths;
 mod devin_models;
 mod normalize;
@@ -1229,6 +1230,8 @@ enum Launch {
 pub struct AcpHarness {
     spec: AcpAgentSpec,
     executable: Option<PathBuf>,
+    antigravity_profile: Option<(PathBuf, bool)>,
+    antigravity_account_name: Option<String>,
     /// Override of the agent's on-disk sessions root (grok's
     /// `~/.grok/sessions`), where subagent transcripts are tailed from.
     sessions_root: Option<PathBuf>,
@@ -1256,6 +1259,8 @@ impl AcpHarness {
         Self {
             spec,
             executable: None,
+            antigravity_profile: None,
+            antigravity_account_name: None,
             sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
@@ -1290,6 +1295,25 @@ impl AcpHarness {
     pub fn antigravity() -> Self {
         Self::with_spec(antigravity_spec())
             .with_model_discovery_timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT)
+    }
+
+    /// Pin every child (including discovery and sign-in) to one account.
+    pub fn with_antigravity_profile(mut self, home: PathBuf, file_storage: bool) -> Self {
+        self.antigravity_profile = Some((home, file_storage));
+        self
+    }
+
+    /// Name the pinned account in verification errors, independent of later switches.
+    pub fn with_antigravity_account_name(mut self, name: String) -> Self {
+        self.antigravity_account_name = Some(name);
+        self
+    }
+
+    fn antigravity_home(&self) -> Result<PathBuf, HarnessError> {
+        match &self.antigravity_profile {
+            Some((home, _)) => Ok(home.clone()),
+            None => antigravity_paths::home(),
+        }
     }
 
     /// sign the agent out with acp `logout`, clearing the credentials its
@@ -1366,7 +1390,7 @@ impl AcpHarness {
         let accept_url = move |url: &str| url_filter.is_none_or(|accept| accept(url));
         let (exe, args) = self.resolve_program(false).await?;
         let gemini_home = (self.spec.id == HarnessId::Antigravity)
-            .then(antigravity_paths::home)
+            .then(|| self.antigravity_home())
             .transpose()?;
         let configured_method = gemini_home
             .as_ref()
@@ -1658,6 +1682,12 @@ impl AcpHarness {
     }
 
     fn configure_adapter_environment(&self, cmd: &mut Command, executable: &Path) {
+        if let Some((home, file_storage)) = &self.antigravity_profile {
+            cmd.env("GEMINI_HOME", home);
+            if *file_storage {
+                cmd.env("AGY_ACP_FORCE_FILE_STORAGE", "1");
+            }
+        }
         if self.spec.id == HarnessId::Antigravity
             && let Some(parent) = executable.parent()
         {
@@ -1701,7 +1731,7 @@ impl AcpHarness {
             cmd.current_dir(cwd);
         }
         if self.spec.id == HarnessId::Antigravity {
-            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+            cmd.env("GEMINI_HOME", self.antigravity_home()?);
             match noop_browser() {
                 Ok(browser) => {
                     cmd.env("BROWSER", browser);
@@ -2234,7 +2264,7 @@ impl Harness for AcpHarness {
             Launch::Archive { entry, .. } => entry,
         };
         let extra = if self.id() == HarnessId::Antigravity {
-            let root = antigravity_paths::home()?.join("antigravity-acp");
+            let root = self.antigravity_home()?.join("antigravity-acp");
             vec![
                 root.join("settings.json"),
                 root.join("oauth_creds.json"),
@@ -2426,7 +2456,10 @@ impl Harness for AcpHarness {
         })
         .boxed();
         Ok(if self.spec.id == HarnessId::Antigravity {
-            system_message::strip_system_message_echoes(events)
+            antigravity_errors::normalize(
+                system_message::strip_system_message_echoes(events),
+                self.antigravity_account_name.clone(),
+            )
         } else {
             events
         })
@@ -5053,6 +5086,42 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_profile_environment_is_local_to_each_child_command() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for home in [first.path(), second.path()] {
+            let harness =
+                AcpHarness::antigravity().with_antigravity_profile(home.to_path_buf(), true);
+            let mut command = Command::new("unused");
+            harness.configure_adapter_environment(&mut command, Path::new("unused"));
+            let env: std::collections::HashMap<_, _> = command
+                .as_std_mut()
+                .get_envs()
+                .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+                .collect();
+            assert_eq!(
+                env[std::ffi::OsStr::new("GEMINI_HOME")].as_deref(),
+                Some(home.as_os_str())
+            );
+            assert_eq!(
+                env[std::ffi::OsStr::new("AGY_ACP_FORCE_FILE_STORAGE")].as_deref(),
+                Some(std::ffi::OsStr::new("1"))
+            );
+            assert_eq!(harness.antigravity_home().unwrap(), home);
+        }
+        let legacy =
+            AcpHarness::antigravity().with_antigravity_profile(first.path().to_path_buf(), false);
+        let mut command = Command::new("unused");
+        legacy.configure_adapter_environment(&mut command, Path::new("unused"));
+        assert!(
+            !command
+                .as_std_mut()
+                .get_envs()
+                .any(|(key, _)| key == "AGY_ACP_FORCE_FILE_STORAGE")
+        );
+    }
 
     #[test]
     fn unix_browser_suppression_falls_back_to_zerons_noop_mode() {

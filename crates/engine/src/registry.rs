@@ -124,6 +124,7 @@ enum Slot {
 }
 
 pub struct HarnessRegistry {
+    agent_accounts: std::sync::OnceLock<crate::AgentAccounts>,
     pub(crate) installs: crate::rpc::Installations,
     slots: Mutex<HashMap<HarnessId, Slot>>,
     order: Mutex<Vec<HarnessId>>,
@@ -212,6 +213,7 @@ impl HarnessRegistry {
     pub fn new() -> Self {
         let (update_generation, _) = tokio::sync::watch::channel(0);
         Self {
+            agent_accounts: std::sync::OnceLock::new(),
             installs: Default::default(),
             slots: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
@@ -482,7 +484,29 @@ impl HarnessRegistry {
     }
 
     pub fn resolve(&self, id: HarnessId) -> Result<Arc<dyn Harness>, HarnessError> {
+        self.resolve_for_chat(id, None, false)
+    }
+
+    pub(crate) fn set_agent_accounts(&self, accounts: crate::AgentAccounts) {
+        let _ = self.agent_accounts.set(accounts);
+    }
+
+    pub(crate) fn resolve_for_chat(
+        &self,
+        id: HarnessId,
+        chat: Option<&str>,
+        existing_session: bool,
+    ) -> Result<Arc<dyn Harness>, HarnessError> {
         let mut slots = self.slots();
+        if id == HarnessId::Antigravity
+            && slots.contains_key(&id)
+            && let Some(accounts) = self.agent_accounts.get()
+        {
+            return accounts
+                .antigravity_harness(chat, existing_session)
+                .map(|harness| harness as Arc<dyn Harness>)
+                .map_err(|error| HarnessError::Protocol(error.to_string()));
+        }
         match slots.get(&id) {
             Some(Slot::Ready(harness)) => Ok(harness.clone()),
             Some(Slot::Lazy { factory, .. }) => {

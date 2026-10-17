@@ -731,7 +731,13 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "message cancelled by a later Stop: not dispatched");
             return Ok(String::new());
         }
-        let harness = self.inner.registry.resolve(harness_id)?;
+        let harness = self.inner.registry.resolve_for_chat(
+            harness_id,
+            Some(chat_id),
+            harness_id == HarnessId::Antigravity
+                && (request.resume.is_some()
+                    || self.inner.resume_for(chat_id, &request.cwd).is_some()),
+        )?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         if !idle {
