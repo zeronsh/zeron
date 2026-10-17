@@ -74,23 +74,8 @@ struct Local {
     cameras: HashMap<SharedString, Orbit>,
     canvases: HashMap<SharedString, CanvasCache>,
     scenes: HashMap<SharedString, SceneCache>,
-    shaders: HashMap<SharedString, ShaderCache>,
+    shaders: HashMap<SharedString, crate::shader_player::SharedShaderPlayer>,
     draw_error: Option<String>,
-}
-
-/// A shader's newest finished frame, and the next one in the works. Frames
-/// render on a background thread; the view shows the newest one meanwhile.
-#[derive(Default)]
-struct ShaderCache {
-    /// The newest frame and the uniforms it was drawn with.
-    shown: Option<(zeron_visual::shader::ShaderUniforms, Arc<gpui::RenderImage>)>,
-    /// Frames started, and the wall time the last one was started at.
-    frame: u32,
-    last_time: f64,
-    /// Buffers carried between frames (feedback, simulations); away on the
-    /// render thread while a frame renders.
-    gpu: Option<zeron_visual_gpu::ShaderState>,
-    rendering: bool,
 }
 
 struct CanvasCache {
@@ -138,7 +123,7 @@ struct SceneImage {
 }
 
 /// A rendered frame as an image GPUI can paint (off the main thread).
-fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<gpui::RenderImage>> {
+pub(crate) fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<gpui::RenderImage>> {
     let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
     Some(Arc::new(gpui::RenderImage::new([image::Frame::new(
         buffer,
@@ -180,12 +165,7 @@ impl VisualFrame {
         target_device_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Its drawings leave every window's sprite atlas with it.
-        cx.on_release(|this, cx| {
-            let images = this.local.borrow_mut().prune(None);
-            free_images(images, cx);
-        })
-        .detach();
+        let mut frame = Self::unloaded(id, title, cx);
         let mut tasks = Vec::new();
         let load = match engine {
             Some(engine) => {
@@ -240,10 +220,36 @@ impl VisualFrame {
             }
             None => Load::Failed("Visual unavailable".into()),
         };
+        frame.load = load;
+        frame._tasks = tasks;
+        frame
+    }
+
+    /// A visual from a script already in hand rather than an agent's reply
+    /// (the user's own visual below the new-thread composer). It has no
+    /// assets; its seed comes from `id`, as [`zeron_visual::seed_for`].
+    pub fn from_script(
+        id: SharedString,
+        title: String,
+        script: &str,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut frame = Self::unloaded(id, title, cx);
+        frame.start(script, zeron_visual::Assets::default(), cx);
+        frame
+    }
+
+    fn unloaded(id: SharedString, title: String, cx: &mut Context<Self>) -> Self {
+        // Its drawings leave every window's sprite atlas with it.
+        cx.on_release(|this, cx| {
+            let images = this.local.borrow_mut().prune(None);
+            free_images(images, cx);
+        })
+        .detach();
         Self {
             id,
             title: title.into(),
-            load,
+            load: Load::Loading,
             runtime: None,
             tree: None,
             generation: 0,
@@ -251,7 +257,7 @@ impl VisualFrame {
             link_ui: None,
             local: Rc::default(),
             started: Instant::now(),
-            _tasks: tasks,
+            _tasks: Vec::new(),
         }
     }
 
@@ -552,9 +558,9 @@ impl Local {
     ) -> Vec<Arc<gpui::RenderImage>> {
         let kept = |key: &SharedString| keep.is_some_and(|keep| keep.contains(key));
         let mut images = Vec::new();
-        self.shaders.retain(|key, cache| {
+        self.shaders.retain(|key, player| {
             kept(key) || {
-                images.extend(cache.shown.as_ref().map(|(_, image)| image.clone()));
+                images.extend(player.borrow_mut().take_image());
                 false
             }
         });
@@ -570,7 +576,7 @@ impl Local {
     }
 }
 
-fn free_images(images: Vec<Arc<gpui::RenderImage>>, cx: &mut App) {
+pub(crate) fn free_images(images: Vec<Arc<gpui::RenderImage>>, cx: &mut App) {
     if !images.is_empty() {
         cx.defer(move |cx| {
             for image in images {
@@ -1653,13 +1659,17 @@ impl VisualFrame {
                 )
             })
             .collect();
-        let (code, buffers, blend, bloom, zoom) = (
-            node.code.clone(),
-            node.buffers.clone(),
-            node.blend,
-            node.bloom,
-            node.zoom,
-        );
+        let zoom = node.zoom;
+        let buffers = node.buffers.clone();
+        let program = Arc::new(crate::shader_player::ShaderProgram {
+            code: node.code.clone(),
+            buffers: node.buffers.clone(),
+            inputs: names,
+            blend: node.blend,
+            bloom: node.bloom,
+            textures,
+            fade_edges: true,
+        });
         // Buffers evolve every frame, so a shader with any keeps running.
         let moving = moving || !buffers.is_empty() && !cx.reduce_motion();
         let (local, time, entity) = (self.local.clone(), self.time(), cx.entity().downgrade());
@@ -1696,105 +1706,55 @@ impl VisualFrame {
                         }
                         _ => [0.0, 0.0, -1.0, -1.0],
                     };
-                    let entry = state.shaders.entry(key.clone()).or_default();
+                    let player = state.shaders.entry(key.clone()).or_default().clone();
+                    drop(state);
+                    let entry = player.borrow();
                     // A still shader keeps the time it first showed.
                     let shown_time = if animate {
                         time
                     } else {
-                        entry
-                            .shown
-                            .as_ref()
-                            .map_or(0.0, |(u, _)| f64::from(u.time[0]))
+                        entry.shown().map_or(0.0, |(u, _)| f64::from(u.time[0]))
                     };
-                    let delta = if entry.frame == 0 {
+                    let delta = if entry.frames() == 0 {
                         0.0
                     } else {
-                        (time - entry.last_time).max(0.0)
+                        (time - entry.last_time()).max(0.0)
                     };
                     let uniforms = zeron_visual::shader::ShaderUniforms {
                         resolution: [size.0 as f32, size.1 as f32, scale, 0.0],
                         mouse,
                         camera: [yaw, orbit.pitch, zoom, 0.0],
-                        time: [shown_time as f32, delta as f32, entry.frame as f32, 0.0],
+                        time: [shown_time as f32, delta as f32, entry.frames() as f32, 0.0],
                         inputs,
                         channels: Default::default(),
                     };
                     let unchanged = buffers.is_empty()
-                        && entry.shown.as_ref().is_some_and(|(p, _)| {
+                        && entry.shown().is_some_and(|(p, _)| {
                             p.resolution == uniforms.resolution
                                 && p.mouse == uniforms.mouse
                                 && p.camera == uniforms.camera
                                 && p.inputs == uniforms.inputs
                                 && (!animate || p.time[0] == uniforms.time[0])
                         });
-                    let shown = entry.shown.as_ref().map(|(_, image)| image.clone());
+                    let shown = entry.image();
+                    let rendering = entry.rendering();
+                    drop(entry);
                     // One frame in flight at a time; when it lands the view
                     // paints again and starts the next if anything moved.
-                    if !unchanged && !entry.rendering {
-                        entry.rendering = true;
-                        entry.frame += 1;
-                        entry.last_time = time;
-                        let mut gpu_state = entry.gpu.take();
-                        let (code, buffers, names, textures) = (
-                            code.clone(),
-                            buffers.clone(),
-                            names.clone(),
-                            textures.clone(),
-                        );
-                        let render = cx.background_executor().spawn(async move {
-                            let rendered = zeron_visual_gpu::render_shader(
-                                &zeron_visual_gpu::ShaderSpec {
-                                    image: &code,
-                                    buffers: &buffers,
-                                    inputs: &names,
-                                    blend,
-                                    bloom,
-                                    textures: &textures,
-                                },
-                                &uniforms,
-                                size.0,
-                                size.1,
-                                &mut gpu_state,
-                            )
-                            .and_then(|frame| {
-                                render_image(frame.width, frame.height, frame.bgra)
-                                    .ok_or_else(|| "the shader's frame was malformed".to_owned())
-                            });
-                            (rendered, gpu_state)
-                        });
-                        let (local, key, entity) = (local.clone(), key.clone(), entity.clone());
-                        cx.spawn(async move |cx| {
-                            let (rendered, gpu_state) = render.await;
-                            cx.update(|cx| {
-                                let mut freed = Vec::new();
-                                let mut state = local.borrow_mut();
-                                match (state.shaders.get_mut(&key), rendered) {
-                                    (Some(entry), Ok(image)) => {
-                                        entry.rendering = false;
-                                        entry.gpu = gpu_state;
-                                        freed.extend(
-                                            entry
-                                                .shown
-                                                .replace((uniforms, image))
-                                                .map(|(_, old)| old),
-                                        );
-                                        state.draw_error = None;
-                                    }
-                                    (Some(entry), Err(error)) => {
-                                        entry.rendering = false;
-                                        entry.gpu = gpu_state;
-                                        state.draw_error = Some(error);
-                                    }
-                                    // The node left the tree meanwhile.
-                                    (None, Ok(image)) => freed.push(image),
-                                    (None, Err(_)) => {}
-                                }
-                                drop(state);
-                                free_images(freed, cx);
+                    if !unchanged && !rendering {
+                        let (local, entity) = (local.clone(), entity.clone());
+                        crate::shader_player::ShaderPlayer::render(
+                            &player,
+                            program.clone(),
+                            uniforms,
+                            size,
+                            time,
+                            cx,
+                            move |outcome, cx| {
+                                local.borrow_mut().draw_error = outcome.err();
                                 let _ = entity.update(cx, |_, cx| cx.notify());
-                            })
-                        })
-                        .detach();
+                            },
+                        );
                     }
                     shown
                 },

@@ -408,22 +408,16 @@ impl Shell {
         };
         let width = (f32::from(viewport.width) - left).max(0.0);
         let ui_settings = settings::current(cx);
-        let artwork = ui_settings
-            .new_thread_composer_background
-            .as_ref()
-            .and_then(|background| {
-                crate::new_thread_background_effects::prepare(
-                    ui_settings.new_thread_background_effect,
-                    &theme,
-                    std::path::Path::new(&background.path),
-                    cx,
-                )
-            });
-        let adjustment = ui_settings
-            .new_thread_composer_background
-            .as_ref()
-            .map(|background| background.adjustment)
-            .unwrap_or_default();
+        let artwork = self.new_thread_artwork(
+            &ui_settings,
+            &theme,
+            (width, new_thread_background_height(f32::from(viewport.height))),
+            true,
+            window,
+            cx,
+        );
+        let adjustment = artwork.adjustment;
+        let artwork = artwork.image;
         // The new-thread hero's artwork with only its soft bottom fade: no
         // cutout around the orb, so no light channel splits the picture.
         let hero = artwork.map(|artwork| {

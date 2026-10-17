@@ -24,6 +24,10 @@ pub struct ShaderSpec<'a> {
     pub bloom: f32,
     /// Images sampled as `iTexture0`-`3`.
     pub textures: &'a [zeron_visual::TextureData],
+    /// Fade non-opaque output out toward the frame's edges, as a visual on
+    /// the chat does. Off where the host masks the frame itself (the
+    /// generative new-thread background).
+    pub fade_edges: bool,
 }
 
 /// One shader's textures between frames: each buffer's previous and
@@ -110,7 +114,7 @@ fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     if (post.y > 1.5) {
         return vec4<f32>(rgb, 1.0);
     }
-    let fade = edge_fade(i.clip.xy, vec2<f32>(textureDimensions(source)));
+    let fade = select(1.0, edge_fade(i.clip.xy, vec2<f32>(textureDimensions(source))), post.z > 0.5);
     if (post.y > 0.5) {
         let a = max(rgb.r, max(rgb.g, rgb.b));
         if (a <= 0.0001) { return vec4<f32>(0.0); }
@@ -657,7 +661,8 @@ pub fn render_shader(
         Blend::Light => 1.0,
         Blend::Opaque => 2.0,
     };
-    let composite = post_uniform([spec.bloom, mode, 0.0, 0.0]);
+    let fade_edges = if spec.fade_edges { 1.0 } else { 0.0 };
+    let composite = post_uniform([spec.bloom, mode, fade_edges, 0.0]);
     fullscreen(
         &mut encoder,
         &state.output,
@@ -686,6 +691,7 @@ mod tests {
             blend,
             bloom: 0.0,
             textures: &[],
+            fade_edges: true,
         }
     }
 
@@ -838,6 +844,16 @@ mod tests {
         assert!(px(&light, 199, 99)[3] < 3, "and the corners");
         let opaque = render(Blend::Opaque);
         assert_eq!(px(&opaque, 0, 0)[3], 255, "an opaque shader keeps its box");
+        let unfaded = ShaderSpec {
+            fade_edges: false,
+            ..spec(code, &[], Blend::Light)
+        };
+        let unfaded = render_shader(&unfaded, &uniforms, 200, 100, &mut None).unwrap();
+        assert_eq!(
+            px(&unfaded, 0, 0)[3],
+            255,
+            "a host-masked frame keeps its edges"
+        );
     }
 
     #[test]

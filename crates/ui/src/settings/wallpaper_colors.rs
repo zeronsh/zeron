@@ -33,10 +33,20 @@ pub(crate) fn extract(pixels: impl IntoIterator<Item = [u8; 4]>) -> Option<Color
 
 pub(crate) fn active(cx: &App) -> Option<Color> {
     let settings = super::current(cx);
-    if settings.wallpaper_theme_colors && settings.new_thread_composer_background.is_some() {
-        settings.wallpaper_color
-    } else {
-        None
+    if !settings.wallpaper_theme_colors {
+        return None;
+    }
+    match settings.new_thread_background_source {
+        super::NewThreadBackgroundSource::Image => settings
+            .new_thread_composer_background
+            .is_some()
+            .then_some(settings.wallpaper_color)
+            .flatten(),
+        super::NewThreadBackgroundSource::Generative => settings
+            .new_thread_generative_art
+            .is_some()
+            .then_some(settings.new_thread_generative_color)
+            .flatten(),
     }
 }
 

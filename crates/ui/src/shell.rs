@@ -1403,6 +1403,28 @@ fn bottom_stack_measurement_matches(
     measured_has_composer == expected_has_composer
 }
 
+/// What the new-thread background shows this frame.
+pub(crate) struct NewThreadArtwork {
+    pub image: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// Identifies the source across frames: the image's path, or the
+    /// generative art's key.
+    pub key: Option<std::path::PathBuf>,
+    pub adjustment: settings::NewThreadBackgroundAdjustment,
+    /// A background is chosen (`image` None then means still loading).
+    pub enabled: bool,
+    /// Frames of one source replace each other (the generative art).
+    pub live: bool,
+}
+
+/// Space between the new-thread composer and the home visual, and below the
+/// visual when no Home notice sits at the window bottom.
+const HOME_VISUAL_GAP: f32 = 24.0;
+/// Room left below the home visual for the bottom Home notices chip.
+const HOME_VISUAL_NOTICE_CLEARANCE: f32 = 72.0;
+/// Less room than this and the home visual stays hidden.
+const HOME_VISUAL_MIN_HEIGHT: f32 = 48.0;
+const HOME_VISUAL_FADE_BAND: f32 = 48.0;
+
 fn new_thread_background_opacity(is_frost: bool) -> f32 {
     if is_frost {
         NEW_THREAD_BACKGROUND_FROSTED_OPACITY
@@ -1998,6 +2020,15 @@ pub struct Shell {
     /// Shared route clock and measured prepaint geometry for the persistent composer.
     composer_dock: crate::composer_dock::SharedDock,
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
+    /// The user's Luau visual below the blank new-thread composer, and the
+    /// script it runs (rebuilt when Settings saves another).
+    home_visual: Option<(String, Entity<crate::visuals::VisualFrame>)>,
+    /// The generative new-thread background while it is chosen.
+    generative_background: Option<crate::new_thread_generative::GenerativeBackground>,
+    /// The persistent composer, and the column the home visual is placed
+    /// in, as last painted (window coordinates).
+    home_composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
+    home_visual_origin: crate::new_thread_background_mask::SurfaceBounds,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     pub(super) sessions_open: bool,
@@ -2560,6 +2591,10 @@ impl Shell {
             bottom_stack_has_composer: std::rc::Rc::new(std::cell::Cell::new(false)),
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
+            home_visual: None,
+            generative_background: None,
+            home_composer_bounds: Default::default(),
+            home_visual_origin: Default::default(),
             archived_open: true,
             pinned_open: true,
             sessions_open: true,
@@ -11181,39 +11216,38 @@ impl Shell {
             (has_spaces || no_project || has_appshots) && has_selection,
         );
         let ui_settings = settings::current(cx);
-        let new_thread_background_setting = ui_settings.new_thread_composer_background;
-        let new_thread_background_effect = ui_settings.new_thread_background_effect;
-        let new_thread_background_adjustment = new_thread_background_setting
-            .as_ref()
-            .map(|background| background.adjustment)
-            .unwrap_or_default();
         let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
-        // Prewarm even in an established thread. Decode/effect work is not
-        // contingent on a hero measurement or a navigation gesture.
-        let artwork = new_thread_background_setting
-            .as_ref()
-            .and_then(|background| {
-                crate::new_thread_background_effects::prepare(
-                    new_thread_background_effect,
-                    theme,
-                    std::path::Path::new(&background.path),
-                    cx,
-                )
-            });
-        let artwork_frame = self.new_thread_artwork_ready.frame(
-            artwork,
-            new_thread_background_setting
-                .as_ref()
-                .map(|background| std::path::Path::new(&background.path)),
-            new_thread_background_adjustment,
-            new_thread_background_setting.is_some(),
-            self.reduced_motion,
-            frame_time,
-        );
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
                 .tick(has_selection, self.reduced_motion, frame_time);
+        // Prewarm even in an established thread. Decode/effect work is not
+        // contingent on a hero measurement or a navigation gesture; only the
+        // generative art renders just while the hero shows.
+        let hero_size = (
+            (self.viewport_width - self.sidebar_now()).max(0.0),
+            new_thread_background_height(self.viewport_height),
+        );
+        let artwork = self.new_thread_artwork(
+            &ui_settings,
+            theme,
+            hero_size,
+            !has_selection || dock_frame.active,
+            window,
+            cx,
+        );
+        if let (true, Some(key)) = (artwork.live, artwork.key.as_deref()) {
+            self.new_thread_artwork_ready
+                .adopt_live_frame(artwork.image.as_ref(), key);
+        }
+        let artwork_frame = self.new_thread_artwork_ready.frame(
+            artwork.image,
+            artwork.key.as_deref(),
+            artwork.adjustment,
+            artwork.enabled,
+            self.reduced_motion,
+            frame_time,
+        );
         if dock_frame.active {
             self.motion_active.set(true);
         }
@@ -11382,6 +11416,22 @@ impl Shell {
         } else {
             None
         };
+        let home_shown = !has_selection || dock_frame.active;
+        let home_visual_layer = self.render_home_visual(
+            ui_settings.new_thread_visual.as_deref(),
+            if home_shown && (has_spaces || no_project || has_appshots) {
+                chip_opacity
+            } else {
+                0.0
+            },
+            if harness_update_card.is_some() {
+                HOME_VISUAL_NOTICE_CLEARANCE
+            } else {
+                HOME_VISUAL_GAP
+            },
+            terminal_geometry.clone(),
+            cx,
+        );
         let status = div()
             .relative()
             .left(px(-session_reserve / 2.0))
@@ -11412,6 +11462,7 @@ impl Shell {
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
             .children(new_thread_background_layer)
+            .children(home_visual_layer)
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -11538,6 +11589,22 @@ impl Shell {
                                     .opacity(composer_opacity)
                                     .mx_auto()
                                     .child(self.composer.clone())
+                                    .when(home_shown, |composer| {
+                                        let measured = self.home_composer_bounds.clone();
+                                        composer.child(
+                                            gpui::canvas(
+                                                move |bounds, window, _| {
+                                                    if measured.get() != Some(bounds) {
+                                                        measured.set(Some(bounds));
+                                                        window.request_animation_frame();
+                                                    }
+                                                },
+                                                |_, _, _, _| {},
+                                            )
+                                            .absolute()
+                                            .inset_0(),
+                                        )
+                                    })
                                     .children(if has_selection {
                                         self.render_jump_to_bottom(cx)
                                     } else {
@@ -11559,6 +11626,180 @@ impl Shell {
             .child(Self::attachment_drop_overlay(theme))
             .child(Self::mention_drop_overlay(theme))
             .into_any_element()
+    }
+
+    /// The new-thread background's source image this frame: the generative
+    /// art's newest frame while it is chosen and can run here, otherwise the
+    /// image with its effect. `painted` says the caller paints it this frame;
+    /// generative art renders only then, so a hidden background stops.
+    pub(crate) fn new_thread_artwork(
+        &mut self,
+        ui_settings: &settings::UiSettings,
+        theme: &Theme,
+        size: (f32, f32),
+        painted: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> NewThreadArtwork {
+        let generative = matches!(
+            ui_settings.new_thread_background_source,
+            settings::NewThreadBackgroundSource::Generative
+        );
+        let script = ui_settings
+            .new_thread_generative_art
+            .as_deref()
+            .filter(|_| generative);
+        if self.generative_background.as_ref().map(|art| art.script()) != script {
+            let images = self
+                .generative_background
+                .take()
+                .and_then(|mut art| art.take_image());
+            crate::visuals::free_images(images.into_iter().collect(), cx);
+            self.generative_background =
+                script.map(crate::new_thread_generative::GenerativeBackground::new);
+        }
+        match self.generative_background.as_mut() {
+            // Without a GPU the image shows instead.
+            Some(art) if !art.failed() => {
+                let image = if painted {
+                    art.frame(size, window.scale_factor(), self.reduced_motion, cx)
+                } else {
+                    None
+                };
+                return NewThreadArtwork {
+                    image,
+                    key: Some(art.key().to_path_buf()),
+                    adjustment: Default::default(),
+                    enabled: true,
+                    live: true,
+                };
+            }
+            // Generative chosen with no art yet: nothing shows.
+            None if generative => {
+                return NewThreadArtwork {
+                    image: None,
+                    key: None,
+                    adjustment: Default::default(),
+                    enabled: false,
+                    live: false,
+                };
+            }
+            _ => {}
+        }
+        let background = ui_settings.new_thread_composer_background.as_ref();
+        NewThreadArtwork {
+            image: background.and_then(|background| {
+                crate::new_thread_background_effects::prepare(
+                    ui_settings.new_thread_background_effect,
+                    theme,
+                    std::path::Path::new(&background.path),
+                    cx,
+                )
+            }),
+            key: background.map(|background| std::path::PathBuf::from(&background.path)),
+            adjustment: background
+                .map(|background| background.adjustment)
+                .unwrap_or_default(),
+            enabled: background.is_some(),
+            live: false,
+        }
+    }
+
+    /// The user's Luau visual (Settings → Appearance → Home visual) in the
+    /// room between the blank new-thread composer and the window bottom.
+    /// It is placed from last frame's composer and column bounds, like the
+    /// bottom-stack clearance, and fades with the Home selectors.
+    fn render_home_visual(
+        &mut self,
+        script: Option<&str>,
+        opacity: f32,
+        bottom_clearance: f32,
+        terminal_geometry: crate::terminal::dock::SharedGeometry,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let Some(script) = script else {
+            self.home_visual = None;
+            return None;
+        };
+        if self
+            .home_visual
+            .as_ref()
+            .is_none_or(|(current, _)| current != script)
+        {
+            let frame = cx.new(|cx| {
+                crate::visuals::VisualFrame::from_script(
+                    settings::home_visual::HOME_VISUAL_ID.into(),
+                    "Home visual".into(),
+                    script,
+                    cx,
+                )
+            });
+            self.home_visual = Some((script.to_owned(), frame));
+        }
+        if opacity <= 0.001 {
+            return None;
+        }
+        let frame = self.home_visual.as_ref()?.1.clone();
+        let origin = self.home_visual_origin.clone();
+        let placement = |column: gpui::Bounds<Pixels>, composer: gpui::Bounds<Pixels>| {
+            let top = f32::from(composer.bottom() - column.top()) + HOME_VISUAL_GAP;
+            let height = f32::from(column.size.height) - top - bottom_clearance;
+            (height >= HOME_VISUAL_MIN_HEIGHT).then(|| {
+                (
+                    f32::from(composer.left() - column.left()) + Theme::SPACE_LG,
+                    top,
+                    (f32::from(composer.size.width) - 2.0 * Theme::SPACE_LG).max(0.0),
+                    height,
+                )
+            })
+        };
+        let placement = origin
+            .get()
+            .zip(self.home_composer_bounds.get())
+            .and_then(|(column, composer)| placement(column, composer));
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(
+                    gpui::canvas(
+                        move |bounds, window, _| {
+                            if origin.get() != Some(bounds) {
+                                origin.set(Some(bounds));
+                                window.request_animation_frame();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .when_some(placement, |layer, (left, top, width, height)| {
+                    // Clipped at the terminal's top edge, like the Home notices.
+                    layer.child(crate::terminal::dock::above_terminal(
+                        div().size_full().overflow_hidden().child(
+                            div()
+                                .absolute()
+                                .left(px(left))
+                                .top(px(top))
+                                .w(px(width))
+                                .h(px(height))
+                                .overflow_hidden()
+                                .opacity(opacity)
+                                // A visual taller than the room fades out at
+                                // its bottom instead of being cut off.
+                                .child(crate::edge_fade::edge_faded(
+                                    HOME_VISUAL_FADE_BAND,
+                                    false,
+                                    true,
+                                    div().size_full().child(frame),
+                                )),
+                        ),
+                        terminal_geometry,
+                    ))
+                })
+                .into_any_element(),
+        )
     }
 
     /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
