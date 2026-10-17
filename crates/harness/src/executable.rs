@@ -143,8 +143,16 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     Some(best)
 }
 
-type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
-type VersionEntry = (Option<semver::Version>, std::collections::HashSet<String>);
+/// The path as run, its resolved file, and that file's mtime and size.
+type VersionKey = (PathBuf, PathBuf, Option<std::time::SystemTime>, u64);
+type VersionEntry = (
+    Option<semver::Version>,
+    std::collections::HashSet<String>,
+    std::time::Instant,
+);
+
+/// How long a version probed through a dispatcher stays trusted. See `binary_version`.
+const DISPATCHED_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 static VERSION_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<VersionKey, VersionEntry>>,
 > = std::sync::OnceLock::new();
@@ -156,17 +164,26 @@ pub(crate) fn invalidate_versions(names: &[&str]) {
         cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (_, aliases)| !names.iter().any(|name| aliases.contains(*name)));
+            .retain(|_, (_, aliases, _)| !names.iter().any(|name| aliases.contains(*name)));
     }
 }
 
 /// Probe once per executable identity. Failures are cached too, including timeout.
 /// Keep the lock during the short probe so concurrent descriptor requests coalesce.
+///
+/// One binary can serve several commands by the name it is run as: mise, asdf and
+/// Volta shims, busybox. So the identity is the path as run, not just the file it
+/// resolves to; otherwise `pi` and `codex` behind the same mise binary share one
+/// version. Such a binary also stays unchanged when the tool behind it is updated,
+/// so when the name run differs from the file's name the probe expires after
+/// `DISPATCHED_VERSION_TTL`.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
     use std::time::Duration;
     let canonical = path.canonicalize().ok()?;
     let metadata = canonical.metadata().ok()?;
-    let key = (canonical, metadata.modified().ok(), metadata.len());
+    let invoked = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let dispatched = invoked.file_name() != canonical.file_name();
+    let key = (invoked, canonical, metadata.modified().ok(), metadata.len());
     let mut cache = VERSION_CACHE
         .get_or_init(Default::default)
         .lock()
@@ -176,7 +193,9 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    if let Some((version, aliases)) = cache.get_mut(&key) {
+    if let Some((version, aliases, probed)) = cache.get_mut(&key)
+        && !(dispatched && probed.elapsed() >= DISPATCHED_VERSION_TTL)
+    {
         aliases.insert(alias);
         return version.clone();
     }
@@ -271,8 +290,15 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         .flatten()
     };
     let version = probe();
-    cache.retain(|(p, _, _), _| p != &key.0);
-    cache.insert(key, (version.clone(), [alias].into_iter().collect()));
+    cache.retain(|(p, ..), _| p != &key.0);
+    cache.insert(
+        key,
+        (
+            version.clone(),
+            [alias].into_iter().collect(),
+            std::time::Instant::now(),
+        ),
+    );
     version
 }
 
