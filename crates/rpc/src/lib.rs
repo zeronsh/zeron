@@ -149,6 +149,8 @@ pub mod methods {
     pub const LIST_REPOS: &str = "ListRepos";
     pub const ADD_REPO: &str = "AddRepo";
     pub const CLONE_REPO: &str = "CloneRepo";
+    pub const LIST_GITHUB_REPOS: &str = "ListGitHubRepos";
+    pub const CLONE_GITHUB_REPO: &str = "CloneGitHubRepo";
     pub const CREATE_REPO: &str = "CreateRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";

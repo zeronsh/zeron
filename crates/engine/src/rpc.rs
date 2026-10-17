@@ -1460,9 +1460,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
     use std::time::Duration;
     match method {
-        methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
-            Duration::from_secs(15 * 60)
-        }
+        methods::CLONE_REPO
+        | methods::CLONE_GITHUB_REPO
+        | methods::FETCH_ALL
+        | methods::APPLY_UPDATE => Duration::from_secs(15 * 60),
         methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
@@ -1519,6 +1520,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_REPOS
             | methods::ADD_REPO
             | methods::CLONE_REPO
+            | methods::LIST_GITHUB_REPOS
+            | methods::CLONE_GITHUB_REPO
             | methods::CREATE_REPO
             | methods::LIST_BRANCHES
             | methods::LIST_REFS
@@ -3090,6 +3093,41 @@ impl RpcService for EngineRpc {
                 let repo = self
                     .repos
                     .clone_repo(&p.url)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&repo)
+            }
+            methods::LIST_GITHUB_REPOS => {
+                let repos = self
+                    .github
+                    .list_repositories()
+                    .await
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&repos)
+            }
+            methods::CLONE_GITHUB_REPO => {
+                #[derive(Deserialize)]
+                struct P {
+                    repository: String,
+                }
+                let p: P = parse_params(params)?;
+                if !crate::source_control::valid_pr_repository(&p.repository) {
+                    return Err(RpcError::BadParams("repository must be owner/repo".into()));
+                }
+                let (target, cloned) = self
+                    .repos
+                    .github_clone_target(&p.repository)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if !cloned {
+                    self.github
+                        .clone_repository(&p.repository, &target)
+                        .await
+                        .map_err(change_request_rpc_error)?;
+                }
+                let repo = self
+                    .repos
+                    .add(&target.to_string_lossy())
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&repo)
