@@ -2036,6 +2036,9 @@ pub struct ComposerInput {
     /// picture. `None` outside the composer, where every attachment link is
     /// shown as a chip.
     attachment_chips: Option<HashMap<u32, ChipAttachment>>,
+    /// Where chat chips look up their session's harness mark. `None` outside
+    /// the composer, where a chat chip shows the generic chat glyph.
+    chat_registry: Option<gpui::WeakEntity<AppState>>,
     /// The draft the attachment chips belong to; copied chips carry it so a paste
     /// into another draft can tell it must not reuse their numbers.
     attachment_scope: String,
@@ -2128,6 +2131,7 @@ impl ComposerInput {
             mention_hits: Vec::new(),
             chip_press: None,
             attachment_chips: None,
+            chat_registry: None,
             attachment_scope: String::new(),
             mention_tooltip: MentionTooltipPhase::Hidden,
             mention_tooltip_generation: 0,
@@ -4905,9 +4909,16 @@ impl gpui::Element for ComposerTextElement {
 
         let mut mention_chips = Vec::new();
         let appearance = Theme::of(cx).appearance;
+        let chat_registry = input
+            .chat_registry
+            .as_ref()
+            .and_then(|state| state.upgrade());
         let mut mention_hits = Vec::new();
         for (mention, display) in &input.projection.mentions {
             let mut first_row = true;
+            let harness = (mention.kind == ChipKind::Chat)
+                .then(|| chat_registry.as_ref()?.read(cx).chat_harness(&mention.path))
+                .flatten();
             let target = MentionTooltipTarget {
                 range: mention.range.clone(),
                 path: if mention.attachment.is_some() {
@@ -4937,7 +4948,7 @@ impl gpui::Element for ComposerTextElement {
                 );
                 mention_chips.push((
                     chip_bounds,
-                    first_row.then(|| chip_icon(mention.kind, &mention.path, appearance)),
+                    first_row.then(|| chip_icon(mention.kind, &mention.path, harness, appearance)),
                 ));
                 first_row = false;
                 let above_anchor = chip_bounds.top() - px(tooltip_height) - px(tooltip_gap);
@@ -6217,6 +6228,7 @@ impl Composer {
                 ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
             input.enable_mentions();
             input.copies_transcript_selection = true;
+            input.chat_registry = Some(state.downgrade());
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));

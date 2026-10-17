@@ -2355,6 +2355,16 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    /// The harness a chat runs on, for chips that mention it.
+    pub fn chat_harness(&self, chat_id: &str) -> Option<HarnessId> {
+        self.chats
+            .iter()
+            .find(|chat| chat.id == chat_id)?
+            .config
+            .as_ref()
+            .map(|config| config.harness)
+    }
+
     /// The chat the Archive session shortcut acts on: the selected one, unless
     /// it is already archived. The shortcut archives and never unarchives, so
     /// an archived chat is left alone. Pure.
