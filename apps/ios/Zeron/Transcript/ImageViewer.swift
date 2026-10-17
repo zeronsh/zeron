@@ -11,6 +11,9 @@ final class ImageViewer: UIViewController, UIScrollViewDelegate {
     init(image: UIImage, source: UIView) {
         self.image = image
         super.init(nibName: nil, bundle: nil)
+        imageView.isAccessibilityElement = true
+        imageView.accessibilityLabel = source.accessibilityLabel ?? "Image"
+        imageView.accessibilityIdentifier = "image-preview"
         preferredTransition = .zoom { [weak source] _ in source }
         modalPresentationStyle = .fullScreen
     }

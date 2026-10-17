@@ -77,6 +77,20 @@ ZeronShared/   Compiled into the app and the extension: the activity's
    arrives (rasterized on the worker thread) and forwards touches; the demo's
    "Agent visuals" chat (`-demo -route chat:chat-visuals`) has one of each.
 
+### Images in chat
+
+Markdown images in paragraphs, lists, and quotes use the existing host attachment reader.
+Save an agent screenshot as a PNG inside the session's project folder. Use an absolute path in the Markdown image reference.
+
+```markdown
+![Calculation result: 8](/workspace/calculator/5-plus-3.png)
+```
+
+The preview preserves the image's shape. Tap it to open the full-size image, then use Share image to copy or save it.
+The host permits workspace and upload paths. It rejects unrelated paths such as `/tmp`, and the phone does not fetch HTTP image URLs.
+Unavailable files and unsupported image data show a failure state with a retry action. A plain download link remains a link.
+Images in headings and table cells retain the existing linked alt text.
+
 ## Launch arguments
 
 | Arg | Effect |

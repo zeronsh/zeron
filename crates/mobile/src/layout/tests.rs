@@ -126,6 +126,78 @@ fn transcript_one(text: &str) -> TranscriptInput {
 }
 
 #[test]
+fn markdown_images_render_inline_and_keep_download_links() {
+    let reference = "/tmp/calculator-result/5-plus-3.png";
+    let mut w = worker(390.0);
+    w.input = transcript_one(&format!("![Calculation result: 8]({reference})\n\n[Download screenshot]({reference})"));
+    let frame = w.pass();
+    let image = frame.display(0).unwrap();
+    assert!(image.widgets.iter().any(|widget| matches!(&widget.kind,
+        display::WidgetKind::Image { reference: path } if path == reference)), "Markdown image became linked alt text");
+    assert_eq!(image.widgets[0].payload.as_deref(), Some("Calculation result: 8"));
+    let download = frame.display(1).unwrap();
+    assert!(download.widgets.is_empty());
+    assert_eq!(download.text, "Download screenshot");
+    assert_eq!(download.links[0].url, reference);
+}
+
+#[test]
+fn markdown_images_keep_text_order_and_container_geometry() {
+    let source = "Before ![First](/a.png) after ![Second](/b.png) end.\n\n> ![Quoted](/quote.png)\n\n- ![Listed](/list.png)\n\n[![Linked](/linked.png)](https://example.com/details)";
+    for width in [280.0, 390.0, 744.0] {
+        let mut w = worker(width);
+        w.input = transcript_one(source);
+        let frame = w.pass();
+        let first = frame.display(0).unwrap();
+        assert_eq!(first.text, "Beforeafterend.");
+        assert_eq!(first.copy_text, "Before ![First](/a.png) after ![Second](/b.png) end.");
+        let first_image = &first.widgets[0];
+        let second_image = &first.widgets[1];
+        assert!(first.runs[0].baseline < first_image.y);
+        assert!(first.runs.iter().any(|run| run.baseline > first_image.y + first_image.h && run.baseline < second_image.y));
+        assert!(first.runs.last().unwrap().baseline > second_image.y + second_image.h);
+        let mut paths = Vec::new();
+        for i in 0..frame.row_count() {
+            let display = frame.display(i).unwrap();
+            assert_eq!(display.height, frame.placement(i).unwrap().height);
+            for widget in &display.widgets {
+                if let display::WidgetKind::Image { reference } = &widget.kind {
+                    paths.push(reference.clone());
+                    assert!(widget.x >= 0.0 && widget.x + widget.w <= width);
+                    assert!(widget.y >= 0.0 && widget.y + widget.h <= display.height);
+                }
+            }
+        }
+        assert_eq!(paths, ["/a.png", "/b.png", "/quote.png", "/list.png", "/linked.png"]);
+        let linked = frame.display(frame.row_count() - 1).unwrap();
+        assert_eq!(linked.links[0].url, "https://example.com/details");
+    }
+}
+
+#[test]
+fn streaming_markdown_images_converge_without_duplicate_widgets() {
+    let source = "Before ![First](/a.png) after.\n\n![](/empty-alt.png)";
+    let mut w = worker(390.0);
+    let mut shown = String::new();
+    for chunk in source.chars().collect::<Vec<_>>().chunks(3) {
+        shown.extend(chunk);
+        w.input = debug_input(vec![DebugEntry { id: "a".into(), user: false, text: shown.clone(), streaming: true }], true);
+        w.pass();
+    }
+    w.input = transcript_one(source);
+    let streamed = w.pass();
+    let mut fresh = worker(390.0);
+    fresh.input = transcript_one(source);
+    let full = fresh.pass();
+    assert_eq!(streamed.row_count(), full.row_count());
+    for i in 0..full.row_count() {
+        assert_eq!(streamed.display(i).unwrap().widgets, full.display(i).unwrap().widgets);
+        assert_eq!(streamed.placement(i).unwrap().height, full.placement(i).unwrap().height);
+    }
+    assert_eq!(full.display(1).unwrap().widgets[0].payload.as_deref(), Some("Image"));
+}
+
+#[test]
 fn stable_prefix_rows_are_reused_while_streaming() {
     let mut w = worker(390.0);
     let base = "# Title\n\nFirst paragraph.\n\nSecond paragraph that keeps growing";

@@ -63,6 +63,8 @@ pub(crate) struct PTable {
 
 pub(crate) enum PBlock {
     Text(PText),
+    Flow(Vec<PBlock>),
+    Image { reference: String, alt: String },
     Heading(PText),
     Code(Box<PCode>),
     Quote(Vec<PBlock>),
@@ -220,7 +222,7 @@ pub(crate) fn prepare_plain(
 
 pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: bool) -> PBlock {
     match block {
-        Block::Paragraph { runs } => PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted)),
+        Block::Paragraph { runs } => prepare_paragraph(ctx, runs, muted),
         Block::Heading { level, runs } => {
             PBlock::Heading(prepare_runs(ctx, runs, TextKind::Heading(*level), muted))
         }
@@ -286,6 +288,34 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
         }
         Block::Rule => PBlock::Rule,
     }
+}
+
+fn prepare_paragraph(ctx: &mut Ctx, runs: &[InlineRun], muted: bool) -> PBlock {
+    if !runs.iter().any(|run| run.style.image.is_some()) {
+        return PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted));
+    }
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    for (i, run) in runs.iter().enumerate() {
+        let Some(image) = &run.style.image else { continue };
+        if runs[start..i].iter().any(|r| !r.text.trim().is_empty()) {
+            blocks.push(PBlock::Text(prepare_runs(ctx, &runs[start..i], TextKind::Body, muted)));
+        }
+        let alt = if image.alt.is_empty() { "Image".to_owned() } else { image.alt.clone() };
+        blocks.push(PBlock::Image { reference: image.source.clone(), alt: alt.clone() });
+        if let Some(link) = &image.link {
+            let mut caption = run.clone();
+            caption.text = alt;
+            caption.style.image = None;
+            caption.style.link = Some(link.clone());
+            blocks.push(PBlock::Text(prepare_runs(ctx, &[caption], TextKind::Body, muted)));
+        }
+        start = i + 1;
+    }
+    if runs[start..].iter().any(|r| !r.text.trim().is_empty()) {
+        blocks.push(PBlock::Text(prepare_runs(ctx, &runs[start..], TextKind::Body, muted)));
+    }
+    PBlock::Flow(blocks)
 }
 
 fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
@@ -538,6 +568,15 @@ pub(crate) fn place(block: &PBlock, px: Px, x: f32, y: f32, width: f32, out: Opt
     use geom::*;
     match block {
         PBlock::Text(t) | PBlock::Heading(t) => place_text(t, x, y, width, out),
+        PBlock::Flow(children) => place_stack(children, px, x, y, width, PARA_GAP, out),
+        PBlock::Image { reference, alt } => {
+            let side = px.v(super::rows::geom::IMAGE).min(width);
+            if let Some(out) = out {
+                out.fill(x, y, side, side, px.v(14.0), ColorRole::ChipBackground);
+                out.widget(WidgetKind::Image { reference: reference.clone() }, (x, y, side, side), Some(alt.clone()));
+            }
+            side
+        }
         PBlock::Code(c) => place_code(c, px, x, y, width, out),
         PBlock::Quote(children) => {
             let indent = px.v(QUOTE_INDENT);
