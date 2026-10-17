@@ -85,50 +85,71 @@ impl Drop for RpcSubscription {
     }
 }
 
+/// What a redialing transport feeds the reader. One ordered channel, so a
+/// `Reset` can never overtake frames from the connection it ends, nor fail
+/// requests already sent on the next one.
+enum Inbound {
+    Frame(String),
+    /// The socket dropped: fail everything pending, keep the client alive.
+    Reset,
+    /// Request `id` was sent while disconnected and never reached a server.
+    Fail(u64),
+}
+
+enum InboundSource {
+    Plain(mpsc::Receiver<String>),
+    Redialing(mpsc::Receiver<Inbound>),
+}
+
+impl InboundSource {
+    async fn recv(&mut self) -> Option<Inbound> {
+        match self {
+            Self::Plain(rx) => rx.recv().await.map(Inbound::Frame),
+            Self::Redialing(rx) => rx.recv().await,
+        }
+    }
+}
+
 impl RpcClient {
     /// Wrap an existing duplex: `out` carries client frames, `inbound` server frames.
-    pub fn new(out: mpsc::Sender<String>, mut inbound: mpsc::Receiver<String>) -> Self {
+    pub fn new(out: mpsc::Sender<String>, inbound: mpsc::Receiver<String>) -> Self {
+        Self::with_source(out, InboundSource::Plain(inbound))
+    }
+
+    fn with_source(out: mpsc::Sender<String>, mut inbound: InboundSource) -> Self {
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
         });
         let reader_shared = shared.clone();
         let reader_out = out.clone();
         let reader = tokio::spawn(async move {
-            while let Some(payload) = inbound.recv().await {
-                for line in payload.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let frame: ServerFrame = match serde_json::from_str(line) {
-                        Ok(frame) => frame,
-                        Err(err) => {
-                            tracing::warn!(error = %err, "rpc: dropping malformed server frame");
-                            continue;
+            while let Some(event) = inbound.recv().await {
+                match event {
+                    Inbound::Frame(payload) => {
+                        for line in payload.lines() {
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let frame: ServerFrame = match serde_json::from_str(line) {
+                                Ok(frame) => frame,
+                                Err(err) => {
+                                    tracing::warn!(
+                                        error = %err,
+                                        "rpc: dropping malformed server frame"
+                                    );
+                                    continue;
+                                }
+                            };
+                            route_frame(&reader_shared, &reader_out, frame).await;
                         }
-                    };
-                    route_frame(&reader_shared, &reader_out, frame).await;
+                    }
+                    Inbound::Reset => fail_pending(&reader_shared, None),
+                    Inbound::Fail(id) => fail_pending(&reader_shared, Some(id)),
                 }
             }
             // Connection closed: fail everything still pending.
-            let drained: Vec<Pending> = {
-                let mut pending = reader_shared.lock();
-                pending.drain().map(|(_, p)| p).collect()
-            };
-            for entry in drained {
-                match entry {
-                    Pending::Call(tx) => {
-                        let _ = tx.send(Err(RpcError::Closed));
-                    }
-                    Pending::CheckedStream {
-                        ready: Some(ready), ..
-                    } => {
-                        let _ = ready.send(Err(RpcError::Closed));
-                    }
-                    Pending::Stream(_) | Pending::CheckedStream { ready: None, .. } => {}
-                }
-                // Stream item receivers end by sender drop.
-            }
+            fail_pending(&reader_shared, None);
         });
         Self {
             out,
@@ -273,6 +294,31 @@ impl Drop for RpcClient {
     }
 }
 
+/// Fail one pending request (`Some(id)`) or all of them with `Closed`.
+fn fail_pending(shared: &Shared, id: Option<u64>) {
+    let drained: Vec<Pending> = {
+        let mut pending = shared.lock();
+        match id {
+            Some(id) => pending.remove(&id).into_iter().collect(),
+            None => pending.drain().map(|(_, p)| p).collect(),
+        }
+    };
+    for entry in drained {
+        match entry {
+            Pending::Call(tx) => {
+                let _ = tx.send(Err(RpcError::Closed));
+            }
+            Pending::CheckedStream {
+                ready: Some(ready), ..
+            } => {
+                let _ = ready.send(Err(RpcError::Closed));
+            }
+            Pending::Stream(_) | Pending::CheckedStream { ready: None, .. } => {}
+        }
+        // Stream item receivers end by sender drop.
+    }
+}
+
 async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: ServerFrame) {
     let id = frame.id;
     if let Some(err) = frame.err {
@@ -368,38 +414,146 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).
 pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
+    let ws = dial(url).await?;
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+    let (in_tx, in_rx) = mpsc::channel::<Inbound>(256);
+    tokio::spawn(async move {
+        pump(ws, &mut out_rx, &in_tx).await;
+    });
+    Ok(RpcClient::with_source(
+        out_tx,
+        InboundSource::Redialing(in_rx),
+    ))
+}
+
+const REDIAL_MIN: std::time::Duration = std::time::Duration::from_millis(100);
+const REDIAL_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`connect_ws`] for a long-lived viewport of a daemon that can restart
+/// underneath it (self-update, `systemctl restart`). The first dial fails
+/// like `connect_ws`; after that a dropped socket redials forever with
+/// backoff instead of leaving a permanently closed client.
+///
+/// A drop fails everything in flight with [`RpcError::Closed`] and ends every
+/// open stream, exactly as a closed socket does — callers that resubscribe on
+/// stream end recover by themselves once the daemon is back. Requests made
+/// while disconnected fail fast rather than queueing for a server that may
+/// never return; ones made mid-dial go out on the new socket.
+pub async fn connect_ws_redialing(url: &str) -> Result<RpcClient, RpcError> {
+    let ws = dial(url).await?;
+    let (out_tx, out_rx) = mpsc::channel::<String>(256);
+    let (in_tx, in_rx) = mpsc::channel::<Inbound>(256);
+    tokio::spawn(redial_loop(url.to_owned(), ws, out_rx, in_tx));
+    Ok(RpcClient::with_source(
+        out_tx,
+        InboundSource::Redialing(in_rx),
+    ))
+}
+
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn dial(url: &str) -> Result<WsStream, RpcError> {
     let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
         .await
         .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
         .map_err(|e| RpcError::Transport(e.to_string()))?;
+    Ok(ws)
+}
+
+/// Why a socket pump stopped.
+enum PumpEnd {
+    /// The `RpcClient` (or its reader) is gone; nothing left to serve.
+    ClientGone,
+    /// The socket closed or errored.
+    SocketClosed,
+}
+
+/// Shuttle frames between one socket and the client until either side ends.
+async fn pump(
+    ws: WsStream,
+    out_rx: &mut mpsc::Receiver<String>,
+    in_tx: &mpsc::Sender<Inbound>,
+) -> PumpEnd {
     let (mut sink, mut stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                frame = out_rx.recv() => match frame {
-                    Some(text) => {
-                        if sink.send(WsMessage::Text(text)).await.is_err() {
-                            break;
-                        }
+    loop {
+        tokio::select! {
+            frame = out_rx.recv() => match frame {
+                Some(text) => {
+                    if sink.send(WsMessage::Text(text)).await.is_err() {
+                        return PumpEnd::SocketClosed;
                     }
-                    None => {
-                        let _ = sink.send(WsMessage::Close(None)).await;
-                        break;
+                }
+                None => {
+                    let _ = sink.send(WsMessage::Close(None)).await;
+                    return PumpEnd::ClientGone;
+                }
+            },
+            message = stream.next() => match message {
+                Some(Ok(WsMessage::Text(text))) => {
+                    if in_tx.send(Inbound::Frame(text)).await.is_err() {
+                        return PumpEnd::ClientGone;
                     }
-                },
-                message = stream.next() => match message {
-                    Some(Ok(WsMessage::Text(text))) => {
-                        if in_tx.send(text).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(_)) => {}
-                },
-            }
+                }
+                Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => {
+                    return PumpEnd::SocketClosed;
+                }
+                Some(Ok(_)) => {}
+            },
         }
-    });
-    Ok(RpcClient::new(out_tx, in_rx))
+    }
+}
+
+async fn redial_loop(
+    url: String,
+    mut ws: WsStream,
+    mut out_rx: mpsc::Receiver<String>,
+    in_tx: mpsc::Sender<Inbound>,
+) {
+    loop {
+        if let PumpEnd::ClientGone = pump(ws, &mut out_rx, &in_tx).await {
+            return;
+        }
+        if in_tx.send(Inbound::Reset).await.is_err() {
+            return;
+        }
+        tracing::info!(%url, "rpc: connection lost; redialing");
+        let mut delay = REDIAL_MIN;
+        ws = loop {
+            let wait = tokio::time::sleep(delay);
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    () = &mut wait => break,
+                    frame = out_rx.recv() => {
+                        let Some(text) = frame else {
+                            return;
+                        };
+                        // Cancels for streams the dead server already
+                        // forgot need no reply; requests fail now.
+                        if let Some(id) = request_id(&text)
+                            && in_tx.send(Inbound::Fail(id)).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            match dial(&url).await {
+                Ok(ws) => break ws,
+                Err(err) => {
+                    tracing::debug!(%url, error = %err, "rpc: redial failed");
+                    delay = (delay * 2).min(REDIAL_MAX);
+                }
+            }
+        };
+        tracing::info!(%url, "rpc: reconnected");
+    }
+}
+
+fn request_id(frame: &str) -> Option<u64> {
+    serde_json::from_str::<ClientFrame>(frame)
+        .ok()
+        .filter(|frame| frame.method.is_some())
+        .map(|frame| frame.id)
 }

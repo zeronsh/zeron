@@ -22,7 +22,7 @@ mod client;
 pub mod device_room;
 mod server;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{RpcClient, RpcSubscription, connect_ws, connect_ws_redialing};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
@@ -620,6 +620,97 @@ mod tests {
         assert_eq!(items.recv().await, Some(serde_json::json!(0)));
         assert_eq!(items.recv().await, Some(serde_json::json!(1)));
         assert_eq!(items.recv().await, None);
+    }
+
+    /// Minimal echo server on one accepted socket; returns (closing the
+    /// socket) when `stop` fires — a daemon dying under its viewports.
+    async fn serve_echo_until(
+        listener: &tokio::net::TcpListener,
+        stop: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut sink, mut frames) = ws.split();
+        tokio::pin!(stop);
+        loop {
+            tokio::select! {
+                _ = &mut stop => return,
+                message = frames.next() => {
+                    let Some(Ok(Message::Text(text))) = message else {
+                        return;
+                    };
+                    let frame: ClientFrame = serde_json::from_str(&text).unwrap();
+                    if frame.method.is_none() {
+                        continue;
+                    }
+                    let reply = ServerFrame {
+                        id: frame.id,
+                        ok: Some(frame.params),
+                        ..ServerFrame::default()
+                    };
+                    let reply = serde_json::to_string(&reply).unwrap();
+                    sink.send(Message::Text(reply)).await.unwrap();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn redialing_client_survives_server_restart() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let first = tokio::spawn(async move {
+            serve_echo_until(&listener, stop_rx).await;
+            // Dropping the listener refuses redials until the restart.
+        });
+
+        let client = connect_ws_redialing(&format!("ws://{addr}")).await.unwrap();
+        let echoed = client.call("Echo", serde_json::json!(1)).await.unwrap();
+        assert_eq!(echoed, serde_json::json!(1));
+        let mut watch = client
+            .subscribe("Watch", serde_json::Value::Null)
+            .await
+            .unwrap();
+
+        // The server dies: open streams end, so resubscribe loops notice …
+        stop_tx.send(()).unwrap();
+        first.await.unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(2), watch.recv())
+            .await
+            .expect("a dropped socket must end open streams");
+        assert_eq!(ended, None);
+
+        // … and requests fail fast while nothing is listening.
+        let down = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.call("Echo", serde_json::json!(2)),
+        )
+        .await
+        .expect("a request while disconnected must not hang");
+        assert!(matches!(down, Err(RpcError::Closed)), "{down:?}");
+
+        // The server restarts on the same port: the same client recovers.
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let (_keep_alive, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move { serve_echo_until(&listener, stop_rx).await });
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match client.call("Echo", serde_json::json!(3)).await {
+                    Ok(value) => return value,
+                    Err(RpcError::Closed) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    Err(err) => panic!("unexpected error after restart: {err}"),
+                }
+            }
+        })
+        .await
+        .expect("the client must redial a restarted server");
+        assert_eq!(recovered, serde_json::json!(3));
     }
 
     #[tokio::test]
