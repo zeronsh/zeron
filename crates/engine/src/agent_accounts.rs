@@ -95,6 +95,7 @@ use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
 mod oauth;
+mod opencode_store;
 #[cfg(test)]
 mod provider_tests;
 mod stores;
@@ -188,6 +189,9 @@ pub struct AgentAccountsConfig {
     /// OpenCode's `auth.json` (`$XDG_DATA_HOME/opencode/`, default
     /// `~/.local/share/opencode/`).
     pub opencode_auth_file: PathBuf,
+    /// Resolve the selected CLI's storage generation and let it initialize
+    /// SQLite before writes. Disabled by isolated tests, which own their schema.
+    pub opencode_native_store: bool,
     /// Pi's agent dir (`$PI_CODING_AGENT_DIR`, default `~/.pi/agent`) —
     /// holds `auth.json`.
     pub pi_agent_dir: PathBuf,
@@ -224,6 +228,7 @@ impl AgentAccountsConfig {
             grok_home: stores::default_grok_home(),
             devin_credentials_file: stores::default_devin_credentials_file(),
             opencode_auth_file: stores::default_opencode_auth_file(),
+            opencode_native_store: true,
             pi_agent_dir: stores::default_pi_agent_dir(),
             hermes_home: stores::default_hermes_home(),
         }
@@ -245,6 +250,7 @@ impl AgentAccountsConfig {
             grok_home: root.join("grok"),
             devin_credentials_file: root.join("devin").join("credentials.toml"),
             opencode_auth_file: root.join("opencode").join("auth.json"),
+            opencode_native_store: false,
             pi_agent_dir: root.join("pi"),
             hermes_home: root.join("hermes"),
         }
@@ -923,7 +929,16 @@ impl AgentAccounts {
         detected_more.extend(self.detect_grok().map(|d| (HarnessId::Grok, d)));
         detected_more.extend(self.detect_devin().map(|d| (HarnessId::Devin, d)));
         for harness in [HarnessId::Opencode, HarnessId::Pi] {
-            let (resolved, unresolved) = self.detect_keyed(harness).await;
+            let (resolved, unresolved) = match self.detect_keyed(harness).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    warnings.push(AgentAccountWarning {
+                        harness,
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             detected_more.extend(resolved.into_iter().map(|d| (harness, d)));
             for detected in unresolved {
                 live(harness, &detected);
@@ -934,7 +949,9 @@ impl AgentAccounts {
             live(*harness, detected);
             self.snapshot_detected(*harness, detected)?;
         }
-        if let Some(message) = stores::opencode_env_warning() {
+        if let Some(message) = stores::opencode_env_warning()
+            && !self.opencode_sqlite(false).await.unwrap_or(false)
+        {
             warnings.push(AgentAccountWarning {
                 harness: HarnessId::Opencode,
                 message,
@@ -1107,7 +1124,8 @@ impl AgentAccounts {
                 let key = slot.store_key.as_deref().ok_or_else(|| {
                     EngineError::Other("That saved login names no provider.".into())
                 })?;
-                self.write_keyed_entry(harness, key, Some(&slot.credentials))?;
+                self.write_keyed_entry(harness, key, Some(&slot.credentials))
+                    .await?;
             }
             other => {
                 return Err(EngineError::Other(format!(
@@ -1212,12 +1230,17 @@ impl AgentAccounts {
     /// Whether a per-provider agent has a live entry under `store_key` at
     /// all, identified or not — a live login zeron can't identify is still
     /// never replaced unasked.
-    fn has_live_entry(&self, harness: HarnessId, store_key: Option<&str>) -> bool {
+    async fn has_live_entry(
+        &self,
+        harness: HarnessId,
+        store_key: Option<&str>,
+    ) -> Result<bool, EngineError> {
         match harness {
             HarnessId::Opencode | HarnessId::Pi => {
-                store_key.is_none_or(|key| self.live_keyed_entry(harness, key).is_some())
+                let entries = self.keyed_entries(harness).await?;
+                Ok(store_key.is_none_or(|key| entries.get(key).is_some_and(stores::oauth_entry)))
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 
@@ -1231,7 +1254,7 @@ impl AgentAccounts {
         let live = self.live_account_key(slot.harness, store_key).await;
         let usable = match slot.harness {
             HarnessId::Cursor => self.cursor_live_usable(),
-            _ => live.is_some() || self.has_live_entry(slot.harness, store_key),
+            _ => live.is_some() || self.has_live_entry(slot.harness, store_key).await?,
         };
         if usable && live.as_deref() != Some(slot.account_key.as_str()) {
             return Ok(());
@@ -1244,7 +1267,8 @@ impl AgentAccounts {
             HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
             HarnessId::Opencode | HarnessId::Pi => {
                 if let Some(key) = store_key {
-                    self.write_keyed_entry(slot.harness, key, Some(&slot.credentials))?;
+                    self.write_keyed_entry(slot.harness, key, Some(&slot.credentials))
+                        .await?;
                 }
             }
             _ => {}
@@ -1260,6 +1284,22 @@ impl AgentAccounts {
         store_key: Option<&str>,
         expected_account_key: &str,
     ) -> Result<(), EngineError> {
+        // Capture the native ID before an await can allow another OpenCode
+        // process to switch accounts. Check it in the removal transaction,
+        // after CLI initialization/migration finishes.
+        let expected_native_id = if harness == HarnessId::Opencode {
+            match store_key {
+                Some(key) => self.live_keyed_entry(harness, key).await.and_then(|entry| {
+                    entry
+                        .pointer("/_opencodeCredential/id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }),
+                None => None,
+            }
+        } else {
+            None
+        };
         if self.live_account_key(harness, store_key).await.as_deref() != Some(expected_account_key)
         {
             return Err(EngineError::Other(
@@ -1315,7 +1355,8 @@ impl AgentAccounts {
             HarnessId::Opencode | HarnessId::Pi => {
                 let key = store_key
                     .ok_or_else(|| EngineError::Other("That login names no provider.".into()))?;
-                self.write_keyed_entry(harness, key, None)?;
+                self.write_keyed_entry_checked(harness, key, None, expected_native_id.as_deref())
+                    .await?;
             }
             _ => {
                 return Err(EngineError::Other(
