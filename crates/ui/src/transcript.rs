@@ -9056,16 +9056,19 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                 )
                 .child(rule()),
         )
+        // Centered by flex, not `text_center()`: gpui registers a text line's
+        // layer at the line origin with the text's own width, so glyphs shifted
+        // by alignment paint outside it and can draw over popovers above them.
         .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .truncate()
-                .text_center()
-                .text_size(crate::typography::ui_rems(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted)
-                .child(source_title),
+            div().w_full().min_w_0().flex().justify_center().child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(source_title),
+            ),
         )
         .into_any_element()
 }
