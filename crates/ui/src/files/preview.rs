@@ -5215,3 +5215,343 @@ mod markdown_buffer_tests {
         assert!(weak.upgrade().is_none());
     }
 }
+
+/// Issue #280: macOS aborted in `MacTextSystem::layout_line` because a font run
+/// ended inside '→'. These tests drive a clean external reload through the real
+/// surface, editor and adapter, holding the reloaded text's highlight task until
+/// the frame that applies the reload has been drawn.
+#[cfg(test)]
+mod reload_highlight_tests {
+    use super::super::editor_adapter::probe;
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+    use std::ops::Range;
+
+    const RELOAD_PATH: &str = "repro-unicode.json";
+    const RELOAD_BEFORE: &str = r#"{"": 1}"#;
+    const RELOAD_AFTER: &str = "\" →\"";
+
+    /// Whether the reloaded text's highlight exists when the reload is applied.
+    #[derive(Clone, Copy)]
+    enum ReloadHighlight {
+        /// Highlighted by the task the reload spawns, delivered after the
+        /// reload frame.
+        Pending,
+        /// Already in the syntax cache, so the reload installs it immediately.
+        Cached,
+    }
+
+    struct ReloadTrace {
+        /// Adapter events while the original text was highlighted and drawn.
+        loaded: Vec<probe::Event>,
+        /// Adapter events of the frame that applied the reload.
+        reload_frame: Vec<probe::Event>,
+        /// Whether that frame was drawn before the reloaded text's highlight
+        /// had been delivered.
+        reload_highlight_pending: bool,
+        /// Editor text right after the reload frame.
+        editor_text: String,
+        /// Adapter events once the reloaded text's own highlight is installed.
+        rehighlighted_frame: Vec<probe::Event>,
+    }
+
+    fn workspace_file(path: &str, text: &str, hash: &str) -> zeron_proto::WorkspaceFileText {
+        zeron_proto::WorkspaceFileText {
+            checkout_id: "checkout".into(),
+            path: path.into(),
+            text: Some(text.into()),
+            content_hash: Some(hash.into()),
+            size: text.len() as u64,
+            modified_at: None,
+            encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+            line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+            read_only_reason: None,
+            truncated: false,
+        }
+    }
+
+    fn trace_clean_external_reload(
+        cx: &mut TestAppContext,
+        path: &'static str,
+        before: &str,
+        after: &str,
+        highlight: ReloadHighlight,
+    ) -> ReloadTrace {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new_editor(
+                state,
+                "chat".into(),
+                path.into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                cx,
+            )
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+                window.simulate_next_frame(cx);
+            })
+            .unwrap();
+        };
+        probe::take();
+        window
+            .update(cx, |surface, _, cx| {
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "chat".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: path.into(),
+                });
+                document.set_loaded(workspace_file(path, before, "hash-before"));
+                surface.preview.active = Some(path.into());
+                surface.preview.documents.insert(path.into(), document);
+                surface.sync_preview_list();
+                surface.request_file_highlight(
+                    path.into(),
+                    before.into(),
+                    "hash-before".into(),
+                    cx,
+                );
+            })
+            .unwrap();
+        // Deliver the original highlight, then let the surface create the
+        // editor and install it, as when a highlighted file is opened.
+        cx.run_until_parked();
+        for _ in 0..3 {
+            draw(cx);
+        }
+        let loaded = probe::take();
+
+        // A clean disk change is queued by reconciliation and applied by the
+        // next render of the document body.
+        window
+            .update(cx, |surface, _, cx| {
+                if let ReloadHighlight::Cached = highlight {
+                    let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+                        source: after,
+                        path: Some(path),
+                        fence_tag: None,
+                    })
+                    .unwrap();
+                    surface.preview.syntax_cache.insert(
+                        DocumentHighlightKey::new(
+                            zeron_syntax::language_for_path(path).unwrap(),
+                            after,
+                        ),
+                        Arc::new(document),
+                    );
+                }
+                surface
+                    .preview
+                    .documents
+                    .get_mut(path)
+                    .unwrap()
+                    .queue_external_reload(workspace_file(path, after, "hash-after"));
+                cx.notify();
+            })
+            .unwrap();
+        draw(cx);
+        let reload_frame = probe::take();
+        let (reload_highlight_pending, editor_text) = window
+            .update(cx, |surface, _, cx| {
+                let document = &surface.preview.documents[path];
+                let editor = document.editor.as_ref().expect("editor created");
+                (
+                    document.highlight_task.is_some(),
+                    editor.read(cx).value().to_string(),
+                )
+            })
+            .unwrap();
+
+        cx.run_until_parked();
+        draw(cx);
+        let rehighlighted_frame = probe::take();
+
+        ReloadTrace {
+            loaded,
+            reload_frame,
+            reload_highlight_pending,
+            editor_text,
+            rehighlighted_frame,
+        }
+    }
+
+    /// The character of `text` whose UTF-8 encoding contains `byte`.
+    fn char_around(text: &str, byte: usize) -> String {
+        let (start, ch) = text
+            .char_indices()
+            .take_while(|(start, _)| *start <= byte)
+            .last()
+            .unwrap();
+        format!("{ch:?} (bytes {start}..{})", start + ch.len_utf8())
+    }
+
+    fn range_violation(text: &str, range: &Range<usize>) -> Option<String> {
+        if range.start > range.end || range.end > text.len() {
+            return Some(format!(
+                "{range:?} is not inside the {}-byte text",
+                text.len()
+            ));
+        }
+        [range.start, range.end]
+            .into_iter()
+            .find(|edge| !text.is_char_boundary(*edge))
+            .map(|edge| {
+                format!(
+                    "{range:?} has edge {edge} inside {}",
+                    char_around(text, edge)
+                )
+            })
+    }
+
+    /// Every way the adapter's events break the contract with the text the
+    /// editor shapes: a highlighter the factory built for another text keeps
+    /// none of its spans, kept spans lie inside the text, and style runs are
+    /// ordered, contiguous, cover each request and sit on UTF-8 boundaries.
+    fn adapter_contract_violations(text: &str, events: &[probe::Event]) -> Vec<String> {
+        let mut violations = Vec::new();
+        let mut stale_build = None;
+        for (index, event) in events.iter().enumerate() {
+            match event {
+                probe::Event::FactoryBuilt { source } => {
+                    stale_build = (source != text).then_some((index, source));
+                }
+                probe::Event::Updated {
+                    edit,
+                    new_end,
+                    spans,
+                } => {
+                    if let Some((built, source)) = stale_build.take()
+                        && !spans.is_empty()
+                    {
+                        violations.push(format!(
+                            "event #{index}: highlighter built at event #{built} from {source:?} \
+                             kept spans {spans:?} while the editor holds {text:?}"
+                        ));
+                    } else if let Some(problem) =
+                        spans.iter().find_map(|span| range_violation(text, span))
+                    {
+                        violations.push(format!(
+                            "event #{index}: after edit {edit:?}->..{new_end} the highlighter \
+                             kept span {problem}"
+                        ));
+                    }
+                }
+                probe::Event::Styles { request, runs } => {
+                    if let Some(problem) = range_violation(text, request) {
+                        violations.push(format!("event #{index}: styles request {problem}"));
+                        continue;
+                    }
+                    let mut cursor = request.start;
+                    let mut broken = false;
+                    for (run_index, (range, _)) in runs.iter().enumerate() {
+                        let problem = if range.start != cursor || range.end > request.end {
+                            Some(format!(
+                                "{range:?} does not continue at byte {cursor} within {request:?}"
+                            ))
+                        } else {
+                            range_violation(text, range)
+                        };
+                        if let Some(problem) = problem {
+                            violations.push(format!(
+                                "event #{index}: style run #{run_index} {problem}; runs {:?}",
+                                runs.iter().map(|(range, _)| range).collect::<Vec<_>>()
+                            ));
+                            broken = true;
+                            break;
+                        }
+                        cursor = range.end;
+                    }
+                    if !broken && cursor < request.end {
+                        violations.push(format!(
+                            "event #{index}: style runs stop at {cursor} before {request:?} ends"
+                        ));
+                    }
+                }
+            }
+        }
+        violations
+    }
+
+    fn assert_loaded_highlight_is_valid(before: &str, trace: &ReloadTrace) {
+        assert!(
+            trace.loaded.iter().any(|event| matches!(
+                event,
+                probe::Event::Styles { runs, .. }
+                    if runs.windows(2).any(|pair| pair[0].1 != pair[1].1)
+            )),
+            "the original text was never drawn with more than one style: {:#?}",
+            trace.loaded
+        );
+        assert_eq!(
+            adapter_contract_violations(before, &trace.loaded),
+            Vec::<String>::new()
+        );
+    }
+
+    #[gpui::test]
+    fn clean_external_reload_only_shapes_highlights_for_the_reloaded_text(cx: &mut TestAppContext) {
+        let trace = trace_clean_external_reload(
+            cx,
+            RELOAD_PATH,
+            RELOAD_BEFORE,
+            RELOAD_AFTER,
+            ReloadHighlight::Pending,
+        );
+        assert_loaded_highlight_is_valid(RELOAD_BEFORE, &trace);
+        assert_eq!(trace.editor_text, RELOAD_AFTER);
+        assert!(
+            trace.reload_highlight_pending,
+            "the reload frame must be drawn while the reloaded text's highlight is pending"
+        );
+        assert_eq!(
+            adapter_contract_violations(RELOAD_AFTER, &trace.rehighlighted_frame),
+            Vec::<String>::new(),
+            "after its own highlight arrives the reloaded text must be valid"
+        );
+        let violations = adapter_contract_violations(RELOAD_AFTER, &trace.reload_frame);
+        assert!(
+            violations.is_empty(),
+            "frame applying the reload broke the highlight contract.\n\
+             First violation: {}\nAll violations:\n  {}\nAdapter events: {:#?}",
+            violations[0],
+            violations.join("\n  "),
+            trace.reload_frame
+        );
+    }
+
+    /// Control: the same reload with the new text's highlight already cached
+    /// installs a fresh factory before the editor renders.
+    #[gpui::test]
+    fn clean_external_reload_with_cached_highlight_shapes_only_reloaded_text(
+        cx: &mut TestAppContext,
+    ) {
+        let trace = trace_clean_external_reload(
+            cx,
+            RELOAD_PATH,
+            RELOAD_BEFORE,
+            RELOAD_AFTER,
+            ReloadHighlight::Cached,
+        );
+        assert_loaded_highlight_is_valid(RELOAD_BEFORE, &trace);
+        assert_eq!(trace.editor_text, RELOAD_AFTER);
+        assert!(!trace.reload_highlight_pending);
+        assert!(trace.reload_frame.iter().any(|event| matches!(
+            event,
+            probe::Event::FactoryBuilt { source } if source == RELOAD_AFTER
+        )));
+        assert_eq!(
+            adapter_contract_violations(RELOAD_AFTER, &trace.reload_frame),
+            Vec::<String>::new()
+        );
+    }
+}
