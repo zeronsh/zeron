@@ -66,3 +66,31 @@ The iOS app adds no Install action. `HarnessDescriptor.can_install` already has
 `#[serde(default)]` (`crates/engine/src/registry.rs`); iOS's `WireHarness: Decodable`
 in `apps/ios/Zeron/Sync/WorkspaceStore.swift` ignores unrecognized keys, including
 `canInstall`. `HarnessCatalog` continues consuming the existing mapped fields.
+
+### Native Claude message forks
+
+Message forks use the official `forkSession` storage API from
+`@anthropic-ai/claude-agent-sdk@0.3.284`. The small `claude/fork.mjs` helper is
+embedded in the Rust binary and materialized through the existing managed SDK
+installer; no global SDK or `npx latest` is used. Node >=18 and npm are required
+for preparation. The helper inherits `CLAUDE_CONFIG_DIR` and runs in the source
+project directory. Creation performs no inference and does not restore files.
+
+Offline helper tests: `node --test crates/harness/src/claude/fork.test.mjs`.
+The storage test additionally accepts `CLAUDE_FORK_TEST_SDK=/absolute/path/to/sdk.mjs`
+with the pinned package and runs `node --test crates/harness/src/claude/fork.storage.test.mjs`.
+
+### Native Pi message forks
+
+Pi 0.85.1 replies use official `SessionManager.createBranchedSession(entryId)`
+through the managed `@earendil-works/pi-coding-agent@0.85.1` storage module. Node
+>=22.19.0 is required, with npm for first preparation. The helper and point-capture
+extension are embedded in the harness binary. Creation performs no inference,
+keeps the parent session intact and verifies the exact inclusive branch/context.
+Native children require their saved session and cannot fall back to a fresh run.
+
+Offline tests: `node --test crates/harness/src/pi/fork.test.mjs`. Set
+`PI_FORK_SDK_MODULE` to the pinned SDK's absolute `dist/core/session-manager.js`
+to include actual storage tests. Isolated real-process tests use a local mock:
+`cargo test -p zeron-harness --test pi_live -- --ignored --nocapture`.
+See [Pi setup and continuity](../../docs/pi.md) for configuration and limitations.

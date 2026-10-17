@@ -680,6 +680,7 @@ enum MutateParams {
 
 #[derive(Clone)]
 pub struct EngineRpc {
+    native_forks: Option<crate::native_forks::NativeForks>,
     voice: crate::voice::VoiceManager,
     sessions: SessionsEngine,
     doc_host: DocHost,
@@ -724,10 +725,17 @@ impl EngineRpc {
             device_id: doc_host.device_id().to_string(),
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
-            capabilities: zeron_proto::capabilities::current(),
+            capabilities: zeron_proto::capabilities::current()
+                .into_iter()
+                .filter(|c| {
+                    c != zeron_proto::capabilities::NATIVE_MESSAGE_FORK_V1
+                        && c != zeron_proto::capabilities::NATIVE_MESSAGE_FORK_MAIN_V1
+                })
+                .collect(),
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
+            native_forks: None,
             voice: sessions.voice_manager(),
             sessions,
             doc_host,
@@ -750,6 +758,17 @@ impl EngineRpc {
             local_import: None,
             engine_info,
         }
+    }
+
+    pub fn with_native_forks(mut self, forks: crate::native_forks::NativeForks) -> Self {
+        self.native_forks = Some(forks);
+        self.engine_info
+            .capabilities
+            .push(zeron_proto::capabilities::NATIVE_MESSAGE_FORK_V1.into());
+        self.engine_info
+            .capabilities
+            .push(zeron_proto::capabilities::NATIVE_MESSAGE_FORK_MAIN_V1.into());
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -1471,6 +1490,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // queueing, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        methods::FORK_MESSAGE_SIDE_CHAT => Duration::from_secs(200),
+        methods::GET_NATIVE_FORK_AVAILABILITY => Duration::from_secs(100),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
@@ -1491,6 +1512,8 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            | methods::FORK_MESSAGE_SIDE_CHAT
+            | methods::GET_NATIVE_FORK_AVAILABILITY
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
@@ -2035,6 +2058,25 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }
+            methods::GET_NATIVE_FORK_AVAILABILITY => {
+                let forks = self.native_forks.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Update the chat host to fork this message".into())
+                })?;
+                let request = parse_params(params)?;
+                RpcReply::value(
+                    &forks
+                        .availability(request)
+                        .await
+                        .map_err(RpcError::Failed)?,
+                )
+            }
+            methods::FORK_MESSAGE_SIDE_CHAT => {
+                let forks = self.native_forks.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Update the chat host to fork this message".into())
+                })?;
+                let request = parse_params(params)?;
+                RpcReply::value(&forks.create(request).await.map_err(RpcError::Failed)?)
+            }
             methods::FORK_SIDE_CHAT => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -2140,6 +2182,7 @@ impl RpcService for EngineRpc {
                         .doc()
                         .push_message(&zeron_doc::SessionMessageEntry {
                             duration_ms: None,
+                            native_fork_point: None,
                             id: marker_id.clone(),
                             role: zeron_doc::MessageRole::System,
                             parts: vec![zeron_doc::MessagePart::Fork {
@@ -4234,6 +4277,7 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -4341,6 +4385,12 @@ mod tests {
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
         ));
+    }
+
+    #[test]
+    fn native_fork_rpcs_route_to_the_execution_host() {
+        assert!(forwardable(methods::FORK_MESSAGE_SIDE_CHAT));
+        assert!(forwardable(methods::GET_NATIVE_FORK_AVAILABILITY));
     }
 
     #[test]
@@ -4608,6 +4658,7 @@ mod context_usage_tests {
                     status: Some(zeron_doc::MessageStatus::Streaming),
                     continuation_of: None,
                     duration_ms: None,
+                    native_fork_point: None,
                 })
                 .unwrap()
         };
@@ -4729,6 +4780,7 @@ mod context_usage_tests {
             status: Some(zeron_doc::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();

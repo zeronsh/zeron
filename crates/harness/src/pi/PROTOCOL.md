@@ -45,3 +45,23 @@ recreation using --session-id in the same cwd. Any submitted input revokes that
 proof before the write to stdin. Missing history/custom entries never authorize
 recreating the same UUID; an unrestorable session starts a new one with a
 visible "without the previous context" notice, like the other harnesses.
+
+Native reply forks (verified Pi 0.85.1 only): an embedded extension runs at
+`turn_end`, after `message_end` has been appended by AgentSession. It requires
+the same assistant message object at `ctx.sessionManager.getLeafEntry()` and
+`stopReason: stop`, then sends an internal metadata notification containing the
+official session/entry IDs. It never matches text, timestamps or bubble indexes.
+The driver associates the notification with its explicit assistant ID before
+`Steered` rotates it or terminal `Done` completes it. A later assistant iteration,
+interruption or failure discards the candidate. Metadata notifications do not
+enter the visible transcript.
+
+Creation uses a separately owned, cancellable Node storage helper with the
+managed SDK pinned to 0.85.1 (Node >=22.19.0). `createBranchedSession(entryId)`
+copies the inclusive native path without touching the running parent. The helper
+checks UUID, cwd and format before opening the source, verifies the resulting
+entries/context and independent UUID, and syncs storage and the UUID lookup.
+It never invokes RPC `fork`, which switches the active session and cuts at a
+user message, nor a model prompt. Native forks use `RequireExisting`: check the
+saved file and project before startup, enforce the same UUID at every state
+barrier and disallow all empty-session/fresh-session recovery paths.

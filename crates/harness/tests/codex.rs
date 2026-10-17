@@ -105,6 +105,7 @@ fn request(prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
     }
 }
 
@@ -455,6 +456,26 @@ async fn a_stale_turn_completion_never_settles_the_running_turn() {
         .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "after"))
         .expect("after");
     assert!(dones[0].0 > after, "{events:?}");
+    let points: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, event)| {
+            if let AgentEvent::NativeForkReady { point, .. } = event {
+                Some((i, &point.boundary))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        points.len(),
+        1,
+        "stale/duplicate completions must not publish fork points: {events:?}"
+    );
+    assert!(
+        matches!(points[0].1, zeron_proto::NativeForkBoundary::AppServerTurn { turn_id } if turn_id == "t-1")
+    );
+    assert!(points[0].0 > after && points[0].0 < dones[0].0);
 }
 
 /// A stop issued before the app-server announces the turn waits for
@@ -1732,6 +1753,77 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
 }
 
 #[tokio::test]
+async fn native_fork_is_inclusive_verified_and_never_starts_a_turn() {
+    use zeron_proto::{NativeForkBoundary, NativeForkPoint};
+    let harness = CodexHarness::new().with_executable(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/native-fork-codex.py"),
+    );
+    for (source, expected) in [
+        ("source", true),
+        ("ignore-boundary", false),
+        ("active", false),
+        ("empty-id", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(harness.native_fork_support(dir.path()).await.available);
+        let point = NativeForkPoint {
+            format_version: 1,
+            harness: HarnessId::Codex,
+            source_device_id: "host".into(),
+            source_session_id: source.into(),
+            cwd: dir.path().to_str().unwrap().into(),
+            boundary: NativeForkBoundary::AppServerTurn {
+                turn_id: "t1".into(),
+            },
+        };
+        let result = harness
+            .fork_native(
+                &point,
+                zeron_harness::NativeForkControls {
+                    execution_lease: None,
+                    interrupt: CancellationToken::new(),
+                    timeout: Duration::from_secs(5),
+                    source_idle: true,
+                },
+            )
+            .await;
+        assert_eq!(result.is_ok(), expected, "{source}: {result:?}");
+        if let Ok(result) = result {
+            assert_eq!(result.session_id, "child");
+        }
+        let wire = std::fs::read_to_string(dir.path().join("fork-wire.jsonl")).unwrap();
+        assert!(!wire.contains("turn/start"));
+        assert!(!wire.contains("thread/start"));
+        if source == "active" {
+            assert!(!wire.contains("thread/fork"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_fork_resume_rejection_never_starts_fresh() {
+    let harness = CodexHarness::new().with_executable(fixture_path());
+    let mut req = request("scenario:resumed");
+    req.resume = Some("resume-fail".into());
+    req.resume_policy = zeron_proto::ResumePolicy::RequireExisting;
+    let (ctl, steer, _) = controls("Allow");
+    drop(steer);
+    let events = run_to_end(&harness, req, ctl).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        }
+    )));
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        AgentEvent::SessionStarted { .. } | AgentEvent::TextDelta { .. }
+    )));
+}
+
+#[tokio::test]
 async fn a_model_change_sent_mid_turn_takes_effect_in_its_own_turn() {
     let (controls, steer, _token) = controls("Yes");
     let mut stream = harness()
@@ -1791,6 +1883,19 @@ async fn a_model_change_sent_mid_turn_takes_effect_in_its_own_turn() {
         })
         .collect();
     assert_eq!(texts, ["working", "to-b", "back-to-a", "plain"]);
+    let fork_turns: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::NativeForkReady { point, .. } => match &point.boundary {
+                zeron_proto::NativeForkBoundary::AppServerTurn { turn_id } => {
+                    Some(turn_id.as_str())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fork_turns, ["t-1", "t-2", "t-3", "t-4"]);
 }
 
 #[tokio::test]
@@ -1826,6 +1931,9 @@ async fn a_stopped_turn_keeps_the_app_server_for_the_next_prompt() {
                 assert_eq!(status, DoneStatus::Interrupted);
                 break;
             }
+            Some(AgentEvent::NativeForkReady { .. }) => {
+                panic!("Stopped reply must not receive a fork point")
+            }
             Some(_) => {}
             None => panic!("a stopped turn must not end the app-server's stream"),
         }
@@ -1845,6 +1953,10 @@ async fn a_stopped_turn_keeps_the_app_server_for_the_next_prompt() {
     assert!(resumed.contains(&AgentEvent::TextDelta {
         text: "resumed".into()
     }));
+    assert!(resumed.iter().any(|event| matches!(event,
+        AgentEvent::NativeForkReady { point, .. }
+            if matches!(&point.boundary, zeron_proto::NativeForkBoundary::AppServerTurn { turn_id } if turn_id == "t-2")
+    )), "the next completed turn must regain a fork point: {resumed:?}");
     assert!(matches!(
         resumed.last(),
         Some(AgentEvent::Done {

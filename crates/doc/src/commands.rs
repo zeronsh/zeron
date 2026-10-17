@@ -361,6 +361,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            resume_policy: Default::default(),
         }
     }
 }

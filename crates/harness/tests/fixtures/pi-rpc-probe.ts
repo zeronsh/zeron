@@ -1,6 +1,9 @@
 import { appendFileSync, existsSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 export default function(pi) {
+  pi.registerTool({name:'native_probe_tool',label:'Native fork probe',description:'Local test tool',
+    parameters:{type:'object',properties:{},required:[]},
+    execute:async () => ({content:[{type:'text',text:'local tool result'}],details:{}})});
   pi.on('input', event => {
     if (/^(burst-|late-)/.test(event.text)) {
       // Queue acceptance finishes in microtasks after this handler returns.
@@ -30,6 +33,13 @@ export default function(pi) {
       const msg = {role:'assistant',content:[], api:model.api, provider:model.provider, model:model.id, usage:{input:10,output:2,cacheRead:0,cacheWrite:0,totalTokens:12,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'stop',timestamp:Date.now()};
       (async () => {
         stream.push({type:'start',partial:msg});
+        if (text === 'native-tool-loop' && context.messages.at(-1)?.role !== 'toolResult') {
+          msg.stopReason = 'toolUse';
+          msg.content.push({type:'toolCall',id:'native-tool-call',name:'native_probe_tool',arguments:{}});
+          stream.push({type:'toolcall_start',contentIndex:0,partial:msg});
+          stream.push({type:'toolcall_end',contentIndex:0,toolCall:msg.content[0],partial:msg});
+          stream.push({type:'done',reason:'toolUse',message:msg});stream.end();return;
+        }
         while (gate && !existsSync('probe-release-'+gate) && !options?.signal?.aborted) {
           await new Promise(resolve => setTimeout(resolve, 5));
         }
@@ -40,7 +50,9 @@ export default function(pi) {
         }
         msg.content.push({type:'text',text:''});
         stream.push({type:'text_start',contentIndex:0,partial:msg});
-        msg.content[0].text = 'MOCK:'+(gate ? batch.join('|') : text);
+        msg.content[0].text = text === 'fork-context'
+          ? JSON.stringify(context.messages.map(m => ({role: m.role, content: m.content})))
+          : 'MOCK:'+(gate ? batch.join('|') : text);
         stream.push({type:'text_delta',contentIndex:0,delta:msg.content[0].text,partial:msg});
         stream.push({type:'text_end',contentIndex:0,content:msg.content[0].text,partial:msg});
         stream.push({type:'done',reason:'stop',message:msg});stream.end();

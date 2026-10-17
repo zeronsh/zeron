@@ -591,6 +591,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }
     }
 

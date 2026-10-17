@@ -131,6 +131,7 @@ impl Rig {
             attachments: vec![],
             worktree: None,
             resume: None,
+            resume_policy: Default::default(),
         }
     }
 

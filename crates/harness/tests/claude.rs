@@ -50,6 +50,7 @@ fn request(prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
     }
 }
 
@@ -218,6 +219,122 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
             session_id: Some("sess-1".into()),
         })
     );
+}
+
+#[tokio::test]
+async fn native_fork_points_follow_the_accepted_completion_not_a_held_result() {
+    for (scenario, expected_uuid) in [
+        ("superseded", Some("replacement-native-uuid")),
+        ("deferred", Some("original-native-uuid")),
+        ("cancelled", None),
+    ] {
+        let (controls, steer, _) = controls("A");
+        if scenario != "deferred" {
+            steer.send(SteerMessage::text("follow up")).await.unwrap();
+        }
+        drop(steer);
+        let events = run_to_end(
+            &harness(),
+            request(&format!("scenario:native-fork-{scenario}")),
+            controls,
+        )
+        .await;
+        let points: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                if let AgentEvent::NativeForkReady {
+                    assistant_message_id,
+                    point,
+                } = e
+                {
+                    let zeron_proto::NativeForkBoundary::ClaudeMessage { uuid } = &point.boundary
+                    else {
+                        panic!("Claude boundary")
+                    };
+                    Some((i, assistant_message_id, uuid.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            points.iter().map(|p| p.2).collect::<Vec<_>>(),
+            expected_uuid.into_iter().collect::<Vec<_>>(),
+            "{scenario}: {events:?}"
+        );
+        if let Some((i, owner, _)) = points.first() {
+            assert!(events[..*i].iter().any(|e| matches!(e, AgentEvent::AssistantMessageCompleted { assistant_message_id } if assistant_message_id == *owner)));
+            assert!(
+                matches!(
+                    events.get(i + 1),
+                    Some(AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        ..
+                    })
+                ),
+                "point must precede its accepted Done: {events:?}"
+            );
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Done { .. }))
+                .count(),
+            1,
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_fork_point_is_discarded_when_stop_settles_a_held_result() {
+    let (controls, steer, _) = controls("A");
+    let turn = controls.turn.clone();
+    steer.send(SteerMessage::text("follow up")).await.unwrap();
+    let mut stream = harness()
+        .run(request("scenario:native-fork-stopped"), controls)
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(
+                event,
+                AgentEvent::Usage {
+                    input_tokens: 7,
+                    ..
+                }
+            ) {
+                turn.stop_turn();
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::NativeForkReady { .. })),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    drop(steer);
 }
 
 #[tokio::test]

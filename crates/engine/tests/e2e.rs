@@ -39,6 +39,7 @@ fn run_request(prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
     }
 }
 
@@ -1231,6 +1232,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
         let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
@@ -1333,6 +1335,7 @@ async fn recover_stale_journal_settles_chips_in_completed_local_entries() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
     }
@@ -1401,6 +1404,7 @@ async fn subagent_done_without_a_live_sink_updates_a_persisted_chip() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
     core.sessions
@@ -2440,6 +2444,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         auto_approve: false,
         attachments: vec![path],
         resume: None,
+        resume_policy: Default::default(),
         worktree: None,
     };
     core.doc_host
