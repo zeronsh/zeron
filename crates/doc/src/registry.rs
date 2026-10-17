@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use zeron_proto::{Chat, ChatConfig, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space};
 
 use crate::schema::DocError;
-use crate::workspace::{DeletedSpace, WorkspaceState};
+use crate::workspace::{DeletedSpace, ForgottenDevice, WorkspaceState};
 
 /// Row kinds — synced sidebar entities plus user preferences.
 pub const KIND_DEVICES: &str = "devices";
@@ -1103,6 +1103,13 @@ impl RegistryDoc {
         Ok(devices)
     }
 
+    pub fn device(&self, device_id: &str) -> Result<Option<Device>, DocError> {
+        Ok(self
+            .overlay_row(KIND_DEVICES, device_id)
+            .and_then(|row| row_to::<crate::workspace::RawDevice>(&row))
+            .map(Device::from))
+    }
+
     // ── spaces ──────────────────────────────────────────────────────────────
 
     pub fn upsert_space(&mut self, space: &Space) -> Result<(), DocError> {
@@ -1200,6 +1207,35 @@ impl RegistryDoc {
         keys.push((KIND_SPACES, space_id));
         self.delete_row_ops(&keys);
         Ok(DeletedSpace { existed, chat_ids })
+    }
+
+    pub fn delete_device(&mut self, device_id: &str) -> Result<ForgottenDevice, DocError> {
+        let existed = self.row_exists(KIND_DEVICES, device_id);
+        let owned_spaces = self
+            .read_spaces()?
+            .into_iter()
+            .filter(|s| s.device_id == device_id)
+            .count();
+        let owned_chats = self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| c.device_id == device_id)
+            .count();
+        if owned_spaces > 0 || owned_chats > 0 {
+            return Ok(ForgottenDevice {
+                existed,
+                owned_spaces,
+                owned_chats,
+                deleted: false,
+            });
+        }
+        self.delete_row_ops(&[(KIND_DEVICES, device_id)]);
+        Ok(ForgottenDevice {
+            existed,
+            owned_spaces,
+            owned_chats,
+            deleted: true,
+        })
     }
 
     // ── chats ───────────────────────────────────────────────────────────────

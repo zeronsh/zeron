@@ -102,6 +102,13 @@ impl Device {
     }
 }
 
+pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
+
+pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    last_seen
+        .is_some_and(|at| now.signed_duration_since(at).num_seconds() <= DEVICE_ONLINE_WINDOW_SECS)
+}
+
 /// A synced (device, folder) pair — the unit of organization in the sidebar.
 /// Sessions belong to exactly one space; the space fixes their host device and
 /// base cwd. Folders need not be git repos: `git_detected` is stamped by the

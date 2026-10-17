@@ -10,6 +10,7 @@ use gpui::{
 use std::time::Duration;
 
 use zeron_proto::WorkspaceScope;
+pub use zeron_proto::{DEVICE_ONLINE_WINDOW_SECS, device_online};
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
@@ -17,16 +18,6 @@ use crate::popover;
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
-
-/// A device that pinged within this window shows a presence dot (engines
-/// heartbeat every 15s; 70s tolerates a couple of missed beats).
-pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
-
-/// Presence: last-seen within the online window (future timestamps count). Pure.
-pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    last_seen
-        .is_some_and(|at| now.signed_duration_since(at).num_seconds() <= DEVICE_ONLINE_WINDOW_SECS)
-}
 
 /// Compact last-seen line. Pure.
 pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
@@ -61,10 +52,16 @@ struct RenameDialog {
     _events: Subscription,
 }
 
+struct ForgetDialog {
+    device_id: String,
+    name: String,
+}
+
 pub struct DevicesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     rename: Option<RenameDialog>,
+    forget: Option<ForgetDialog>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
     error: Option<SharedString>,
@@ -80,6 +77,7 @@ impl DevicesPage {
             state,
             scroll: widgets::PageScroll::default(),
             rename: None,
+            forget: None,
             copied: None,
             error: None,
             task: None,
@@ -112,7 +110,7 @@ impl DevicesPage {
     /// Escape that reached Settings unclaimed closes the rename dialog first,
     /// so it never closes Settings under the dialog. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.rename.take().is_none() {
+        if self.forget.take().is_none() && self.rename.take().is_none() {
             return false;
         }
         cx.notify();
@@ -141,6 +139,35 @@ impl DevicesPage {
             this.update(cx, |page, cx| {
                 if let Err(err) = result {
                     page.error = Some(format!("Rename failed: {err}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn open_forget(&mut self, device_id: String, name: String, cx: &mut Context<Self>) {
+        self.forget = Some(ForgetDialog { device_id, name });
+        cx.notify();
+    }
+
+    fn submit_forget(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.forget.take() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({
+            "op": "forgetDevice",
+            "deviceId": dialog.device_id,
+        });
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |page, cx| {
+                if let Err(err) = result {
+                    page.error = Some(err.to_string().into());
                 }
                 cx.notify();
             })
@@ -221,6 +248,66 @@ impl DevicesPage {
         Some(popover::modal("rename-device-dialog", viewport, card))
     }
 
+    fn render_forget_dialog(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).for_popup();
+        let dialog = self.forget.as_ref()?;
+        let name = dialog.name.clone();
+        let card = popover::dialog_card(&theme)
+            .id("forget-device-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("Forget device")
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.forget = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(popover::dialog_title(&theme, "Forget device"))
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "Forget \u{201c}{name}\u{201d}? It is removed from this workspace. If it comes back online, it re-registers."
+                    ))),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        widgets::text_action(&theme, widgets::ActionTone::Quiet, "Cancel")
+                            .id("forget-cancel")
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.forget = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        widgets::text_action(&theme, widgets::ActionTone::Solid, "Forget")
+                            .id("forget-confirm")
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_forget(cx))),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("forget-device-dialog", viewport, card))
+    }
+
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if self.scroll.set_list_hovered(*hovered) {
             cx.notify();
@@ -275,6 +362,7 @@ impl Render for DevicesPage {
         };
         let copied = self.copied.clone();
         let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        let forget_dialog = self.render_forget_dialog(window.viewport_size(), cx);
         // Split into this device and the rest; each renders as rows in one
         // block, like every other settings page.
         let (local, others): (Vec<_>, Vec<_>) = devices
@@ -359,7 +447,22 @@ impl Render for DevicesPage {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.open_rename(rename_id.clone(), rename_name.clone(), cx);
                                 })),
-                        ),
+                        )
+                        .when(!is_local && !online, |el| {
+                            let forget_id = device.id.clone();
+                            let forget_name = device.name.clone();
+                            el.child(
+                                widgets::text_action(&theme, widgets::ActionTone::Quiet, "Forget")
+                                    .id(("device-forget", ix))
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .aria_label(format!("Forget {}", device.name))
+                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_forget(forget_id.clone(), forget_name.clone(), cx);
+                                    })),
+                            )
+                        }),
                 )
                 .into_any_element()
         };
@@ -431,6 +534,7 @@ impl Render for DevicesPage {
             )
             .children(scrollbar)
             .when_some(dialog, |el, dialog| el.child(dialog))
+            .when_some(forget_dialog, |el, dialog| el.child(dialog))
     }
 }
 

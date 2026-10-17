@@ -738,6 +738,83 @@ fn delete_space_cascades_and_converges() {
 }
 
 #[test]
+fn forget_device_tombstones_and_converges() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-old", "laptop")).unwrap();
+    let mut b = RegistryDoc::new("dev-b");
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(a.read_devices().unwrap().len(), 1);
+
+    let gone = a.delete_device("dev-old").unwrap();
+    assert!(gone.existed);
+    assert!(gone.deleted);
+    assert_eq!(gone.owned_spaces, 0);
+    assert_eq!(gone.owned_chats, 0);
+    assert!(a.read_devices().unwrap().is_empty());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.read_devices().unwrap().is_empty());
+
+    let again = b.delete_device("dev-old").unwrap();
+    assert!(!again.existed);
+    assert!(again.deleted);
+}
+
+#[test]
+fn forget_device_reregisters_when_it_returns() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-old", "laptop")).unwrap();
+    a.delete_device("dev-old").unwrap();
+    assert!(a.read_devices().unwrap().is_empty());
+
+    a.upsert_device(&device("dev-old", "laptop")).unwrap();
+    let back = a.read_devices().unwrap();
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].id, "dev-old");
+}
+
+#[test]
+fn forget_device_refuses_while_it_owns_projects_or_chats() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-old", "laptop")).unwrap();
+    a.upsert_space(&space("sp-1", "dev-old", "/tmp/one")).unwrap();
+    let blocked = a.delete_device("dev-old").unwrap();
+    assert!(blocked.existed);
+    assert!(!blocked.deleted);
+    assert_eq!(blocked.owned_spaces, 1);
+    assert_eq!(blocked.owned_chats, 0);
+    assert_eq!(a.read_devices().unwrap().len(), 1);
+
+    a.delete_space("sp-1").unwrap();
+    a.upsert_chat(&chat("chat-1", "dev-old")).unwrap();
+    let blocked = a.delete_device("dev-old").unwrap();
+    assert!(!blocked.deleted);
+    assert_eq!(blocked.owned_spaces, 0);
+    assert_eq!(blocked.owned_chats, 1);
+
+    a.delete_chat("chat-1").unwrap();
+    let gone = a.delete_device("dev-old").unwrap();
+    assert!(gone.deleted);
+    assert!(a.read_devices().unwrap().is_empty());
+}
+
+#[test]
+fn forget_device_ignores_entities_owned_by_other_devices() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-old", "laptop")).unwrap();
+    a.upsert_space(&space("sp-1", "dev-b", "/tmp/one")).unwrap();
+    a.upsert_chat(&chat("chat-1", "dev-b")).unwrap();
+    let gone = a.delete_device("dev-old").unwrap();
+    assert!(gone.deleted);
+    assert_eq!(gone.owned_spaces, 0);
+    assert_eq!(gone.owned_chats, 0);
+    assert!(a.read_devices().unwrap().is_empty());
+    assert_eq!(a.read_spaces().unwrap().len(), 1);
+    assert_eq!(a.read_chats().unwrap().len(), 1);
+}
+
+#[test]
 fn persistence_round_trips_rows_pending_and_cursor() {
     let mut doc = RegistryDoc::new("dev-a");
     doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
