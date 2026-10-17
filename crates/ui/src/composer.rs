@@ -1258,6 +1258,17 @@ impl TextProjection {
                 }),
         );
         links.extend(
+            zeron_proto::pull_request_mentions::pull_request_mention_links(raw)
+                .into_iter()
+                .map(|link| FileMentionLink {
+                    range: link.range,
+                    basename: link.label,
+                    path: link.url,
+                    kind: ChipKind::PullRequest,
+                    attachment: None,
+                }),
+        );
+        links.extend(
             zeron_proto::attachment_mentions::attachment_mentions(raw)
                 .into_iter()
                 .map(|mention| FileMentionLink {
@@ -1431,8 +1442,11 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
                         .iter()
                         .filter(|other| other.path != link.path)
                         .collect();
-                    // A chat's "path" is its id: always show its title.
-                    if duplicates.is_empty() || link.kind == ChipKind::Chat {
+                    // A chat's "path" is its id and a pull request's its
+                    // URL: always show the title.
+                    if duplicates.is_empty()
+                        || matches!(link.kind, ChipKind::Chat | ChipKind::PullRequest)
+                    {
                         return link.basename.clone();
                     }
                     let parts: Vec<_> = link.path.split('/').collect();
@@ -1487,6 +1501,7 @@ fn has_mention_scheme(raw: &str) -> bool {
         || raw.contains(zeron_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
         || raw.contains(zeron_proto::chat_mentions::CHAT_MENTION_SCHEME)
+        || raw.contains(zeron_proto::pull_request_mentions::PULL_REQUEST_MENTION_SCHEME)
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -6708,12 +6723,32 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(link) = zeron_proto::chat_mentions::chat_mention_link(chat_id, title) else {
-            return;
-        };
+        if let Some(link) = zeron_proto::chat_mentions::chat_mention_link(chat_id, title) {
+            self.insert_reference_link(&link, window, cx);
+        }
+    }
+
+    /// Mention a pull request at the caret: a chip the agent receives as the
+    /// pull request's URL (dragged in from its tab).
+    pub(crate) fn add_pull_request_mention(
+        &mut self,
+        url: &str,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(link) =
+            zeron_proto::pull_request_mentions::pull_request_mention_link(url, label)
+        {
+            self.insert_reference_link(&link, window, cx);
+        }
+    }
+
+    /// Insert a reference chip's link at the caret and focus the draft.
+    fn insert_reference_link(&mut self, link: &str, window: &mut Window, cx: &mut Context<Self>) {
         let inserted = self
             .input
-            .update(cx, |input, cx| input.insert_reference(&link, cx));
+            .update(cx, |input, cx| input.insert_reference(link, cx));
         if inserted {
             self.reset_mention(None, cx);
             self.reset_slash(None, cx);
@@ -15157,6 +15192,29 @@ mod tests {
                 .all(|span| display[span.range.clone()].contains("Brief"))
         );
         assert!(!display.contains("a2c4"));
+    }
+
+    #[test]
+    fn pull_request_mentions_show_as_pull_request_chips_with_their_title() {
+        let url = "https://github.com/acme/zeron/pull/42";
+        let link =
+            zeron_proto::pull_request_mentions::pull_request_mention_link(url, "#42 Fix it")
+                .unwrap();
+        let other = zeron_proto::pull_request_mentions::pull_request_mention_link(
+            "https://github.com/acme/other/pull/42",
+            "#42 Fix it",
+        )
+        .unwrap();
+        let (display, spans) =
+            sent_mention_display(&format!("review {link} and {other}")).expect("chips");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].kind, ChipKind::PullRequest);
+        assert_eq!(spans[0].path.as_ref(), url);
+        // Two pull requests with one title keep their titles, never URLs.
+        for span in &spans {
+            assert!(display[span.range.clone()].contains("#42\u{00A0}Fix\u{00A0}it"));
+        }
+        assert!(!display.contains("github.com"));
     }
 
     #[test]
