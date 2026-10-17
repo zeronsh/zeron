@@ -308,8 +308,7 @@ impl Composer {
         // Dismissable whenever the turn is idle, finished or not.
         let header = self.todo_header(&chat_id, &items, summary, expanded, !live, &theme, cx);
 
-        let surface =
-            crate::queue::queue_panel_surface(&theme, cx.has_active_drag()).child(header);
+        let surface = crate::queue::queue_panel_surface(&theme, cx.has_active_drag()).child(header);
         let surface = if expanded {
             let list = div().flex().flex_col().children(
                 rows(&items, show_earlier, show_later)

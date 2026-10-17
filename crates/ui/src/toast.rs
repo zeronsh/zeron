@@ -423,9 +423,8 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             1.0
         } else {
             EASE.eval(
-                (now.saturating_duration_since(toast.created).as_secs_f32()
-                    / MOVE.as_secs_f32())
-                .clamp(0.0, 1.0),
+                (now.saturating_duration_since(toast.created).as_secs_f32() / MOVE.as_secs_f32())
+                    .clamp(0.0, 1.0),
             )
         };
         y -= (1.0 - enter) * (clip_height + OFFSET);
@@ -673,7 +672,11 @@ mod tests {
     struct Host;
 
     impl gpui::Render for Host {
-        fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             div().size_full().children(render_toaster(window, cx))
         }
     }
@@ -706,7 +709,10 @@ mod tests {
         let halfway = glide.value(mid);
         assert!(halfway > 0.0 && halfway < 100.0);
         glide.retarget(0.0, mid, false);
-        assert!((glide.value(mid) - halfway).abs() < 0.01, "no jump on reversal");
+        assert!(
+            (glide.value(mid) - halfway).abs() < 0.01,
+            "no jump on reversal"
+        );
         assert_eq!(glide.value(mid + MOVE), 0.0);
     }
 }

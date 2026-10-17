@@ -533,20 +533,13 @@ impl Render for ArchivedPage {
                                         .flex_row()
                                         .items_end()
                                         .gap(px(16.0))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(widgets::page_header(
-                                                    &theme,
-                                                    "Archived sessions",
-                                                    (count > 0).then_some(count),
-                                                ))
-                                                .child(widgets::page_subtitle(
-                                                    &theme,
-                                                    "Hidden from the sidebar until restored.",
-                                                )),
-                                        )
+                                        .child(div().flex_1().min_w_0().child(
+                                            widgets::page_header(
+                                                &theme,
+                                                "Archived sessions",
+                                                (count > 0).then_some(count),
+                                            ),
+                                        ))
                                         .children(delete_all),
                                 )
                                 .child(body)

@@ -60,10 +60,15 @@ pub async fn exercise(
     #[cfg(target_os = "macos")]
     if std::env::var_os("ZERON_BROWSER_STORAGE_DIAGNOSTICS").is_some() {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        browser.read_with(cx, |browser, _| browser.fixture_cookies(move |cookies| {
-            let _ = tx.send(cookies);
-        }));
-        eprintln!("Storage native cookies before close ({url}): {:?}", rx.await?);
+        browser.read_with(cx, |browser, _| {
+            browser.fixture_cookies(move |cookies| {
+                let _ = tx.send(cookies);
+            })
+        });
+        eprintln!(
+            "Storage native cookies before close ({url}): {:?}",
+            rx.await?
+        );
     }
     loaded_result?;
     window.update(cx, |shell, window, cx| {
@@ -77,7 +82,9 @@ pub async fn exercise(
             shell.fixture_open_browser(Some(empty), window, cx)
         })?;
         loaded(&reopened, cx).await?;
-        window.update(cx, |shell, window, cx| shell.fixture_close_browser(id, window, cx))?;
+        window.update(cx, |shell, window, cx| {
+            shell.fixture_close_browser(id, window, cx)
+        })?;
         eprintln!("Storage diagnostic: empty after closing and reopening the deleted page");
     }
     if url.ends_with("/write") {

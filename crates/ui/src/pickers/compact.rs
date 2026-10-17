@@ -497,12 +497,7 @@ impl Pickers {
                 }));
             // Each side fades over the tabs hidden past it, up to one tab
             // pitch, reaching zero exactly at the clip edge.
-            crate::edge_fade::edge_faded(
-                COMPACT_ROW_HEIGHT + popover::MENU_GAP,
-                false,
-                false,
-                tabs,
-            )
+            crate::edge_fade::edge_faded(COMPACT_ROW_HEIGHT + popover::MENU_GAP, false, false, tabs)
                 .fade_left(true)
                 .fade_right(true)
                 .fade_scroll_x(&self.compact_strip_scroll)

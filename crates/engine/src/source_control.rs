@@ -28,8 +28,7 @@ const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 /// `ssh -G` only reads configuration; it never connects.
 const SSH_CONFIG_TIMEOUT: Duration = Duration::from_secs(3);
 /// `repository()` follows renames: the old name resolves to the current one.
-const GITHUB_REPOSITORY_QUERY: &str =
-    "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
+const GITHUB_REPOSITORY_QUERY: &str = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
@@ -863,7 +862,9 @@ impl GitHubCli {
         {
             return Ok(page);
         }
-        let page = self.fetch_list_page(repository, filter, after, refresh).await?;
+        let page = self
+            .fetch_list_page(repository, filter, after, refresh)
+            .await?;
         if let Some((store, account)) = stored {
             store.save(&account, repository, filter, &page).await;
         }
@@ -2664,9 +2665,8 @@ mod tests {
 
     #[tokio::test]
     async fn ssh_alias_remote_matches_through_ssh_config() {
-        let runner = FakeProcessRunner::with_responses([command_success(
-            "user git\nhostname github.com\n",
-        )]);
+        let runner =
+            FakeProcessRunner::with_responses([command_success("user git\nhostname github.com\n")]);
         let resolver = ChangeRequestResolver {
             inspector: GitCheckoutInspector::new(runner.clone()),
             github: GitHubCli::with_runner(runner.clone()),
@@ -2689,7 +2689,10 @@ mod tests {
                 .as_deref(),
             Some("acme/zeron")
         );
-        assert_eq!(resolver.github_slug("https://gitlab.com/acme/zeron").await, None);
+        assert_eq!(
+            resolver.github_slug("https://gitlab.com/acme/zeron").await,
+            None
+        );
         assert_eq!(runner.requests().len(), 1);
     }
 
@@ -3157,7 +3160,13 @@ mod tests {
         assert_eq!(first.next_cursor.as_deref(), Some("Y3Vyc29yOjUw"));
         assert_eq!(first.total_count, Some(120));
         let second = github
-            .list_page("acme/zeron", filter, first.next_cursor.as_deref(), false, false)
+            .list_page(
+                "acme/zeron",
+                filter,
+                first.next_cursor.as_deref(),
+                false,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(second.items[0].number, 2);
@@ -3900,10 +3909,10 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             // Git reports slash-separated paths on Windows, while settings
             // retain canonical Win32 prefixes. Compare the actual directory.
             assert!(
-                refs.iter().any(|entry| entry
-                    .worktree_path
-                    .as_ref()
-                    .is_some_and(|listed| same_file::is_same_file(listed, path).unwrap_or(false))),
+                refs.iter()
+                    .any(|entry| entry.worktree_path.as_ref().is_some_and(|listed| {
+                        same_file::is_same_file(listed, path).unwrap_or(false)
+                    })),
                 "Git refs must include worktree {path}; got {refs:?}"
             );
         }
@@ -3976,7 +3985,10 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             ],
         );
         run_git(&checkout, &["config", "branch.main.remote", "upstream"]);
-        run_git(&checkout, &["config", "branch.main.merge", "refs/heads/main"]);
+        run_git(
+            &checkout,
+            &["config", "branch.main.merge", "refs/heads/main"],
+        );
 
         let resolver = ChangeRequestResolver::new();
         let source = resolver

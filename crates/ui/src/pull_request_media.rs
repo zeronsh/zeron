@@ -378,7 +378,10 @@ pub(super) fn media(
                         cx.stop_propagation();
                         // A failed inline image offers the browser instead.
                         if matches!(
-                            window.get_asset::<PrImageLoader>(&SharedString::from(source.clone()), cx),
+                            window.get_asset::<PrImageLoader>(
+                                &SharedString::from(source.clone()),
+                                cx
+                            ),
                             Some(Err(_))
                         ) {
                             cx.open_url(&source);

@@ -91,7 +91,11 @@ impl Shell {
             true
         } else {
             if !self.state.read(cx).sidebar_preferences.can_edit() {
-                self.show_notice(crate::toast::ToastKind::Error, "Sidebar is still syncing. Try again shortly.", cx);
+                self.show_notice(
+                    crate::toast::ToastKind::Error,
+                    "Sidebar is still syncing. Try again shortly.",
+                    cx,
+                );
                 cx.notify();
                 return false;
             }

@@ -511,8 +511,7 @@ impl PullRequestDetailPage {
                                     .on_click(cx.listener(move |page, _, _, cx| {
                                         page.verification_platform = platform;
                                         cx.notify();
-                                    },
-                                ))
+                                    }))
                             }),
                         ),
                     ),

@@ -944,6 +944,7 @@ impl Shell {
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .pb(px(super::titlebar_bottom_pad()))
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))

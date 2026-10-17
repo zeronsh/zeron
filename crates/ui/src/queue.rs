@@ -2035,10 +2035,10 @@ mod tests {
     use super::{
         PANEL_BORDER, PANEL_PAD_TOP, PANEL_PAD_X, PANEL_RADIUS, QueuePrimaryAction,
         ROW_CONTROL_INSET, ROW_CONTROL_RADIUS, ROW_CONTROL_SIZE, ROW_HEIGHT, ROW_PAD_X, ROW_RADIUS,
-        ROW_SLOT,
-        available_queue_primary_action, latest_queued_message, one_line, queue_action_needs_host,
-        queue_drag_offsets, queue_drop_index, queue_latest_shortcut_visible, queue_lifted_top,
-        queue_mutation_acknowledged, queue_visible_text, visible_queue_rows,
+        ROW_SLOT, available_queue_primary_action, latest_queued_message, one_line,
+        queue_action_needs_host, queue_drag_offsets, queue_drop_index,
+        queue_latest_shortcut_visible, queue_lifted_top, queue_mutation_acknowledged,
+        queue_visible_text, visible_queue_rows,
     };
 
     #[test]
@@ -2233,7 +2233,11 @@ mod tests {
     #[test]
     fn row_buttons_are_concentric_with_the_row() {
         assert_eq!((ROW_HEIGHT - ROW_CONTROL_SIZE) / 2.0, ROW_CONTROL_INSET);
-        assert_eq!(ROW_CONTROL_INSET, ROW_PAD_X - PANEL_PAD_X, "same inset on the side");
+        assert_eq!(
+            ROW_CONTROL_INSET,
+            ROW_PAD_X - PANEL_PAD_X,
+            "same inset on the side"
+        );
         assert_eq!(ROW_CONTROL_RADIUS + ROW_CONTROL_INSET, ROW_RADIUS);
     }
 

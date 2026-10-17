@@ -550,13 +550,16 @@ impl Shell {
                                 })
                                 // Running subagents live in this panel: mark the
                                 // button so they are findable while it is closed.
-                                .when(running_subagents > 0, |button| {
-                                    crate::running_pill::mark_files_button(
-                                        button,
-                                        running_subagents,
-                                        &theme,
-                                    )
-                                }),
+                                .when(
+                                    running_subagents > 0,
+                                    |button| {
+                                        crate::running_pill::mark_files_button(
+                                            button,
+                                            running_subagents,
+                                            &theme,
+                                        )
+                                    },
+                                ),
                             )
                             .child(header_icon_button_with(
                                 "toggle-changes",
@@ -609,6 +612,7 @@ impl Shell {
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .pb(px(super::titlebar_bottom_pad()))
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))

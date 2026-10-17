@@ -444,6 +444,7 @@ impl Shell {
                                 bounds,
                                 adjustment,
                                 false,
+                                Self::window_corner_radius(window),
                                 window,
                             );
                         },

@@ -1138,39 +1138,38 @@ impl Worker {
             [c.r, c.g, c.b, c.a]
         };
         let pixel_scale = self.source.pixel_scale.min(MAX_GPU_SCALE);
-        let (image, hints, labels) =
-            match zeron_visual_gpu::render_scene(
-                scene,
-                camera,
-                w,
-                h,
-                pixel_scale,
-                &rgba,
-                &mut state.scene_gpu,
-            ) {
-                Some(frame) => {
-                    let (hints, labels) = scene.annotations(camera, w, h);
-                    (
-                        image_of(frame.width, frame.height, frame.bgra),
-                        hints,
-                        labels,
-                    )
-                }
-                None => {
-                    // No GPU: the software renderer, rougher while it moves.
-                    let quality = if self.moving(state) || orbit.drag.is_some() {
-                        zeron_visual::Quality::Draft
-                    } else {
-                        zeron_visual::Quality::Final
-                    };
-                    let raster = scene.render(camera, w, h, pixel_scale, quality, &rgba);
-                    (
-                        image_of(raster.width, raster.height, raster.bgra),
-                        raster.hints,
-                        raster.labels,
-                    )
-                }
-            };
+        let (image, hints, labels) = match zeron_visual_gpu::render_scene(
+            scene,
+            camera,
+            w,
+            h,
+            pixel_scale,
+            &rgba,
+            &mut state.scene_gpu,
+        ) {
+            Some(frame) => {
+                let (hints, labels) = scene.annotations(camera, w, h);
+                (
+                    image_of(frame.width, frame.height, frame.bgra),
+                    hints,
+                    labels,
+                )
+            }
+            None => {
+                // No GPU: the software renderer, rougher while it moves.
+                let quality = if self.moving(state) || orbit.drag.is_some() {
+                    zeron_visual::Quality::Draft
+                } else {
+                    zeron_visual::Quality::Final
+                };
+                let raster = scene.render(camera, w, h, pixel_scale, quality, &rgba);
+                (
+                    image_of(raster.width, raster.height, raster.bgra),
+                    raster.hints,
+                    raster.labels,
+                )
+            }
+        };
         state.hints = hints;
         let mut ctx = TextCtx {
             typo: &mut self.typo,

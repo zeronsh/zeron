@@ -3803,6 +3803,7 @@ impl Render for AppearancePage {
         })
         .render(&self.reduce_motion_select, cx);
         let pause_in_background = crate::motion::pause_in_background(cx);
+        let hover_trail = crate::settings::current(cx).hover_trail;
         let motion_rows = vec![
             widgets::card_row(&theme, true)
                 .child(
@@ -3862,6 +3863,44 @@ impl Render for AppearancePage {
                         crate::motion::set_pause_in_background(!pause_in_background, cx);
                         cx.notify();
                     })),
+                )
+                .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(&theme, "Hover trail"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div()
+                                .child(
+                                    "List rows light up instantly and fade slowly behind the pointer.",
+                                )
+                                .into_any_element()],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, hover_trail, "hover-trail")
+                        .id("hover-trail-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Hover trail")
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .aria_toggled(if hover_trail {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::update(
+                                crate::settings::SavePolicy::Immediate,
+                                cx,
+                                |settings| settings.hover_trail = !hover_trail,
+                            );
+                            cx.notify();
+                        })),
                 )
                 .into_any_element(),
         ];

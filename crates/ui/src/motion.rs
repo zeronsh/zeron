@@ -467,6 +467,12 @@ pub const EASE_TAILWIND: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 /// CSS `transition-colors` default: 150ms over [`EASE_TAILWIND`] — the temporal
 /// blend every interactive hover wash rides in the original.
 pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
+/// Sidebar rows' trail hover: the wash snaps in the moment the pointer
+/// arrives, then decays over 400ms after it leaves (user request — the
+/// midpoint of the 350–500ms window they asked for). Fast up/down travel
+/// leaves a fading wake behind the cursor. Reduced motion snaps both ways.
+pub const HOVER_TRAIL_ENTER: Duration = Duration::ZERO;
+pub const HOVER_TRAIL_LEAVE: Duration = Duration::from_millis(400);
 /// Zeron Icons (icons.zeron.sh) state morph: `--zi-duration: 280ms` over
 /// `cubic-bezier(.22, 1, .36, 1)` — the sidebar glyph's panel open ↔ closed.
 pub const GLYPH_STATE: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
@@ -726,20 +732,35 @@ pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
 // [`hover_fades_active`] (the once-per-frame tick) when a full frame passes
 // without a read — a reopened menu never inherits a dead entry's wash.
 
-/// One element's hover fade: progress runs `origin → target` over
-/// [`HOVER_FADE`], re-anchored at `origin` whenever the pointer flips
-/// direction mid-flight so the blend is continuous.
+/// One element's hover fade: progress runs `origin → target`, re-anchored at
+/// `origin` whenever the pointer flips direction mid-flight so the blend is
+/// continuous. Enter and leave carry their own durations — most elements ride
+/// [`HOVER_FADE`] both ways; trail elements (sidebar rows) snap in and decay
+/// slowly (see [`HOVER_TRAIL_LEAVE`]).
 #[derive(Debug, Clone, Copy)]
 struct FadeEntry {
     origin: f32,
     target: f32,
     started: Instant,
+    /// Duration pointer-in runs at (target 1.0).
+    enter: Duration,
+    /// Duration pointer-out runs at (target 0.0).
+    leave: Duration,
     /// Frame counter at the last read (liveness stamp — see module notes).
     seen: u64,
 }
 
 impl FadeEntry {
-    fn value(&self, now: Instant, duration: Duration) -> f32 {
+    fn duration(&self) -> Duration {
+        if self.target == 0.0 {
+            self.leave
+        } else {
+            self.enter
+        }
+    }
+
+    fn value(&self, now: Instant) -> f32 {
+        let duration = self.duration();
         let elapsed = now.saturating_duration_since(self.started);
         if duration.is_zero() || elapsed >= duration {
             return self.target;
@@ -748,8 +769,8 @@ impl FadeEntry {
         lerp(self.origin, self.target, HOVER_FADE.curve.eval(raw))
     }
 
-    fn settled(&self, now: Instant, duration: Duration) -> bool {
-        self.origin == self.target || now.saturating_duration_since(self.started) >= duration
+    fn settled(&self, now: Instant) -> bool {
+        self.origin == self.target || now.saturating_duration_since(self.started) >= self.duration()
     }
 }
 
@@ -858,13 +879,26 @@ impl HoverFades {
     /// Pointer entered (`hovered`) or left the element behind `key`. Reduced
     /// motion snaps straight to the endpoint.
     pub fn set_at(&mut self, key: &str, hovered: bool, reduced: bool, now: Instant) {
-        let target = if hovered { 1.0 } else { 0.0 };
         let duration = Self::duration();
-        let current = self
-            .entries
-            .get(key)
-            .map(|e| e.value(now, duration))
-            .unwrap_or(0.0);
+        self.set_at_timed(key, hovered, reduced, now, duration, duration)
+    }
+
+    /// [`Self::set_at`] with per-direction durations — the trail effect's
+    /// hook: instant in, slow out.
+    pub fn set_at_timed(
+        &mut self,
+        key: &str,
+        hovered: bool,
+        reduced: bool,
+        now: Instant,
+        enter: Duration,
+        leave: Duration,
+    ) {
+        let target = if hovered { 1.0 } else { 0.0 };
+        let enter = enter.mul_f32(speed_scale());
+        let leave = leave.mul_f32(speed_scale());
+        let duration = if target == 0.0 { leave } else { enter };
+        let current = self.entries.get(key).map(|e| e.value(now)).unwrap_or(0.0);
         if target == 0.0 && !self.entries.contains_key(key) {
             return; // never-hovered element reporting a leave — nothing to do
         }
@@ -876,18 +910,22 @@ impl HoverFades {
                 origin,
                 target,
                 started: now,
+                enter,
+                leave,
                 seen,
             },
         );
     }
 
-    /// Hover progress (0..1) for `key` at `now`; stamps liveness.
+    /// Hover progress (0..1) for `key` at `now`; stamps liveness. The
+    /// direction's duration lives on the entry, so a read needs no timing
+    /// of its own.
     pub fn value_at(&mut self, key: &str, now: Instant) -> f32 {
         let frame = self.frame;
         match self.entries.get_mut(key) {
             Some(entry) => {
                 entry.seen = frame;
-                entry.value(now, Self::duration())
+                entry.value(now)
             }
             None => 0.0,
         }
@@ -899,7 +937,6 @@ impl HoverFades {
     pub fn tick_at(&mut self, now: Instant) -> bool {
         self.frame += 1;
         let frame = self.frame;
-        let duration = Self::duration();
         let mut active = false;
         self.entries.retain(|_, entry| {
             // Unread through the whole previous frame: the element unmounted
@@ -907,7 +944,7 @@ impl HoverFades {
             if entry.seen + 1 < frame {
                 return false;
             }
-            let settled = entry.settled(now, duration);
+            let settled = entry.settled(now);
             if !settled {
                 active = true;
             }
@@ -936,14 +973,35 @@ pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
     });
 }
 
+/// Record a hover flip with per-direction durations — [`hover_listener_timed`]
+/// is the element-facing form.
+pub fn set_hover_timed(key: &str, hovered: bool, reduced: bool, enter: Duration, leave: Duration) {
+    HOVER_FADES.with(|fades| {
+        fades
+            .borrow_mut()
+            .set_at_timed(key, hovered, reduced, Instant::now(), enter, leave)
+    });
+}
+
 /// An `.on_hover` listener driving the fade for `key` — pair with
 /// [`hover_t`]/[`hover_blend`] reads of the same key in the same element.
 pub fn hover_listener(
     key: impl Into<SharedString>,
 ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+    hover_listener_timed(key, HOVER_FADE.total(), HOVER_FADE.total())
+}
+
+/// [`hover_listener`] with per-direction durations: `enter` snaps/fast-fades
+/// the wash in, `leave` lets it decay slowly. Fast pointer travel down a list
+/// then reads as a fading trail behind the cursor (user request).
+pub fn hover_listener_timed(
+    key: impl Into<SharedString>,
+    enter: Duration,
+    leave: Duration,
+) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
     let key = key.into();
     move |hovered, window, cx| {
-        set_hover(&key, *hovered, reduced_motion(cx));
+        set_hover_timed(&key, *hovered, reduced_motion(cx), enter, leave);
         // Event-dispatch context: `request_animation_frame` is draw-phase-only
         // (it resolves the current view) — `refresh` marks the whole window
         // dirty, the root render re-evaluates the blend and keeps frames
@@ -1774,12 +1832,18 @@ mod tests {
 
         // Reverse mid-flight re-anchors — no jump — then lands at 1.
         let at_flip = morph(&mut morphs, true, ms(80));
-        assert!((at_flip - mid).abs() < 1e-4, "continuity: {mid} vs {at_flip}");
+        assert!(
+            (at_flip - mid).abs() < 1e-4,
+            "continuity: {mid} vs {at_flip}"
+        );
         assert_eq!(morph(&mut morphs, true, ms(400)), 1.0);
         assert!(!morphs.tick_at(ms(400)));
 
         // Reduced motion snaps a flip.
-        assert_eq!(morphs.value_at("glyph", false, GLYPH_STATE, true, ms(500)), 0.0);
+        assert_eq!(
+            morphs.value_at("glyph", false, GLYPH_STATE, true, ms(500)),
+            0.0
+        );
 
         // Unread for a full frame: pruned (a remount snaps again).
         morphs.tick_at(ms(600));
@@ -1880,6 +1944,59 @@ mod tests {
         assert_eq!(HOVER_FADE.duration_ms, 150);
         assert_eq!(HOVER_FADE.delay_ms, 0);
         assert_eq!(EASE_TAILWIND, CubicBezier::new(0.4, 0.0, 0.2, 1.0));
+    }
+
+    #[test]
+    fn trail_fades_snap_in_and_decay_slowly() {
+        let now = Instant::now();
+        let mut fades = HoverFades::default();
+        fades.set_at_timed(
+            "row",
+            true,
+            false,
+            now,
+            HOVER_TRAIL_ENTER,
+            HOVER_TRAIL_LEAVE,
+        );
+        assert_eq!(fades.value_at("row", now), 1.0, "enter is instant");
+
+        fades.set_at_timed(
+            "row",
+            false,
+            false,
+            now,
+            HOVER_TRAIL_ENTER,
+            HOVER_TRAIL_LEAVE,
+        );
+        let half = HOVER_TRAIL_LEAVE.mul_f32(speed_scale()) / 2;
+        let mid = fades.value_at("row", now + half);
+        // The tailwind curve covers ~77.6% of the distance at half time, so
+        // the decay reads as mostly-faded at the midpoint.
+        let expected = lerp(1.0, 0.0, EASE_TAILWIND.eval(0.5));
+        assert!((mid - expected).abs() < 1e-3, "leave eases: {mid}");
+        assert_eq!(
+            fades.value_at("row", now + HOVER_TRAIL_LEAVE.mul_f32(speed_scale())),
+            0.0,
+            "leave settles at rest"
+        );
+
+        // Standard keys keep the symmetric 150ms blend both ways.
+        let mut fades = HoverFades::default();
+        fades.set_at("chip", true, false, now);
+        let duration = HoverFades::duration();
+        let expected = EASE_TAILWIND.eval(0.5);
+        let mid = fades.value_at("chip", now + duration / 2);
+        assert!(
+            (mid - expected).abs() < 1e-3,
+            "symmetric enter eases: {mid}"
+        );
+        fades.set_at("chip", false, false, now + duration);
+        let expected = lerp(1.0, 0.0, EASE_TAILWIND.eval(0.5));
+        let mid = fades.value_at("chip", now + duration + duration / 2);
+        assert!(
+            (mid - expected).abs() < 1e-3,
+            "symmetric leave eases: {mid}"
+        );
     }
 
     #[test]

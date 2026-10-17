@@ -55,10 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !search.wait_until_indexed(&root, Duration::from_secs(600)) {
         return Err("index did not finish within 10 minutes".into());
     }
-    println!(
-        "index ready in {:?}",
-        started.elapsed()
-    );
+    println!("index ready in {:?}", started.elapsed());
     print_rss("after index");
 
     println!();

@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, ParentElement as _, Pixels, Radians, ScaledPixels, ShapedLine,
-    SharedString, Style, Styled as _, TextRun, TransformationMatrix, Window, div, point, px,
+    App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, ParentElement as _, Pixels, Radians, ScaledPixels, ShapedLine, SharedString, Style,
+    Styled as _, TextRun, TransformationMatrix, Window, div, point, px,
 };
 
 use crate::motion::{CubicBezier, EASE_OUT_QUINT, RESIZE, lerp, speed_scale};
@@ -48,7 +48,6 @@ const GLIDE: CubicBezier = EASE_OUT_QUINT;
 fn layout_progress(elapsed: f32) -> f32 {
     RESIZE.progress(elapsed / RESIZE.total().as_secs_f32())
 }
-
 
 #[derive(Clone)]
 struct Roll {
@@ -78,7 +77,11 @@ fn total() -> Duration {
 
 /// The label for `key`: plain at rest, rolling for a moment after `text`
 /// changes. The first sight of a key never rolls.
-pub fn roll_text(key: impl Into<SharedString>, text: SharedString, reduced: bool) -> gpui::AnyElement {
+pub fn roll_text(
+    key: impl Into<SharedString>,
+    text: SharedString,
+    reduced: bool,
+) -> gpui::AnyElement {
     rolling(key, text.clone(), reduced)
         .unwrap_or_else(|| div().min_w_0().truncate().child(text).into_any_element())
 }
@@ -359,7 +362,10 @@ impl Element for RollText {
         let halo = px((f32::from(font_size) * BLUR_EM * 3.0).ceil());
         let mask = Bounds {
             origin: point(bounds.origin.x - halo, bounds.origin.y - room),
-            size: gpui::size(bounds.size.width + halo * 2.0, bounds.size.height + room * 2.0),
+            size: gpui::size(
+                bounds.size.width + halo * 2.0,
+                bounds.size.height + room * 2.0,
+            ),
         };
         // `motion` = 1 − progress: Scritto's resting-state distance. Tilt and
         // blur fade with it; scale and translate are the caller's.
@@ -433,7 +439,8 @@ impl Element for RollText {
                 if !changed(glyph.index, from_len) {
                     continue; // the new line paints the shared runs
                 }
-                let progress = GLIDE.eval(((elapsed - from_delay(glyph.x)) / duration).clamp(0.0, 1.0));
+                let progress =
+                    GLIDE.eval(((elapsed - from_delay(glyph.x)) / duration).clamp(0.0, 1.0));
                 paint(
                     window,
                     glyph,

@@ -3,6 +3,12 @@ use crate::theme::Theme;
 use gpui::{IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*, px};
 use zeron_proto::ContextUsage;
 
+/// The popover's fixed width — about 3/4 of the first wide build (was double
+/// the hug-content width, read as a billboard), still enough for the
+/// used/used-up and remaining lines to pull to opposite corners around the
+/// bar (user request).
+const CONTEXT_CARD_WIDTH: f32 = 322.0;
+
 /// The context ring's trigger chip; the footer ([`crate::account_usage`])
 /// opens [`card`] from it on click.
 pub fn chip(usage: Option<ContextUsage>, open: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
@@ -95,16 +101,29 @@ pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl Into
     .size(px(16.0))
 }
 
-fn with_separators(count: u64) -> String {
-    let digits = count.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(digit);
+/// Compact token counts for the popover ("11.7k / 200k", "188k remaining"):
+/// plain below a thousand, one decimal under 100k, round k/m above — the
+/// raw digit strings read as noise at a glance (user request).
+fn compact_tokens(count: u64) -> String {
+    if count < 1_000 {
+        return count.to_string();
     }
-    grouped
+    let (scale, suffix) = if count < 1_000_000 {
+        (1_000.0, "k")
+    } else {
+        (1_000_000.0, "m")
+    };
+    let value = count as f64 / scale;
+    let mut text = if value < 100.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.0}")
+    };
+    if text.ends_with(".0") {
+        text.truncate(text.len() - 2);
+    }
+    text.push_str(suffix);
+    text
 }
 
 /// whether the indicator has anything to measure against: harnesses that
@@ -116,52 +135,99 @@ pub fn has_window(usage: Option<ContextUsage>) -> bool {
         .is_some_and(|window| window > 0)
 }
 
-fn details(usage: Option<ContextUsage>) -> String {
+/// The two lines the wide card sets around the bar: used/window top-left,
+/// remaining bottom-right.
+fn usage_lines(usage: Option<ContextUsage>) -> (String, String) {
     match usage.unwrap_or_default() {
         ContextUsage {
             tokens: Some(tokens),
             window: Some(window),
-        } if window > 0 => {
+        } if window > 0 => (
             format!(
-                "{} / {} tokens\n{} tokens remaining",
-                with_separators(tokens),
-                with_separators(window),
-                with_separators(window.saturating_sub(tokens))
-            )
-        }
+                "{} / {} used",
+                compact_tokens(tokens),
+                compact_tokens(window)
+            ),
+            format!(
+                "{} remaining",
+                compact_tokens(window.saturating_sub(tokens))
+            ),
+        ),
         ContextUsage {
             tokens: Some(tokens),
             ..
-        } => format!(
-            "{} tokens used\nContext limit not reported",
-            with_separators(tokens)
+        } => (
+            format!("{} used", compact_tokens(tokens)),
+            "Context limit not reported".into(),
         ),
         ContextUsage {
             window: Some(window),
             ..
-        } if window > 0 => format!(
-            "{} token capacity\nWaiting for context usage",
-            with_separators(window)
+        } if window > 0 => (
+            format!("{} capacity", compact_tokens(window)),
+            "Waiting for context usage".into(),
         ),
-        _ => "Context usage not reported by this harness yet".into(),
+        _ => (
+            "Context usage not reported".into(),
+            "by this harness yet".into(),
+        ),
     }
 }
 
-/// The context ring's popover content.
+/// The context ring's popover content: used/window top-left, a horizontal
+/// occupancy bar through the middle (the ring's threshold colors), remaining
+/// bottom-right — twice the old hug-content width (user request).
 pub fn card(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Div {
+    let fraction = usage.and_then(ContextUsage::fraction);
+    let (used, remaining) = usage_lines(usage);
+    let line = |text: String| {
+        div()
+            .text_size(px(12.0))
+            .line_height(px(19.0))
+            .whitespace_nowrap()
+            .text_color(theme.text_muted)
+            .child(SharedString::from(text))
+    };
     crate::popover::popover_card(theme)
         .flex()
         .flex_col()
+        .w(px(CONTEXT_CARD_WIDTH))
         .child(crate::popover::menu_heading(theme, "Context window"))
         .child(
             div()
-                .px(px(8.0))
-                .pb(px(6.0))
-                .text_size(px(12.0))
-                .line_height(px(19.0))
-                .whitespace_nowrap()
-                .text_color(theme.text_muted)
-                .child(SharedString::from(details(usage))),
+                .px(px(4.0))
+                .flex()
+                .flex_col()
+                .child(line(used))
+                .when_some(fraction, |column, fraction| {
+                    // Same tiering as the ring chip: the bar turns for
+                    // trouble before the text has to say so.
+                    let fill = if fraction >= 0.9 {
+                        theme.danger
+                    } else if fraction >= 0.75 {
+                        theme.warning
+                    } else {
+                        theme.text_muted
+                    };
+                    column.child(
+                        div()
+                            .my(px(6.0))
+                            .h(px(4.0))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .bg(theme.text_faint.opacity(0.25))
+                            .child(
+                                div()
+                                    .w(gpui::relative(fraction.clamp(0.0, 1.0) as f32))
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(fill),
+                            ),
+                    )
+                })
+                // Bottom-right: the trailing line hugs the card's far
+                // corner (user request).
+                .child(div().flex().justify_end().child(line(remaining))),
         )
 }
 
@@ -187,42 +253,43 @@ mod tests {
 
     #[test]
     fn missing_usage_is_distinct_from_zero_and_overflow() {
-        assert!(details(None).contains("not reported"));
-        assert!(
-            details(Some(ContextUsage {
-                tokens: Some(0),
-                window: Some(200)
-            }))
-            .contains("200 tokens remaining")
-        );
-        assert!(
-            details(Some(ContextUsage {
-                tokens: Some(250),
-                window: Some(200)
-            }))
-            .contains("0 tokens remaining")
-        );
-        assert!(
-            details(Some(ContextUsage {
-                tokens: Some(10),
-                window: Some(0)
-            }))
-            .contains("limit not reported")
-        );
+        let (used, remaining) = usage_lines(None);
+        assert!(used.contains("not reported"));
+        assert_eq!(remaining, "by this harness yet");
+        let (used, remaining) = usage_lines(Some(ContextUsage {
+            tokens: Some(0),
+            window: Some(200),
+        }));
+        assert_eq!(used, "0 / 200 used");
+        assert_eq!(remaining, "200 remaining");
+        let (_, remaining) = usage_lines(Some(ContextUsage {
+            tokens: Some(250),
+            window: Some(200),
+        }));
+        assert_eq!(remaining, "0 remaining");
+        let (used, remaining) = usage_lines(Some(ContextUsage {
+            tokens: Some(10),
+            window: Some(0),
+        }));
+        assert_eq!(used, "10 used");
+        assert_eq!(remaining, "Context limit not reported");
     }
 
     #[test]
-    fn token_counts_are_grouped_by_thousands() {
-        assert_eq!(with_separators(0), "0");
-        assert_eq!(with_separators(999), "999");
-        assert_eq!(with_separators(5417), "5,417");
-        assert_eq!(with_separators(1_048_576), "1,048,576");
-        assert_eq!(
-            details(Some(ContextUsage {
-                tokens: Some(5417),
-                window: Some(1_048_576)
-            })),
-            "5,417 / 1,048,576 tokens\n1,043,159 tokens remaining"
-        );
+    fn token_counts_compact_to_k_and_m() {
+        assert_eq!(compact_tokens(0), "0");
+        assert_eq!(compact_tokens(999), "999");
+        assert_eq!(compact_tokens(5417), "5.4k");
+        assert_eq!(compact_tokens(11_731), "11.7k");
+        assert_eq!(compact_tokens(200_000), "200k");
+        assert_eq!(compact_tokens(562_285), "562k");
+        assert_eq!(compact_tokens(1_000_000), "1m");
+        assert_eq!(compact_tokens(1_048_576), "1m");
+        let (used, remaining) = usage_lines(Some(ContextUsage {
+            tokens: Some(5417),
+            window: Some(1_048_576),
+        }));
+        assert_eq!(used, "5.4k / 1m used");
+        assert_eq!(remaining, "1m remaining");
     }
 }

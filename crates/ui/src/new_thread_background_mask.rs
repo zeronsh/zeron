@@ -204,19 +204,48 @@ pub(crate) fn paint_adjusted(
 /// All elements have finished prepaint before this reads the measured surface,
 /// so the first visible frame uses the current composer, including on sidebar
 /// resize and right-panel handoffs. Object-fit cropping is independent.
+fn window_edge_corner_radii(
+    bounds: Bounds<Pixels>,
+    viewport_width: Pixels,
+    window_corner_radius: f32,
+) -> Corners<Pixels> {
+    if window_corner_radius <= 0.0 {
+        return Corners::default();
+    }
+
+    // The hero starts after the sidebar, but can extend all the way beneath
+    // the right pane. Round only the top corners that actually meet the
+    // floating window edge; rounding the hero's own left edge would create a
+    // spurious curve at the sidebar seam.
+    let at_top = f32::from(bounds.top()) <= 0.5;
+    let at_left = f32::from(bounds.left()) <= 0.5;
+    let at_right = (f32::from(viewport_width) - f32::from(bounds.right())).abs() <= 0.5;
+    let radius = px(window_corner_radius);
+    let zero = px(0.0);
+    Corners {
+        top_left: if at_top && at_left { radius } else { zero },
+        top_right: if at_top && at_right { radius } else { zero },
+        bottom_right: zero,
+        bottom_left: zero,
+    }
+}
+
 pub(crate) fn paint(
     source: Arc<RenderImage>,
     bounds: Bounds<Pixels>,
     composer: Bounds<Pixels>,
     adjustment: NewThreadBackgroundAdjustment,
     cutout: bool,
+    window_corner_radius: f32,
     window: &mut Window,
 ) {
+    let corners =
+        window_edge_corner_radii(bounds, window.viewport_size().width, window_corner_radius);
     paint_adjusted_with_mask(
         source,
         bounds,
         adjustment,
-        Default::default(),
+        corners,
         Some(mask(bounds, composer, cutout)),
         window,
     );
@@ -252,6 +281,31 @@ mod tests {
             height,
             image::Rgba([79, 151, 233, 180]),
         ))])
+    }
+
+    #[test]
+    fn wallpaper_only_rounds_top_corners_at_window_edges() {
+        let bounds = Bounds::new(point(px(40.0), px(0.0)), size(px(1160.0), px(600.0)));
+        assert_eq!(
+            window_edge_corner_radii(bounds, px(1200.0), 10.0),
+            Corners {
+                top_left: px(0.0),
+                top_right: px(10.0),
+                bottom_right: px(0.0),
+                bottom_left: px(0.0),
+            }
+        );
+
+        let full_width = Bounds::new(point(px(0.0), px(0.0)), size(px(1200.0), px(600.0)));
+        assert_eq!(
+            window_edge_corner_radii(full_width, px(1200.0), 10.0),
+            Corners {
+                top_left: px(10.0),
+                top_right: px(10.0),
+                bottom_right: px(0.0),
+                bottom_left: px(0.0),
+            }
+        );
     }
 
     #[test]
@@ -474,6 +528,7 @@ mod tests {
                                         composer,
                                         NewThreadBackgroundAdjustment::default(),
                                         true,
+                                        0.0,
                                         window,
                                     );
                                 }

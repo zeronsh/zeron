@@ -640,15 +640,23 @@ impl BrowserContext {
                     Some(device),
                 )
                 .unwrap();
-                eprintln!("Storage cleanup: invoke; main_thread={}", objc2::MainThreadMarker::new().is_some());
+                eprintln!(
+                    "Storage cleanup: invoke; main_thread={}",
+                    objc2::MainThreadMarker::new().is_some()
+                );
                 // A cleanup-only process has not constructed a WebKit store yet.
                 // Initialize its main run loop before removal dispatches back from the
                 // WebsiteDataStoreIO queue. An ephemeral store never opens user data.
-                let mtm = objc2::MainThreadMarker::new().expect("profile cleanup requires the main thread");
-                let initialization = unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+                let mtm = objc2::MainThreadMarker::new()
+                    .expect("profile cleanup requires the main thread");
+                let initialization =
+                    unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) };
                 drop(initialization);
                 wry::WebView::remove_data_store(&profile.data_store_identifier(), move |result| {
-                    eprintln!("Storage cleanup: callback; main_thread={}; result={result:?}", objc2::MainThreadMarker::new().is_some());
+                    eprintln!(
+                        "Storage cleanup: callback; main_thread={}; result={result:?}",
+                        objc2::MainThreadMarker::new().is_some()
+                    );
                     completion(result.map_err(|error| error.to_string()));
                 });
                 eprintln!("Storage cleanup: invocation returned");
@@ -740,7 +748,10 @@ impl BrowserSurface {
     }
     #[cfg(target_os = "macos")]
     pub fn fixture_cookies(&self, completion: impl FnOnce(Vec<String>) + 'static) {
-        self.native.as_ref().expect("storage page must be attached").fixture_cookies(completion);
+        self.native
+            .as_ref()
+            .expect("storage page must be attached")
+            .fixture_cookies(completion);
     }
 
     pub fn fixture_eval(&self, script: &str) {

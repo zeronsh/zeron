@@ -85,7 +85,9 @@ impl Shell {
         if let Some(pending) = &mut self.sidebar_pin_write {
             if pending.unconfirmed {
                 self.set_pin_write_notice(
-                    "Waiting for the engine to confirm the previous sidebar change.".into(), cx);
+                    "Waiting for the engine to confirm the previous sidebar change.".into(),
+                    cx,
+                );
                 cx.notify();
                 return false;
             }
@@ -184,7 +186,10 @@ impl Shell {
                 });
             }
             Err(error) => {
-                self.set_pin_write_notice(format!("Couldn't save sidebar changes: {error}").into(), cx);
+                self.set_pin_write_notice(
+                    format!("Couldn't save sidebar changes: {error}").into(),
+                    cx,
+                );
             }
         }
         if let Some(profile) = imported_profile {

@@ -26,9 +26,18 @@ struct IconDefinition {
 }
 
 static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| {
-    let mut m: Manifest = serde_json::from_str(include_str!("../../../ui/src/file-icons.json")).expect("bundled file-icon manifest");
-    m.file_extensions = m.file_extensions.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
-    m.file_names = m.file_names.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+    let mut m: Manifest = serde_json::from_str(include_str!("../../../ui/src/file-icons.json"))
+        .expect("bundled file-icon manifest");
+    m.file_extensions = m
+        .file_extensions
+        .into_iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .collect();
+    m.file_names = m
+        .file_names
+        .into_iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .collect();
     m
 });
 
@@ -38,7 +47,11 @@ fn definition_asset(definition: &str) -> Option<&'static str> {
         "yml" => "yaml",
         d => d,
     };
-    MANIFEST.icon_definitions.get(definition)?.icon_path.strip_prefix("./icons/")
+    MANIFEST
+        .icon_definitions
+        .get(definition)?
+        .icon_path
+        .strip_prefix("./icons/")
 }
 
 pub(crate) fn basename(path: &str) -> &str {
@@ -46,7 +59,11 @@ pub(crate) fn basename(path: &str) -> &str {
 }
 
 fn resolve(name: &str) -> &'static str {
-    if let Some(a) = MANIFEST.file_names.get(name).and_then(|d| definition_asset(d)) {
+    if let Some(a) = MANIFEST
+        .file_names
+        .get(name)
+        .and_then(|d| definition_asset(d))
+    {
         return a;
     }
     for (i, _) in name.match_indices('.') {
@@ -54,17 +71,28 @@ fn resolve(name: &str) -> &'static str {
         if ext.is_empty() {
             continue;
         }
-        if let Some(a) = MANIFEST.file_extensions.get(ext).and_then(|d| definition_asset(d)) {
+        if let Some(a) = MANIFEST
+            .file_extensions
+            .get(ext)
+            .and_then(|d| definition_asset(d))
+        {
             return a;
         }
     }
-    MANIFEST.file.as_deref().and_then(definition_asset).unwrap_or("files/document.svg")
+    MANIFEST
+        .file
+        .as_deref()
+        .and_then(definition_asset)
+        .unwrap_or("files/document.svg")
 }
 
 /// Asset name for a file path's icon: `fileicon-files-<name>`.
 pub(crate) fn file_icon_asset(path: &str) -> String {
     let asset = resolve(&basename(path).to_ascii_lowercase());
-    format!("fileicon-{}", asset.trim_end_matches(".svg").replace('/', "-"))
+    format!(
+        "fileicon-{}",
+        asset.trim_end_matches(".svg").replace('/', "-")
+    )
 }
 
 #[cfg(test)]
@@ -73,8 +101,14 @@ mod tests {
 
     #[test]
     fn resolves_like_desktop() {
-        assert_eq!(file_icon_asset("crates/mobile/src/lib.rs"), "fileicon-files-rust");
-        assert_eq!(file_icon_asset("/x/Cargo.toml"), file_icon_asset("Cargo.toml"));
+        assert_eq!(
+            file_icon_asset("crates/mobile/src/lib.rs"),
+            "fileicon-files-rust"
+        );
+        assert_eq!(
+            file_icon_asset("/x/Cargo.toml"),
+            file_icon_asset("Cargo.toml")
+        );
         assert!(file_icon_asset("weird.unknownext").starts_with("fileicon-files-"));
     }
 }

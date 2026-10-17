@@ -353,18 +353,6 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
         })
 }
 
-/// Subtitle under the headline: `mt-1 text-[13px] text-muted-foreground`.
-pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .mt(px(4.0))
-        .px(px(SECTION_LABEL_INSET))
-        .min_w_0()
-        .text_size(crate::typography::ui_rems(13.0))
-        .line_height(crate::typography::ui_rems(17.0))
-        .text_color(theme.text_muted)
-        .child(copy.into())
-}
-
 /// Small label above a group of controls (`text-[13px] font-medium`) — the
 /// "Theme" caption over a picker, not a page headline.
 pub fn field_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
@@ -1043,6 +1031,30 @@ pub fn section_tab(
     id: impl Into<SharedString>,
     hover_key: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
+    section_tab_with_hover(
+        theme,
+        selected,
+        selection_t,
+        id,
+        hover_key,
+        crate::motion::HOVER_FADE.total(),
+        crate::motion::HOVER_FADE.total(),
+    )
+}
+
+/// [`section_tab`] with per-direction hover durations — the settings nav's
+/// trail effect: the wash snaps in and decays slowly, so fast travel down the
+/// list leaves a fading wake (user request).
+#[allow(clippy::too_many_arguments)]
+pub fn section_tab_with_hover(
+    theme: &Theme,
+    selected: bool,
+    selection_t: f32,
+    id: impl Into<SharedString>,
+    hover_key: impl Into<SharedString>,
+    enter: std::time::Duration,
+    leave: std::time::Duration,
+) -> gpui::Stateful<gpui::Div> {
     let hover_key = hover_key.into();
     let base_bg = crate::motion::mix(
         crate::theme::wash(0.0),
@@ -1072,7 +1084,7 @@ pub fn section_tab(
         ))
         .bg(crate::motion::hover_blend(&hover_key, base_bg, hover_bg))
         .id(id.into())
-        .on_hover(crate::motion::hover_listener(hover_key))
+        .on_hover(crate::motion::hover_listener_timed(hover_key, enter, leave))
 }
 
 /// Height of every settings select trigger: centered in a 60px card row.

@@ -172,7 +172,10 @@ pub enum WidgetKind {
     Image { reference: String },
     /// Working indicator at the tail of a live turn. The painter ticks the
     /// elapsed label itself so time never forces a relayout.
-    Working { since_ms: Option<i64>, streaming: bool },
+    Working {
+        since_ms: Option<i64>,
+        streaming: bool,
+    },
     /// A small activity spinner (running tools).
     Spinner,
     /// Tap target revealing the full text in `payload` (truncated tool lines).
@@ -186,7 +189,14 @@ pub enum WidgetKind {
     /// quadratic elbow (radius `bend`) at `row_mid` below the row top, then a
     /// branch to `branch_end`. The trunk continues through a row's full
     /// height (open details) into the next row.
-    ToolRail { trunk_x: f32, bend: f32, branch_end: f32, row_mid: f32, tops: Vec<f32>, heights: Vec<f32> },
+    ToolRail {
+        trunk_x: f32,
+        bend: f32,
+        branch_end: f32,
+        row_mid: f32,
+        tops: Vec<f32>,
+        heights: Vec<f32>,
+    },
     /// Tap target toggling one tool row's inline detail.
     ToolToggle { detail: u64, open: bool },
     /// Shimmer sweep over the active group's title (text drawn by the canvas

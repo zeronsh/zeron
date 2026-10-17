@@ -827,6 +827,10 @@ pub struct UiSettings {
         std::collections::HashMap<zeron_proto::HarnessId, SkillCompletionSettings>,
     /// Open model selection with an effort slider and a separate model list.
     pub compact_model_picker: bool,
+    /// Sidebar/session-row hover wash decays slowly after the pointer leaves
+    /// (the "trail" effect). Off by default (maintainer request); toggled in
+    /// Settings → Appearance → Motion.
+    pub hover_trail: bool,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -1024,6 +1028,7 @@ impl Default for UiSettings {
             dictation_enabled: false,
             dictation_input: None,
             window_geometry: None,
+            hover_trail: false,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
@@ -1673,6 +1678,7 @@ impl UiSettings {
             dictation_enabled,
             dictation_input,
             window_geometry,
+            hover_trail,
             composer_send_behavior,
             skills_in_slash_menu,
             skill_completion_by_harness,
@@ -2709,6 +2715,7 @@ mod tests {
             dictation_enabled: false,
             dictation_input: Some("coreaudio:usb-mic".into()),
             window_geometry: None,
+            hover_trail: false,
             codex_voice: Some("ember".into()),
             codex_voice_device: Some("fedora".into()),
             sidebar_width: 300.0,

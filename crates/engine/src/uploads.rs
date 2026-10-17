@@ -537,12 +537,17 @@ mod tests {
             ("sky.hdr".to_owned(), b"hdr".to_vec()),
         ];
         uploads.store_visual_assets("v:abc", &assets).unwrap();
-        let script = uploads.store_visual("v:abc", "return ui.text 'hi'").unwrap();
+        let script = uploads
+            .store_visual("v:abc", "return ui.text 'hi'")
+            .unwrap();
         let stem = script.strip_suffix("-visual.luau").unwrap();
         let names: Vec<String> =
             serde_json::from_slice(&std::fs::read(format!("{stem}-assets.json")).unwrap()).unwrap();
         assert_eq!(names, ["prism.glb", "sky.hdr"]);
-        assert_eq!(std::fs::read(format!("{stem}-asset-sky.hdr")).unwrap(), b"hdr");
+        assert_eq!(
+            std::fs::read(format!("{stem}-asset-sky.hdr")).unwrap(),
+            b"hdr"
+        );
         uploads.remove_visual("v:abc");
         assert_eq!(std::fs::read_dir(uploads.dir()).unwrap().count(), 0);
     }
@@ -915,7 +920,11 @@ impl Uploads {
     /// Store the files a visual's script uses, beside it: each as
     /// `{id}-asset-{name}`, and `{id}-assets.json` listing their names
     /// (clients find it from the script's path).
-    pub fn store_visual_assets(&self, id: &str, assets: &[(String, Vec<u8>)]) -> Result<(), EngineError> {
+    pub fn store_visual_assets(
+        &self,
+        id: &str,
+        assets: &[(String, Vec<u8>)],
+    ) -> Result<(), EngineError> {
         use std::io::Write;
         if assets.is_empty() {
             return Ok(());
@@ -941,7 +950,8 @@ impl Uploads {
                 written.push(file);
                 names.push(name);
             }
-            let manifest = serde_json::to_vec(&names).map_err(|err| EngineError::Other(err.to_string()))?;
+            let manifest =
+                serde_json::to_vec(&names).map_err(|err| EngineError::Other(err.to_string()))?;
             write(&format!("{id}-assets.json"), &manifest)
         })();
         if stored.is_err() {
@@ -962,7 +972,9 @@ impl Uploads {
             .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
         {
             for name in names {
-                let _ = std::fs::remove_file(self.dir().join(format!("{id}-asset-{}", sanitize(&name))));
+                let _ = std::fs::remove_file(
+                    self.dir().join(format!("{id}-asset-{}", sanitize(&name))),
+                );
             }
         }
         let _ = std::fs::remove_file(manifest);

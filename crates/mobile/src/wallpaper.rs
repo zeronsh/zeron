@@ -30,7 +30,12 @@ struct Source<'a> {
 impl Source<'_> {
     fn color(&self, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * self.w + x) * 4) as usize;
-        [self.rgba[i], self.rgba[i + 1], self.rgba[i + 2], self.rgba[i + 3]]
+        [
+            self.rgba[i],
+            self.rgba[i + 1],
+            self.rgba[i + 2],
+            self.rgba[i + 3],
+        ]
     }
 
     fn luma(&self, x: u32, y: u32) -> u8 {
@@ -42,11 +47,21 @@ impl Source<'_> {
 /// Apply `effect` to an RGBA image; `light` is the appearance it's drawn in
 /// (effects print on white paper in light mode, black in dark).
 #[uniffi::export]
-pub fn wallpaper_render(rgba: Vec<u8>, width: u32, height: u32, effect: WallpaperEffect, light: bool) -> Vec<u8> {
+pub fn wallpaper_render(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    effect: WallpaperEffect,
+    light: bool,
+) -> Vec<u8> {
     if width == 0 || height == 0 || rgba.len() < (width * height * 4) as usize {
         return rgba;
     }
-    let src = Source { w: width, h: height, rgba: &rgba };
+    let src = Source {
+        w: width,
+        h: height,
+        rgba: &rgba,
+    };
     match effect {
         WallpaperEffect::None => rgba.clone(),
         WallpaperEffect::Scanlines => scanlines(&src, light),
@@ -97,11 +112,20 @@ fn ascii(s: &Source, light: bool) -> Vec<u8> {
             let l = s.luma(sx, sy);
             let density = if light { 255 - l } else { l };
             let index = ((density as f32 / 255.0).sqrt() * 9.0) as usize;
-            let ink = x % 6 < 5 && y % 8 < 7 && GLYPHS[index.min(9)][y as usize % 8] & (1 << (4 - x % 6)) != 0;
+            let ink = x % 6 < 5
+                && y % 8 < 7
+                && GLYPHS[index.min(9)][y as usize % 8] & (1 << (4 - x % 6)) != 0;
             let [r, g, b, a] = s.color(x, y);
             let [cr, cg, cb, _] = s.color(sx, sy);
             let paper = if light { 255.0 } else { 0.0 };
-            let mix = |base: u8, glyph: u8| (base as f32 * 0.60 + if ink { glyph as f32 * 0.40 } else { paper * 0.40 }) as u8;
+            let mix = |base: u8, glyph: u8| {
+                (base as f32 * 0.60
+                    + if ink {
+                        glyph as f32 * 0.40
+                    } else {
+                        paper * 0.40
+                    }) as u8
+            };
             out.extend_from_slice(&[mix(r, cr), mix(g, cg), mix(b, cb), a]);
         }
     }
@@ -125,7 +149,11 @@ fn halftone(s: &Source, light: bool) -> Vec<u8> {
                     let distance = ((dx as f32 - 1.5).powi(2) + (dy as f32 - 1.5).powi(2)).sqrt();
                     let coverage = (radius + 0.5 - distance).clamp(0.0, 1.0) * a as f32 / 255.0;
                     let [sr, sg, sb, sa] = s.color(x + dx, y + dy);
-                    let blend = |source: u8, dot: u8| (source as f32 * 0.60 + (dot as f32 * coverage + paper as f32 * (1.0 - coverage)) * 0.40) as u8;
+                    let blend = |source: u8, dot: u8| {
+                        (source as f32 * 0.60
+                            + (dot as f32 * coverage + paper as f32 * (1.0 - coverage)) * 0.40)
+                            as u8
+                    };
                     let i = (((y + dy) * s.w + x + dx) * 4) as usize;
                     out[i..i + 4].copy_from_slice(&[blend(sr, r), blend(sg, g), blend(sb, b), sa]);
                 }
@@ -145,7 +173,12 @@ fn dither(s: &Source) -> Vec<u8> {
             let peak = r.max(g).max(b) as f32;
             let bright = peak / 255.0 > (threshold as f32 + 0.5) / 16.0;
             let gain = if bright { 255.0 / peak.max(1.0) } else { 0.08 };
-            let c = [(r as f32 * gain).round() as u8, (g as f32 * gain).round() as u8, (b as f32 * gain).round() as u8, a];
+            let c = [
+                (r as f32 * gain).round() as u8,
+                (g as f32 * gain).round() as u8,
+                (b as f32 * gain).round() as u8,
+                a,
+            ];
             for dy in 0..2.min(s.h - y) {
                 for dx in 0..2.min(s.w - x) {
                     let i = (((y + dy) * s.w + x + dx) * 4) as usize;
@@ -161,7 +194,11 @@ fn dither(s: &Source) -> Vec<u8> {
 
 fn linear(c: u8) -> f32 {
     let c = c as f32 / 255.0;
-    if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn rel_luminance(rgb: u32) -> f32 {
@@ -239,25 +276,43 @@ mod tests {
     use super::*;
 
     fn solid(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
-        (0..w * h).flat_map(|_| [rgb[0], rgb[1], rgb[2], 255]).collect()
+        (0..w * h)
+            .flat_map(|_| [rgb[0], rgb[1], rgb[2], 255])
+            .collect()
     }
 
     #[test]
     fn effects_keep_size_and_differ_from_source() {
-        let src: Vec<u8> = (0..32 * 24).flat_map(|i| [(i % 255) as u8, (i * 3 % 255) as u8, 200, 255]).collect();
-        for effect in [WallpaperEffect::Dither, WallpaperEffect::Ascii, WallpaperEffect::Halftone, WallpaperEffect::Scanlines] {
+        let src: Vec<u8> = (0..32 * 24)
+            .flat_map(|i| [(i % 255) as u8, (i * 3 % 255) as u8, 200, 255])
+            .collect();
+        for effect in [
+            WallpaperEffect::Dither,
+            WallpaperEffect::Ascii,
+            WallpaperEffect::Halftone,
+            WallpaperEffect::Scanlines,
+        ] {
             for light in [false, true] {
                 let out = wallpaper_render(src.clone(), 32, 24, effect, light);
                 assert_eq!(out.len(), src.len());
                 assert_ne!(out, src, "{effect:?} light={light}");
             }
         }
-        assert_eq!(wallpaper_render(src.clone(), 32, 24, WallpaperEffect::None, false), src);
+        assert_eq!(
+            wallpaper_render(src.clone(), 32, 24, WallpaperEffect::None, false),
+            src
+        );
     }
 
     #[test]
     fn scanlines_match_desktop_gain() {
-        let out = wallpaper_render(solid(3, 3, [200, 100, 50]), 3, 3, WallpaperEffect::Scanlines, false);
+        let out = wallpaper_render(
+            solid(3, 3, [200, 100, 50]),
+            3,
+            3,
+            WallpaperEffect::Scanlines,
+            false,
+        );
         assert_eq!(&out[0..3], &[104, 52, 26]); // row 0: × 0.52
         assert_eq!(&out[12..15], &[200, 100, 50]); // row 1 untouched
     }
@@ -268,7 +323,8 @@ mod tests {
         // hard; a black image can show fully.
         let text = 0xE8E8EA;
         let bg = 0x060606;
-        let white = wallpaper_safe_opacity(solid(8, 8, [255, 255, 255]), 8, 8, text, bg, 1.0, 4.5, 1.0);
+        let white =
+            wallpaper_safe_opacity(solid(8, 8, [255, 255, 255]), 8, 8, text, bg, 1.0, 4.5, 1.0);
         assert!(white < 0.5, "{white}");
         let g = |v: f32| (v * 255.0 + (1.0 - v) * 6.0).round() as u32;
         let over = g(white) << 16 | g(white) << 8 | g(white);
@@ -276,7 +332,16 @@ mod tests {
         let black = wallpaper_safe_opacity(solid(8, 8, [0, 0, 0]), 8, 8, text, bg, 1.0, 4.5, 1.0);
         assert!((black - 1.0).abs() < 1e-6);
         // Light theme (dark text on white): a dark image is the threat.
-        let dark = wallpaper_safe_opacity(solid(8, 8, [20, 20, 40]), 8, 8, 0x303035, 0xF3F3F5, 1.0, 4.5, 1.0);
+        let dark = wallpaper_safe_opacity(
+            solid(8, 8, [20, 20, 40]),
+            8,
+            8,
+            0x303035,
+            0xF3F3F5,
+            1.0,
+            4.5,
+            1.0,
+        );
         assert!(dark < 0.75, "{dark}");
         assert!(dark > 0.2, "{dark}");
     }

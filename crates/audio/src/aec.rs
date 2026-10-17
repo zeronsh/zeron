@@ -44,30 +44,47 @@ mod tests {
     use super::*;
     #[test]
     fn aec_reduces_delayed_synthetic_echo_without_erasing_double_talk() {
-        let processor=EchoProcessor::new().unwrap();
-        let mut delayed=std::collections::VecDeque::from([[0.0;DSP_SAMPLES];3]);
-        let mut random=1u32;
-        let mut before=0.0f64; let mut after=0.0f64;
-        let mut near_before=0.0f64; let mut near_after=0.0f64;
+        let processor = EchoProcessor::new().unwrap();
+        let mut delayed = std::collections::VecDeque::from([[0.0; DSP_SAMPLES]; 3]);
+        let mut random = 1u32;
+        let mut before = 0.0f64;
+        let mut after = 0.0f64;
+        let mut near_before = 0.0f64;
+        let mut near_after = 0.0f64;
         for index in 0..1000 {
-            let reference=std::array::from_fn(|_| {
-                random=random.wrapping_mul(1664525).wrapping_add(1013904223);
-                (random as f64/u32::MAX as f64*0.4-0.2) as f32
+            let reference = std::array::from_fn(|_| {
+                random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                (random as f64 / u32::MAX as f64 * 0.4 - 0.2) as f32
             });
             processor.render(&reference).unwrap();
-            let echo=delayed.pop_front().unwrap(); delayed.push_back(reference);
-            let mut microphone=std::array::from_fn(|sample| {
-                let human=if index>=800 { ((index*DSP_SAMPLES+sample) as f32*0.08).sin()*0.15 } else { 0.0 };
-                human+echo[sample]*0.55
+            let echo = delayed.pop_front().unwrap();
+            delayed.push_back(reference);
+            let mut microphone = std::array::from_fn(|sample| {
+                let human = if index >= 800 {
+                    ((index * DSP_SAMPLES + sample) as f32 * 0.08).sin() * 0.15
+                } else {
+                    0.0
+                };
+                human + echo[sample] * 0.55
             });
-            let input_energy=microphone.iter().map(|s|(*s as f64).powi(2)).sum::<f64>();
+            let input_energy = microphone.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
             processor.capture(&mut microphone).unwrap();
-            let output_energy=microphone.iter().map(|s|(*s as f64).powi(2)).sum::<f64>();
-            if (600..800).contains(&index) { before+=input_energy; after+=output_energy; }
-            if index>=900 { near_before+=input_energy; near_after+=output_energy; }
+            let output_energy = microphone.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+            if (600..800).contains(&index) {
+                before += input_energy;
+                after += output_energy;
+            }
+            if index >= 900 {
+                near_before += input_energy;
+                near_after += output_energy;
+            }
         }
-        assert!(after<before*0.5,"echo energy ratio {}",after/before);
-        assert!(near_after>near_before*0.1,"double-talk energy ratio {}",near_after/near_before);
+        assert!(after < before * 0.5, "echo energy ratio {}", after / before);
+        assert!(
+            near_after > near_before * 0.1,
+            "double-talk energy ratio {}",
+            near_after / near_before
+        );
     }
 
     #[test]

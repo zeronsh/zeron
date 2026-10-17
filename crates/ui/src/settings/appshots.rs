@@ -282,10 +282,6 @@ impl ShortcutsPage {
                     .child(
                         widgets::page_column()
                             .child(widgets::page_header(&theme, "Appshots", None))
-                            .child(
-                                widgets::page_subtitle(&theme, capabilities.setup_description())
-                                    .line_height(px(20.0)),
-                            )
                             .child(card)
                             .child(
                                 div()

@@ -1003,53 +1003,48 @@ impl Render for ShortcutsPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                crate::edge_fade::edge_faded(16.0, true, true, div()
-                    .id("shortcuts-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll.scroll)
-                    .track_focus(&self.focus)
-                    .child(
-                        widgets::page_column()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_start()
-                                    .flex_wrap()
-                                    .justify_between()
-                                    .gap(px(24.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(200.0))
-                                            .flex()
-                                            .flex_col()
-                                            .child(widgets::page_header(
-                                                &theme,
-                                                "Keyboard shortcuts",
-                                                None,
-                                            ))
-                                            .child(
-                                                widgets::page_subtitle(
+                crate::edge_fade::edge_faded(
+                    16.0,
+                    true,
+                    true,
+                    div()
+                        .id("shortcuts-page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll.scroll)
+                        .track_focus(&self.focus)
+                        .child(
+                            widgets::page_column()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_start()
+                                        .flex_wrap()
+                                        .justify_between()
+                                        .gap(px(24.0))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(200.0))
+                                                .flex()
+                                                .flex_col()
+                                                .child(widgets::page_header(
                                                     &theme,
-                                                    "Click a binding, then press the new key combination.",
-                                                )
-                                                .max_w(px(512.0))
-                                                .line_height(px(20.0)),
-                                            ),
-                                    )
-                                    .child({
-                                        // `disabled:opacity-35` when nothing is
-                                        // customized or while recording.
-                                        let disabled = !customized || recording.is_some();
-                                        widgets::ghost_action(&theme)
-                                            .id("shortcuts-restore-defaults")
-                                            .flex_none()
-                                            .when(disabled, |el| el.opacity(0.35))
-                                            .when(!disabled, |el| {
-                                                el.on_click(
-                                                    cx.listener(|this, _, _, cx| {
+                                                    "Keyboard shortcuts",
+                                                    None,
+                                                )),
+                                        )
+                                        .child({
+                                            // `disabled:opacity-35` when nothing is
+                                            // customized or while recording.
+                                            let disabled = !customized || recording.is_some();
+                                            widgets::ghost_action(&theme)
+                                                .id("shortcuts-restore-defaults")
+                                                .flex_none()
+                                                .when(disabled, |el| el.opacity(0.35))
+                                                .when(!disabled, |el| {
+                                                    el.on_click(cx.listener(|this, _, _, cx| {
                                                         this.keymap = KeymapConfig::default();
                                                         this.stop_recording();
                                                         this.conflict_notice = None;
@@ -1061,36 +1056,31 @@ impl Render for ShortcutsPage {
                                                             ComposerSendBehavior::Enter,
                                                             cx,
                                                         );
-                                                    }),
+                                                    }))
+                                                })
+                                                .child(
+                                                    crate::icons::icon(crate::icons::RESTART)
+                                                        .size(px(14.0))
+                                                        .text_color(theme.text_muted),
                                                 )
-                                            })
-                                            .child(
-                                                crate::icons::icon(crate::icons::RESTART)
-                                                    .size(px(14.0))
-                                                    .text_color(theme.text_muted),
-                                            )
-                                            .child(SharedString::from("Restore defaults"))
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .children(groups),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .px(px(4.0))
-                                    .min_h(px(20.0))
-                                    .flex()
-                                    .justify_center()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child(helper),
-                            )
-                            ,
-                    )).fade_overflow_y(&self.scroll.scroll),
+                                                .child(SharedString::from("Restore defaults"))
+                                        }),
+                                )
+                                .child(div().flex().flex_col().children(groups))
+                                .child(
+                                    div()
+                                        .mt(px(12.0))
+                                        .px(px(4.0))
+                                        .min_h(px(20.0))
+                                        .flex()
+                                        .justify_center()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(helper),
+                                ),
+                        ),
+                )
+                .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .into_any_element()

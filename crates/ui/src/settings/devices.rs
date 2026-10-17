@@ -47,14 +47,6 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
 
 /// Scope-aware copy: a local registry describes only the active local
 /// workspace and must not imply that account device metadata is already live.
-pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
-    match scope {
-        Some(WorkspaceScope::Local) => "Devices in this local workspace.",
-        Some(WorkspaceScope::Synced) => "Devices synced to this workspace.",
-        Some(WorkspaceScope::Development) | None => "Devices in this workspace.",
-    }
-}
-
 struct RenameDialog {
     device_id: String,
     input: Entity<ComposerInput>,
@@ -420,10 +412,6 @@ impl Render for DevicesPage {
                         .child(
                             widgets::page_column()
                                 .child(widgets::page_header(&theme, "Devices", None))
-                                .child(widgets::page_subtitle(
-                                    &theme,
-                                    devices_subtitle(workspace_scope),
-                                ))
                                 .child(card),
                         ),
                 )
@@ -470,12 +458,5 @@ mod tests {
             format_last_seen(Some(now - TimeDelta::days(2)), now),
             "2d ago"
         );
-    }
-
-    #[test]
-    fn local_subtitle_does_not_claim_synced_metadata() {
-        let copy = devices_subtitle(Some(WorkspaceScope::Local));
-        assert!(copy.contains("local workspace"));
-        assert!(!copy.contains("synced"));
     }
 }
