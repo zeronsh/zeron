@@ -158,7 +158,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             done(self?.attachMenu?().children ?? [])
         }])
         attachButton.showsMenuAsPrimaryAction = true
-        content.addSubview(attachButton)
+        // Keep the menu source outside the shared glass. Otherwise UIKit can
+        // morph the entire resting capsule into the attachment menu.
+        addSubview(attachButton)
 
         textView.font = font
         textView.textColor = Palette.text
@@ -182,8 +184,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         toolbar.clipsToBounds = true
-        // Beneath the controls: the row spans the card, and above them it
-        // would swallow taps on "+" (the action button is added later).
+        // Beneath the text and in-glass controls: the row spans the card.
         content.insertSubview(toolbar, at: 0)
         chipScroll.showsHorizontalScrollIndicator = false
         chipScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -273,7 +274,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         refreshAction(animated: false)
     }
 
-    /// Taps on controls (attach, chips, send) are theirs: focusing would
+    /// Taps on embedded controls (chips, send) are theirs: focusing would
     /// morph the capsule under the finger and cancel the control's menu.
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         var v = touch.view
