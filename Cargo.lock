@@ -13569,6 +13569,7 @@ dependencies = [
  "zeron-rpc",
  "zeron-ui",
  "zeron-update",
+ "zeron-visual",
 ]
 
 [[package]]
@@ -14008,6 +14009,7 @@ dependencies = [
  "mlua",
  "naga",
  "thiserror 2.0.20",
+ "zeron-markdown",
 ]
 
 [[package]]

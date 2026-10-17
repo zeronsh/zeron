@@ -226,6 +226,52 @@ the glass composer, and takes input like any other row, identically on Linux,
 macOS, and Windows, and it follows theme, appearance, and text-size changes
 without rerunning the script.
 
+#### Visuals in Markdown documents
+
+The same script can live in a Markdown file as a fenced block whose language
+is `zeron-visual` (case-insensitive), and the desktop's Markdown preview runs
+it in place of the code. No MCP call is involved: the agent edits the file with
+its own tools, Zeron reloads it when it changes on disk, and the preview parses
+it again.
+
+````markdown
+```zeron-visual
+--! title: Latency by region
+local s = ui.state { metric = "p95" }
+return function()
+  return ui.column { gap = 16, ui.text "..." }
+end
+```
+````
+
+- The optional first line `--! title: ...` names the visual (a Luau comment,
+  since the parser keeps only the info string's first word); without one it is
+  "Visual".
+- `math.random` is seeded from the fence's code and its position among fences
+  with identical code (`zeron_visual::seed_for_document`), so a fence keeps its
+  data and its live state when text around it changes; editing its code starts
+  it again.
+- Fences take no assets: a script that uses `s:model`, `texture`, or
+  `ui.shader` textures fails with the runtime's usual error.
+- Lua runs on the desktop's main thread, so a document runs at most 8 visuals
+  (its first 8 fences; the rest show as code with a notice), each starts only
+  when its row first renders, and they are dropped when the preview suspends,
+  switches documents, or the fence leaves the document's first 8 fences. A
+  truncated preview runs none. A document outside the workspace runs nothing
+  on its own: each fence shows its code with a "Run visual" button.
+- The fence sits on the document without a code-block frame; a quiet row above
+  it toggles "Show source" / "Show visual". Elsewhere (GitHub, other editors,
+  chat replies, iOS) the fence is ordinary code.
+
+An agent can't see the preview, so `zeron visual check <file>` runs a file's
+visuals the way the preview will (`zeron_visual::check` with the same seed):
+every fence of a `.md`/`.markdown`, or a whole `.luau` script. It prints
+`file.md:LINE: visual K ok (N interactions)` plus the script's `print()`
+output, or `file.md:LINE: visual K: message` with the error's script line
+mapped to the document's, and exits 1 when any visual fails. Fence extraction
+(`zeron_visual::document`) uses the preview's shared Markdown parser, including
+its handling of lists, tabs, quotes, HTML, and code indentation.
+
 ## Selecting a host and project
 
 `list_projects {device?}` filters by device id or exact name; without arguments

@@ -180,12 +180,9 @@ impl VisualFrame {
         target_device_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Its drawings leave every window's sprite atlas with it.
-        cx.on_release(|this, cx| {
-            let images = this.local.borrow_mut().prune(None);
-            free_images(images, cx);
-        })
-        .detach();
+        // The row id ends with the part's visual id, which the engine
+        // seeded its check with: the reader sees the same random data.
+        let seed = zeron_visual::seed_for(id.rsplit('#').next().unwrap_or(&id));
         let mut tasks = Vec::new();
         let load = match engine {
             Some(engine) => {
@@ -229,7 +226,7 @@ impl VisualFrame {
                     }
                     let assets = zeron_visual::Assets::new(files);
                     let _ = this.update(cx, |this, cx| match script {
-                        Some(script) => this.start(&script, assets, cx),
+                        Some(script) => this.start(&script, assets, seed, cx),
                         None => {
                             this.load = Load::Failed("Visual unavailable".into());
                             cx.notify();
@@ -240,6 +237,32 @@ impl VisualFrame {
             }
             None => Load::Failed("Visual unavailable".into()),
         };
+        let mut frame = Self::empty(id, title, load, cx);
+        frame._tasks = tasks;
+        frame
+    }
+
+    /// A visual whose script is already at hand (a Markdown document's
+    /// ```` ```zeron-visual ```` fence), run now with `seed` and no assets.
+    pub fn from_source(
+        id: SharedString,
+        title: String,
+        script: &str,
+        seed: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut frame = Self::empty(id, title, Load::Loading, cx);
+        frame.start(script, zeron_visual::Assets::default(), seed, cx);
+        frame
+    }
+
+    fn empty(id: SharedString, title: String, load: Load, cx: &mut Context<Self>) -> Self {
+        // Its drawings leave every window's sprite atlas with it.
+        cx.on_release(|this, cx| {
+            let images = this.local.borrow_mut().prune(None);
+            free_images(images, cx);
+        })
+        .detach();
         Self {
             id,
             title: title.into(),
@@ -251,7 +274,7 @@ impl VisualFrame {
             link_ui: None,
             local: Rc::default(),
             started: Instant::now(),
-            _tasks: tasks,
+            _tasks: Vec::new(),
         }
     }
 
@@ -259,13 +282,30 @@ impl VisualFrame {
         self.link_ui = link_ui;
     }
 
+    /// Whether the script rendered, or why it didn't.
+    #[cfg(test)]
+    pub(crate) fn test_status(&self) -> Result<(), String> {
+        match (&self.load, &self.tree) {
+            (Load::Failed(message), _) => Err(message.to_string()),
+            (Load::Ready, Some(_)) => Ok(()),
+            _ => Err("loading".into()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_id(&self) -> &SharedString {
+        &self.id
+    }
+
     /// Run a script's setup and first render (the engine already ran the
     /// same script before publishing it, so failures here are rare).
-    fn start(&mut self, script: &str, assets: zeron_visual::Assets, cx: &mut Context<Self>) {
-        // The row id ends with the part's visual id, which the engine
-        // seeded its check with: the reader sees the same random data.
-        let visual_id = self.id.rsplit('#').next().unwrap_or(&self.id);
-        let seed = zeron_visual::seed_for(visual_id);
+    fn start(
+        &mut self,
+        script: &str,
+        assets: zeron_visual::Assets,
+        seed: u64,
+        cx: &mut Context<Self>,
+    ) {
         match zeron_visual::Visual::load(script, seed) {
             Ok(visual) => {
                 let visual = visual.with_assets(assets);
@@ -510,6 +550,8 @@ impl Render for VisualFrame {
                 let root = self.id.to_string();
                 self.node(&tree, &root, &theme, &palette, window, cx)
             }
+            // The first render failed: the error below says why.
+            (Load::Ready, None) if self.error.is_some() => gpui::Empty.into_any_element(),
             _ => status_line("Loading visual…".into(), theme.text_faint),
         };
         let error = self
@@ -532,6 +574,25 @@ impl Render for VisualFrame {
                 ))
             })
     }
+}
+
+/// The title a document visual names in its first line, `--! title: ...`,
+/// trimmed and cut like a `show_visual` title.
+pub fn visual_title(script: &str) -> Option<String> {
+    let title = script
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("--!")?
+        .trim_start()
+        .strip_prefix("title:")?
+        .trim();
+    let title: String = title
+        .chars()
+        .take(zeron_proto::VISUAL_MAX_TITLE_CHARS)
+        .collect();
+    let title = title.trim_end();
+    (!title.is_empty()).then(|| title.to_owned())
 }
 
 fn status_line(message: SharedString, color: Hsla) -> AnyElement {
@@ -2771,6 +2832,27 @@ mod tests {
             let half = palette.color(zeron_visual::Color::token(Token::Accent).with_alpha(0.5));
             assert!((half.a - theme.accent.a * 0.5).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn document_visuals_name_themselves_in_their_first_line() {
+        assert_eq!(
+            visual_title("--! title: Latencia por región\nreturn nil").as_deref(),
+            Some("Latencia por región")
+        );
+        assert_eq!(
+            visual_title("  --!title:   Spaced  ").as_deref(),
+            Some("Spaced")
+        );
+        assert_eq!(visual_title("--! title:   \nx"), None);
+        assert_eq!(visual_title("local x = 1\n--! title: Late"), None);
+        assert_eq!(visual_title("-- title: Plain comment"), None);
+        assert_eq!(visual_title(""), None);
+        let long = format!("--! title: {}", "é".repeat(500));
+        assert_eq!(
+            visual_title(&long).unwrap().chars().count(),
+            zeron_proto::VISUAL_MAX_TITLE_CHARS
+        );
     }
 
     #[test]

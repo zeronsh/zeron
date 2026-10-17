@@ -340,6 +340,7 @@ pub(super) fn media(
     let pr_url = pr_url.to_owned();
     MediaUi {
         diagram: None,
+        visual: None,
         image: image_renderer(move |image, id, theme| {
             let Some(source) = image_url(&image.source, &pr_url) else {
                 return placeholder(

@@ -6459,6 +6459,7 @@ impl Transcript {
         let owner = cx.weak_entity();
         let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
             image: None,
+            visual: None,
             diagram: Some(Rc::new(move |code, id, _theme| {
                 let lookup = cache.borrow_mut().request(code, &id);
                 match lookup {

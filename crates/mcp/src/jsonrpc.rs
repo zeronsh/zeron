@@ -50,7 +50,11 @@ When a chart, table, diagram, dashboard, or 3D view would say more than prose an
 your final reply. Zeron renders it with its own native interface and enforces its style: \
 content sits directly on the chat with no cards or boxed panels, text uses the interface font \
 and type scale, and colors are theme tokens that work on frosted glass or opaque, light or dark. \
-The reader sees the visual above that reply, so don't announce or restate it.";
+The reader sees the visual above that reply, so don't announce or restate it.\n\
+\n\
+The same Luau visual script can live in a Markdown document as a ```zeron-visual fenced block \
+(optional first line `--! title: ...`; no assets); Zeron's Markdown preview runs it. Run \
+`zeron visual check <file>` after editing such a document and fix any errors it reports.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;

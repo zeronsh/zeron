@@ -22,6 +22,9 @@ use std::{
 const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MEDIA_ENTRIES: usize = 32;
 const MAX_MARKDOWN_BYTES: usize = 2 * 1024 * 1024;
+/// Live visuals per document. Their Luau runs on the main thread, so a
+/// document past this many shows the rest as code.
+const MAX_VISUALS: usize = 8;
 const MAX_PREVIEW_CONTENT_WIDTH: f32 = 900.0;
 const PREVIEW_VERTICAL_PADDING: f32 = 16.0;
 
@@ -81,6 +84,19 @@ fn web_target(target: &str) -> bool {
     crate::browser::model::transcript_address(target).is_ok()
         || (!target.chars().any(char::is_control)
             && url::Url::parse(target).is_ok_and(|url| url.scheme() == "mailto"))
+}
+
+/// A document visual: its fence's code and its position among fences with
+/// identical code. Independent of where the fence sits, so text added above
+/// it keeps the visual running.
+type VisualKey = (String, usize);
+
+/// How one visual fence of a row renders this frame.
+enum RowVisual {
+    Live(gpui::Entity<crate::visuals::VisualFrame>),
+    /// An outside document's visual, waiting for "Run visual".
+    Gated(VisualKey),
+    Blocked(&'static str),
 }
 
 fn comment_block(lines: &[u32], line: u32) -> Option<usize> {
@@ -201,6 +217,16 @@ pub(super) struct MarkdownPreview {
     diagram_task: Option<Task<()>>,
     diagram_style: u32,
     source_visible: HashSet<String>,
+    /// Running ```` ```zeron-visual ```` fences, created when their row
+    /// first renders and kept while their code stays among the first
+    /// [`MAX_VISUALS`] fences in the document.
+    visuals: HashMap<VisualKey, gpui::Entity<crate::visuals::VisualFrame>>,
+    /// Each fence's key by its frame id (`{row}-visual-{ix}`), per parse.
+    visual_slots: HashMap<String, VisualKey>,
+    /// The first [`MAX_VISUALS`] fences in document order: the ones that run.
+    visual_allowed: HashSet<VisualKey>,
+    /// Visuals of an outside document the reader chose to run.
+    visual_runnable: HashSet<VisualKey>,
     preview_image: Option<crate::attachments::PreviewImage>,
     zoom_source: Option<crate::image_media::MediaImage>,
     zoom_render: Option<crate::image_media::MediaImage>,
@@ -396,6 +422,7 @@ impl MarkdownPreview {
     ) -> Self {
         cx.on_release(|view, cx| {
             view.close_media_preview(cx);
+            view.clear_visuals();
             render::clear_selection_surface(&view.scope);
             let media = view
                 .images
@@ -431,6 +458,10 @@ impl MarkdownPreview {
             diagram_task: None,
             diagram_style: 0,
             source_visible: HashSet::new(),
+            visuals: HashMap::new(),
+            visual_slots: HashMap::new(),
+            visual_allowed: HashSet::new(),
+            visual_runnable: HashSet::new(),
             preview_image: None,
             zoom_source: None,
             zoom_render: None,
@@ -560,6 +591,7 @@ impl MarkdownPreview {
                 view.block_lines = block_lines;
                 view.highlights = highlights;
                 view.anchors = anchors;
+                view.sync_visuals();
                 view.cache.borrow_mut().clear();
                 view.loading = false;
                 view.load_images(cx);
@@ -750,6 +782,124 @@ impl MarkdownPreview {
         })
     }
 
+    fn clear_visuals(&mut self) {
+        // A frame frees its GPU images on release.
+        self.visuals.clear();
+        self.visual_slots.clear();
+        self.visual_allowed.clear();
+        self.visual_runnable.clear();
+    }
+
+    /// Map the parsed tree's visual fences to their keys, and drop the
+    /// visuals whose fence left the allowed set or changed its code.
+    fn sync_visuals(&mut self) {
+        self.visual_slots.clear();
+        self.visual_allowed.clear();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (top_ix, top) in self.tree.blocks.iter().enumerate() {
+            for (ix, code) in render::visual_fences(&top.block, top_ix) {
+                let occurrence = seen.entry(code.clone()).or_default();
+                let key = (code, *occurrence);
+                *occurrence += 1;
+                if self.visual_allowed.len() < MAX_VISUALS {
+                    self.visual_allowed.insert(key.clone());
+                }
+                self.visual_slots
+                    .insert(format!("{}{top_ix}-visual-{ix}", self.scope), key);
+            }
+        }
+        if self.truncated {
+            self.visuals.clear();
+        }
+        self.visuals
+            .retain(|key, _| self.visual_allowed.contains(key));
+        let present: HashSet<&VisualKey> = self.visual_slots.values().collect();
+        self.visual_runnable.retain(|key| present.contains(key));
+    }
+
+    /// How each visual fence of row `top_ix` renders, by frame id. Starts
+    /// the visuals that may run and have none yet: only rendered rows get
+    /// here, so a long document starts its visuals as they scroll in.
+    fn row_visuals(
+        &mut self,
+        block: &Block,
+        top_ix: usize,
+        link: &LinkUi,
+        cx: &mut Context<Self>,
+    ) -> HashMap<String, RowVisual> {
+        let outside = super::path_is_outside(&self.path);
+        let mut out = HashMap::new();
+        for (ix, _) in render::visual_fences(block, top_ix) {
+            let id = format!("{}{top_ix}-visual-{ix}", self.scope);
+            let Some(key) = self.visual_slots.get(&id).cloned() else {
+                continue;
+            };
+            let slot = if self.truncated {
+                RowVisual::Blocked("Visuals don't run in a truncated preview")
+            } else if !self.visual_allowed.contains(&key) {
+                RowVisual::Blocked("Document visual preview limit reached")
+            } else if let Some(frame) = self.visuals.get(&key) {
+                RowVisual::Live(frame.clone())
+            } else if outside && !self.visual_runnable.contains(&key) {
+                RowVisual::Gated(key)
+            } else {
+                RowVisual::Live(self.start_visual(key, cx))
+            };
+            if let RowVisual::Live(frame) = &slot {
+                frame.update(cx, |frame, _| frame.set_link_ui(Some(link.clone())));
+            }
+            out.insert(id, slot);
+        }
+        out
+    }
+
+    fn start_visual(
+        &mut self,
+        key: VisualKey,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<crate::visuals::VisualFrame> {
+        let (code, occurrence) = &key;
+        let seed = zeron_visual::seed_for_document(code, *occurrence);
+        // Stable while the fence moves, so its element state stays put.
+        let id: SharedString = format!("{}visual-{seed:016x}", self.scope).into();
+        let title = crate::visuals::visual_title(code).unwrap_or_else(|| "Visual".into());
+        let frame =
+            cx.new(|cx| crate::visuals::VisualFrame::from_source(id, title, code, seed, cx));
+        // A tab switch or a failure resizes the row, like a diagram loading.
+        cx.subscribe(
+            &frame,
+            |view, _, _: &crate::visuals::VisualLayoutChanged, cx| {
+                view.list.remeasure_items(0..view.tree.len());
+                cx.notify();
+            },
+        )
+        .detach();
+        self.visuals.insert(key, frame.clone());
+        frame
+    }
+
+    fn run_visual(&mut self, key: VisualKey, cx: &mut Context<Self>) {
+        self.visual_runnable.insert(key);
+        self.list.remeasure_items(0..self.tree.len());
+        cx.notify();
+    }
+
+    /// Flip a diagram or visual fence between its drawing and its source.
+    fn source_toggle(
+        owner: gpui::WeakEntity<Self>,
+        id: String,
+    ) -> Rc<dyn Fn(&mut Window, &mut gpui::App)> {
+        Rc::new(move |_, cx| {
+            let _ = owner.update(cx, |view, cx| {
+                if !view.source_visible.remove(&id) {
+                    view.source_visible.insert(id.clone());
+                }
+                view.list.remeasure_items(0..view.tree.len());
+                cx.notify();
+            });
+        })
+    }
+
     pub fn activate(
         &mut self,
         path: &str,
@@ -767,6 +917,8 @@ impl MarkdownPreview {
                 self.images.drain().filter_map(|(_, result)| result.ok()),
                 cx,
             );
+            // Another document: nothing of this one's visuals carries over.
+            self.clear_visuals();
             self.media_dirty = true;
         }
         if self.suspended {
@@ -790,6 +942,7 @@ impl MarkdownPreview {
         self.copied_clear = None;
         self.copied_code = None;
         self.code_fences.clear();
+        self.clear_visuals();
         self.close_media_preview(cx);
         self.image_snapshot = Rc::default();
         self.diagram_snapshot = Rc::default();
@@ -1116,13 +1269,46 @@ impl MarkdownPreview {
                 let source_visible = self.source_visible.clone();
                 let image_allowed = self.image_allowed.clone();
                 let diagram_allowed = self.diagram_allowed.clone();
+                let visuals = self.row_visuals(&top.block, ix, &link, cx);
+                let visual_owner = cx.weak_entity();
+                let visual_source_visible = source_visible.clone();
                 opts.media = Some(render::MediaUi {
+                    visual: (!visuals.is_empty()).then(|| {
+                        Rc::new(move |_: &str, id: SharedString, _: &Theme| {
+                            let owner = visual_owner.clone();
+                            match visuals.get(id.as_ref()) {
+                                None => render::DiagramView::Source,
+                                Some(RowVisual::Blocked(reason)) => {
+                                    render::DiagramView::Failed((*reason).into())
+                                }
+                                Some(RowVisual::Gated(key)) => {
+                                    let key = key.clone();
+                                    render::DiagramView::Gated(Rc::new(move |_, cx| {
+                                        let _ = owner.update(cx, |view, cx| {
+                                            view.run_visual(key.clone(), cx)
+                                        });
+                                    }))
+                                }
+                                Some(RowVisual::Live(frame)) => {
+                                    render::DiagramView::Diagram(render::DiagramUi {
+                                        body: div()
+                                            .w_full()
+                                            .child(frame.clone())
+                                            .into_any_element(),
+                                        show_source: visual_source_visible.contains(id.as_ref()),
+                                        toggle_source: Self::source_toggle(owner, id.to_string()),
+                                    })
+                                }
+                            }
+                        })
+                            as Rc<dyn Fn(&str, SharedString, &Theme) -> render::DiagramView>
+                    }),
                     diagram: Some(Rc::new(move |code, id, theme| {
                         let state = diagrams.get(code);
                         let allowed = diagram_allowed.contains(code);
                         let source_shown = source_visible.contains(id.as_ref()) || !allowed;
-                        let owner = diagram_owner.clone();
-                        let toggle_id = id.to_string();
+                        let toggle_source =
+                            Self::source_toggle(diagram_owner.clone(), id.to_string());
                         let body = match state {
                             Some(Ok(loaded)) => Self::media_element(
                                 loaded,
@@ -1150,15 +1336,7 @@ impl MarkdownPreview {
                         render::DiagramView::Diagram(render::DiagramUi {
                             body,
                             show_source: source_shown,
-                            toggle_source: Rc::new(move |_, cx| {
-                                let _ = owner.update(cx, |view, cx| {
-                                    if !view.source_visible.remove(&toggle_id) {
-                                        view.source_visible.insert(toggle_id.clone());
-                                    }
-                                    view.list.remeasure_items(0..view.tree.len());
-                                    cx.notify();
-                                });
-                            }),
+                            toggle_source,
                         })
                     })),
                     image: Some(Rc::new(move |image, id, theme| {
@@ -1465,6 +1643,40 @@ mod tests {
         assert_eq!(comment_block(&lines, 11), Some(3));
         assert_eq!(comment_block(&[], 1), None);
     }
+    /// `zeron visual check` and the preview share the Markdown parser. Their
+    /// extraction must also keep code and occurrences identical for seeding.
+    #[test]
+    fn visual_check_parser_matches_the_preview() {
+        for source in [
+            "# Doc\n\n```zeron-visual\nlocal a = 1\n\n  indented()\n```\n\nText\n\n~~~zeron-visual\ntilde()\n~~~\n",
+            "- item\n\n  ```zeron-visual\n  listed()\n    deeper()\n  ```\n\n1. ```zeron-visual\n   numbered()\n   ```\n",
+            "> ```zeron-visual\n> quoted()\n>\n> more()\n> ```\n",
+            "```zeron-visual\r\ncrlf()\r\n\r\nend\r\n```\r\n",
+            "````markdown\n```zeron-visual\nhidden()\n```\n````\n```zeron-visual\nopen()\n",
+            "```zeron-visual\n```\n\n```zeron-visual\n\n\n```\n",
+            "- item\n\n\t```zeron-visual\n\treturn ui.nope {}\n\t```\n",
+            "<!--\n```zeron-visual\nhidden()\n```\n-->\n\n```zeron-visual\nshown()\n```\n",
+            "<div>\n```zeron-visual\nhidden()\n```\n</div>\n",
+            "    ```zeron-visual\n    hidden()\n    ```\n",
+            "- ```zeron-visual\n  first()\n\n```zeron-visual\nsecond()\n```\n",
+            "[x](/tmp/Some Folder/x.md)\r\n\r\n> ```zeron-visual\r\n> quoted()\r\n> ```\r\n",
+        ] {
+            let tree = parser::parse_full(source);
+            let parsed: Vec<String> = tree
+                .blocks
+                .iter()
+                .enumerate()
+                .flat_map(|(ix, top)| render::visual_fences(&top.block, ix))
+                .map(|(_, code)| code)
+                .collect();
+            let scanned: Vec<String> = zeron_visual::document::fences(source)
+                .into_iter()
+                .map(|fence| fence.code)
+                .collect();
+            assert_eq!(scanned, parsed, "{source:?}");
+        }
+    }
+
     #[test]
     fn markdown_paths_and_links() {
         assert!(is_markdown("docs/README.MD"));
@@ -1880,6 +2092,72 @@ mod layout_tests {
     }
 
     #[test]
+    fn rendered_visual_draws_lazily_and_toggles_source() {
+        gpui_platform::headless().run(|cx| {
+            cx.set_global(Theme::dark());
+            let fence = "```zeron-visual\n--! title: Tabs\nlocal s = ui.state { tab = \"a\" }\nreturn function()\n  return ui.column { gap = 8,\n    ui.tabs { options = { \"a\", \"b\" }, value = s.tab, on_change = function(v) s.tab = v end },\n    ui.chart { type = \"bar\", height = 200, x = { \"x\", \"y\" }, series = { { name = \"n\", values = { 1, 2 } } } },\n  }\nend\n```\n";
+            // Far below the fold, so it starts only when scrolled to.
+            let source = format!("{}{fence}", "Paragraph.\n\n".repeat(80));
+            let window = cx
+                .open_window(
+                    gpui::WindowOptions {
+                        window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(
+                            Point::default(),
+                            gpui::size(px(900.0), px(600.0)),
+                        ))),
+                        ..Default::default()
+                    },
+                    |_, cx| {
+                        cx.new(|cx| {
+                            let mut view =
+                                MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                            view.tree = parser::parse_full(&source);
+                            view.list.reset(view.tree.len());
+                            view.sync_visuals();
+                            view.diagram_style = crate::theme::style_generation();
+                            view
+                        })
+                    },
+                )
+                .unwrap();
+            let view = window.entity(cx).unwrap();
+            let draw = |cx: &mut gpui::App| {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.refresh();
+                    let _ = window.draw(cx);
+                })
+                .unwrap();
+            };
+            draw(cx);
+            assert!(view.read(cx).visuals.is_empty(), "an unseen visual doesn't run");
+            let last = view.read(cx).tree.len() - 1;
+            view.update(cx, |view, _| {
+                view.list.scroll_to(ListOffset {
+                    item_ix: last,
+                    offset_in_item: px(0.0),
+                })
+            });
+            draw(cx);
+            let frame = view.read(cx).visuals.values().next().unwrap().clone();
+            assert_eq!(frame.read(cx).test_status(), Ok(()));
+            let drawn = view.read(cx).test_block_bounds(last).size.height;
+            assert!(drawn > px(200.0), "the chart sets the row height: {drawn:?}");
+
+            let id = format!("{}{last}-visual-{last}", view.read(cx).scope);
+            view.update(cx, |view, _| {
+                view.source_visible.insert(id);
+                view.list.remeasure_items(0..view.tree.len());
+            });
+            draw(cx);
+            assert_eq!(view.read(cx).visuals.len(), 1, "source view keeps the visual");
+            let code = view.read(cx).test_block_bounds(last).size.height;
+            assert!(code < drawn, "the source is shorter than the chart: {code:?}");
+
+            cx.spawn(async move |cx| cx.update(|cx| cx.quit())).detach();
+        });
+    }
+
+    #[test]
     fn rendered_mermaid_opens_lightbox_and_toggles_source() {
         gpui_platform::headless().run(|cx| {
             cx.set_global(Theme::dark());
@@ -2040,6 +2318,214 @@ mod async_tests {
         drop(view);
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
+    }
+
+    const SCRIPT: &str = "--! title: Test\nreturn function()\n  return ui.text \"hi\"\nend";
+
+    fn fence(code: &str) -> String {
+        format!("```zeron-visual\n{code}\n```\n\n")
+    }
+
+    fn show(view: &mut MarkdownPreview, source: &str) {
+        view.tree = parser::parse_full(source);
+        view.list.reset(view.tree.len());
+        view.sync_visuals();
+    }
+
+    /// Every row's visual fences as the next frame renders them.
+    fn render_visuals(
+        view: &mut MarkdownPreview,
+        cx: &mut Context<MarkdownPreview>,
+    ) -> Vec<RowVisual> {
+        let link = view.link_ui(cx);
+        let blocks = view.tree.blocks.clone();
+        let mut out = Vec::new();
+        for (ix, top) in blocks.iter().enumerate() {
+            let mut row: Vec<_> = view
+                .row_visuals(&top.block, ix, &link, cx)
+                .into_iter()
+                .collect();
+            row.sort_by(|a, b| a.0.cmp(&b.0));
+            out.extend(row.into_iter().map(|(_, slot)| slot));
+        }
+        out
+    }
+
+    fn live(slot: &RowVisual) -> gpui::Entity<crate::visuals::VisualFrame> {
+        match slot {
+            RowVisual::Live(frame) => frame.clone(),
+            RowVisual::Gated(_) => panic!("gated"),
+            RowVisual::Blocked(reason) => panic!("blocked: {reason}"),
+        }
+    }
+
+    #[gpui::test]
+    fn document_visuals_follow_their_fence_code(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        view.update(cx, |view, cx| {
+            show(view, &fence(SCRIPT));
+            let first = live(&render_visuals(view, cx)[0]);
+            assert_eq!(first.read(cx).test_status(), Ok(()));
+            assert_eq!(view.visuals.len(), 1);
+
+            // Text above moves the fence to another row; the visual stays.
+            show(view, &format!("Intro paragraph.\n\n{}", fence(SCRIPT)));
+            assert_eq!(live(&render_visuals(view, cx)[0]), first);
+
+            // Editing the fence starts it again.
+            let edited = SCRIPT.replace("hi", "edited");
+            show(view, &format!("Intro paragraph.\n\n{}", fence(&edited)));
+            assert!(view.visuals.is_empty(), "the old visual is dropped");
+            let second = live(&render_visuals(view, cx)[0]);
+            assert_ne!(second, first);
+            assert_eq!(view.visuals.len(), 1);
+
+            // Identical fences are separate visuals with their own seeds.
+            show(view, &format!("{}{}", fence(&edited), fence(&edited)));
+            let slots = render_visuals(view, cx);
+            let (a, b) = (live(&slots[0]), live(&slots[1]));
+            assert_ne!(a, b);
+            assert_ne!(a.read(cx).test_id(), b.read(cx).test_id());
+
+            let broken = live(&{
+                show(view, &fence("return function( end"));
+                render_visuals(view, cx).remove(0)
+            });
+            let status = broken.read(cx).test_status().unwrap_err();
+            assert!(status.starts_with("Visual failed: visual:1:"), "{status}");
+
+            view.suspend(cx);
+            assert!(view.visuals.is_empty());
+            assert!(view.visual_slots.is_empty());
+            assert!(view.visual_allowed.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn nested_visuals_keep_independent_frames(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        view.update(cx, |view, cx| {
+            let source = "> > Intro\n> >\n> > ```zeron-visual\n> > return ui.text \"A\"\n> > ```\n>\n> ```zeron-visual\n> return ui.text \"B\"\n> ```\n";
+            show(view, source);
+            let slots = render_visuals(view, cx);
+            assert_eq!(slots.len(), 2);
+            let a = live(&slots[0]);
+            let b = live(&slots[1]);
+            assert_ne!(a, b);
+            assert_eq!(a.read(cx).test_status(), Ok(()));
+            assert_eq!(b.read(cx).test_status(), Ok(()));
+            assert_eq!(view.visuals.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn documents_run_a_bounded_number_of_visuals(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        view.update(cx, |view, cx| {
+            let source: String = (0..=MAX_VISUALS)
+                .map(|i| fence(&format!("{SCRIPT}\n-- {i}")))
+                .collect();
+            show(view, &source);
+            let slots = render_visuals(view, cx);
+            assert_eq!(slots.len(), MAX_VISUALS + 1);
+            for slot in &slots[..MAX_VISUALS] {
+                live(slot);
+            }
+            assert!(matches!(
+                slots[MAX_VISUALS],
+                RowVisual::Blocked("Document visual preview limit reached")
+            ));
+            assert_eq!(view.visuals.len(), MAX_VISUALS);
+
+            view.truncated = true;
+            view.sync_visuals();
+            assert!(view.visuals.is_empty());
+            assert!(
+                render_visuals(view, cx)
+                    .iter()
+                    .all(|slot| matches!(slot, RowVisual::Blocked(_)))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn document_edits_release_visuals_that_leave_the_preview_limit(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        let mut source: String = (0..MAX_VISUALS)
+            .map(|i| fence(&format!("{SCRIPT}\n-- initial {i}")))
+            .collect();
+        let mut previous: Vec<_> = view.update(cx, |view, cx| {
+            show(view, &source);
+            render_visuals(view, cx)
+                .iter()
+                .map(|slot| live(slot).downgrade())
+                .collect()
+        });
+        cx.run_until_parked();
+
+        for edit in 0..3 {
+            source = format!("{}{source}", fence(&format!("{SCRIPT}\n-- added {edit}")));
+            view.update(cx, |view, _| {
+                show(view, &source);
+                assert_eq!(view.visuals.len(), MAX_VISUALS - 1);
+                assert!(
+                    previous[..MAX_VISUALS - 1]
+                        .iter()
+                        .all(|frame| frame.upgrade().is_some()),
+                    "allowed frames keep their state"
+                );
+            });
+            // GPUI defers entity releases until the update's effects finish.
+            cx.run_until_parked();
+            assert!(
+                previous.last().unwrap().upgrade().is_none(),
+                "the displaced frame is released"
+            );
+            previous = view.update(cx, |view, cx| {
+                let slots = render_visuals(view, cx);
+                assert!(
+                    slots[MAX_VISUALS..]
+                        .iter()
+                        .all(|slot| matches!(slot, RowVisual::Blocked(_)))
+                );
+                assert_eq!(view.visuals.len(), MAX_VISUALS);
+                slots[..MAX_VISUALS]
+                    .iter()
+                    .map(|slot| live(slot).downgrade())
+                    .collect()
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn outside_documents_run_visuals_only_when_asked(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let view =
+            cx.new(|cx| MarkdownPreview::new("/tmp/notes.md".into(), Rc::new(|_, _| {}), cx));
+        view.update(cx, |view, cx| {
+            show(view, &format!("{}{}", fence(SCRIPT), fence("return nil")));
+            let slots = render_visuals(view, cx);
+            let RowVisual::Gated(key) = &slots[0] else {
+                panic!("an outside visual must wait");
+            };
+            assert!(view.visuals.is_empty());
+            view.run_visual(key.clone(), cx);
+            let slots = render_visuals(view, cx);
+            live(&slots[0]);
+            assert!(
+                matches!(slots[1], RowVisual::Gated(_)),
+                "only the one asked"
+            );
+            // Another document forgets what the reader allowed.
+            view.activate("/tmp/other.md", &(None, "checkout".into()), cx);
+            assert!(view.visual_runnable.is_empty());
+            assert!(view.visuals.is_empty());
+        });
     }
 
     #[gpui::test]

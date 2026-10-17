@@ -140,7 +140,78 @@ pub fn parse_full(source: &str) -> BlockTree {
     parse_at(source, 0)
 }
 
+/// A fenced code block with its opening line in the original source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FencedCodeBlock {
+    pub line: usize,
+    pub language: Option<String>,
+    pub code: String,
+}
+
+/// Extract fences using the same parser, options, and code normalization as
+/// [`parse_full`]. Container indentation and HTML follow Markdown semantics;
+/// indented code blocks are excluded.
+pub fn fenced_code_blocks(source: &str) -> Vec<FencedCodeBlock> {
+    let line_starts: Vec<_> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(offset, _)| offset + 1))
+        .collect();
+    with_events(source, 0, |cur| {
+        let mut fences = Vec::new();
+        while let Some((event, range)) = cur.peek() {
+            if matches!(
+                event,
+                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+            ) {
+                let line = line_starts.partition_point(|start| *start <= range.start);
+                for block in parse_started_block(cur) {
+                    if let Block::CodeBlock { language, code } = block {
+                        fences.push(FencedCodeBlock {
+                            line,
+                            language,
+                            code,
+                        });
+                    }
+                }
+            } else {
+                cur.bump();
+            }
+        }
+        fences
+    })
+}
+
 fn parse_at(source: &str, offset: usize) -> BlockTree {
+    with_events(source, offset, |cur| {
+        let mut blocks = Vec::new();
+        while let Some((event, range)) = cur.peek() {
+            let range = range.clone();
+            match event {
+                Event::Rule => {
+                    cur.bump();
+                    blocks.push(Arc::new(TopBlock {
+                        range,
+                        block: Block::Rule,
+                    }));
+                }
+                Event::Start(_) => {
+                    for block in parse_started_block(cur) {
+                        blocks.push(Arc::new(TopBlock {
+                            range: range.clone(),
+                            block,
+                        }));
+                    }
+                }
+                // Stray inline events at top level (shouldn't happen): skip.
+                _ => cur.bump(),
+            }
+        }
+        BlockTree { blocks }
+    })
+}
+
+/// Run a parser over the same prepared source and original byte offsets used
+/// by the block tree, including absolute-link destination rewriting.
+fn with_events<T>(source: &str, offset: usize, parse: impl FnOnce(&mut Cursor<'_, '_>) -> T) -> T {
     let (text, insertions) = match rewrite_absolute_destinations(source) {
         Some((text, insertions)) => (Cow::Owned(text), Some(insertions)),
         None => (Cow::Borrowed(source), None),
@@ -161,30 +232,7 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
         events: &events,
         ix: 0,
     };
-    let mut blocks = Vec::new();
-    while let Some((event, range)) = cur.peek() {
-        let range = range.clone();
-        match event {
-            Event::Rule => {
-                cur.bump();
-                blocks.push(Arc::new(TopBlock {
-                    range,
-                    block: Block::Rule,
-                }));
-            }
-            Event::Start(_) => {
-                for block in parse_started_block(&mut cur) {
-                    blocks.push(Arc::new(TopBlock {
-                        range: range.clone(),
-                        block,
-                    }));
-                }
-            }
-            // Stray inline events at top level (shouldn't happen): skip.
-            _ => cur.bump(),
-        }
-    }
-    BlockTree { blocks }
+    parse(&mut cur)
 }
 
 /// Byte positions, in the rewritten text, of the angle brackets the rewrite
@@ -1676,6 +1724,19 @@ mod destination_rewrite_tests {
         let runs = paragraph("`[x](/tmp/a b.md)`");
         assert!(runs.iter().all(|run| run.style.link.is_none()));
         assert_eq!(text(&runs), "[x](/tmp/a b.md)");
+    }
+
+    #[test]
+    fn fenced_code_extraction_keeps_original_lines_and_normalized_code() {
+        let source = "[x](/tmp/Some Folder/x.md)\r\n\r\n- item\r\n\r\n\t~~~RuSt extra\r\n\tfirst()\r\n\t~~~\r\n";
+        assert_eq!(
+            fenced_code_blocks(source),
+            vec![FencedCodeBlock {
+                line: 5,
+                language: Some("RuSt".into()),
+                code: "first()".into(),
+            }]
+        );
     }
 
     #[test]

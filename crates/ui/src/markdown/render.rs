@@ -110,17 +110,27 @@ pub struct TaskUi {
 #[derive(Clone)]
 pub struct MediaUi {
     pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
+    /// Runs ```` ```zeron-visual ```` fences. `None` shows them as code.
+    pub visual: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
     /// `None` keeps inline images in their ordinary text rendering.
     pub image: Option<Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>>,
 }
 
-/// How a Mermaid fence presents itself on the owning surface.
+/// How a Mermaid or visual fence presents itself on the owning surface.
 pub enum DiagramView {
     /// The ordinary source fence, unchanged (no diagram is available yet).
     Source,
     /// The source fence, flagged with the reason it cannot be drawn.
     Failed(SharedString),
+    /// The source fence with a button that draws it on request (a visual in
+    /// a document from outside the workspace runs only when asked).
+    Gated(Rc<dyn Fn(&mut Window, &mut gpui::App)>),
     Diagram(DiagramUi),
+}
+
+/// Whether a fence's language marks a Luau visual.
+pub fn is_visual_language(language: &str) -> bool {
+    zeron_visual::document::is_fence_language(language)
 }
 
 pub struct DiagramUi {
@@ -491,16 +501,17 @@ pub fn render_tree(
     window: &Window,
     highlight: &dyn Fn(usize) -> Option<std::sync::Arc<HighlightedDocument>>,
 ) -> AnyElement {
+    let mut next_ix = 0;
     div()
         .flex()
         .flex_col()
         .gap(px(MD_BLOCK_GAP))
         .children(tree.blocks.iter().enumerate().map(|(ix, top)| {
             let document = highlight(ix);
-            render_block(
+            render_block_next(
                 &top.block,
                 ix,
-                ix,
+                &mut next_ix,
                 opts,
                 theme,
                 window,
@@ -512,41 +523,52 @@ pub fn render_tree(
         .into_any_element()
 }
 
-fn quote_child_ix(ix: usize, child_ix: usize) -> usize {
-    ix * 100 + child_ix
-}
-
-fn list_child_ix(ix: usize, item_ix: usize, child_ix: usize) -> usize {
-    ix * 100 + item_ix * 10 + child_ix
+/// Visit blocks in preorder, assigning each block one distinct index. Shared
+/// with rendering so nested fences get the same identity in every caller.
+fn visit_blocks(block: &Block, next_ix: &mut usize, visit: &mut impl FnMut(usize, &Block)) {
+    let ix = *next_ix;
+    *next_ix += 1;
+    visit(ix, block);
+    match block {
+        Block::BlockQuote { children } => {
+            for child in children {
+                visit_blocks(child, next_ix, visit);
+            }
+        }
+        Block::List { items, .. } => {
+            for child in items.iter().flatten() {
+                visit_blocks(child, next_ix, visit);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Element discriminators for every code block below `block`. Transcript rows
 /// use this to provision one independent scroll handle per nested fence before
 /// the renderer recursively reaches it.
-pub(crate) fn code_block_indices(block: &Block, ix: usize) -> Vec<usize> {
-    fn collect(block: &Block, ix: usize, out: &mut Vec<usize>) {
-        match block {
-            Block::CodeBlock { .. } => out.push(ix),
-            Block::BlockQuote { children } => {
-                for (child_ix, child) in children.iter().enumerate() {
-                    collect(child, quote_child_ix(ix, child_ix), out);
-                }
-            }
-            Block::List { items, .. } => {
-                for (item_ix, item) in items.iter().enumerate() {
-                    for (child_ix, child) in item.iter().enumerate() {
-                        collect(child, list_child_ix(ix, item_ix, child_ix), out);
-                    }
-                }
-            }
-            Block::Paragraph { .. } | Block::Heading { .. } | Block::Table { .. } | Block::Rule => {
-            }
-        }
-    }
-
+pub(crate) fn code_block_indices(block: &Block, mut ix: usize) -> Vec<usize> {
     let mut indices = Vec::new();
-    collect(block, ix, &mut indices);
+    visit_blocks(block, &mut ix, &mut |ix, block| {
+        if matches!(block, Block::CodeBlock { .. }) {
+            indices.push(ix);
+        }
+    });
     indices
+}
+
+/// The ```` ```zeron-visual ```` fences below `block` with the element
+/// discriminator each one renders with (the same as [`code_block_indices`]).
+pub(crate) fn visual_fences(block: &Block, mut ix: usize) -> Vec<(usize, String)> {
+    let mut fences = Vec::new();
+    visit_blocks(block, &mut ix, &mut |ix, block| {
+        if let Block::CodeBlock { language, code } = block
+            && language.as_deref().is_some_and(is_visual_language)
+        {
+            fences.push((ix, code.clone()));
+        }
+    });
+    fences
 }
 
 /// Render one block (top-level or nested). `top_ix` is the enclosing top-level
@@ -555,12 +577,27 @@ pub(crate) fn code_block_indices(block: &Block, ix: usize) -> Vec<usize> {
 pub fn render_block(
     block: &Block,
     top_ix: usize,
-    ix: usize,
+    mut ix: usize,
     opts: &RenderOptions,
     theme: &Theme,
     window: &Window,
     highlight: CodeHighlight,
 ) -> AnyElement {
+    render_block_next(block, top_ix, &mut ix, opts, theme, window, highlight)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_block_next(
+    block: &Block,
+    top_ix: usize,
+    next_ix: &mut usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+    window: &Window,
+    highlight: CodeHighlight,
+) -> AnyElement {
+    let ix = *next_ix;
+    *next_ix += 1;
     match block {
         Block::Paragraph { runs } => text_element(
             runs,
@@ -585,33 +622,27 @@ pub fn render_block(
             theme,
             highlight,
         ),
-        Block::BlockQuote { children } => div()
-            // Accent-tinted quote: indigo rail + a whisper of the same hue
-            // behind it (the inline-code treatment, dialed down).
-            .border_l_2()
-            .border_color(theme.accent.opacity(0.6))
-            .bg(theme.accent.opacity(0.05))
-            .rounded_tr(px(6.0))
-            .rounded_br(px(6.0))
-            .pl(px(12.0))
-            .pr(px(10.0))
-            .py(px(6.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .text_color(theme.text_muted)
-            .children(children.iter().enumerate().map(|(ci, child)| {
-                render_block(
-                    child,
-                    top_ix,
-                    quote_child_ix(ix, ci),
-                    opts,
-                    theme,
-                    window,
-                    None,
-                )
-            }))
-            .into_any_element(),
+        Block::BlockQuote { children } => {
+            div()
+                // Accent-tinted quote: indigo rail + a whisper of the same hue
+                // behind it (the inline-code treatment, dialed down).
+                .border_l_2()
+                .border_color(theme.accent.opacity(0.6))
+                .bg(theme.accent.opacity(0.05))
+                .rounded_tr(px(6.0))
+                .rounded_br(px(6.0))
+                .pl(px(12.0))
+                .pr(px(10.0))
+                .py(px(6.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .text_color(theme.text_muted)
+                .children(children.iter().map(|child| {
+                    render_block_next(child, top_ix, next_ix, opts, theme, window, None)
+                }))
+                .into_any_element()
+        }
         Block::List {
             ordered_start,
             items,
@@ -738,15 +769,7 @@ pub fn render_block(
                             } else {
                                 child
                             };
-                            render_block(
-                                child,
-                                top_ix,
-                                list_child_ix(ix, item_ix, ci),
-                                opts,
-                                theme,
-                                window,
-                                None,
-                            )
+                            render_block_next(child, top_ix, next_ix, opts, theme, window, None)
                         })),
                 )
             }))
@@ -2045,65 +2068,111 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    if language.is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
-        if let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref()) {
-            let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
-            let diagram = match handler(code, frame_id.clone(), theme) {
-                DiagramView::Source => {
-                    return render_code_block_source(
-                        language, code, top_ix, ix, opts, theme, highlight,
-                    );
-                }
-                DiagramView::Failed(reason) => {
-                    let notice = code_notice(format!("{frame_id}-failure").into(), reason, theme);
-                    return render_code_block_source_with_actions(
-                        language,
-                        code,
-                        top_ix,
-                        ix,
-                        opts,
-                        theme,
-                        highlight,
-                        vec![notice],
-                    );
-                }
-                DiagramView::Diagram(diagram) => diagram,
-            };
-            let toggle = diagram.toggle_source.clone();
-            let toggle_action = code_icon_action(
-                format!("{frame_id}-source-toggle").into(),
-                if diagram.show_source {
-                    "Show diagram"
+    let media = opts.media.as_ref();
+    let (handler, kind, shown) = match language {
+        Some(l) if l.eq_ignore_ascii_case("mermaid") => (
+            media.and_then(|m| m.diagram.as_ref()),
+            "mermaid",
+            "Show diagram",
+        ),
+        Some(l) if is_visual_language(l) => (
+            media.and_then(|m| m.visual.as_ref()),
+            "visual",
+            "Show visual",
+        ),
+        _ => (None, "", ""),
+    };
+    let Some(handler) = handler else {
+        return render_code_block_source(language, code, top_ix, ix, opts, theme, highlight);
+    };
+    let frame_id: SharedString = format!("{}-{kind}-{ix}", opts.row_key).into();
+    let diagram = match handler(code, frame_id.clone(), theme) {
+        DiagramView::Source => {
+            return render_code_block_source(language, code, top_ix, ix, opts, theme, highlight);
+        }
+        DiagramView::Failed(reason) => {
+            let notice = code_notice(format!("{frame_id}-failure").into(), reason, theme);
+            return render_code_block_source_with_actions(
+                language,
+                code,
+                top_ix,
+                ix,
+                opts,
+                theme,
+                highlight,
+                vec![notice],
+            );
+        }
+        DiagramView::Gated(run) => {
+            let action = code_icon_action(
+                format!("{frame_id}-run").into(),
+                if kind == "visual" {
+                    "Run visual"
                 } else {
-                    "Show source"
+                    "Render diagram"
                 },
-                if diagram.show_source {
-                    crate::icons::EYE
-                } else {
-                    crate::icons::FILE_CODE
-                },
-                Rc::new(move |window, cx| toggle(window, cx)),
+                crate::icons::ACTION_PLAY,
+                Rc::new(move |window, cx| run(window, cx)),
                 theme,
             );
-            if diagram.show_source {
-                return render_code_block_source_with_actions(
-                    language,
-                    code,
-                    top_ix,
-                    ix,
-                    opts,
-                    theme,
-                    highlight,
-                    vec![toggle_action],
-                );
-            }
-            let mut actions = vec![toggle_action];
-            actions.extend(code_copy_button(code, ix, opts, theme));
-            return code_block_frame(frame_id, language, actions, diagram.body, theme)
-                .into_any_element();
+            return render_code_block_source_with_actions(
+                language,
+                code,
+                top_ix,
+                ix,
+                opts,
+                theme,
+                highlight,
+                vec![action],
+            );
         }
+        DiagramView::Diagram(diagram) => diagram,
+    };
+    let toggle = diagram.toggle_source.clone();
+    let toggle_action = code_icon_action(
+        format!("{frame_id}-source-toggle").into(),
+        if diagram.show_source {
+            shown
+        } else {
+            "Show source"
+        },
+        if diagram.show_source {
+            crate::icons::EYE
+        } else {
+            crate::icons::FILE_CODE
+        },
+        Rc::new(move |window, cx| toggle(window, cx)),
+        theme,
+    );
+    if diagram.show_source {
+        return render_code_block_source_with_actions(
+            language,
+            code,
+            top_ix,
+            ix,
+            opts,
+            theme,
+            highlight,
+            vec![toggle_action],
+        );
     }
-    render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
+    if kind == "visual" {
+        // Visuals carry no box or fill (their style rules forbid them): only
+        // a quiet row with the source toggle sits above.
+        return div()
+            .id(frame_id)
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(div().flex().flex_row().justify_end().child(toggle_action))
+            .child(diagram.body)
+            .into_any_element();
+    }
+    let mut actions = vec![toggle_action];
+    actions.extend(code_copy_button(code, ix, opts, theme));
+    code_block_frame(frame_id, language, actions, diagram.body, theme).into_any_element()
 }
 
 fn code_icon_action(
@@ -3214,13 +3283,162 @@ mod tests {
     #[test]
     fn code_block_indices_include_nested_quotes_and_lists() {
         let quoted = parse_full("> ```rust\n> let x = 1;\n> ```\n");
-        assert_eq!(code_block_indices(&quoted.blocks[0].block, 0), vec![0]);
+        assert_eq!(code_block_indices(&quoted.blocks[0].block, 0), vec![1]);
 
         let listed = parse_full("- Result:\n\n  ```json\n  {\"ok\":true}\n  ```\n");
-        assert_eq!(code_block_indices(&listed.blocks[0].block, 0), vec![1]);
+        assert_eq!(code_block_indices(&listed.blocks[0].block, 0), vec![2]);
 
         let top_level = parse_full("paragraph\n\n```text\nvalue\n```\n");
         assert_eq!(code_block_indices(&top_level.blocks[1].block, 1), vec![1]);
+    }
+
+    const NESTED_VISUALS: &str = "> > Intro\n> >\n> > ```zeron-visual\n> > return ui.text \"A\"\n> > ```\n>\n> ```zeron-visual\n> return ui.text \"B\"\n> ```\n";
+
+    #[test]
+    fn nested_block_indices_are_unique() {
+        // The old base-100 arithmetic gave both of these fences index 1.
+        let quoted = parse_full(NESTED_VISUALS);
+        let indices = code_block_indices(&quoted.blocks[0].block, 0);
+        assert_eq!(indices.len(), 2);
+        assert_ne!(indices[0], indices[1]);
+
+        // List item 0's child 10 also used to collide with item 1's child 0.
+        let mut listed = String::from("- First\n\n");
+        listed.push_str(&"  Paragraph.\n\n".repeat(9));
+        listed.push_str("  ```zeron-visual\n  return ui.text \"A\"\n  ```\n\n- ```zeron-visual\n  return ui.text \"B\"\n  ```\n");
+        let tree = parse_full(&listed);
+        let indices = code_block_indices(&tree.blocks[0].block, 0);
+        assert_eq!(indices.len(), 2);
+        assert_ne!(indices[0], indices[1]);
+    }
+
+    #[test]
+    fn visual_fences_share_code_block_indices() {
+        let source = "```zeron-visual\ntop()\n```\n\n\
+            > ```Zeron-Visual\n> quoted()\n> ```\n\n\
+            - item\n\n  ```rust\n  let x = 1;\n  ```\n\n  ```zeron-visual\n  listed()\n  ```\n";
+        let tree = parse_full(source);
+        let found: Vec<(usize, String)> = tree
+            .blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(ix, top)| visual_fences(&top.block, ix))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (0, "top()".to_string()),
+                (2, "quoted()".to_string()),
+                (5, "listed()".to_string()),
+            ]
+        );
+        for (ix, top) in tree.blocks.iter().enumerate() {
+            let indices = code_block_indices(&top.block, ix);
+            for (fence_ix, _) in visual_fences(&top.block, ix) {
+                assert!(indices.contains(&fence_ix), "{fence_ix} in {indices:?}");
+            }
+        }
+        assert!(is_visual_language("ZERON-VISUAL"));
+        assert!(!is_visual_language("zeron-visuals"));
+    }
+
+    struct VisualFenceHarness {
+        handler: bool,
+        calls: Rc<RefCell<Vec<String>>>,
+        source: &'static str,
+    }
+
+    impl Render for VisualFenceHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let mut opts = RenderOptions::settled("visual-test".into());
+            let calls = self.calls.clone();
+            opts.media = Some(MediaUi {
+                diagram: None,
+                visual: self.handler.then(|| {
+                    Rc::new(move |_: &str, id: SharedString, _: &Theme| {
+                        calls.borrow_mut().push(id.to_string());
+                        DiagramView::Diagram(DiagramUi {
+                            body: div().h(px(40.0)).child("drawn").into_any_element(),
+                            show_source: false,
+                            toggle_source: Rc::new(|_, _| {}),
+                        })
+                    }) as Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>
+                }),
+                image: None,
+            });
+            div()
+                .size_full()
+                .child(selection_frame_reset())
+                .child(render_tree(
+                    &parse_full(self.source),
+                    &opts,
+                    &theme,
+                    window,
+                    &|_| None,
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn visual_fences_render_as_code_without_a_handler(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let registered = |key: &str| {
+            REGISTRY.with(|registry| registry.borrow().iter().any(|e| e.key.as_ref() == key))
+        };
+        for handler in [false, true] {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let (_, cx) = cx.add_window_view(|_, _| VisualFenceHarness {
+                handler,
+                calls: calls.clone(),
+                source: "```zeron-visual\nreturn nil\n```\n",
+            });
+            cx.simulate_resize(size(px(640.0), px(240.0)));
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+            assert_eq!(registered("visual-test-code0-line0"), !handler);
+            // Each layout pass asks again, always for the same frame id.
+            let calls = calls.borrow();
+            assert_eq!(!calls.is_empty(), handler);
+            assert!(
+                calls.iter().all(|id| id == "visual-test-visual-0"),
+                "{calls:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn nested_visuals_render_with_distinct_frame_ids(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|_, _| VisualFenceHarness {
+            handler: true,
+            calls: calls.clone(),
+            source: NESTED_VISUALS,
+        });
+        cx.simulate_resize(size(px(640.0), px(480.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        let tree = parse_full(NESTED_VISUALS);
+        let expected: std::collections::HashSet<_> = visual_fences(&tree.blocks[0].block, 0)
+            .into_iter()
+            .map(|(ix, _)| format!("visual-test-visual-{ix}"))
+            .collect();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(
+            calls
+                .borrow()
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
     }
 
     #[test]
