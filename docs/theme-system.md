@@ -41,7 +41,7 @@ Windows using their in-app renderers. Windows uses the bounded Direct3D
 `BackdropBlur` implementation; native window Acrylic remains independent.
 The preference remains portable even where a particular surface cannot honor blur.
 
-The built-in registry contains 30 variants across 19 families:
+The built-in registry contains 31 variants across 20 families:
 
 - Zeron Light and Dark
 - VS Code Light+ and Dark+
@@ -62,9 +62,16 @@ The built-in registry contains 30 variants across 19 families:
 - Shades of Purple
 - Cobalt2
 - Andromeda
+- Vesper
 
 Every bundled variant records source URL, exact upstream revision, license, and
 a SHA-256 hash of the resolved curated definition.
+
+Vesper uses a dark neutral palette with orange accents and mint strings. It
+defines all UI, code, Markdown, diff, status, and terminal roles, including all
+16 ANSI colors. Comments use an opaque grey for readability. Its recommended
+surface treatment is opaque, and the separate surface preference can override
+that choice.
 
 Appearance settings keep light and dark choices in ordinary settings rows.
 Each row opens a palette-preview menu, which allows the catalog to grow without

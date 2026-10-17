@@ -57,6 +57,7 @@ by Zeron. Their names identify the corresponding palette adaptations.
 | Shades of Purple | `e8eb49f33e5db05ceba6677367b33ddb27ad821c` | [MIT text with an additional “With condition” section](https://github.com/ahmadawais/shades-of-purple-vscode/blob/e8eb49f33e5db05ceba6677367b33ddb27ad821c/LICENSE.md); Zeron is MIT-licensed, satisfying the stated condition |
 | Cobalt2 | `c4e9574372b85afad1682ed0fdd1ac0411c62512` | [MIT](https://github.com/wesbos/cobalt2-vscode/blob/c4e9574372b85afad1682ed0fdd1ac0411c62512/LICENSE) |
 | Andromeda | `d1abb48c69493000aa0133a32d594eb25e523d4f` | [MIT](https://github.com/EliverLara/Andromeda/blob/d1abb48c69493000aa0133a32d594eb25e523d4f/LICENSE.md) |
+| Vesper | `9043f3849b776949445f0cd4990365959cca35a3` | [MIT](https://github.com/raunofreiberg/vesper/blob/9043f3849b776949445f0cd4990365959cca35a3/LICENSE) |
 
 The palette values are adapted under the corresponding upstream license. The
 linked license pages contain each project's copyright and permission notice and
@@ -82,6 +83,7 @@ Copyright notices retained from those pinned upstream licenses:
 - Copyright (c) 2015-∞ Ahmad Awais
 - Copyright (c) 2018 Wes Bos, Roberto Achar
 - Copyright (c) 2017 <eliverlara@gmail.com>
+- Copyright (c) 2023 Rauno Freiberg
 
 The common MIT permission notice for the adaptations above follows:
 
