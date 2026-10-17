@@ -8,9 +8,11 @@
 //! [`OnboardingEvent`]. While the sign-in wizard is up the shell hides this
 //! card, and the signed-in edge moves it on to the agents step.
 
+use std::path::{Path, PathBuf};
+
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription,
-    Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, IntoElement, ObjectFit, Render, SharedString,
+    StyledImage as _, Subscription, Task, Window, div, img, prelude::*, px,
 };
 
 use zeron_engine::registry::HarnessDescriptor;
@@ -22,7 +24,7 @@ use crate::icons::{self, icon};
 use crate::motion;
 use crate::popover::{self, Loadable};
 use crate::settings::accounts::{self, AccountsPage, AccountsSnapshotCache};
-use crate::settings::widgets;
+use crate::settings::{NewThreadBackgroundEffect, widgets};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -91,7 +93,7 @@ impl Step {
 const NUMBERED_STEPS: usize = 3;
 const CARD_WIDTH: f32 = 480.0;
 const COMPACT_CARD_WIDTH: f32 = 400.0;
-const CARD_MAX_HEIGHT: f32 = 600.0;
+const CARD_MAX_HEIGHT: f32 = 660.0;
 const CARD_PADDING: f32 = 32.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +187,11 @@ pub struct Onboarding {
     install_task: Option<Task<()>>,
     _observe_state: Subscription,
     _observe_accounts: Option<Subscription>,
+    /// The card as last laid out: the wallpaper clears around it the way the
+    /// new-chat wallpaper clears around the composer.
+    card_bounds: crate::new_thread_background_mask::SurfaceBounds,
+    wallpaper: crate::new_thread_background_effects::Readiness,
+    wallpaper_error: Option<SharedString>,
 }
 
 impl EventEmitter<OnboardingEvent> for Onboarding {}
@@ -216,6 +223,9 @@ impl Onboarding {
             install_task: None,
             _observe_state: observe_state,
             _observe_accounts: None,
+            card_bounds: Default::default(),
+            wallpaper: Default::default(),
+            wallpaper_error: None,
         };
         onboarding.go(step, cx);
         onboarding
@@ -354,6 +364,103 @@ impl Onboarding {
                 .ok();
         })
         .detach();
+    }
+
+    fn choose_wallpaper(&mut self, cx: &mut Context<Self>) {
+        self.wallpaper_error = None;
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose Wallpaper".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.wallpaper_error =
+                    crate::settings::install_new_thread_composer_background(&path, cx)
+                        .err()
+                        .map(SharedString::from);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn remove_wallpaper(&mut self, cx: &mut Context<Self>) {
+        self.wallpaper_error = crate::settings::remove_new_thread_composer_background(cx)
+            .err()
+            .map(SharedString::from);
+        cx.notify();
+    }
+
+    /// The new-chat wallpaper, painted exactly as the new-chat canvas paints
+    /// it — same crop, effect and fade — with the card as the cleared shape.
+    fn render_wallpaper(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let settings = crate::settings::current(cx);
+        let background = settings.new_thread_composer_background;
+        let path = background
+            .as_ref()
+            .map(|background| PathBuf::from(&background.path));
+        let adjustment = background
+            .as_ref()
+            .map(|background| background.adjustment)
+            .unwrap_or_default();
+        let image = path.as_deref().and_then(|path| {
+            crate::new_thread_background_effects::prepare(
+                settings.new_thread_background_effect,
+                theme,
+                path,
+                cx,
+            )
+        });
+        let frame = self.wallpaper.frame(
+            image,
+            path.as_deref(),
+            adjustment,
+            path.is_some(),
+            motion::reduced_motion(cx),
+            std::time::Instant::now(),
+        );
+        if frame.active {
+            window.request_animation_frame();
+        }
+        let viewport = window.viewport_size();
+        let (width, height) = (f32::from(viewport.width), f32::from(viewport.height));
+        let opacity = crate::shell::new_thread_background_opacity(theme.is_frost());
+        div()
+            .absolute()
+            .inset_0()
+            .child(crate::shell::new_thread_background(
+                frame.previous,
+                frame.previous_adjustment,
+                height,
+                width,
+                self.card_bounds.clone(),
+                0.0,
+                (1.0 - frame.mix) * opacity,
+            ))
+            .child(crate::shell::new_thread_background(
+                frame.current,
+                frame.current_adjustment,
+                height,
+                width,
+                self.card_bounds.clone(),
+                0.0,
+                frame.mix * opacity,
+            ))
+            .into_any_element()
     }
 
     /// Open (or close) one agent's sign-in, the same accounts section
@@ -652,6 +759,155 @@ impl Onboarding {
                     .gap(px(10.0))
                     .children(swatches),
             )
+            .child(self.render_wallpaper_choice(theme, cx))
+            .into_any_element()
+    }
+
+    /// The new-chat wallpaper: an image of your own, then a treatment for it.
+    /// It shows behind this card as soon as it's chosen.
+    fn render_wallpaper_choice(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let settings = crate::settings::current(cx);
+        let background = settings
+            .new_thread_composer_background
+            .filter(|background| Path::new(&background.path).is_file());
+        let current_effect = settings.new_thread_background_effect;
+        let tile = div()
+            .flex_none()
+            .size(px(40.0))
+            .rounded(px(8.0))
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.wash(0.04))
+            .flex()
+            .items_center()
+            .justify_center()
+            .map(|tile| match &background {
+                Some(background) => tile.child(
+                    img(PathBuf::from(&background.path))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                ),
+                None => tile.child(
+                    icon(icons::GALLERY)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted.opacity(0.7)),
+                ),
+            });
+        let effects = NewThreadBackgroundEffect::ALL.into_iter().map(|effect| {
+            let selected = effect == current_effect;
+            div()
+                .id(SharedString::from(format!(
+                    "onboarding-effect-{}",
+                    effect.label()
+                )))
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .cursor_pointer()
+                .map(|chip| {
+                    if selected {
+                        chip.bg(theme.accent_wash)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.accent)
+                    } else {
+                        chip.text_color(theme.text_muted)
+                            .hover(|s| s.bg(theme.wash(0.06)).text_color(theme.text))
+                    }
+                })
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::settings::set_new_thread_background_effect(effect, cx);
+                    cx.notify();
+                }))
+                .child(SharedString::from(effect.label()))
+        });
+        div()
+            .mt(px(24.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from("New chat wallpaper")),
+            )
+            .child(
+                div()
+                    .mt(px(10.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(tile)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(
+                                        background
+                                            .as_ref()
+                                            .map(|background| background.name.clone())
+                                            .unwrap_or_else(|| "None".into()),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted.opacity(0.8))
+                                    .child(SharedString::from("Shows behind every new chat.")),
+                            ),
+                    )
+                    .when(background.is_some(), |row| {
+                        row.child(
+                            widgets::ghost_action(theme)
+                                .id("onboarding-wallpaper-remove")
+                                .flex_none()
+                                .on_click(cx.listener(|this, _, _, cx| this.remove_wallpaper(cx)))
+                                .child("Remove"),
+                        )
+                    })
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id("onboarding-wallpaper-choose")
+                            .flex_none()
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_wallpaper(cx)))
+                            .child(if background.is_some() {
+                                "Change"
+                            } else {
+                                "Choose image"
+                            }),
+                    ),
+            )
+            .when(background.is_some(), |section| {
+                section.child(
+                    div()
+                        .mt(px(12.0))
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(4.0))
+                        .children(effects),
+                )
+            })
+            .when_some(self.wallpaper_error.clone(), |section, error| {
+                section.child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger_muted.opacity(0.9))
+                        .child(error),
+                )
+            })
             .into_any_element()
     }
 
@@ -1273,13 +1529,25 @@ impl Render for Onboarding {
                             .child(body),
                     )),
             )
-            .children(footer);
+            .children(footer)
+            .child({
+                let measured = self.card_bounds.clone();
+                // Prepaint runs before any paint, so the wallpaper reads this
+                // frame's card, never the last one's.
+                gpui::canvas(
+                    move |bounds, _, _| measured.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+            });
+        let wallpaper = self.render_wallpaper(&theme, window, cx);
         div()
             .absolute()
             .inset_0()
             .occlude()
             .bg(theme.bg)
-            .child(crate::shell::grid_backdrop(&theme))
+            .child(wallpaper)
             .child(
                 div()
                     .absolute()

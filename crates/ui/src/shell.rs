@@ -1398,7 +1398,7 @@ fn bottom_stack_measurement_matches(
     measured_has_composer == expected_has_composer
 }
 
-fn new_thread_background_opacity(is_frost: bool) -> f32 {
+pub(crate) fn new_thread_background_opacity(is_frost: bool) -> f32 {
     if is_frost {
         NEW_THREAD_BACKGROUND_FROSTED_OPACITY
     } else {
@@ -1411,7 +1411,7 @@ pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
         .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
 }
 
-fn new_thread_background(
+pub(crate) fn new_thread_background(
     artwork: Option<std::sync::Arc<gpui::RenderImage>>,
     adjustment: settings::NewThreadBackgroundAdjustment,
     viewport_height: f32,
@@ -13009,7 +13009,7 @@ impl Shell {
 /// The sign-in gate's faint grid backdrop (zeron styles.css `.bg-grid`):
 /// 44px hairlines at white 3.5%, with the radial mask approximated by edge
 /// gradients back into the page background (gpui has no mask-image).
-pub(crate) fn grid_backdrop(theme: &Theme) -> AnyElement {
+fn grid_backdrop(theme: &Theme) -> AnyElement {
     let line = crate::theme::hairline(0.035);
     let bg = theme.bg;
     const STEP: f32 = 44.0;
