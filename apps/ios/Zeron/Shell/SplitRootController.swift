@@ -5,6 +5,8 @@ import UIKit
 protocol AppRouter: AnyObject {
     func openSession(_ chatId: String)
     func presentNewSession(prompt: String?)
+    /// Reopen a prompt draft's new-session page.
+    func openDraft(_ draftId: String)
     func showSettings()
     func showSearch()
 }
@@ -77,6 +79,7 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         }
         currentChatId = chatId
         sidebar.currentChatId = chatId
+        sidebar.currentDraftId = nil
         detail.setViewControllers([session], animated: false)
     }
 
@@ -94,12 +97,21 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         showDraft(prompt: prompt, focus: true)
     }
 
+    func openDraft(_ draftId: String) {
+        guard !isCollapsed else { return tabs.openDraft(draftId) }
+        guard let row = app.draftRow(draftId) else { return }
+        if let page = detail.viewControllers.first as? NewSessionViewController, page.draftId == draftId { return }
+        showDraft(prompt: nil, restoring: row, focus: true)
+    }
+
     /// The new-session page in the main column. Launch shows it without the
     /// keyboard (it would cover half the column); asking for one focuses it.
-    func showDraft(prompt: String?, focus: Bool) {
+    /// `restoring` reopens a prompt draft there.
+    func showDraft(prompt: String?, restoring row: DraftRow? = nil, focus: Bool) {
         currentChatId = nil
         sidebar.currentChatId = nil
-        let draft = NewSessionViewController(app: app, prompt: prompt, embedded: true) { [weak self] chatId, handoff in
+        sidebar.currentDraftId = row?.id
+        let draft = NewSessionViewController(app: app, prompt: prompt, restoring: row, embedded: true) { [weak self] chatId, handoff in
             guard let self, let handoff, let window = self.view.window, !self.isCollapsed else {
                 self?.openSession(chatId)
                 return
@@ -111,6 +123,7 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             }
             self.currentChatId = chatId
             self.sidebar.currentChatId = chatId
+            self.sidebar.currentDraftId = nil
             UIView.performWithoutAnimation {
                 self.detail.setViewControllers([session], animated: false)
                 self.view.layoutIfNeeded()
@@ -207,6 +220,12 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
     var currentChatId: String? {
         get { list.currentChatId }
         set { list.currentChatId = newValue }
+    }
+
+    /// The draft open in the main column: drawn as current.
+    var currentDraftId: String? {
+        get { list.currentDraftId }
+        set { list.currentDraftId = newValue }
     }
 
     init(app: AppModel) {

@@ -122,6 +122,14 @@ impl DemoHost {
         for status in seeded.change_requests {
             client.workspace.put_change_request(status);
         }
+        if self.options.fixture == crate::config::DemoFixture::Standard {
+            // Oldest first: each new draft lists above the ones before it.
+            let mut drafts = fixtures::drafts(now_ms());
+            drafts.sort_by_key(|d| d.created_at_ms);
+            for draft in drafts {
+                crate::drafts::seed(client, draft)?;
+            }
+        }
         self.beat_presence(client);
         Ok(())
     }

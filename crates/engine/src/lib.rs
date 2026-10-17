@@ -23,6 +23,7 @@ pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod drafts;
 mod fs_watch;
 pub mod harness_updates;
 pub(crate) mod home_index;

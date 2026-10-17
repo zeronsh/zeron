@@ -599,3 +599,107 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
 }
+
+fn draft_ids(client: &Client) -> Vec<String> {
+    client
+        .workspace()
+        .drafts
+        .iter()
+        .map(|d| d.id.clone())
+        .collect()
+}
+
+#[test]
+fn drafts_list_open_reorder_send_and_discard() {
+    use zeron_client::{DraftEdit, DraftFile, DraftTarget, NewSession, SessionTarget};
+    let (client, _dir) = demo(fast());
+    // Newest first; the haptics draft edited on two devices lists both heads.
+    let ws = client.workspace();
+    assert_eq!(
+        draft_ids(&client),
+        [
+            "demo-draft-sidebar",
+            "demo-draft-notes",
+            "demo-draft-limits",
+            "demo-draft-haptics",
+            "demo-draft-haptics-2",
+        ]
+    );
+    let sidebar = &ws.drafts[0];
+    assert_eq!(sidebar.project.as_ref().unwrap().name, "zeron");
+    assert_eq!(sidebar.device_name.as_deref(), Some("MacBook Pro"));
+    assert_eq!(sidebar.harness.as_deref(), Some("claude-code"));
+    assert!(
+        sidebar
+            .preview
+            .starts_with("Match the desktop Drafts section")
+    );
+    assert!(ws.drafts[2].new_worktree);
+    assert!(ws.drafts[1].project.is_none());
+    assert!(ws.drafts[4].conflict);
+
+    let rt = zeron_client::runtime::shared();
+    let loaded = rt.block_on(client.load_draft(&sidebar.revision)).unwrap();
+    assert!(loaded.prompt.contains("screenshot"));
+    assert_eq!(loaded.files.len(), 1);
+    assert!(loaded.files[0].data.starts_with(b"\x89PNG"));
+
+    // A new canvas is hidden while open, listed first once left.
+    let target = DraftTarget {
+        device_id: "dev-mac".into(),
+        ..Default::default()
+    };
+    let canvas = |revision: &str, deferred: bool| DraftEdit {
+        id: "canvas".into(),
+        revision: revision.into(),
+        base_revision: None,
+        created_at_ms: 1,
+        deferred,
+        prompt: "Profile the transcript".into(),
+        target: target.clone(),
+        files: vec![DraftFile {
+            id: "image".into(),
+            name: "trace.png".into(),
+            data: b"\x89PNG trace".to_vec(),
+            appshot: None,
+        }],
+    };
+    client.save_draft(canvas("canvas-1", true)).unwrap();
+    assert!(!draft_ids(&client).contains(&"canvas".to_owned()));
+    client.save_draft(canvas("canvas-1", false)).unwrap();
+    wait_for("publication", Duration::from_secs(5), || {
+        client
+            .workspace()
+            .drafts
+            .first()
+            .is_some_and(|d| d.id == "canvas" && !d.pending)
+    });
+
+    client
+        .move_draft("canvas", Some("demo-draft-limits".into()), None)
+        .unwrap();
+    assert_eq!(draft_ids(&client)[3], "canvas");
+
+    // Sending: one chat per draft, however often it is retried.
+    rt.block_on(client.claim_draft("canvas", "canvas-1"))
+        .unwrap();
+    let new = || NewSession {
+        target: SessionTarget::Projectless {
+            device_id: "dev-mac".into(),
+        },
+        config: None,
+        branch: None,
+        cwd: None,
+        title: None,
+    };
+    let chat = client.create_draft_session("canvas", new()).unwrap();
+    assert_eq!(chat, "draft-canvas");
+    assert_eq!(client.create_draft_session("canvas", new()).unwrap(), chat);
+    client.consume_draft("canvas", "canvas-1").unwrap();
+    assert!(!draft_ids(&client).contains(&"canvas".to_owned()));
+    // A late save can't bring a sent draft back.
+    assert!(client.save_draft(canvas("canvas-2", false)).is_err());
+
+    client.discard_draft("demo-draft-notes").unwrap();
+    assert!(!draft_ids(&client).contains(&"demo-draft-notes".to_owned()));
+}

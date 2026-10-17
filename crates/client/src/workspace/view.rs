@@ -18,7 +18,7 @@ use zeron_doc::WorkspaceState;
 use zeron_proto::view::{attention_rank, display_status, project_key, representative_space};
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus,
-    Device, Session, SidebarPreferences, Space,
+    Device, PromptDraft, Session, SidebarPreferences, Space,
 };
 
 use crate::catalog;
@@ -109,6 +109,40 @@ pub struct SectionView {
     pub name: String,
     pub collapsed: bool,
     pub sessions: Vec<Arc<SessionRow>>,
+}
+
+/// An unsent new-session canvas (docs/prompt-drafts.md), listed above
+/// Pinned like the desktop sidebar's Drafts section. Content (full prompt,
+/// images) loads on open; the row carries only what the list shows and
+/// what reopening the canvas needs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DraftRow {
+    pub id: String,
+    /// The immutable content revision this row shows.
+    pub revision: String,
+    pub base_revision: Option<String>,
+    pub created_at_ms: i64,
+    /// First non-blank prompt line (or "N attachments").
+    pub preview: String,
+    /// The target project while it exists; `None` = projectless, or a
+    /// project deleted since (then `project_name` still names it).
+    pub project: Option<ProjectRef>,
+    pub project_name: Option<String>,
+    pub space_id: Option<String>,
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub model_label: Option<String>,
+    pub reasoning: Option<String>,
+    pub branch: Option<String>,
+    pub new_worktree: bool,
+    /// A concurrent edit from another device, listed beside its sibling.
+    pub conflict: bool,
+    /// Saved on this device, not yet published to the registry.
+    pub pending: bool,
+    /// [`relative_time_label`] of `created_at_ms`.
+    pub time_label: String,
 }
 
 /// The "Threads" page — the desktop sidebar.
@@ -203,6 +237,8 @@ pub struct WorkspaceSnapshot {
     pub pull_requests: PullRequestGroups,
     pub archived: Vec<Arc<SessionRow>>,
     pub devices: Vec<DeviceView>,
+    /// Prompt drafts in their shared manual order.
+    pub drafts: Vec<DraftRow>,
     /// Every chat row (archived and children included), by id.
     pub sessions: HashMap<String, Arc<SessionRow>>,
     children: HashMap<String, Vec<Arc<SessionRow>>>,
@@ -323,6 +359,8 @@ pub(crate) struct DeriveContext<'a> {
     pub send_states: &'a HashMap<String, SendState>,
     pub synced: bool,
     pub previous: Option<&'a WorkspaceSnapshot>,
+    /// Registry drafts with this device's unpublished saves laid over them.
+    pub drafts: &'a [PromptDraft],
 }
 
 /// A device's display name, or `None` when it has none worth showing (blank,
@@ -713,6 +751,12 @@ pub(crate) fn derive(
             .then_with(|| a.id.cmp(&b.id))
     });
 
+    let drafts = cx
+        .drafts
+        .iter()
+        .map(|draft| draft_row(draft, &rc, now_ms))
+        .collect();
+
     let mut snapshot = WorkspaceSnapshot {
         revision: 0,
         computed_at_ms: now_ms,
@@ -728,12 +772,68 @@ pub(crate) fn derive(
         pull_requests,
         archived,
         devices,
+        drafts,
         sessions: rows,
         children,
         content_hash: 0,
     };
     snapshot.content_hash = snapshot_hash(&snapshot);
     snapshot
+}
+
+fn draft_row(draft: &PromptDraft, rc: &RowContext<'_>, now_ms: i64) -> DraftRow {
+    let target = &draft.target;
+    let project = target
+        .space_id
+        .as_deref()
+        .and_then(|id| rc.spaces.get(id))
+        .map(|space| ProjectRef {
+            id: space.id.clone(),
+            name: space.display_name().to_owned(),
+            color_index: project_color_index(&representative_space(rc.all_spaces, space).path),
+        });
+    let config = target.config.as_ref();
+    let harness = config.and_then(|c| {
+        serde_json::to_value(c.harness)
+            .ok()?
+            .as_str()
+            .map(str::to_owned)
+    });
+    let model = config.and_then(|c| c.model.clone());
+    let reasoning = config
+        .and_then(|c| c.reasoning)
+        .and_then(|r| serde_json::to_value(r).ok()?.as_str().map(str::to_owned));
+    DraftRow {
+        id: draft.id.clone(),
+        revision: draft.revision.clone(),
+        base_revision: draft.base_revision.clone(),
+        created_at_ms: draft.created_at,
+        preview: zeron_proto::view::single_line(&draft.preview),
+        project_name: project
+            .as_ref()
+            .map(|p| p.name.clone())
+            .or_else(|| target.project_name.clone()),
+        project,
+        space_id: target.space_id.clone(),
+        device_id: target.device_id.clone(),
+        device_name: rc
+            .devices
+            .get(target.device_id.as_str())
+            .and_then(|d| device_display_name(d)),
+        model_label: match (harness.as_deref(), model.as_deref()) {
+            (Some(h), Some(m)) => Some(catalog::model_label(h, m)),
+            (None, Some(m)) => Some(m.to_owned()),
+            _ => None,
+        },
+        harness,
+        model,
+        reasoning,
+        branch: target.branch.clone().filter(|b| !b.trim().is_empty()),
+        new_worktree: target.new_worktree,
+        conflict: draft.conflict,
+        pending: draft.pending,
+        time_label: relative_time_label(draft.created_at, now_ms),
+    }
 }
 
 fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
@@ -771,6 +871,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
     for device in &s.devices {
         device.hash(&mut h);
     }
+    s.drafts.hash(&mut h);
     let mut all: Vec<(&String, u64)> = s.sessions.iter().map(|(k, v)| (k, v.revision)).collect();
     all.sort();
     all.hash(&mut h);

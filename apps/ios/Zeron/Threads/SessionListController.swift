@@ -7,6 +7,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     enum Item: Hashable {
         case folder(String)
         case session(String)
+        case draft(String)
         case header(String)
     }
 
@@ -15,6 +16,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     var dataSource: UICollectionViewDiffableDataSource<String, Item>!
     private(set) var sessions: [String: SessionRowVM] = [:]
     private(set) var folders: [String: FolderRowVM] = [:]
+    private(set) var draftRows: [String: DraftRowVM] = [:]
     private var headers: [String: String] = [:]
     private var token: AnyObject?
     /// Show drag handles in edit mode (Pinned).
@@ -28,6 +30,16 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             var s = dataSource.snapshot()
             let ids = Set([oldValue, currentChatId].compactMap { $0 })
             s.reconfigureItems(s.itemIdentifiers.filter { if case let .session(id) = $0 { return ids.contains(id) } else { return false } })
+            dataSource.apply(s, animatingDifferences: false)
+        }
+    }
+    /// The draft open beside this list (iPad sidebar): drawn as current.
+    var currentDraftId: String? {
+        didSet {
+            guard oldValue != currentDraftId, dataSource != nil else { return }
+            var s = dataSource.snapshot()
+            let ids = Set([oldValue, currentDraftId].compactMap { $0 })
+            s.reconfigureItems(s.itemIdentifiers.filter { if case let .draft(id) = $0 { return ids.contains(id) } else { return false } })
             dataSource.apply(s, animatingDifferences: false)
         }
     }
@@ -73,6 +85,12 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             cell.isCurrent = id == self.currentChatId
             cell.accessories = self.reorderable ? [.reorder(displayed: .whenEditing)] : []
         }
+        let draftReg = UICollectionView.CellRegistration<DraftCell, String> { [weak self] cell, _, id in
+            guard let self, let vm = self.draftRows[id] else { return }
+            cell.configure(vm)
+            cell.isCurrent = id == self.currentDraftId
+            cell.accessories = self.reorderable ? [.reorder(displayed: .whenEditing)] : []
+        }
         let folderReg = UICollectionView.CellRegistration<FolderCell, String> { [weak self] cell, _, id in
             guard let vm = self?.folders[id] else { return }
             cell.configure(vm)
@@ -95,6 +113,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { [weak self] cv, path, item in
             switch item {
             case let .session(id): cv.dequeueConfiguredReusableCell(using: sessionReg, for: path, item: id)
+            case let .draft(id): cv.dequeueConfiguredReusableCell(using: draftReg, for: path, item: id)
             case let .folder(id): cv.dequeueConfiguredReusableCell(using: folderReg, for: path, item: id)
             case let .header(id) where self?.collapsible == true: cv.dequeueConfiguredReusableCell(using: sectionReg, for: path, item: id)
             case let .header(id): cv.dequeueConfiguredReusableCell(using: headerReg, for: path, item: id)
@@ -124,12 +143,42 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     /// Subclasses build their sections from the app model.
     func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] { [] }
 
+    /// Prompt drafts, listed first (none by default).
+    func buildDrafts() -> [DraftRowVM] { [] }
+    /// The drafts section's header (nil: no header).
+    var draftsHeader: String? { nil }
+
     func reload(animated: Bool) {
         let sections = buildSections()
         var snapshot = NSDiffableDataSourceSnapshot<String, Item>()
         var nextSessions: [String: SessionRowVM] = [:]
         var nextFolders: [String: FolderRowVM] = [:]
+        var nextDrafts: [String: DraftRowVM] = [:]
         var changed: [Item] = []
+        let drafts = buildDrafts()
+        if !drafts.isEmpty {
+            let id = "drafts"
+            snapshot.appendSections([id])
+            var items: [Item] = []
+            var folded = false
+            if let header = draftsHeader {
+                headers[id] = header
+                items.append(.header(id))
+                if collapsible {
+                    let state = SectionHeaderCell.State(id: id, title: header, count: drafts.count, collapsed: collapsed.contains(id), live: nil)
+                    if let old = headerStates[id], old != state { changed.append(.header(id)) }
+                    headerStates[id] = state
+                    folded = state.collapsed
+                }
+            }
+            for d in drafts where nextDrafts[d.id] == nil {
+                if let old = draftRows[d.id], old != d { changed.append(.draft(d.id)) }
+                nextDrafts[d.id] = d
+                if !folded { items.append(.draft(d.id)) }
+            }
+            snapshot.appendItems(items, toSection: id)
+        }
+        draftRows = nextDrafts
         for s in sections {
             snapshot.appendSections([s.id])
             var items: [Item] = []
@@ -185,6 +234,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         switch dataSource.itemIdentifier(for: indexPath) {
         case let .session(id):
             openSession(id)
+        case let .draft(id):
+            openDraft(id)
         case let .folder(id):
             openFolder(id)
         case let .header(id) where collapsible:
@@ -226,6 +277,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         navigationController?.pushViewController(session, animated: true)
     }
 
+    /// The draft's new-session page: a sheet on iPhone, the main column on iPad.
+    func openDraft(_ id: String) {
+        router?.openDraft(id)
+    }
+
     func openFolder(_ id: String) {
         guard let f = folders[id] ?? app.frontPage.folders.first(where: { $0.id == id }) else { return }
         navigationController?.pushViewController(FolderViewController(app: app, folder: f), animated: true)
@@ -249,7 +305,20 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         return UISwipeActionsConfiguration(actions: [pin])
     }
 
+    private func draftId(_ path: IndexPath) -> String? {
+        if case let .draft(id) = dataSource.itemIdentifier(for: path) { return id }
+        return nil
+    }
+
     private func trailingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
+        if let id = draftId(path) {
+            let discard = UIContextualAction(style: .destructive, title: "Discard") { [weak self] _, _, done in
+                self?.app.discardDraft(id)
+                done(true)
+            }
+            discard.image = UIImage(systemName: "trash.fill")
+            return UISwipeActionsConfiguration(actions: [discard])
+        }
         guard let id = sessionId(path) else { return nil }
         if archivedRows {
             let restore = UIContextualAction(style: .normal, title: "Unarchive") { [weak self] _, _, done in
@@ -279,6 +348,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         if let path = indexPaths.first, case let .header(id) = dataSource.itemIdentifier(for: path), let menu = headerMenu(id) {
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
         }
+        if let path = indexPaths.first, let id = draftId(path) {
+            return UIContextMenuConfiguration(identifier: id as NSString, previewProvider: nil) { [weak self] _ in
+                self?.draftMenu(id)
+            }
+        }
         guard let path = indexPaths.first, let id = sessionId(path), let vm = sessions[id] else { return nil }
         return UIContextMenuConfiguration(identifier: id as NSString, previewProvider: nil) { [weak self] _ in
             guard let self else { return nil }
@@ -295,6 +369,28 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in self.app.archive(id) },
             ])
         }
+    }
+
+    /// Open, reorder at the ends (drag lives in the Drafts page), discard.
+    func draftMenu(_ id: String) -> UIMenu {
+        let ids = app.drafts.map(\.id)
+        let others = ids.filter { $0 != id }
+        var order: [UIMenuElement] = []
+        if ids.first != id {
+            order.append(UIAction(title: "Move to Top", image: UIImage(systemName: "arrow.up.to.line")) { [weak self] _ in
+                self?.app.moveDraft(id, after: nil, before: others.first)
+            })
+        }
+        if ids.last != id {
+            order.append(UIAction(title: "Move to Bottom", image: UIImage(systemName: "arrow.down.to.line")) { [weak self] _ in
+                self?.app.moveDraft(id, after: others.last, before: nil)
+            })
+        }
+        return UIMenu(children: [
+            UIAction(title: "Open", image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in self?.openDraft(id) },
+            UIMenu(options: .displayInline, children: order),
+            UIAction(title: "Discard", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in self?.app.discardDraft(id) },
+        ])
     }
 
     func moveMenu(_ id: String) -> UIMenu {
@@ -476,6 +572,13 @@ class SessionsViewController: SessionListController {
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu())
     }
 
+    /// Drafts above Pinned, like the desktop sidebar (not while searching).
+    override func buildDrafts() -> [DraftRowVM] {
+        query.trimmingCharacters(in: .whitespaces).isEmpty ? app.drafts : []
+    }
+
+    override var draftsHeader: String? { "Drafts" }
+
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
         if !query.trimmingCharacters(in: .whitespaces).isEmpty {
             return [("results", nil, [], app.search(query))]
@@ -517,6 +620,16 @@ class SessionsViewController: SessionListController {
 
     override func headerMenu(_ id: String) -> UIMenu? {
         if id == "recent" { return nil }
+        if id == "drafts" {
+            let open = { [weak self] in
+                guard let self else { return }
+                self.navigationController?.pushViewController(DraftsViewController(app: self.app), animated: true)
+            }
+            return UIMenu(children: [
+                UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { _ in open() },
+                UIAction(title: "Reorder…", image: UIImage(systemName: "arrow.up.arrow.down")) { _ in open() },
+            ])
+        }
         guard let folder = app.frontPage.folders.first(where: { $0.id == id }) else { return nil }
         let open = UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { [weak self] _ in self?.openFolder(id) }
         if id == "pinned" {
@@ -551,6 +664,7 @@ class SessionsViewController: SessionListController {
             UIAction(title: "Collapse All", image: UIImage(systemName: "rectangle.compress.vertical")) { [weak self] _ in
                 guard let self else { return }
                 var ids = self.app.frontPage.folders.map(\.id)
+                if !self.app.drafts.isEmpty { ids.insert("drafts", at: 0) }
                 if self.app.groupByProject { ids += self.app.frontPage.projectGroups.map(\.id) }
                 for id in ids where !self.collapsed.contains(id) { self.toggleSection(id) }
             },
@@ -645,6 +759,52 @@ final class FolderViewController: SessionListController {
         // iPad presents action sheets as popovers: anchor it to the ⋯ button.
         alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
         present(alert, animated: true)
+    }
+}
+
+/// Every prompt draft in its shared order; Edit drags to reorder (synced to
+/// desktop, like Pinned).
+final class DraftsViewController: SessionListController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Drafts"
+        navigationItem.largeTitleDisplayMode = .always
+        navigationItem.rightBarButtonItem = editButtonItem
+        reorderable = true
+        reload(animated: false)
+        dataSource.reorderingHandlers.canReorderItem = { item in
+            if case .draft = item { return true }
+            return false
+        }
+        dataSource.reorderingHandlers.didReorder = { [weak self] tx in self?.draftsReordered(tx) }
+    }
+
+    override func setEditing(_ editing: Bool, animated: Bool) {
+        super.setEditing(editing, animated: animated)
+        collectionView.isEditing = editing
+    }
+
+    override func buildDrafts() -> [DraftRowVM] { app.drafts }
+
+    override func reload(animated: Bool) {
+        super.reload(animated: animated)
+        // The last one sent or discarded: nothing left to show here.
+        if app.drafts.isEmpty, view.window != nil, navigationController?.topViewController === self {
+            navigationController?.popViewController(animated: true)
+        }
+    }
+
+    private func draftsReordered(_ tx: NSDiffableDataSourceTransaction<String, Item>) {
+        let ids = tx.finalSnapshot.itemIdentifiers.compactMap { item -> String? in
+            if case let .draft(id) = item { return id }
+            return nil
+        }
+        for change in tx.difference.insertions {
+            guard case let .insert(offset, item, _) = change, case let .draft(id) = item else { continue }
+            let after = offset > 0 ? ids[offset - 1] : nil
+            let before = offset + 1 < ids.count ? ids[offset + 1] : nil
+            app.moveDraft(id, after: after, before: before)
+        }
     }
 }
 

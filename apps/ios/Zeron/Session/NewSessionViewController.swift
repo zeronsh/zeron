@@ -43,9 +43,41 @@ struct ModelChoice: Equatable {
     let efforts: [String]
 }
 
+extension NewSessionDraft {
+    /// A listed draft's destination and run options (before its content loads).
+    init(row: DraftRow, fallback: NewSessionDraft) {
+        self.init()
+        projectId = row.spaceId
+        hostId = row.spaceId == nil ? row.deviceId : nil
+        branch = row.branch
+        worktree = row.newWorktree
+        harness = row.harness ?? fallback.harness
+        model = row.model
+        effort = row.reasoning
+    }
+
+    /// A prompt draft's destination and run options.
+    init(target t: DraftTarget, fallback: NewSessionDraft) {
+        self.init()
+        projectId = t.spaceId
+        // Projectless (or a project removed since): its host.
+        hostId = t.spaceId == nil ? t.deviceId : nil
+        branch = t.branch
+        worktree = t.newWorktree
+        harness = t.config?.harness ?? fallback.harness
+        model = t.config?.model
+        effort = t.config?.reasoning
+    }
+}
+
 /// "Ask anything" → a composer-first canvas. Context is set with native menus
 /// (project, branch/worktree, model, effort) that load lazily; the composer is
 /// focused immediately so the common case is: tap, type, send.
+///
+/// The page is a prompt draft (docs/prompt-drafts.md): every change autosaves
+/// through the core; leaving it unsent lists it under Drafts on every device,
+/// and the next New Session starts empty. Opening a draft brings back its
+/// text, images and options.
 final class NewSessionViewController: UIViewController, UIGestureRecognizerDelegate {
     private let app: AppModel
     private let onCreated: (String, DraftHandoff?) -> Void
@@ -62,47 +94,91 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
+        saveTimer?.invalidate()
     }
     /// Take the keyboard on appearing. The sheet always does; the iPad column
     /// only when opened on purpose (not the launch page).
     var focusOnAppear: Bool
 
-    init(app: AppModel, prompt: String?, embedded: Bool = false, onCreated: @escaping (String, DraftHandoff?) -> Void) {
+    /// This page's prompt-draft identity.
+    private struct Canvas {
+        var id = UUID().uuidString.lowercased()
+        var revision: String?
+        var baseRevision: String?
+        var createdAt = Int64(Date().timeIntervalSince1970 * 1000)
+        /// Still the open canvas: saved, not listed.
+        var deferred = true
+        var savedDeferred = true
+        /// Listed (here or elsewhere): sending reserves it first, since
+        /// another device may send it too.
+        var listed = false
+        /// A send attempt reserved `revision`: an edit forks a new draft.
+        var reserved = false
+        /// What the saved revision holds.
+        var saved: Content?
+    }
+
+    private struct Content: Equatable {
+        var text: String
+        var images: [String]
+        var options: NewSessionDraft
+    }
+
+    private var canvas = Canvas()
+    /// The draft being reopened, until its content is loaded.
+    private var restoring: DraftRow?
+    /// Opened from Drafts: its options don't become the next page's defaults.
+    private var reopened = false
+    /// Desktop attachments the phone can't stage (non-image files), kept
+    /// with the draft and sent with it.
+    private var keptFiles: [DraftFile] = []
+    /// Desktop Appshot context of restored images, kept across saves.
+    private var appshots: [String: String] = [:]
+    private var saveTimer: Timer?
+    /// Reserving a listed draft before sending it.
+    private var sending = false
+
+    var draftId: String { canvas.id }
+
+    init(app: AppModel, prompt: String?, restoring row: DraftRow? = nil, embedded: Bool = false, onCreated: @escaping (String, DraftHandoff?) -> Void) {
         self.app = app
         self.embedded = embedded
         self.focusOnAppear = !embedded
         self.onCreated = onCreated
         self.draft = app.lastDraft
         super.init(nibName: nil, bundle: nil)
-        // Pick up where the page was left (closed without sending).
-        composer.text = prompt ?? app.newSessionText
-        composer.images = app.newSessionImages
+        if let row {
+            restoring = row
+            reopened = true
+            canvas = Canvas(id: row.id, revision: row.revision, baseRevision: row.baseRevision, createdAt: row.createdAtMs, deferred: false, savedDeferred: false, listed: true)
+            draft = NewSessionDraft(row: row, fallback: app.lastDraft)
+        } else if let prompt {
+            composer.text = prompt
+        }
     }
 
     /// A session was created from this page: nothing to keep.
     private var created = false
 
     /// Closed (swipe down, ✕, or replaced in the iPad column) without
-    /// sending: keep what was typed and picked for next time.
-    private func rememberDraft() {
-        guard !created else { return }
-        app.lastDraft = draft
-        app.newSessionText = composer.text
-        app.newSessionImages = composer.images
-    }
-
+    /// sending: the options seed the next page; the text lists as a draft.
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        rememberDraft()
+        guard !created else { return }
+        if !reopened { app.lastDraft = draft }
+        saveDraft(listing: true)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        // The app can be killed in the background: keep the draft first.
+        // The app can be killed in the background: save the draft first (a
+        // page the app dies on lists at the next launch).
         backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.rememberDraft()
+            guard let self, !self.created else { return }
+            if !self.reopened { self.app.lastDraft = self.draft }
+            self.saveDraft(listing: false)
         }
         // Tapping the canvas puts the keyboard away (the card stays open here).
         let dismissTap = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard))
@@ -146,8 +222,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
         }
         composer.onSend = { [weak self] text, images, _ in
-            self?.create(text: text, images: images) ?? false ? .sent : .kept
+            self?.send(text: text, images: images) ?? .kept
         }
+        composer.onEdit = { [weak self] in self?.scheduleSave() }
         view.addSubview(composer)
         heroStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24).isActive = true
         // The headline lives in the free space above the composer — from the
@@ -174,12 +251,127 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             fill,
             composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
         ])
+        // A draft's project removed since: run where it was meant to.
+        if let id = draft.projectId, !app.projectOptions.contains(where: { $0.id == id }), let row = restoring {
+            draft.projectId = nil
+            draft.hostId = row.deviceId
+        }
         if draft.projectId == nil, draft.hostId == nil { draft.projectId = app.projectOptions.first?.id }
         if draft.projectId == nil, draft.hostId == nil {
             // No projects yet: run on the first reachable host.
             draft.hostId = app.hostOptions.first(where: \.online)?.id ?? app.hostOptions.first?.id
         }
         loadModels()
+        if let row = restoring { load(row) }
+    }
+
+    // MARK: Prompt draft
+
+    /// Bring a draft's text and images back; the page stays read-only until
+    /// they're in (an edit before that would fork from nothing).
+    private func load(_ row: DraftRow) {
+        composer.textView.isEditable = false
+        composer.alpha = 0.5
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let loaded = try await self.app.loadDraft(revision: row.revision)
+                var images: [StagedImage] = []
+                for file in loaded.files {
+                    if let image = UIImage(data: file.data) {
+                        images.append(StagedImage(id: file.id, name: file.name, data: file.data, thumbnail: image.preparingThumbnail(of: CGSize(width: 180, height: 180)) ?? image))
+                        if let json = file.appshotJson { self.appshots[file.id] = json }
+                    } else {
+                        self.keptFiles.append(file)
+                    }
+                }
+                self.draft = NewSessionDraft(target: loaded.target, fallback: self.draft)
+                if let id = self.draft.projectId, !self.app.projectOptions.contains(where: { $0.id == id }) {
+                    self.draft.projectId = nil
+                    self.draft.hostId = loaded.target.deviceId
+                }
+                self.composer.text = loaded.prompt
+                self.composer.images = images
+                self.restoring = nil
+                self.canvas.saved = self.content
+                self.loadModels()
+            } catch {
+                self.restoring = nil
+                self.canvas = Canvas()
+                let alert = UIAlertController(title: "Couldn't open the draft", message: "It may have been sent or discarded on another device, or it hasn't reached this one yet.", preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
+            }
+            self.composer.textView.isEditable = true
+            self.composer.alpha = 1
+        }
+    }
+
+    private var content: Content {
+        Content(text: composer.text, images: composer.images.map(\.id), options: draft)
+    }
+
+    /// Autosave a moment after the last change.
+    private func scheduleSave() {
+        guard restoring == nil, !created else { return }
+        saveTimer?.invalidate()
+        saveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            self?.saveDraft(listing: false)
+        }
+    }
+
+    private var target: DraftTarget {
+        let project = self.project
+        return DraftTarget(
+            deviceId: deviceId,
+            spaceId: project?.id,
+            projectName: project?.groupName,
+            config: ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite),
+            branch: draft.branch,
+            newWorktree: draft.worktree
+        )
+    }
+
+    /// Save what's on the page. `listing`: the page is being left, so the
+    /// draft joins the Drafts list (for good: a later save can't hide it).
+    /// Emptied, a saved draft is discarded.
+    @discardableResult
+    private func saveDraft(listing: Bool) -> Bool {
+        saveTimer?.invalidate()
+        guard restoring == nil, !created, !deviceId.isEmpty else { return false }
+        let now = content
+        if now.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, now.images.isEmpty, keptFiles.isEmpty {
+            if canvas.revision != nil {
+                app.discardDraft(canvas.id)
+                canvas = Canvas()
+            }
+            app.openCanvas = nil
+            return false
+        }
+        let changed = now != canvas.saved
+        if changed, canvas.reserved {
+            // The reserved revision belongs to its send attempt.
+            canvas = Canvas()
+        }
+        if listing { canvas.deferred = false }
+        guard changed || canvas.deferred != canvas.savedDeferred else { return true }
+        let revision = changed || canvas.revision == nil ? UUID().uuidString.lowercased() : canvas.revision!
+        let base = changed ? canvas.revision : canvas.baseRevision
+        let files = composer.images.map { DraftFile(id: $0.id, name: $0.name, data: $0.data, appshotJson: appshots[$0.id]) } + keptFiles
+        let edit = DraftEdit(id: canvas.id, revision: revision, baseRevision: base, createdAtMs: canvas.createdAt, deferred: canvas.deferred, prompt: now.text, target: target, files: files)
+        do {
+            try app.saveDraft(edit)
+        } catch {
+            NSLog("draft save failed: \(error)")
+            return false
+        }
+        canvas.revision = revision
+        canvas.baseRevision = base
+        canvas.saved = now
+        canvas.savedDeferred = canvas.deferred
+        canvas.listed = canvas.listed || !canvas.deferred
+        app.openCanvas = canvas.deferred ? AppModel.OpenCanvas(id: canvas.id, revision: revision, baseRevision: base, createdAt: canvas.createdAt) : nil
+        return true
     }
 
     /// The last catalog each host reported, so the chip opens on a real model
@@ -267,6 +459,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
         }
         composer.chips = chips
+        // Picking options is an edit too.
+        scheduleSave()
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
             "host": { [weak self] in self?.hostMenu() },
@@ -403,19 +597,61 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         })
     }
 
+    /// Send the page: a draft only this page knows goes at once (offline
+    /// too); a listed one is reserved first, so two devices can't both send
+    /// it. Either way the chat id derives from the draft.
+    private func send(text: String, images: [StagedImage]) -> ComposerBar.SendResult {
+        guard restoring == nil, !sending else { return .kept }
+        if !reopened { app.lastDraft = draft }
+        guard saveDraft(listing: false), let revision = canvas.revision else {
+            return create(text: text, images: images, revision: nil) ? .sent : .kept
+        }
+        guard canvas.listed else {
+            return create(text: text, images: images, revision: revision) ? .sent : .kept
+        }
+        sending = true
+        canvas.reserved = true
+        let id = canvas.id
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.app.claimDraft(id, revision: revision)
+                self.sending = false
+                // Still the same draft (no edit while reserving): send it.
+                guard self.canvas.id == id, self.canvas.revision == revision else { return }
+                if self.create(text: text, images: images, revision: revision) {
+                    self.composer.text = ""
+                    self.composer.images = []
+                }
+            } catch {
+                self.sending = false
+                // A conflict: another device sent this revision first.
+                var alreadySent = false
+                if case CoreError.InvalidArgument = error { alreadySent = true }
+                let alert = UIAlertController(
+                    title: alreadySent ? "Already sent" : "Couldn't send the draft",
+                    message: alreadySent ? "This draft was sent from another device." : "Couldn't reach Zeron to reserve it. Try again when you're online.",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
+            }
+        }
+        return .kept
+    }
+
     /// False when the session couldn't be created (the prompt stays put).
-    private func create(text: String, images: [StagedImage]) -> Bool {
-        app.lastDraft = draft
-        guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
+    private func create(text: String, images: [StagedImage], revision: String?) -> Bool {
+        let source = revision.map { (id: canvas.id, revision: $0) }
+        guard let chatId = app.createSession(draft: draft, text: text, images: images, files: keptFiles, fromDraft: source) else {
             let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
             return false
         }
         created = true
+        saveTimer?.invalidate()
         PushNotifications.shared.askAfterFirstSession()
-        app.newSessionText = ""
-        app.newSessionImages = []
         // Lift the draft out (page + composer + typed text) so the chat can
         // take over in one motion.
         onCreated(chatId, DraftHandoff.capture(from: self, composer: composer, text: text))

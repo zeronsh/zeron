@@ -1035,11 +1035,28 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func childSessions(parentId: String)  -> [SessionRow]
     
     /**
+     * Reserve this exact revision for sending (fails when another device
+     * already sent the draft).
+     */
+    func claimDraft(id: String, revision: String) async throws 
+    
+    /**
      * The view closed; the session stays warm until evicted.
      */
     func closeSession(chatId: String) 
     
     func connectivity()  -> Connectivity
+    
+    /**
+     * The draft became a session: unlist it everywhere.
+     */
+    func consumeDraft(id: String, revision: String) throws 
+    
+    /**
+     * A prompt draft's session: the chat id derives from the draft, so a
+     * retried send reuses it.
+     */
+    func createDraftSession(draftId: String, newSession: NewSession) throws  -> String
     
     /**
      * Create (or find) the project for `path` on `device_id`. Returns its id.
@@ -1071,6 +1088,13 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func devices()  -> [DeviceView]
     
+    func discardDraft(id: String) throws 
+    
+    /**
+     * Listed drafts (also in `workspace().drafts`).
+     */
+    func drafts()  -> [DraftRow]
+    
     /**
      * Devices that can run sessions (new-session / new-project pickers).
      */
@@ -1101,7 +1125,17 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func listRefs(deviceId: String, repoPath: String) async throws  -> [RepoRef]
     
+    /**
+     * A draft's full content (cached objects first, else the edge).
+     */
+    func loadDraft(revision: String) async throws  -> LoadedDraft
+    
     func markSeen(chatId: String) 
+    
+    /**
+     * Reorder between neighbours (either may be `None` at the ends).
+     */
+    func moveDraft(id: String, after: String?, before: String?) throws 
     
     /**
      * Reorder a pin between neighbours (`None` at either end).
@@ -1170,6 +1204,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func renameSection(sectionId: String, name: String) throws 
     
     func renameSession(chatId: String, title: String) throws 
+    
+    /**
+     * Save a canvas locally; it publishes to other devices in the background.
+     */
+    func saveDraft(edit: DraftEdit) throws 
     
     func search(query: String, limit: UInt32)  -> [SearchHit]
     
@@ -1370,6 +1409,26 @@ open func childSessions(parentId: String) -> [SessionRow]  {
 }
     
     /**
+     * Reserve this exact revision for sending (fails when another device
+     * already sent the draft).
+     */
+open func claimDraft(id: String, revision: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_claim_draft(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(id),FfiConverterString.lower(revision)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
      * The view closed; the session stays warm until evicted.
      */
 open func closeSession(chatId: String)  {try! rustCall() {
@@ -1386,6 +1445,34 @@ open func connectivity() -> Connectivity  {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_connectivity(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The draft became a session: unlist it everywhere.
+     */
+open func consumeDraft(id: String, revision: String)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_consume_draft(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(revision),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * A prompt draft's session: the chat id derives from the draft, so a
+     * retried send reuses it.
+     */
+open func createDraftSession(draftId: String, newSession: NewSession)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_create_draft_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(draftId),
+        FfiConverterTypeNewSession_lower(newSession),uniffiCallStatus
     )
 })
 }
@@ -1494,6 +1581,27 @@ open func devices() -> [DeviceView]  {
     return try!  FfiConverterSequenceTypeDeviceView.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_devices(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func discardDraft(id: String)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_discard_draft(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Listed drafts (also in `workspace().drafts`).
+     */
+open func drafts() -> [DraftRow]  {
+    return try!  FfiConverterSequenceTypeDraftRow.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_drafts(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -1608,11 +1716,44 @@ open func listRefs(deviceId: String, repoPath: String)async throws  -> [RepoRef]
         )
 }
     
+    /**
+     * A draft's full content (cached objects first, else the edge).
+     */
+open func loadDraft(revision: String)async throws  -> LoadedDraft  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_load_draft(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(revision)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLoadedDraft_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func markSeen(chatId: String)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_mark_seen(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Reorder between neighbours (either may be `None` at the ends).
+     */
+open func moveDraft(id: String, after: String?, before: String?)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_move_draft(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterOptionString.lower(after),
+        FfiConverterOptionString.lower(before),uniffiCallStatus
     )
 }
 }
@@ -1830,6 +1971,18 @@ open func renameSession(chatId: String, title: String)throws   {try rustCallWith
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),
         FfiConverterString.lower(title),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Save a canvas locally; it publishes to other devices in the background.
+     */
+open func saveDraft(edit: DraftEdit)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_save_draft(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDraftEdit_lower(edit),uniffiCallStatus
     )
 }
 }
@@ -6443,6 +6596,441 @@ public func FfiConverterTypeDeviceView_lower(_ value: DeviceView) -> RustBuffer 
 }
 
 
+/**
+ * One save of a canvas: a new `revision` whenever its content changed.
+ */
+public struct DraftEdit: Equatable, Hashable {
+    public var id: String
+    public var revision: String
+    /**
+     * The revision this one was edited from.
+     */
+    public var baseRevision: String?
+    public var createdAtMs: Int64
+    /**
+     * Still the open canvas: saved, listed only once left.
+     */
+    public var deferred: Bool
+    public var prompt: String
+    public var target: DraftTarget
+    public var files: [DraftFile]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, revision: String, 
+        /**
+         * The revision this one was edited from.
+         */baseRevision: String?, createdAtMs: Int64, 
+        /**
+         * Still the open canvas: saved, listed only once left.
+         */deferred: Bool, prompt: String, target: DraftTarget, files: [DraftFile]) {
+        self.id = id
+        self.revision = revision
+        self.baseRevision = baseRevision
+        self.createdAtMs = createdAtMs
+        self.deferred = deferred
+        self.prompt = prompt
+        self.target = target
+        self.files = files
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DraftEdit: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDraftEdit: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DraftEdit {
+        return
+            try DraftEdit(
+                id: FfiConverterString.read(from: &buf), 
+                revision: FfiConverterString.read(from: &buf), 
+                baseRevision: FfiConverterOptionString.read(from: &buf), 
+                createdAtMs: FfiConverterInt64.read(from: &buf), 
+                deferred: FfiConverterBool.read(from: &buf), 
+                prompt: FfiConverterString.read(from: &buf), 
+                target: FfiConverterTypeDraftTarget.read(from: &buf), 
+                files: FfiConverterSequenceTypeDraftFile.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DraftEdit, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.revision, into: &buf)
+        FfiConverterOptionString.write(value.baseRevision, into: &buf)
+        FfiConverterInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterBool.write(value.deferred, into: &buf)
+        FfiConverterString.write(value.prompt, into: &buf)
+        FfiConverterTypeDraftTarget.write(value.target, into: &buf)
+        FfiConverterSequenceTypeDraftFile.write(value.files, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftEdit_lift(_ buf: RustBuffer) throws -> DraftEdit {
+    return try FfiConverterTypeDraftEdit.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftEdit_lower(_ value: DraftEdit) -> RustBuffer {
+    return FfiConverterTypeDraftEdit.lower(value)
+}
+
+
+/**
+ * One attached file.
+ */
+public struct DraftFile: Equatable, Hashable {
+    /**
+     * Stable across saves (the composer's attachment id).
+     */
+    public var id: String
+    public var name: String
+    public var data: Data
+    /**
+     * Desktop Appshot context (JSON), kept as-is across saves.
+     */
+    public var appshotJson: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stable across saves (the composer's attachment id).
+         */id: String, name: String, data: Data, 
+        /**
+         * Desktop Appshot context (JSON), kept as-is across saves.
+         */appshotJson: String?) {
+        self.id = id
+        self.name = name
+        self.data = data
+        self.appshotJson = appshotJson
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DraftFile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDraftFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DraftFile {
+        return
+            try DraftFile(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                data: FfiConverterData.read(from: &buf), 
+                appshotJson: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DraftFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterData.write(value.data, into: &buf)
+        FfiConverterOptionString.write(value.appshotJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftFile_lift(_ buf: RustBuffer) throws -> DraftFile {
+    return try FfiConverterTypeDraftFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftFile_lower(_ value: DraftFile) -> RustBuffer {
+    return FfiConverterTypeDraftFile.lower(value)
+}
+
+
+/**
+ * An unsent new-session canvas (docs/prompt-drafts.md), as the Drafts
+ * section lists it. Open it with `load_draft(revision)`.
+ */
+public struct DraftRow: Equatable, Hashable {
+    public var id: String
+    public var revision: String
+    public var baseRevision: String?
+    public var createdAtMs: Int64
+    /**
+     * First non-blank prompt line (or "N attachments").
+     */
+    public var preview: String
+    /**
+     * The target project while it exists.
+     */
+    public var project: ProjectRef?
+    /**
+     * Its name even after the project was removed.
+     */
+    public var projectName: String?
+    public var spaceId: String?
+    public var deviceId: String
+    public var deviceName: String?
+    /**
+     * Wire harness id (`claude-code`).
+     */
+    public var harness: String?
+    public var model: String?
+    public var modelLabel: String?
+    /**
+     * Wire effort (`xhigh`).
+     */
+    public var reasoning: String?
+    public var branch: String?
+    public var newWorktree: Bool
+    /**
+     * A concurrent edit from another device, listed beside its sibling.
+     */
+    public var conflict: Bool
+    /**
+     * Saved here, not yet on other devices.
+     */
+    public var pending: Bool
+    /**
+     * `now` / `34m` / `4h` / `2d` of `created_at_ms`.
+     */
+    public var timeLabel: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, revision: String, baseRevision: String?, createdAtMs: Int64, 
+        /**
+         * First non-blank prompt line (or "N attachments").
+         */preview: String, 
+        /**
+         * The target project while it exists.
+         */project: ProjectRef?, 
+        /**
+         * Its name even after the project was removed.
+         */projectName: String?, spaceId: String?, deviceId: String, deviceName: String?, 
+        /**
+         * Wire harness id (`claude-code`).
+         */harness: String?, model: String?, modelLabel: String?, 
+        /**
+         * Wire effort (`xhigh`).
+         */reasoning: String?, branch: String?, newWorktree: Bool, 
+        /**
+         * A concurrent edit from another device, listed beside its sibling.
+         */conflict: Bool, 
+        /**
+         * Saved here, not yet on other devices.
+         */pending: Bool, 
+        /**
+         * `now` / `34m` / `4h` / `2d` of `created_at_ms`.
+         */timeLabel: String) {
+        self.id = id
+        self.revision = revision
+        self.baseRevision = baseRevision
+        self.createdAtMs = createdAtMs
+        self.preview = preview
+        self.project = project
+        self.projectName = projectName
+        self.spaceId = spaceId
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.harness = harness
+        self.model = model
+        self.modelLabel = modelLabel
+        self.reasoning = reasoning
+        self.branch = branch
+        self.newWorktree = newWorktree
+        self.conflict = conflict
+        self.pending = pending
+        self.timeLabel = timeLabel
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DraftRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDraftRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DraftRow {
+        return
+            try DraftRow(
+                id: FfiConverterString.read(from: &buf), 
+                revision: FfiConverterString.read(from: &buf), 
+                baseRevision: FfiConverterOptionString.read(from: &buf), 
+                createdAtMs: FfiConverterInt64.read(from: &buf), 
+                preview: FfiConverterString.read(from: &buf), 
+                project: FfiConverterOptionTypeProjectRef.read(from: &buf), 
+                projectName: FfiConverterOptionString.read(from: &buf), 
+                spaceId: FfiConverterOptionString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                deviceName: FfiConverterOptionString.read(from: &buf), 
+                harness: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                modelLabel: FfiConverterOptionString.read(from: &buf), 
+                reasoning: FfiConverterOptionString.read(from: &buf), 
+                branch: FfiConverterOptionString.read(from: &buf), 
+                newWorktree: FfiConverterBool.read(from: &buf), 
+                conflict: FfiConverterBool.read(from: &buf), 
+                pending: FfiConverterBool.read(from: &buf), 
+                timeLabel: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DraftRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.revision, into: &buf)
+        FfiConverterOptionString.write(value.baseRevision, into: &buf)
+        FfiConverterInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterString.write(value.preview, into: &buf)
+        FfiConverterOptionTypeProjectRef.write(value.project, into: &buf)
+        FfiConverterOptionString.write(value.projectName, into: &buf)
+        FfiConverterOptionString.write(value.spaceId, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterOptionString.write(value.deviceName, into: &buf)
+        FfiConverterOptionString.write(value.harness, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.modelLabel, into: &buf)
+        FfiConverterOptionString.write(value.reasoning, into: &buf)
+        FfiConverterOptionString.write(value.branch, into: &buf)
+        FfiConverterBool.write(value.newWorktree, into: &buf)
+        FfiConverterBool.write(value.conflict, into: &buf)
+        FfiConverterBool.write(value.pending, into: &buf)
+        FfiConverterString.write(value.timeLabel, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftRow_lift(_ buf: RustBuffer) throws -> DraftRow {
+    return try FfiConverterTypeDraftRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftRow_lower(_ value: DraftRow) -> RustBuffer {
+    return FfiConverterTypeDraftRow.lower(value)
+}
+
+
+/**
+ * Where a draft will run, and how.
+ */
+public struct DraftTarget: Equatable, Hashable {
+    /**
+     * The host (a project's device, or a projectless session's).
+     */
+    public var deviceId: String
+    public var spaceId: String?
+    /**
+     * The project's name when saved (survives its removal).
+     */
+    public var projectName: String?
+    public var config: ChatConfig?
+    /**
+     * Picked ref (the worktree's base with `new_worktree`).
+     */
+    public var branch: String?
+    public var newWorktree: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The host (a project's device, or a projectless session's).
+         */deviceId: String, spaceId: String?, 
+        /**
+         * The project's name when saved (survives its removal).
+         */projectName: String?, config: ChatConfig?, 
+        /**
+         * Picked ref (the worktree's base with `new_worktree`).
+         */branch: String?, newWorktree: Bool) {
+        self.deviceId = deviceId
+        self.spaceId = spaceId
+        self.projectName = projectName
+        self.config = config
+        self.branch = branch
+        self.newWorktree = newWorktree
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DraftTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDraftTarget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DraftTarget {
+        return
+            try DraftTarget(
+                deviceId: FfiConverterString.read(from: &buf), 
+                spaceId: FfiConverterOptionString.read(from: &buf), 
+                projectName: FfiConverterOptionString.read(from: &buf), 
+                config: FfiConverterOptionTypeChatConfig.read(from: &buf), 
+                branch: FfiConverterOptionString.read(from: &buf), 
+                newWorktree: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DraftTarget, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterOptionString.write(value.spaceId, into: &buf)
+        FfiConverterOptionString.write(value.projectName, into: &buf)
+        FfiConverterOptionTypeChatConfig.write(value.config, into: &buf)
+        FfiConverterOptionString.write(value.branch, into: &buf)
+        FfiConverterBool.write(value.newWorktree, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftTarget_lift(_ buf: RustBuffer) throws -> DraftTarget {
+    return try FfiConverterTypeDraftTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDraftTarget_lower(_ value: DraftTarget) -> RustBuffer {
+    return FfiConverterTypeDraftTarget.lower(value)
+}
+
+
 public struct FaceData: Equatable, Hashable {
     public var role: FaceRole
     public var bytes: Data
@@ -7352,6 +7940,67 @@ public func FfiConverterTypeLiveStatus_lift(_ buf: RustBuffer) throws -> LiveSta
 #endif
 public func FfiConverterTypeLiveStatus_lower(_ value: LiveStatus) -> RustBuffer {
     return FfiConverterTypeLiveStatus.lower(value)
+}
+
+
+/**
+ * A draft's full content.
+ */
+public struct LoadedDraft: Equatable, Hashable {
+    public var prompt: String
+    public var target: DraftTarget
+    public var files: [DraftFile]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(prompt: String, target: DraftTarget, files: [DraftFile]) {
+        self.prompt = prompt
+        self.target = target
+        self.files = files
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LoadedDraft: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLoadedDraft: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LoadedDraft {
+        return
+            try LoadedDraft(
+                prompt: FfiConverterString.read(from: &buf), 
+                target: FfiConverterTypeDraftTarget.read(from: &buf), 
+                files: FfiConverterSequenceTypeDraftFile.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LoadedDraft, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.prompt, into: &buf)
+        FfiConverterTypeDraftTarget.write(value.target, into: &buf)
+        FfiConverterSequenceTypeDraftFile.write(value.files, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLoadedDraft_lift(_ buf: RustBuffer) throws -> LoadedDraft {
+    return try FfiConverterTypeLoadedDraft.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLoadedDraft_lower(_ value: LoadedDraft) -> RustBuffer {
+    return FfiConverterTypeLoadedDraft.lower(value)
 }
 
 
@@ -10580,6 +11229,10 @@ public struct WorkspaceSnapshot: Equatable, Hashable {
     public var pullRequests: PullRequestGroups
     public var archived: [SessionRow]
     public var devices: [DeviceView]
+    /**
+     * Prompt drafts, in their shared manual order (above Pinned).
+     */
+    public var drafts: [DraftRow]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10595,7 +11248,10 @@ public struct WorkspaceSnapshot: Equatable, Hashable {
          */projects: [ProjectView], 
         /**
          * Active sessions without a project.
-         */projectless: [SessionRow], pullRequests: PullRequestGroups, archived: [SessionRow], devices: [DeviceView]) {
+         */projectless: [SessionRow], pullRequests: PullRequestGroups, archived: [SessionRow], devices: [DeviceView], 
+        /**
+         * Prompt drafts, in their shared manual order (above Pinned).
+         */drafts: [DraftRow]) {
         self.revision = revision
         self.computedAtMs = computedAtMs
         self.pinsReady = pinsReady
@@ -10606,6 +11262,7 @@ public struct WorkspaceSnapshot: Equatable, Hashable {
         self.pullRequests = pullRequests
         self.archived = archived
         self.devices = devices
+        self.drafts = drafts
     }
 
     
@@ -10633,7 +11290,8 @@ public struct FfiConverterTypeWorkspaceSnapshot: FfiConverterRustBuffer {
                 projectless: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
                 pullRequests: FfiConverterTypePullRequestGroups.read(from: &buf), 
                 archived: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
-                devices: FfiConverterSequenceTypeDeviceView.read(from: &buf)
+                devices: FfiConverterSequenceTypeDeviceView.read(from: &buf), 
+                drafts: FfiConverterSequenceTypeDraftRow.read(from: &buf)
         )
     }
 
@@ -10648,6 +11306,7 @@ public struct FfiConverterTypeWorkspaceSnapshot: FfiConverterRustBuffer {
         FfiConverterTypePullRequestGroups.write(value.pullRequests, into: &buf)
         FfiConverterSequenceTypeSessionRow.write(value.archived, into: &buf)
         FfiConverterSequenceTypeDeviceView.write(value.devices, into: &buf)
+        FfiConverterSequenceTypeDraftRow.write(value.drafts, into: &buf)
     }
 }
 
@@ -15802,6 +16461,56 @@ fileprivate struct FfiConverterSequenceTypeDeviceView: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDraftFile: FfiConverterRustBuffer {
+    typealias SwiftType = [DraftFile]
+
+    public static func write(_ value: [DraftFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDraftFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DraftFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DraftFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDraftFile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeDraftRow: FfiConverterRustBuffer {
+    typealias SwiftType = [DraftRow]
+
+    public static func write(_ value: [DraftRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDraftRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DraftRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DraftRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDraftRow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFaceData: FfiConverterRustBuffer {
     typealias SwiftType = [FaceData]
 
@@ -17020,10 +17729,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_child_sessions() != 10159) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_claim_draft() != 38922) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_close_session() != 11270) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_connectivity() != 51284) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_consume_draft() != 55409) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_create_draft_session() != 30595) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_create_project() != 59427) {
@@ -17053,6 +17771,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_devices() != 57985) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_discard_draft() != 25790) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_drafts() != 65148) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_execution_devices() != 15578) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17074,7 +17798,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_refs() != 27606) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_load_draft() != 2159) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_mark_seen() != 64234) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_move_draft() != 18496) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_move_pin() != 26081) {
@@ -17129,6 +17859,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_rename_session() != 49666) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_save_draft() != 16849) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_search() != 33140) {

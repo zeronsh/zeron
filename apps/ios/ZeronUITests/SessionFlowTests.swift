@@ -385,9 +385,10 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertFalse(chip.label.contains("Claude Code"), "chip shows a model, got \(chip.label)")
     }
 
-    /// Closing the new-session page keeps what was typed and the options
-    /// picked; sending clears the text for next time.
-    func testNewSessionRemembersDraftWhenClosed() {
+    /// Closing the new-session page unsent lists it under Drafts (the next
+    /// page starts empty, with the options picked); opening the draft brings
+    /// the text back, and sending it takes it off the list.
+    func testClosedNewSessionBecomesADraft() {
         let app = launch()
         let accessory = app.buttons["new-session"]
         XCTAssertTrue(accessory.waitForExistence(timeout: 10))
@@ -406,19 +407,54 @@ final class SessionFlowTests: XCTestCase {
         top.press(forDuration: 0.05, thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
         XCTAssertTrue(input.waitForNonExistence(timeout: 5), "sheet dismissed")
 
+        let draft = app.cells.matching(NSPredicate(format: "label CONTAINS 'Half-written idea'")).firstMatch
+        XCTAssertTrue(draft.waitForExistence(timeout: 5), "listed under Drafts")
+        snapshot(app, "draft-listed")
+
         accessory.tap()
         XCTAssertTrue(input.waitForExistence(timeout: 5))
-        XCTAssertEqual(input.value as? String, "Half-written idea", "typed text comes back")
+        XCTAssertNotEqual(input.value as? String, "Half-written idea", "a new page starts empty")
         XCTAssertTrue(app.buttons["composer-chip-effort"].label.contains("Low"), "picked effort comes back")
+        app.navigationBars["New Session"].buttons["Close"].tap()
+        XCTAssertTrue(input.waitForNonExistence(timeout: 5))
 
-        // Sending uses it up: the next page starts empty.
+        draft.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        // Its content loads asynchronously.
+        let restored = expectation(for: NSPredicate(format: "value == %@", "Half-written idea"), evaluatedWith: input)
+        XCTAssertEqual(XCTWaiter().wait(for: [restored], timeout: 5), .completed, "the draft's text comes back")
         app.buttons["composer-send"].tap()
         XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(accessory.waitForExistence(timeout: 5))
-        accessory.tap()
+        XCTAssertFalse(draft.exists, "sent: off the list")
+    }
+
+    /// The demo's drafts list above Pinned: one opens with its prompt, and a
+    /// swipe discards another.
+    func testDemoDraftsOpenAndDiscard() {
+        let app = launch()
+        let section = app.cells["section-drafts"]
+        XCTAssertTrue(section.waitForExistence(timeout: 10))
+        let sidebar = app.cells["draft-demo-draft-sidebar"]
+        XCTAssertTrue(sidebar.exists)
+        XCTAssertTrue(app.cells["draft-demo-draft-haptics-2"].exists, "a concurrent edit lists as its own draft")
+        snapshot(app, "drafts-section")
+
+        sidebar.tap()
+        let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5))
-        XCTAssertNotEqual(input.value as? String, "Half-written idea")
+        let restored = expectation(for: NSPredicate(format: "value BEGINSWITH %@", "Match the desktop Drafts section"), evaluatedWith: input)
+        XCTAssertEqual(XCTWaiter().wait(for: [restored], timeout: 5), .completed, "the draft's prompt")
+        snapshot(app, "draft-opened")
+        app.navigationBars["New Session"].buttons["Close"].tap()
+        XCTAssertTrue(input.waitForNonExistence(timeout: 5))
+
+        let notes = app.cells["draft-demo-draft-notes"]
+        XCTAssertTrue(notes.waitForExistence(timeout: 5))
+        notes.swipeLeft()
+        app.buttons["Discard"].tap()
+        XCTAssertTrue(notes.waitForNonExistence(timeout: 5))
     }
 
     func testEffortPickerInNewSession() {
