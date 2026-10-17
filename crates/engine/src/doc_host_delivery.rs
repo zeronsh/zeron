@@ -242,13 +242,18 @@ mod tests {
                             break;
                         }
                     }
-                    assert!(
-                        String::from_utf8_lossy(&request).starts_with("POST /device/remote/nudge ")
-                    );
-                    count.fetch_add(1, Ordering::SeqCst);
-                    let response = format!(
-                        "HTTP/1.1 {} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    // The host also pushes chat rows to this edge; only wake
+                    // requests are counted, anything else gets a failure.
+                    let status = if String::from_utf8_lossy(&request)
+                        .starts_with("POST /device/remote/nudge ")
+                    {
+                        count.fetch_add(1, Ordering::SeqCst);
                         code.load(Ordering::SeqCst)
+                    } else {
+                        500
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                 });
@@ -299,8 +304,14 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // The host may queue rows of its own for this chat; only the one
+        // acknowledged above has to be gone.
         assert!(
-            !store.has_pending_chat_updates("outgoing").unwrap(),
+            store
+                .pending_chat_updates("outgoing")
+                .unwrap()
+                .iter()
+                .all(|(batch_id, _)| batch_id != "acked-row"),
             "row delivery and wake delivery are independent"
         );
         host.shutdown_workers().await;
