@@ -999,6 +999,7 @@ pub struct UiSettings {
     /// Most recently displayed sources first; bounded by the shuffle cooldown.
     pub wallpaper_history: Vec<PathBuf>,
     pub wallpaper_theme_colors: bool,
+    pub wallpaper_in_session: bool,
     pub wallpaper_color: Option<zeron_theme::Color>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
@@ -1103,6 +1104,7 @@ impl Default for UiSettings {
             wallpaper_source: None,
             wallpaper_history: Vec::new(),
             wallpaper_theme_colors: false,
+            wallpaper_in_session: false,
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             reduce_motion: crate::motion::ReduceMotion::System,
@@ -1748,6 +1750,7 @@ impl UiSettings {
             wallpaper_source,
             wallpaper_history,
             wallpaper_theme_colors,
+            wallpaper_in_session,
             wallpaper_color,
             new_thread_background_effect,
             reduce_motion,
@@ -2838,6 +2841,7 @@ mod tests {
             wallpaper_source: Some("/tmp/wallpapers/background.png".into()),
             wallpaper_history: vec!["/tmp/wallpapers/background.png".into()],
             wallpaper_theme_colors: false,
+            wallpaper_in_session: false,
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             reduce_motion: crate::motion::ReduceMotion::On,

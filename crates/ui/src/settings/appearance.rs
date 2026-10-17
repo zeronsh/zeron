@@ -3734,6 +3734,38 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
+        let keep_wallpaper = wallpaper_settings.wallpaper_in_session;
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Show wallpaper in sessions"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div().child("Keep the wallpaper visible during conversations.").into_any_element()],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, keep_wallpaper, "wallpaper-in-session")
+                        .id("wallpaper-in-session-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Show wallpaper in sessions")
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .aria_toggled(if keep_wallpaper { gpui::Toggled::True } else { gpui::Toggled::False })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                                settings.wallpaper_in_session = !keep_wallpaper;
+                            });
+                            cx.refresh_windows();
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
         if background_available {
             use crate::settings::NewThreadBackgroundEffect;
             let effect_control = widgets::select(

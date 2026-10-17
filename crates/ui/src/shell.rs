@@ -11252,13 +11252,15 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
-        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
+        let keep_wallpaper = ui_settings.wallpaper_in_session;
+        let new_thread_background_layer = (!has_selection || dock_frame.active || keep_wallpaper).then(|| {
             if artwork_frame.active {
                 window.request_animation_frame();
             }
             let width = (self.viewport_width - self.sidebar_now()).max(0.0);
             let bounds = self.composer.read(cx).surface_bounds();
             let opacity = new_thread_background_opacity(theme.is_frost());
+            let dissolve = if keep_wallpaper { 0.0 } else { dock_frame.dissolve() };
             div()
                 .absolute()
                 .inset_0()
@@ -11268,7 +11270,7 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds.clone(),
-                    dock_frame.dissolve(),
+                    dissolve,
                     (1.0 - artwork_frame.mix) * opacity,
                 ))
                 .child(new_thread_background(
@@ -11277,7 +11279,7 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds,
-                    dock_frame.dissolve(),
+                    dissolve,
                     artwork_frame.mix * opacity,
                 ))
                 .into_any_element()
