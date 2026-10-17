@@ -19,6 +19,10 @@
 //! through it itself; zeron lists the pool and adds to it through Hermes'
 //! own CLI, but never rewrites it.
 //!
+//! Oh My Pi is not in the table: it keeps its logins in its own `agent.db`
+//! (under `~/.omp/agent`), which zeron neither reads nor switches. Sign in
+//! with `omp login`.
+//!
 //! The original four providers each store exactly one live login:
 //!
 //! - **Claude Code** — credentials in `~/.claude/.credentials.json`
@@ -3101,6 +3105,7 @@ fn harness_slug(harness: HarnessId) -> &'static str {
         HarnessId::Grok => "grok",
         HarnessId::Hermes => "hermes",
         HarnessId::Pi => "pi",
+        HarnessId::Omp => "omp",
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "antigravity",
         HarnessId::Mock => "mock",

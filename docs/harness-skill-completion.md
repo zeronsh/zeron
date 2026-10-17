@@ -37,6 +37,7 @@ Typing an unselected inline `/word` does not execute a local action.
 | Claude Code | Project-scoped commands from its initialize catalog |
 | OpenCode | Project-scoped server command catalog |
 | Pi | Native `get_commands`, including extension commands and `skill:*` invocations |
+| Oh My Pi | Native `get_available_commands` and `available_commands_update`, including extension commands and `skill:*` invocations |
 | Devin, Grok, Hermes, Antigravity | Advertised ACP commands, including session command updates |
 | Cursor | Workspace actions; its SDK adapter has no native command catalog |
 
@@ -69,12 +70,12 @@ Discovery runs on the selected host in the project directory. Codex uses its
 native skill catalog. Other adapters discover standard project and user skill
 directories, including shared `.agents/skills` directories. Claude checks native
 command availability; OpenCode adds skills from its server command catalog.
-ACP adapters bind discovered skills to advertised commands, and Pi also exposes
-advertised `/skill:name` entries without a local file.
+ACP adapters bind discovered skills to advertised commands, and Pi and Oh My Pi also
+expose advertised `/skill:name` entries without a local file.
 Shared `.agents/skills` files use explicit file delivery in Claude and generic ACP
 catalogs: a matching built-in command name does not establish skill identity.
-Pi's `skill:` namespace and OpenCode's skill source metadata identify native skills
-explicitly and remain eligible for native delivery.
+The `skill:` namespace of Pi and Oh My Pi, and OpenCode's skill source metadata,
+identify native skills explicitly and remain eligible for native delivery.
 
 At delivery, Codex receives typed skill inputs. A leading skill selection with a
 native command for the current harness becomes that command, preserving its

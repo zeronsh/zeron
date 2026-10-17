@@ -16,6 +16,17 @@ pub(crate) fn context(
     binary: &Path,
     extra: &[PathBuf],
 ) -> Result<ModelContext, HarnessError> {
+    context_salted(id, binary, extra, &[])
+}
+
+/// `salt` carries harness-derived, non-secret state that lives outside a
+/// hashable file (for example a credential listing inside a database).
+pub(crate) fn context_salted(
+    id: HarnessId,
+    binary: &Path,
+    extra: &[PathBuf],
+    salt: &[u8],
+) -> Result<ModelContext, HarnessError> {
     let home = crate::executable::home_or_current_dir();
     let files = match id {
         HarnessId::Codex => vec![root("CODEX_HOME", home.join(".codex")).join("auth.json")],
@@ -96,6 +107,7 @@ pub(crate) fn context(
         );
     }
     hash_files(&mut hash, files.iter().chain(extra))?;
+    field(&mut hash, salt);
     let prefixes: &[&str] = match id {
         HarnessId::Codex => &["CODEX_", "OPENAI_"],
         HarnessId::ClaudeCode => &["CLAUDE_", "ANTHROPIC_", "AWS_"],
@@ -103,6 +115,7 @@ pub(crate) fn context(
         HarnessId::Grok => &["GROK_", "XAI_"],
         HarnessId::Hermes => &["HERMES_", "OPENAI_", "ANTHROPIC_"],
         HarnessId::Pi => &["PI_", "OPENAI_", "ANTHROPIC_"],
+        HarnessId::Omp => &["PI_", "OMP_", "OPENAI_", "ANTHROPIC_"],
         HarnessId::Devin => &["DEVIN_"],
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
         HarnessId::Cursor => &["CURSOR_"],
