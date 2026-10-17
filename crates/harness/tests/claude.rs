@@ -790,6 +790,64 @@ async fn command_discovery_tracks_project_changes() {
     }
 }
 
+/// A CLI that answers `initialize` and then ignores SIGTERM (live SessionStart
+/// hooks do this) must still return commands without waiting out `kill_grace`.
+#[tokio::test]
+async fn command_discovery_returns_without_waiting_for_a_term_ignoring_cli() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sleep_pid = dir.path().join("sleep.pid");
+    let script = dir.path().join("fake-claude.sh");
+    let body = r#"#!/bin/sh
+trap '' TERM
+read -r line || exit 1
+rid=$(printf '%s\n' "$line" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"'"$rid"'","response":{"commands":[{"name":"review","description":"Review a pull request","argumentHint":"[pr number]"}]}}}'
+sleep 30 &
+echo $! > PIDFILE_PATH
+wait
+"#
+    .replace("PIDFILE_PATH", &format!("\"{}\"", sleep_pid.display()));
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Reap the background sleep if the probe is killed by pid rather than group.
+    struct Reap(std::path::PathBuf);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            if let Ok(text) = std::fs::read_to_string(&self.0)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+    let _reap = Reap(sleep_pid);
+
+    let cwd = tempfile::tempdir().unwrap();
+    // The login-shell PATH snapshot is once per process and can take seconds.
+    // It is not part of probe retirement; pay for it before the clock starts.
+    let _ = zeron_harness::shell_env::login_shell_path();
+    let started = std::time::Instant::now();
+    let commands = ClaudeHarness::new()
+        .with_executable(&script)
+        .commands_for(cwd.path())
+        .await
+        .unwrap_or_else(|error| panic!("discovery failed after {:?}: {error}", started.elapsed()));
+    let elapsed = started.elapsed();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0].name, "review");
+    assert_eq!(commands[0].description, "Review a pull request");
+    assert_eq!(commands[0].input_hint.as_deref(), Some("[pr number]"));
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "command discovery took {elapsed:?}; a TERM-ignoring CLI must be killed immediately"
+    );
+}
+
 #[tokio::test]
 async fn shared_skill_colliding_with_builtin_keeps_file_delivery() {
     use zeron_proto::invocation::{Invocation, harness_prompt};

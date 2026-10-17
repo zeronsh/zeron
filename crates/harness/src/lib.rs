@@ -578,6 +578,27 @@ pub(crate) async fn shutdown_child(child: &mut process::Child, kill_grace: std::
     }
 }
 
+/// Kill and reap a throwaway discovery probe that holds no state worth a
+/// graceful exit. Unix SIGKILLs the child's process group immediately —
+/// hooks spawn grandchildren, so the group matters — and waits. Windows
+/// terminates the owned job.
+pub(crate) async fn kill_child_now(child: &mut process::Child) {
+    #[cfg(windows)]
+    {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return;
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(pid) = process::signal_target(child) {
+            send_signal(&pid, Signal::Kill);
+        }
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Signal {
     Term,

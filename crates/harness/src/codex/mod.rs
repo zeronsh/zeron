@@ -222,7 +222,7 @@ impl CodexHarness {
             }
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            shutdown_child(&mut child, self.kill_grace).await;
+            kill_child_now(&mut child).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
         // The receiver must stay alive for the client's reader loop; agent →
@@ -250,7 +250,7 @@ impl CodexHarness {
             Ok::<Value, HarnessError>(skills)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        kill_child_now(&mut child).await;
         match result {
             Ok(inner) => inner,
             Err(_) => Err(HarnessError::Protocol("command discovery timed out".into())),
@@ -278,7 +278,7 @@ impl CodexHarness {
             }
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            shutdown_child(&mut child, self.kill_grace).await;
+            kill_child_now(&mut child).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
         let (client, _incoming) = RpcClient::new(stdin, stdout);
@@ -347,7 +347,7 @@ impl CodexHarness {
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        kill_child_now(&mut child).await;
         match result {
             Ok(inner) => inner,
             Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
@@ -2237,7 +2237,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
     }
 }
 
-use crate::{Signal, send_signal, shutdown_child};
+use crate::{Signal, kill_child_now, send_signal, shutdown_child};
 
 #[cfg(test)]
 mod tests {
