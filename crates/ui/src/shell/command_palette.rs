@@ -923,13 +923,19 @@ impl Shell {
             Command::ArchiveThread => ShortcutId::ArchiveSession,
             Command::Theme(_) => return None,
         };
+        Some(self.shortcut_badge(id))
+    }
+
+    /// The badge for `id`'s bound combo, falling back to its default when the
+    /// stored combo is unparseable (as `apply_keymap` does when binding).
+    fn shortcut_badge(&self, id: ShortcutId) -> String {
         let combo = self.settings.keymap.get(id);
         let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
-        Some(crate::settings::badge_combo(if valid {
+        crate::settings::badge_combo(if valid {
             combo
         } else {
             id.default_combo()
-        }))
+        })
     }
 
     fn render_palette_row(
@@ -1279,7 +1285,10 @@ impl Shell {
             .child(palette_header(
                 &theme,
                 search.into_any_element(),
-                popover::kbd_hint(&theme, &crate::settings::badge_combo("mod-k")),
+                popover::kbd_hint(
+                    &theme,
+                    &self.shortcut_badge(ShortcutId::ToggleCommandPalette),
+                ),
             ))
             .child(tabs)
             .child(body)
