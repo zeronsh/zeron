@@ -658,6 +658,13 @@ impl PullRequestDetailPage {
             )
     }
 
+    /// The width the hosting pane lays the page out at, until the page has
+    /// measured itself: a new tab's first frame then already has the
+    /// layout its pane width calls for, rather than switching a frame late.
+    pub(crate) fn seed_width(&mut self, width: f32) {
+        self.page_width.get_or_insert(width);
+    }
+
     /// The details are loading, e.g. for the tab's working indicator.
     pub(crate) fn is_loading(&self) -> bool {
         self.loading

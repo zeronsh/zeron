@@ -904,13 +904,6 @@ impl Shell {
             }
             return;
         }
-        let key = self.panel_key(cx);
-        let was_open = self.panels.get(&key).changes_open;
-        let from = self.right_target(cx);
-        self.panels.update(&key, |panel| panel.changes_open = true);
-        if !was_open {
-            self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
-        }
         let owner = (self.active_chat.clone(), self.state.clone());
         self.add_file_surface_at(owner, path, location, window, cx);
     }

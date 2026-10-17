@@ -119,7 +119,11 @@ impl Shell {
     ) -> Option<AnyElement> {
         let page = self.chat_pull_requests.get(&id)?.page.clone();
         let theme = Theme::of(cx).clone();
-        let toolbar = page.update(cx, |page, cx| page.toolbar(cx));
+        let width = self.right_content_width(self.right_target(cx));
+        let toolbar = page.update(cx, |page, cx| {
+            page.seed_width(width);
+            page.toolbar(cx)
+        });
         Some(
             div()
                 .size_full()

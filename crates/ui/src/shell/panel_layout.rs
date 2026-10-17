@@ -2,6 +2,9 @@
 //! share its width, and the motion between arrangements.
 use super::*;
 
+/// The pull request pane's recency key; never a chat id.
+const PULL_REQUEST_PANE_KEY: &str = "\0pull-requests";
+
 /// A panel's content tween for a mask running `from → to`, given the content
 /// width laid out now. Opening from closed lays out at the destination and
 /// closing keeps the current layout, so the mask never reflows what it
@@ -146,6 +149,115 @@ impl Shell {
         self.main_takeover_tween = None;
     }
 
+    /// The route's right column: the chat's surface host, or the pull
+    /// request pane beside the board. Both follow this module's policy, with
+    /// the conversation or the board as the content column beside them.
+    pub(super) fn right_column_open(&self) -> bool {
+        match self.route {
+            Route::Chat => {
+                !self.active_chat.is_empty() && self.panels.get(&self.active_chat).changes_open
+            }
+            Route::PullRequests => self.pull_request_pane_open(),
+            Route::Settings(_) => false,
+        }
+    }
+
+    /// Open and on screen: the window fit is not hiding it.
+    pub(super) fn right_column_shown(&self) -> bool {
+        self.right_column_open() && self.horizontal_fit().right
+    }
+
+    /// Takeover: the right column spends the content column's width.
+    pub(super) fn right_column_expanded(&self) -> bool {
+        match self.route {
+            Route::Chat => self.right_pane_expanded,
+            Route::PullRequests => self.pull_request_pane.expanded,
+            Route::Settings(_) => false,
+        }
+    }
+
+    pub(super) fn set_right_column_expanded(&mut self, expanded: bool) {
+        match self.route {
+            Route::Chat => self.right_pane_expanded = expanded,
+            Route::PullRequests => self.pull_request_pane.expanded = expanded,
+            Route::Settings(_) => {}
+        }
+    }
+
+    /// The right column's share of the content width: the latest split, or
+    /// a dragged divider until the next panel toggle.
+    pub(super) fn right_column_width(&self) -> f32 {
+        match self.route {
+            Route::PullRequests => self.settings.pull_request_pane_width,
+            _ => self.settings.right_pane_width,
+        }
+    }
+
+    pub(super) fn set_right_column_width(&mut self, width: f32) {
+        match self.route {
+            Route::PullRequests => self.settings.pull_request_pane_width = width,
+            _ => self.settings.right_pane_width = width,
+        }
+    }
+
+    /// Whose panel recency the layout reads: the chat's (or the canvas'),
+    /// or the pull request pane's on its route.
+    pub(super) fn layout_key(&self, cx: &App) -> String {
+        match self.route {
+            Route::PullRequests => PULL_REQUEST_PANE_KEY.into(),
+            _ => self.panel_key(cx),
+        }
+    }
+
+    /// Open or close the route's right column from what is painted: the
+    /// column, its content and a takeover's content column ease together on
+    /// one tween, and the remaining columns re-split. `apply` flips the
+    /// route's own open flag (and may enter takeover).
+    pub(super) fn transition_right_column(
+        &mut self,
+        open: bool,
+        apply: impl FnOnce(&mut Self),
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.painted_panels(cx);
+        self.right_edge_bounce = None;
+        self.right_resize_edge = None;
+        self.finish_pane_resize(PaneResizeKind::Right);
+        let sidebar_now = self.sidebar_now();
+        let was_expanded =
+            self.right_column_expanded() || self.tween_active(self.main_takeover_tween);
+        if open {
+            self.record_panel_open(AuxiliaryPanel::Right, &self.layout_key(cx));
+        } else {
+            // Closing always leaves takeover: reopening at full bleed with
+            // the content column gone reads as broken.
+            self.set_right_column_expanded(false);
+        }
+        apply(self);
+        let takeover = was_expanded || self.right_column_expanded();
+        self.resplit_panels(before, Some(AuxiliaryPanel::Right), cx);
+        let to = self.right_settled_target(cx);
+        let pane = self.panel_tween(before.right, to);
+        self.right_tween = Some(pane);
+        let (content_from, content_to) =
+            panel_content_tween(before.right_content, before.right, to);
+        self.right_content_tween = Some(WidthTween {
+            from: content_from,
+            to: content_to,
+            ..pane
+        });
+        // The content column's takeover rides the pane's own tween.
+        self.main_takeover_tween = takeover.then(|| WidthTween {
+            from: before.conversation_content,
+            to: conversation_width(
+                self.viewport_width - self.files_reserved_width(cx),
+                sidebar_now,
+                to,
+            ),
+            ..pane
+        });
+    }
+
     /// Which columns the window has room for this frame. A closing column
     /// keeps its slot until its mask is gone.
     pub(super) fn horizontal_fit(&self) -> HorizontalPanelFit {
@@ -166,7 +278,7 @@ impl Shell {
 
     /// `closing: false` is the fit once every running close has landed.
     fn fit(&self, closing: bool) -> HorizontalPanelFit {
-        if !matches!(self.route, Route::Chat) {
+        if matches!(self.route, Route::Settings(_)) {
             return HorizontalPanelFit {
                 sidebar: !self.settings.sidebar_collapsed,
                 right: false,
@@ -175,7 +287,11 @@ impl Shell {
             };
         }
         let panels = self.panels.get(&self.active_chat);
-        let on_chat = !self.active_chat.is_empty();
+        let on_chat = matches!(self.route, Route::Chat) && !self.active_chat.is_empty();
+        let (has_right, right_opened_at) = match self.route {
+            Route::PullRequests => (true, self.pull_request_pane.opened_at),
+            _ => (on_chat, panels.changes_opened_at),
+        };
         // A closing column keeps its slot while it still paints: one the fit
         // had already hidden closes from zero and claims nothing.
         let present = |open: bool, tween: Option<WidthTween>| {
@@ -190,14 +306,14 @@ impl Shell {
                 self.sidebar_opened_at,
             ),
             (
-                on_chat && present(panels.changes_open, self.right_tween),
-                panels.changes_opened_at,
+                has_right && present(self.right_column_open(), self.right_tween),
+                right_opened_at,
             ),
             (
                 on_chat && present(panels.files_open, self.files_tween),
                 panels.files_opened_at,
             ),
-            self.right_pane_expanded,
+            self.right_column_expanded(),
         );
         let memo = &self.fit_memo[usize::from(closing)];
         if let Some((memo, fit)) = memo.get()
@@ -217,7 +333,7 @@ impl Shell {
     /// slot until their mask is gone, so a returning neighbour never jumps
     /// into their space mid-close.
     pub(super) fn track_horizontal_fit(&mut self, cx: &App) {
-        if !matches!(self.route, Route::Chat) {
+        if matches!(self.route, Route::Settings(_)) {
             self.painted_columns = None;
             return;
         }
@@ -243,11 +359,12 @@ impl Shell {
         }
         if let Some((previous, painted)) = previous.filter(|_| !direct) {
             // Closing columns count too: the fit may hide one mid-close.
-            let panels = self.panels.get(&self.active_chat);
+            let right_open = self.right_column_open();
+            let files_open = self.files_panel_open(cx);
             let open = [
                 !self.settings.sidebar_collapsed || self.tween_active(self.sidebar_tween),
-                panels.changes_open || self.tween_active(self.right_tween),
-                panels.files_open || self.tween_active(self.files_tween),
+                right_open || self.tween_active(self.right_tween),
+                files_open || self.tween_active(self.files_tween),
             ];
             let was = [previous.sidebar, previous.right, previous.files];
             let now = [fit.sidebar, fit.right, fit.files];
@@ -286,13 +403,13 @@ impl Shell {
                     .min(self.sidebar_tween_limit(previous.sidebar_limit));
                 self.sidebar_tween = Some(self.panel_tween(from, fit.sidebar_limit));
             }
-            if fit.right && !previous.right && panels.changes_open && !opening[1] {
+            if fit.right && !previous.right && right_open && !opening[1] {
                 let tween = self.panel_tween(painted[1].0, self.right_settled_target(cx));
                 let (from, to) = panel_content_tween(painted[1].1, tween.from, tween.to);
                 self.right_tween = Some(tween);
                 self.right_content_tween = Some(WidthTween { from, to, ..tween });
             }
-            if fit.files && !previous.files && panels.files_open && !opening[2] {
+            if fit.files && !previous.files && files_open && !opening[2] {
                 let (width, content) = painted[2];
                 self.transition_files(width, content, self.files_settled_width(cx));
             }
@@ -359,20 +476,18 @@ impl Shell {
     /// content columns absorb every change. The share persists with the next
     /// settings save, like a drag. Returns whether the surface host took one.
     fn split_panel_widths(&mut self, cx: &App) -> bool {
-        if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
-            return false;
-        }
         // Split for where the columns will rest, not for a slot a closing
         // column still holds this frame.
         let (fit, sidebar) = self.settled_fit();
-        // Takeover spends the conversation's width on the surface host.
-        let right_open = fit.right && self.right_pane_open(cx) && !self.right_pane_expanded;
+        // Takeover spends the content column's width on the right column.
+        let right_open = fit.right && self.right_column_open() && !self.right_column_expanded();
         if !right_open {
             return false;
         }
         let files = self.files_width_for(fit, sidebar, cx);
-        self.settings.right_pane_width =
-            content_split((self.viewport_width - sidebar - files).max(0.0));
+        self.set_right_column_width(content_split(
+            (self.viewport_width - sidebar - files).max(0.0),
+        ));
         true
     }
 
@@ -447,7 +562,7 @@ impl Shell {
                 let to = self.files_settled_width(cx);
                 self.transition_files(before.files, before.files_content, to);
             }
-            PaneResizeKind::Right | PaneResizeKind::Terminal | PaneResizeKind::PullRequests => {}
+            PaneResizeKind::Right | PaneResizeKind::Terminal => {}
         }
         self.right_edge_bounce = None;
         self.resplit_panels(before, None, cx);
@@ -471,7 +586,7 @@ impl Shell {
             return false;
         }
         let before = self.painted_panels(cx);
-        let key = self.panel_key(cx);
+        let key = self.layout_key(cx);
         let rank = (self.panel_open_sequence, self.panel_opened_at(panel, &key));
         self.record_panel_open(panel, &key);
         if !shown(self.horizontal_fit()) {
@@ -494,6 +609,9 @@ impl Shell {
         let panels = self.panels.get(key);
         match panel {
             AuxiliaryPanel::Sidebar => self.sidebar_opened_at,
+            AuxiliaryPanel::Right if key == PULL_REQUEST_PANE_KEY => {
+                self.pull_request_pane.opened_at
+            }
             AuxiliaryPanel::Right => panels.changes_opened_at,
             AuxiliaryPanel::Files => panels.files_opened_at,
         }
@@ -502,6 +620,9 @@ impl Shell {
     fn set_panel_opened_at(&mut self, panel: AuxiliaryPanel, key: &str, opened_at: u64) {
         match panel {
             AuxiliaryPanel::Sidebar => self.sidebar_opened_at = opened_at,
+            AuxiliaryPanel::Right if key == PULL_REQUEST_PANE_KEY => {
+                self.pull_request_pane.opened_at = opened_at
+            }
             AuxiliaryPanel::Right => self
                 .panels
                 .update(key, |panels| panels.changes_opened_at = opened_at),
@@ -533,7 +654,7 @@ impl Shell {
     }
 
     pub(super) fn main_takeover_active(&self) -> bool {
-        (self.right_pane_expanded && self.horizontal_fit().right)
+        (self.right_column_expanded() && self.horizontal_fit().right)
             || self.tween_active(self.main_takeover_tween)
     }
 
@@ -546,7 +667,7 @@ impl Shell {
             let retained = self
                 .main_takeover_tween
                 .map(|tween| {
-                    if self.right_pane_expanded {
+                    if self.right_column_expanded() {
                         tween.from
                     } else {
                         // Return from the captured width to where the
@@ -564,8 +685,7 @@ impl Shell {
                     // Returning to an expanded chat or resizing clears the tween.
                     // Reconstruct its ordinary conversation geometry, never zero.
                     let right = self
-                        .settings
-                        .right_pane_width
+                        .right_column_width()
                         .min((available - CHAT_PANEL_MIN).max(0.0));
                     (available - right).max(0.0)
                 });
@@ -632,20 +752,21 @@ impl Shell {
             self.clear_panel_transitions();
         }
         self.viewport_width = viewport;
-        // Re-split directly whenever the window changed since the last
-        // split, sub-pixel steps included. Only a shown surface host outside
-        // takeover takes a share, so a chat switch, a visit to Settings or a
-        // relaunch keeps a dragged divider; panel toggles re-split on their
-        // own (see `Self::resplit_panels`).
-        let last = *self.split_viewport.get_or_insert(viewport);
+        // Re-split directly whenever the window changed since the route's
+        // last split, sub-pixel steps included. Only a shown right column
+        // outside takeover takes a share, so a chat switch, a visit to
+        // Settings or a relaunch keeps a dragged divider; panel toggles
+        // re-split on their own (see `Self::resplit_panels`).
+        let slot = match self.route {
+            Route::Chat => 0,
+            Route::PullRequests => 1,
+            Route::Settings(_) => return,
+        };
+        let last = *self.split_viewport[slot].get_or_insert(viewport);
         let (fit, _) = self.settled_fit();
-        if matches!(self.route, Route::Chat)
-            && fit.right
-            && !self.right_pane_expanded
-            && (viewport - last).abs() > 0.01
-        {
+        if fit.right && !self.right_column_expanded() && (viewport - last).abs() > 0.01 {
             self.split_panel_widths(cx);
-            self.split_viewport = Some(viewport);
+            self.split_viewport[slot] = Some(viewport);
         }
     }
 }

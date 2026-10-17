@@ -94,7 +94,7 @@ impl Shell {
                 self.fit_exit_width(1)
                     .map_or(0.0, |width| (width / RIGHT_PANE_MIN).clamp(0.0, 1.0))
             },
-            self.right_pane_expanded && fit.right,
+            self.right_column_expanded() && fit.right,
         )
     }
 
@@ -162,14 +162,14 @@ impl Shell {
         } else {
             0.0
         };
-        let right = fit.right && self.right_pane_open(cx);
+        let right = fit.right && self.right_column_open();
         files_panel_layout(
             self.viewport_width,
             sidebar,
             preferred,
             preferred,
             if right { 1.0 } else { 0.0 },
-            self.right_pane_expanded && right,
+            self.right_column_expanded() && right,
         )
         .width
     }
@@ -373,8 +373,12 @@ impl Shell {
         self.panels.update(&key, |p| p.files_open = true);
         if opening {
             self.record_panel_open(AuxiliaryPanel::Files, &key);
-            self.resplit_panels(before, Some(AuxiliaryPanel::Files), cx);
-            self.transition_files(from, before.files_content, self.files_settled_width(cx));
+            // Off the chat route Files is not laid out; re-splitting there
+            // would move that route's own columns.
+            if matches!(self.route, Route::Chat) {
+                self.resplit_panels(before, Some(AuxiliaryPanel::Files), cx);
+                self.transition_files(from, before.files_content, self.files_settled_width(cx));
+            }
         }
         if let Some(files) = self.files.get(&key).cloned() {
             files.update(cx, |files, cx| {

@@ -48,8 +48,8 @@ pub const FILES_PANEL_MAX: f32 = 440.0;
 /// for the conversation and any docked file explorer.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
-/// The Pull requests route's side pane defaults wider than the chat's: the
-/// detail's Code tab needs room beside the board.
+/// The Pull requests route's side pane before its first split with the
+/// board; opening it splits the width equally, like the chat's.
 pub const PULL_REQUEST_PANE_DEFAULT: f32 = 640.0;
 /// Minimum width retained for the conversation when the right pane is open.
 pub const CHAT_PANEL_MIN: f32 = 300.0;
@@ -902,7 +902,8 @@ pub struct UiSettings {
     /// remain enabled independently of this preference.
     pub agent_update_notifications: bool,
     pub right_pane_width: f32,
-    /// Width of the pull request pane beside the board.
+    /// Width of the pull request pane beside the board: its latest equal
+    /// split with the board, or a dragged divider until the next toggle.
     pub pull_request_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
