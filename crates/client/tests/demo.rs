@@ -206,6 +206,13 @@ fn sidebar_writes_reorder_the_front_page() {
     assert!(client.workspace().session("chat-tabs").unwrap().unseen);
     client.mark_seen("chat-tabs");
     assert!(!client.workspace().session("chat-tabs").unwrap().unseen);
+    // Mark Unread clears the seen marker; a later Mark Seen wins again.
+    client.mark_unread("chat-tabs").unwrap();
+    assert!(client.workspace().session("chat-tabs").unwrap().unseen);
+    client.mark_unread("chat-tabs").unwrap();
+    client.mark_seen("chat-tabs");
+    assert!(!client.workspace().session("chat-tabs").unwrap().unseen);
+    assert!(client.mark_unread("missing").is_err());
     client.delete_session("chat-blog").unwrap();
     assert!(client.workspace().session("chat-blog").is_none());
 }

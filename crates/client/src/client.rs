@@ -801,6 +801,12 @@ impl Client {
         self.inner.mark_seen(chat_id);
     }
 
+    /// Synced explicit unread intent (`lastSeenAt: null` with a newer field
+    /// clock). Any replica may write it; the chat's host need not be online.
+    pub fn mark_unread(&self, chat_id: &str) -> Result<()> {
+        self.chat_write(chat_id, |doc| doc.set_chat_unread(chat_id))
+    }
+
     pub fn set_session_config(&self, chat_id: &str, config: &ChatConfig) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))
     }

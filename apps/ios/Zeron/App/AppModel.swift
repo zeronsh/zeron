@@ -525,6 +525,7 @@ final class AppModel {
     func createSection(_ name: String) { attempt("section") { _ = try client?.createSection(name: name) } }
     func rename(_ id: String, _ title: String) { attempt("rename") { try client?.renameSession(chatId: id, title: title) } }
     func markSeen(_ id: String) { attempt("seen") { try client?.markSeen(chatId: id) } }
+    func markUnread(_ id: String) { attempt("unread") { try client?.markUnread(chatId: id) } }
 
     // MARK: Sessions
 
