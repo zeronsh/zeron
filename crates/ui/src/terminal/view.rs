@@ -3,13 +3,15 @@
 //! - theme-owned background/ANSI16 plus the xterm 256-color cube/grayscale;
 //! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
 //!   escape sequences, Ctrl- combos, Alt prefixing);
-//! - the 12 ms input coalescer and the 80 ms resize debounce constants (the
-//!   panel drives the timers; the buffer logic here is pure);
+//! - the leading-edge 12 ms input coalescer and the 80 ms resize debounce
+//!   constants (the panel drives the timers; the buffer logic here is pure);
 //! - [`TerminalElement`] — a custom gpui element that measures cell metrics
 //!   from the real mono font (the "font probe"), reports the resulting
 //!   cols×rows back to the panel, and paints the grid: background quads for
 //!   non-default cells, one `ShapedLine` per row (same font whatever the
 //!   colors — paint never changes layout), and the cursor block.
+
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, Modifiers, PaintQuad, Pixels, ShapedLine,
@@ -30,7 +32,8 @@ const TERM_LINE_HEIGHT_RATIO: f32 = TERM_LINE_HEIGHT / TERM_FONT_SIZE;
 /// Inner padding of the grid area.
 pub const TERM_PADDING: f32 = 12.0;
 
-/// Keyboard input coalescing window before a `WriteTerminal` flush.
+/// Keyboard input coalescing window after a `WriteTerminal` flush: input that
+/// arrives inside it rides one flush when it closes.
 pub const COALESCE_MS: u64 = 12;
 /// Debounce for `ResizeTerminal` after viewport-driven size changes.
 pub const RESIZE_DEBOUNCE_MS: u64 = 80;
@@ -325,22 +328,44 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 // Input coalescer (pure buffer; the panel owns the 12 ms timer)
 // ---------------------------------------------------------------------------
 
-/// Buffers keyboard bytes between flushes. `push` returns `true` exactly when
-/// a flush timer should be scheduled (the buffer was empty), so at most one
-/// timer is in flight per burst.
+/// What the panel does after [`InputCoalescer::push`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFlush {
+    /// Idle: flush immediately. Typed keys are tens of ms apart, so waiting
+    /// for company would only add latency to every remote echo.
+    Now,
+    /// Inside the window after the previous flush: flush once it closes.
+    After(Duration),
+    /// Nothing to schedule — a flush is already pending (or nothing queued).
+    Pending,
+}
+
+/// Buffers keyboard bytes between flushes, leading-edge: the first push of a
+/// burst flushes at once and opens a [`COALESCE_MS`] window; pushes inside it
+/// share a single flush at its end, so a burst still costs at most one
+/// `WriteTerminal` per window.
 #[derive(Debug, Default)]
 pub struct InputCoalescer {
     pending: Vec<u8>,
+    window_end: Option<Instant>,
 }
 
 impl InputCoalescer {
-    pub fn push(&mut self, bytes: &[u8]) -> bool {
+    pub fn push(&mut self, bytes: &[u8], now: Instant) -> InputFlush {
         let was_empty = self.pending.is_empty();
         self.pending.extend_from_slice(bytes);
-        was_empty && !self.pending.is_empty()
+        if !was_empty || self.pending.is_empty() {
+            return InputFlush::Pending;
+        }
+        match self.window_end {
+            Some(end) if now < end => InputFlush::After(end - now),
+            _ => InputFlush::Now,
+        }
     }
 
-    pub fn take(&mut self) -> Vec<u8> {
+    /// Drain for a flush at `now`, opening the next coalescing window.
+    pub fn take(&mut self, now: Instant) -> Vec<u8> {
+        self.window_end = Some(now + Duration::from_millis(COALESCE_MS));
         std::mem::take(&mut self.pending)
     }
 
@@ -911,19 +936,26 @@ mod tests {
     }
 
     #[test]
-    fn coalescer_schedules_once_per_burst() {
+    fn coalescer_flushes_idle_input_at_once_and_batches_inside_the_window() {
+        let window = Duration::from_millis(COALESCE_MS);
+        let t0 = Instant::now();
         let mut c = InputCoalescer::default();
         assert!(c.is_empty());
-        assert!(c.push(b"a"), "first push schedules the flush");
-        assert!(!c.push(b"b"), "subsequent pushes ride the pending flush");
-        assert!(!c.push(b"c"));
-        assert_eq!(c.take(), b"abc".to_vec());
+        // An idle keystroke goes out immediately.
+        assert_eq!(c.push(b"a", t0), InputFlush::Now);
+        assert_eq!(c.take(t0), b"a".to_vec());
+        // Input inside the window waits for it to close, then rides one flush.
+        let t1 = t0 + Duration::from_millis(4);
+        assert_eq!(c.push(b"b", t1), InputFlush::After(window - (t1 - t0)));
+        assert_eq!(c.push(b"c", t1), InputFlush::Pending);
+        let t2 = t0 + window;
+        assert_eq!(c.take(t2), b"bc".to_vec());
         assert!(c.is_empty());
-        // Next burst schedules again.
-        assert!(c.push(b"d"));
+        // A keystroke after the window is idle again.
+        assert_eq!(c.push(b"d", t2 + window), InputFlush::Now);
         // Empty pushes never schedule.
         let mut c = InputCoalescer::default();
-        assert!(!c.push(b""));
+        assert_eq!(c.push(b"", t0), InputFlush::Pending);
     }
 
     #[test]

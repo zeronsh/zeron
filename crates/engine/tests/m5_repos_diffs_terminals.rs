@@ -2551,6 +2551,37 @@ async fn rpc_dispatch_for_m5_methods() {
             break;
         }
     }
+    // Sequenced writes delivered swapped still reach the shell in seq order:
+    // only the in-order line prints `rpc-s3q-ok` (the typed echo has `''`).
+    for (seq, data) in [(1, "''-ok\n"), (0, "echo rpc-s3q")] {
+        client
+            .call(
+                methods::WRITE_TERMINAL,
+                serde_json::json!({
+                    "terminalId": terminal_id,
+                    "data": BASE64.encode(data),
+                    "writerId": "m5-tab",
+                    "seq": seq,
+                }),
+            )
+            .await
+            .expect("sequenced WriteTerminal");
+    }
+    loop {
+        let item = tokio::time::timeout_at(deadline, stream.recv())
+            .await
+            .expect("sequenced terminal output before timeout")
+            .expect("stream alive");
+        if item["type"] == "data" {
+            let bytes = BASE64
+                .decode(item["data"].as_str().expect("data"))
+                .expect("valid base64");
+            transcript.extend(bytes);
+        }
+        if String::from_utf8_lossy(&transcript).contains("rpc-s3q-ok") {
+            break;
+        }
+    }
     let resized = client
         .call(
             methods::RESIZE_TERMINAL,

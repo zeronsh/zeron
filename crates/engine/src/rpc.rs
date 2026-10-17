@@ -21,12 +21,14 @@
 //! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
 //!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
 //!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
-//!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
+//!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → `CheckoutDiff[]`, then one
+//!   `CheckoutDiff` per changed checkout (the full list again on removal)
 //! - Workspace files: lazy directory listing, recursive path search, bounded text
 //!   reads, hash-guarded writes, and a checkout-scoped filesystem change stream.
 //! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows, cwd?}` → `TerminalSession`,
 //!   `SubscribeTerminal {terminalId, afterSeq?}` → stream of `TerminalEvent`
-//!   (replay then live tail), `WriteTerminal {terminalId, data}`, `ResizeTerminal`,
+//!   (replay then live tail), `WriteTerminal {terminalId, data, writerId?, seq?}`
+//!   (a writer's frames apply in `seq` order), `ResizeTerminal`,
 //!   `CloseTerminal`. M5 is single-user local: per-user owner checks land with
 //!   real multi-account auth in M6.
 //! - Agent accounts (§3.7): `ListAgentAccounts {forceUsage?}` →
@@ -57,7 +59,7 @@ use base64::Engine as _;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -424,6 +426,12 @@ struct WriteTerminalParams {
     terminal_id: String,
     /// Base64 input bytes (plain UTF-8 accepted leniently).
     data: String,
+    /// Ordering stamp: frames of one writer apply in `seq` order. Older
+    /// clients omit both and write immediately.
+    #[serde(default)]
+    writer_id: Option<String>,
+    #[serde(default)]
+    seq: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1632,6 +1640,74 @@ where
     .boxed()
 }
 
+/// What identifies a published checkout snapshot: the checksum covers branch,
+/// head, patch, files and truncation; the rest is location and publish time.
+#[derive(PartialEq)]
+struct DiffFingerprint {
+    checksum: String,
+    cwd: String,
+    device_id: String,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl DiffFingerprint {
+    fn of(diff: &zeron_proto::CheckoutDiff) -> Self {
+        Self {
+            checksum: diff.checksum.clone(),
+            cwd: diff.cwd.clone(),
+            device_id: diff.device_id.clone(),
+            updated_at: diff.updated_at,
+        }
+    }
+}
+
+/// `WatchCheckoutDiffs` as incremental frames: the full `CheckoutDiff[]` first,
+/// then one `CheckoutDiff` per checkout whose snapshot changed (clients upsert
+/// by checkout id). A checkout leaving the set re-sends the full list, since an
+/// item frame cannot express removal. Re-sending the whole list on every
+/// change pushed every checkout's patch (up to 3 MiB each) through the device
+/// link, ahead of terminal echoes, whenever any one checkout changed.
+fn checkout_diffs_stream(
+    rx: watch::Receiver<Vec<zeron_proto::CheckoutDiff>>,
+) -> BoxStream<'static, serde_json::Value> {
+    // Checkouts the client holds, by id; `None` until the first list goes out.
+    let sent: Option<HashMap<String, DiffFingerprint>> = None;
+    futures::stream::unfold(
+        (rx, sent, VecDeque::new()),
+        |(mut rx, mut sent, mut queue)| async move {
+            loop {
+                if let Some(frame) = queue.pop_front() {
+                    return Some((frame, (rx, sent, queue)));
+                }
+                if sent.is_some() {
+                    rx.changed().await.ok()?;
+                }
+                let current = rx.borrow_and_update();
+                let removed = sent.as_ref().is_none_or(|sent| {
+                    sent.keys()
+                        .any(|id| !current.iter().any(|diff| &diff.checkout_id == id))
+                });
+                if removed {
+                    queue.push_back(serde_json::to_value(&*current).ok()?);
+                } else if let Some(sent) = &sent {
+                    for diff in current.iter() {
+                        if sent.get(&diff.checkout_id) != Some(&DiffFingerprint::of(diff)) {
+                            queue.push_back(serde_json::to_value(diff).ok()?);
+                        }
+                    }
+                }
+                sent = Some(
+                    current
+                        .iter()
+                        .map(|diff| (diff.checkout_id.clone(), DiffFingerprint::of(diff)))
+                        .collect(),
+                );
+            }
+        },
+    )
+    .boxed()
+}
+
 /// The transcript watch as delta frames (`zeron_doc::transcript_delta`): a
 /// full `reset` first, then only changed entries per commit — the whole-Vec
 /// serialization here was the per-tick cost that scaled with transcript size.
@@ -2595,9 +2671,9 @@ impl RpcService for EngineRpc {
                 }
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
-            methods::WATCH_CHECKOUT_DIFFS => {
-                Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
-            }
+            methods::WATCH_CHECKOUT_DIFFS => Ok(RpcReply::Stream(checkout_diffs_stream(
+                self.diff_sync.watch_diffs(),
+            ))),
             methods::WATCH_WORKSPACE_GIT_STATUS => {
                 let request: zeron_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let workspace = self.workspace_files.resolve_target(&request.target).await?;
@@ -3630,9 +3706,14 @@ impl RpcService for EngineRpc {
             }
             methods::WRITE_TERMINAL => {
                 let p: WriteTerminalParams = parse_params(params)?;
-                self.terminals
-                    .write(&p.terminal_id, &p.data)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                match (p.writer_id.as_deref(), p.seq) {
+                    (Some(writer), Some(seq)) => {
+                        self.terminals
+                            .write_sequenced(&p.terminal_id, &p.data, writer, seq)
+                    }
+                    _ => self.terminals.write(&p.terminal_id, &p.data),
+                }
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::RESIZE_TERMINAL => {
@@ -4959,5 +5040,84 @@ mod context_usage_tests {
         remote.clear_context_usage().unwrap();
         tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
         assert!(stream.next().await.unwrap()["contextUsage"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod checkout_diffs_stream_tests {
+    use super::*;
+    use futures::StreamExt;
+    use zeron_proto::CheckoutDiff;
+
+    fn diff(id: &str, checksum: &str) -> CheckoutDiff {
+        CheckoutDiff {
+            checkout_id: id.into(),
+            device_id: "dev".into(),
+            cwd: format!("/repo/{id}"),
+            patch: format!("patch {checksum}"),
+            files: Vec::new(),
+            additions: 0,
+            deletions: 0,
+            truncated: false,
+            checksum: checksum.into(),
+            updated_at: chrono::DateTime::UNIX_EPOCH,
+        }
+    }
+
+    async fn next(stream: &mut BoxStream<'static, serde_json::Value>) -> serde_json::Value {
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("frame before timeout")
+            .expect("stream alive")
+    }
+
+    async fn assert_quiet(stream: &mut BoxStream<'static, serde_json::Value>) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), stream.next())
+                .await
+                .is_err(),
+            "no frame expected"
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_the_list_then_only_changed_checkouts() {
+        let (tx, rx) = watch::channel(vec![diff("a", "1"), diff("b", "1")]);
+        let mut stream = checkout_diffs_stream(rx);
+        let first = next(&mut stream).await;
+        assert_eq!(first.as_array().map(Vec::len), Some(2));
+
+        // Republishing identical snapshots (reconcile) sends nothing.
+        tx.send_modify(|_| {});
+        assert_quiet(&mut stream).await;
+
+        tx.send_modify(|diffs| diffs[1] = diff("b", "2"));
+        let changed = next(&mut stream).await;
+        assert_eq!(changed["checkoutId"], "b");
+        assert_eq!(changed["checksum"], "2");
+        assert_quiet(&mut stream).await;
+
+        // Added checkouts arrive as single items too.
+        tx.send_modify(|diffs| {
+            diffs[0] = diff("a", "2");
+            diffs.push(diff("c", "1"));
+        });
+        let mut ids = vec![
+            next(&mut stream).await["checkoutId"].clone(),
+            next(&mut stream).await["checkoutId"].clone(),
+        ];
+        ids.sort_by_key(|id| id.to_string());
+        assert_eq!(ids, ["a", "c"]);
+    }
+
+    #[tokio::test]
+    async fn removal_resends_the_full_list() {
+        let (tx, rx) = watch::channel(vec![diff("a", "1"), diff("b", "1")]);
+        let mut stream = checkout_diffs_stream(rx);
+        next(&mut stream).await;
+        tx.send_modify(|diffs| diffs.retain(|d| d.checkout_id == "a"));
+        let frame = next(&mut stream).await;
+        let list: Vec<CheckoutDiff> = serde_json::from_value(frame).unwrap();
+        assert_eq!(list, vec![diff("a", "1")]);
     }
 }
