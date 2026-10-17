@@ -164,7 +164,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             free.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -20),
             free.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             free.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            heroStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            // Safe area, not view: insets can differ side to side (the
+            // iPhone Duo's camera and status bar sit on one edge).
+            heroStack.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
             heroStack.centerYAnchor.constraint(equalTo: free.centerYAnchor),
             heroStack.topAnchor.constraint(greaterThanOrEqualTo: free.topAnchor),
             heroStack.bottomAnchor.constraint(lessThanOrEqualTo: free.bottomAnchor),

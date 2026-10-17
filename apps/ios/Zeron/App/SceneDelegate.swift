@@ -82,11 +82,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     private func showRoot(animated: Bool) {
         guard let window else { return }
-        // iPad gets the split shell (it collapses to the tab shell
-        // at compact widths); iPhone the tab shell directly.
-        let root: UIViewController = !app.isSignedIn
-            ? SignInViewController(app: app)
-            : UIDevice.current.userInterfaceIdiom == .pad ? SplitRootController(app: app) : MainTabController(app: app)
+        // The split shell everywhere: it shows the sidebar when the window
+        // is regular in both directions (iPad, an unfolded iPhone Duo) and
+        // collapses to the tab shell otherwise, live as the window changes —
+        // folding or unfolding carries the open session across.
+        let root: UIViewController = !app.isSignedIn ? SignInViewController(app: app) : SplitRootController(app: app)
         // Sheets (new session, Settings) belong to the old root: they'd
         // stay on top of the new one.
         if let old = window.rootViewController, old.presentedViewController != nil {
