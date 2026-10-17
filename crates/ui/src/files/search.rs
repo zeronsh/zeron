@@ -300,6 +300,10 @@ impl FilesSurface {
         self.search_state.active = 0;
         self.search_state.error = None;
         self.search_state.task = None;
+        // Results live where the tree does: searching unfolds it.
+        if !query.is_empty() && !self.sections.is_open(super::sections::Section::Files) {
+            self.toggle_tree(cx);
+        }
         if query.is_empty() {
             self.search_state.loading = false;
             self.search_state.results.clear();
