@@ -11,6 +11,7 @@ use macos as native;
 mod windows_webview;
 #[cfg(windows)]
 use windows_webview as native;
+mod document;
 pub mod model;
 pub(crate) mod profile;
 mod view;
@@ -69,6 +70,7 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
 pub enum BrowserEvent {
     Changed,
     NewTab(Option<String>),
+    OpenSource(String),
     Close,
 }
 
@@ -119,6 +121,12 @@ pub struct BrowserSurface {
     _input_sub: Subscription,
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     native: Option<native::NativePage>,
+    document: Option<document::HtmlDocument>,
+    document_task: Option<gpui::Task<()>>,
+    preview_request: Option<(
+        crate::files::client::WorkspaceFilesClient,
+        zeron_markdown::content_reference::HtmlPreview,
+    )>,
     #[cfg(target_os = "linux")]
     native_startup: Option<gpui::Task<()>>,
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
@@ -184,6 +192,9 @@ impl BrowserSurface {
             context,
             address,
             focus: cx.focus_handle(),
+            document: None,
+            document_task: None,
+            preview_request: None,
             page: PageState::default(),
             favicon: None,
             address_edited: false,
@@ -354,6 +365,9 @@ impl BrowserSurface {
                 return;
             }
         };
+        self.document = None;
+        self.document_task = None;
+        self.preview_request = None;
         self.validation = None;
         self.address
             .update(cx, |input, cx| input.set_text(url.clone(), cx));
@@ -401,15 +415,126 @@ impl BrowserSurface {
         cx.notify();
     }
 
+    /// Read through the same session/device RPC as the file editor. Closing
+    /// this surface cancels delivery, so a late read cannot open another chat.
+    pub fn read_preview(
+        &mut self,
+        client: crate::files::client::WorkspaceFilesClient,
+        request: zeron_markdown::content_reference::HtmlPreview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.preview_request = Some((client.clone(), request.clone()));
+        self.document = None;
+        self.page.error = None;
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
+            self.native = None;
+            self.context = BrowserContext::default();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.native_startup = None;
+        }
+        self.page.url = Some(request.path.clone());
+        self.page.title = request
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("HTML preview")
+            .into();
+        self.page.loading = true;
+        self.previews_task = None;
+        self.address
+            .update(cx, |input, cx| input.set_text(request.path.clone(), cx));
+        let read = gpui_tokio::Tokio::spawn(cx, async move {
+            let file = client
+                .read_file(zeron_proto::ReadWorkspaceFileRequest {
+                    target: client.target().clone(),
+                    path: request.path.clone(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            if file.truncated {
+                return Err(
+                    "This HTML preview is too large. Open the source file instead.".to_owned(),
+                );
+            }
+            let text = file
+                .text
+                .ok_or_else(|| "This file is not a UTF-8 HTML document.".to_owned())?;
+            document::HtmlDocument::new(&request, &text)
+        });
+        self.document_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = read
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                let result = result.and_then(|document| this.show_document(document, window, cx));
+                this.page.loading = result.is_ok();
+                this.page.error = result.err();
+                cx.emit(BrowserEvent::Changed);
+                cx.notify();
+            });
+        }));
+        cx.emit(BrowserEvent::Changed);
+        cx.notify();
+    }
+
+    fn show_document(
+        &mut self,
+        document: document::HtmlDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = &cx;
+        self.document = Some(document);
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            if self.native.is_none() {
+                let mut native =
+                    native::NativePage::new(window, &self.context.data, self.native_tx.clone())?;
+                native.present(self.presentation);
+                self.native = Some(native);
+            }
+            self.native
+                .as_ref()
+                .unwrap()
+                .load_html(&self.document.as_ref().unwrap().html)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(native) = &self.native {
+                native.load_html(&self.document.as_ref().unwrap().html)
+            } else {
+                self.start_linux_page(window, cx)
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            let _ = window;
+            Err("HTML previews are not available on this platform.".into())
+        }
+    }
+
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.address.read(cx).text().to_owned();
         self.navigate(&url, window, cx);
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((client, request)) = self.preview_request.clone() {
+            self.read_preview(client, request, window, cx);
+            return;
+        }
+        let _ = window;
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         if let Some(native) = &self.native {
-            if self.page.error.is_some() {
+            if let Some(document) = &self.document {
+                let _ = native.load_html(&document.html);
+            } else if self.page.error.is_some() {
                 if let Some(url) = &self.page.url {
                     let _ = native.load(url);
                 }
@@ -451,6 +576,8 @@ impl BrowserSurface {
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.document_task = None;
+        self.preview_request = None;
         self.set_presentation(Presentation::Hidden, cx);
         self.clear_favicon(cx);
         #[cfg(target_os = "linux")]
@@ -493,6 +620,12 @@ impl BrowserSurface {
             native::NativeEvent::Changed | native::NativeEvent::Finished => {
                 let finished = matches!(event, native::NativeEvent::Finished);
                 let mut page = native.state();
+                if let Some(document) = &self.document {
+                    page.url = Some(document.path.clone());
+                    page.title = document.title.clone();
+                    page.can_back = false;
+                    page.can_forward = false;
+                }
                 // A failed provisional request has no committed WebKit URL.
                 if page.url.is_none() {
                     page.url = self.page.url.clone();
@@ -517,7 +650,10 @@ impl BrowserSurface {
                     self.address_edited = false;
                 }
                 native.present(self.presentation);
-                if finished && let Some(url) = &page.url {
+                if finished
+                    && self.document.is_none()
+                    && let Some(url) = &page.url
+                {
                     native.discover_favicon(url.clone());
                 }
                 if page != self.page {
@@ -640,15 +776,23 @@ impl BrowserContext {
                     Some(device),
                 )
                 .unwrap();
-                eprintln!("Storage cleanup: invoke; main_thread={}", objc2::MainThreadMarker::new().is_some());
+                eprintln!(
+                    "Storage cleanup: invoke; main_thread={}",
+                    objc2::MainThreadMarker::new().is_some()
+                );
                 // A cleanup-only process has not constructed a WebKit store yet.
                 // Initialize its main run loop before removal dispatches back from the
                 // WebsiteDataStoreIO queue. An ephemeral store never opens user data.
-                let mtm = objc2::MainThreadMarker::new().expect("profile cleanup requires the main thread");
-                let initialization = unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+                let mtm = objc2::MainThreadMarker::new()
+                    .expect("profile cleanup requires the main thread");
+                let initialization =
+                    unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) };
                 drop(initialization);
                 wry::WebView::remove_data_store(&profile.data_store_identifier(), move |result| {
-                    eprintln!("Storage cleanup: callback; main_thread={}; result={result:?}", objc2::MainThreadMarker::new().is_some());
+                    eprintln!(
+                        "Storage cleanup: callback; main_thread={}; result={result:?}",
+                        objc2::MainThreadMarker::new().is_some()
+                    );
                     completion(result.map_err(|error| error.to_string()));
                 });
                 eprintln!("Storage cleanup: invocation returned");
@@ -740,7 +884,10 @@ impl BrowserSurface {
     }
     #[cfg(target_os = "macos")]
     pub fn fixture_cookies(&self, completion: impl FnOnce(Vec<String>) + 'static) {
-        self.native.as_ref().expect("storage page must be attached").fixture_cookies(completion);
+        self.native
+            .as_ref()
+            .expect("storage page must be attached")
+            .fixture_cookies(completion);
     }
 
     pub fn fixture_eval(&self, script: &str) {
@@ -754,6 +901,44 @@ impl BrowserSurface {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = script;
+    }
+
+    pub fn fixture_document(
+        &mut self,
+        request: &zeron_markdown::content_reference::HtmlPreview,
+        content: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        if self.native.is_none() {
+            self.context = BrowserContext::default();
+        }
+        let mut document = document::HtmlDocument::new(request, content)?;
+        // Fixture-only status relay: the opaque child can report test results
+        // without granting the parent access to its DOM (or any engine API).
+        document.html = document.html.replace("<body>", "<body><script>addEventListener('message', e => { if(e.source === document.querySelector('iframe').contentWindow) document.title = String(e.data); });</script>");
+        self.page.url = Some(document.path.clone());
+        self.page.title = document.title.clone();
+        self.show_document(document, window, cx)?;
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn fixture_document_status(&self) -> Option<String> {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
+            self.native.as_ref().map(|native| native.state().title)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            None
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn fixture_snapshot(&self, completion: impl FnOnce(Result<Vec<u8>, String>) + 'static) {
+        self.native.as_ref().unwrap().fixture_snapshot(completion);
     }
 }
 

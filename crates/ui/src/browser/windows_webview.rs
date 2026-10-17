@@ -306,6 +306,7 @@ pub(super) struct Host {
     data: BrowserData,
     page: RefCell<Option<Page>>,
     pending_url: RefCell<Option<String>>,
+    document: RefCell<Option<String>>,
     requested_url: RefCell<Option<String>>,
     error: RefCell<Option<String>>,
     loading: Cell<bool>,
@@ -340,6 +341,7 @@ impl NativePage {
             data: data.clone(),
             page: RefCell::new(None),
             pending_url: RefCell::new(None),
+            document: RefCell::new(None),
             requested_url: RefCell::new(None),
             error: RefCell::new(None),
             loading: Cell::new(true),
@@ -375,6 +377,7 @@ impl NativePage {
     }
 
     pub fn load(&self, url: &str) -> Result<(), String> {
+        self.0.document.borrow_mut().take();
         self.0.error.borrow_mut().take();
         *self.0.requested_url.borrow_mut() = Some(url.into());
         self.0.loading.set(true);
@@ -386,6 +389,18 @@ impl NativePage {
                 Ok(())
             }
         }
+    }
+
+    pub fn load_html(&self, html: &str) -> Result<(), String> {
+        self.0.error.borrow_mut().take();
+        self.0.pending_url.borrow_mut().take();
+        *self.0.document.borrow_mut() = Some(html.into());
+        self.0.loading.set(true);
+        if let Some(page) = &*self.0.page.borrow() {
+            unsafe { page.webview.NavigateToString(&HSTRING::from(html)) }
+                .map_err(|error| error.message())?;
+        }
+        Ok(())
     }
 
     pub fn reload(&self) {
@@ -602,7 +617,13 @@ impl Host {
                         let mut uri = PWSTR::null();
                         let uri = args.Uri(&mut uri).map(|()| take_pwstr(uri));
                         match uri {
-                            Ok(uri) if allowed_navigation(&uri) => {
+                            Ok(uri)
+                                if if host.document.borrow().is_some() {
+                                    super::model::allowed_document_navigation(&uri)
+                                } else {
+                                    allowed_navigation(&uri)
+                                } =>
+                            {
                                 *host.requested_url.borrow_mut() = Some(uri);
                                 host.error.borrow_mut().take();
                                 host.loading.set(true);
@@ -618,13 +639,21 @@ impl Host {
             // Subframes too (the main-frame event does not see them): web
             // content only — their own documents (about:blank, srcdoc, data:,
             // blob:) included — never a scheme that leaves the page.
+            let weak = Rc::downgrade(host);
             webview.add_FrameNavigationStarting(
                 &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                     if let Some(args) = args {
                         let mut uri = PWSTR::null();
-                        let allowed = args
-                            .Uri(&mut uri)
-                            .is_ok_and(|()| allowed_frame_navigation(&take_pwstr(uri)));
+                        let allowed = args.Uri(&mut uri).is_ok_and(|()| {
+                            let uri = take_pwstr(uri);
+                            weak.upgrade().is_some_and(|host| {
+                                if host.document.borrow().is_some() {
+                                    super::model::allowed_document_navigation(&uri)
+                                } else {
+                                    allowed_frame_navigation(&uri)
+                                }
+                            })
+                        });
                         if !allowed {
                             args.SetCancel(true)?;
                         }
@@ -869,6 +898,13 @@ impl Host {
         });
         host.apply_geometry();
         host.update_visibility();
+        if let Some(html) = &*host.document.borrow()
+            && let Some(page) = &*host.page.borrow()
+        {
+            unsafe {
+                page.webview.NavigateToString(&HSTRING::from(html))?;
+            }
+        }
         if let Some(url) = host.pending_url.borrow_mut().take()
             && let Some(page) = &*host.page.borrow()
         {

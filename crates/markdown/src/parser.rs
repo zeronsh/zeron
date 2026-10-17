@@ -32,7 +32,7 @@ pub struct InlineStyle {
     pub link: Option<String>,
     /// The label to show instead of `text` for a file link whose text is the
     /// path itself (an inline-code span) rather than a label the author
-    /// wrote. Never set by the parser; `None` shows `text`. When set, copy
+    /// wrote, or a content reference. `None` shows `text`. When set, copy
     /// and selection still map back to `text`.
     pub file_label: Option<String>,
     pub image: Option<InlineImage>,
@@ -131,7 +131,7 @@ impl BlockTree {
 // Full parse
 // ---------------------------------------------------------------------------
 
-fn options() -> Options {
+pub(crate) fn options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
 
@@ -141,22 +141,30 @@ pub fn parse_full(source: &str) -> BlockTree {
 }
 
 fn parse_at(source: &str, offset: usize) -> BlockTree {
+    let references = crate::content_reference::rewrite(source);
+    let source = references.as_ref().map_or(source, |r| r.text.as_str());
     let (text, insertions) = match rewrite_absolute_destinations(source) {
         Some((text, insertions)) => (Cow::Owned(text), Some(insertions)),
         None => (Cow::Borrowed(source), None),
     };
-    let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&text, options())
-        .into_offset_iter()
-        .map(|(event, range)| {
-            // Inserted angle brackets shift every following offset; ranges
-            // come from the rewritten text and must point into the original.
-            let range = match &insertions {
-                Some(insertions) => insertions.original_range(range),
-                None => range,
-            };
-            (event, range.start + offset..range.end + offset)
-        })
-        .collect();
+    let mut events = Vec::new();
+    for (event, range) in Parser::new_ext(&text, options()).into_offset_iter() {
+        // Resolve the destination rewrite first, then content replacements.
+        let range = insertions
+            .as_ref()
+            .map_or(range.clone(), |i| i.original_range(range));
+        let mut emit = |event, range: Range<usize>| {
+            let range = references
+                .as_ref()
+                .map_or(range.clone(), |r| r.original_range(range));
+            events.push((event, range.start + offset..range.end + offset));
+        };
+        if let Some(references) = &references {
+            references.expand(event, range, &mut emit);
+        } else {
+            emit(event, range);
+        }
+    }
     let mut cur = Cursor {
         events: &events,
         ix: 0,
@@ -713,7 +721,26 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
         }
         Event::SoftBreak => push(runs, " ".into(), style.clone()),
         Event::HardBreak => push(runs, "\n".into(), style.clone()),
-        Event::Html(t) | Event::InlineHtml(t) => push(runs, t.into_string(), style.clone()),
+        Event::Html(t) | Event::InlineHtml(t) => {
+            if let Some(reference) = crate::content_reference::file_reference(&t) {
+                let mut style = style.clone();
+                style.file_label = Some(reference.label().to_owned());
+                style.link = Some(crate::content_reference::file_destination(&reference.path));
+                push(runs, reference.path, style);
+            } else if let Some(reference) = crate::content_reference::html_preview(&t) {
+                let mut style = style.clone();
+                let name = reference
+                    .path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&reference.path);
+                style.file_label = Some(format!("Preview · {name}"));
+                style.link = Some(t.into_string());
+                push(runs, reference.path, style);
+            } else {
+                push(runs, t.into_string(), style.clone());
+            }
+        }
         Event::TaskListMarker(done) => {
             let mut style = style.clone();
             style.task = Some(TaskMarker {
@@ -865,7 +892,11 @@ fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
     for run in runs {
         match out.last_mut() {
-            Some(last) if last.style == run.style && run.style.image.is_none() => {
+            Some(last)
+                if last.style == run.style
+                    && run.style.image.is_none()
+                    && run.style.file_label.is_none() =>
+            {
                 last.text.push_str(&run.text)
             }
             _ => out.push(run),

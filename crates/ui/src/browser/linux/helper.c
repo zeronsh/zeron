@@ -20,7 +20,7 @@ typedef struct {
     guint id;
     GtkWidget *window;
     WebKitWebView *web;
-    gboolean visible, dirty;
+    gboolean visible, dirty, document;
     gchar *error;
     guint width, height;
     double scale;
@@ -204,7 +204,9 @@ static gboolean policy(WebKitWebView *web, WebKitPolicyDecision *decision,
         WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(
             WEBKIT_NAVIGATION_POLICY_DECISION(decision));
         const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
-        if (!allowed(uri)) {
+        gboolean internal_document = p->document &&
+            (!strcmp(uri, "about:blank") || !strcmp(uri, "about:srcdoc"));
+        if (p->document ? !internal_document : !allowed(uri)) {
             webkit_policy_decision_ignore(decision);
             return TRUE;
         }
@@ -518,8 +520,12 @@ static void command(JsonObject *o) {
     }
     if (!strcmp(cmd, "load")) {
         const char *url = string(o, "url");
+        p->document = FALSE;
         if (allowed(url))
             webkit_web_view_load_uri(p->web, url);
+    } else if (!strcmp(cmd, "load-html")) {
+        p->document = TRUE;
+        webkit_web_view_load_html(p->web, string(o, "html"), "about:blank");
     } else if (!strcmp(cmd, "dismiss-menu")) {
         if (p->options) {
             webkit_option_menu_close(p->options);

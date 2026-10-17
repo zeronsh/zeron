@@ -2,6 +2,8 @@
 mod storage;
 #[path = "browser-fixture/transcript_links.rs"]
 mod transcript_links;
+#[path = "browser-fixture/html-preview.rs"]
+mod html_preview;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
@@ -229,6 +231,9 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                if std::env::var_os("ZERON_HTML_PREVIEW_FIXTURE_ONLY").is_some() {
+                    return html_preview::exercise(window, state.clone(), &output, cx).await;
+                }
                 if let Some(url) = &storage_url {
                     storage::exercise(window, state.clone(), &storage_root, &storage_profile, url, cx).await?;
                     std::fs::write(output.join("storage-result.json"), serde_json::to_vec(&serde_json::json!({

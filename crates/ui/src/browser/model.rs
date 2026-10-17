@@ -1,6 +1,12 @@
 //! Browser state shared by the chrome and platform host. No native handles.
 use std::net::IpAddr;
 
+/// Only the host's in-memory document and its srcdoc frame can navigate in a
+/// content preview. Website navigation retains its separate HTTP(S) policy.
+pub fn allowed_document_navigation(url: &str) -> bool {
+    matches!(url, "about:blank" | "about:srcdoc")
+}
+
 /// NSEvent supplies characters, while GPUI bindings name non-printing keys.
 /// Shift+Tab can arrive as NSBackTabCharacter rather than a literal tab.
 #[cfg(any(target_os = "macos", test))]
