@@ -223,6 +223,7 @@ mod project_tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: repository.map(str::to_string),
+            created_by_chat_id: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH + chrono::TimeDelta::minutes(minutes),
         }
     }

@@ -21,6 +21,7 @@
 //! serves the full sidebar before any server contact; the old `ws4` rooms are
 //! simply never joined again. The legacy snapshot is kept for rollback.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use chrono::Utc;
@@ -207,6 +208,13 @@ struct WorkspaceHostInner {
 
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
 pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// A folder path without trailing separators (a bare root stays as is), so
+/// `/a/b/` and `/a/b` name one project.
+fn trim_separators(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() { path } else { trimmed }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -852,6 +860,7 @@ impl WorkspaceHost {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            created_by_chat_id: None,
             created_at: Utc::now(),
         };
         self.mutate(|doc| doc.upsert_space(&space))?;
@@ -1041,10 +1050,10 @@ impl WorkspaceHost {
         git_detected: bool,
     ) -> Result<(), EngineError> {
         let spaces = self.read(|doc| doc.read_spaces())?;
-        if spaces
-            .iter()
-            .any(|s| s.id == space_id || (s.device_id == device_id && s.path == path))
-        {
+        if spaces.iter().any(|s| {
+            s.id == space_id
+                || (s.device_id == device_id && trim_separators(&s.path) == trim_separators(path))
+        }) {
             return Ok(());
         }
         self.mutate(|doc| {
@@ -1057,10 +1066,60 @@ impl WorkspaceHost {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                created_by_chat_id: None,
                 created_at: Utc::now(),
             })
         })?;
         Ok(())
+    }
+
+    /// Add a project on THIS device for an agent (`AddProject`). `folder` is
+    /// already canonical (see `rpc::resolve_project_folder`). A project on the
+    /// same folder under any spelling that resolves to it — trailing slash,
+    /// symlink — is returned instead: `(space, created)`.
+    pub fn add_local_project(
+        &self,
+        folder: &Path,
+        name: Option<String>,
+        created_by_chat_id: Option<String>,
+    ) -> Result<(Space, bool), EngineError> {
+        let device_id = &self.inner.config.device_id;
+        let path = folder.to_string_lossy().into_owned();
+        let same_spelling =
+            |s: &Space| &s.device_id == device_id && trim_separators(&s.path) == path;
+        // Aliases (a symlinked spelling) need the disk: resolve them before
+        // taking the registry lock.
+        let spaces = self.read(|doc| doc.read_spaces())?;
+        if let Some(existing) = spaces.into_iter().find(|s| {
+            same_spelling(s)
+                || (&s.device_id == device_id
+                    && crate::repos::canonical_folder(Path::new(&s.path))
+                        .is_ok_and(|p| p == folder))
+        }) {
+            return Ok((existing, false));
+        }
+        let space = Space {
+            id: uuid::Uuid::new_v4().to_string(),
+            device_id: device_id.clone(),
+            path: path.clone(),
+            name: name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()),
+            // A hint; SpacesSync stamps the truth once it sees the row.
+            git_detected: folder.join(".git").exists(),
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: None,
+            created_by_chat_id: created_by_chat_id.filter(|c| !c.trim().is_empty()),
+            created_at: Utc::now(),
+        };
+        // Recheck and write under one lock: a concurrent add of the same
+        // folder (always this canonical spelling) must find the row, not race it.
+        Ok(self.mutate(|doc| -> Result<_, zeron_doc::DocError> {
+            if let Some(existing) = doc.read_spaces()?.into_iter().find(same_spelling) {
+                return Ok((existing, false));
+            }
+            doc.upsert_space(&space)?;
+            Ok((space, true))
+        })?)
     }
 
     pub fn rename_space(&self, space_id: &str, name: Option<&str>) -> Result<bool, EngineError> {
@@ -1843,6 +1902,129 @@ mod tests {
             host.watch_spaces().borrow()[0].name.as_deref(),
             Some("Renamed")
         );
+    }
+
+    #[tokio::test]
+    async fn agent_projects_dedupe_on_the_resolved_folder() {
+        use super::*;
+
+        let docs = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(docs.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "linux".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        let project = dir.path().join("comet");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let folder = crate::repos::canonical_folder(&project).unwrap();
+
+        // A person added it first, with a trailing slash.
+        host.create_space(
+            "picked",
+            "test-device",
+            &format!("{}/", folder.display()),
+            None,
+            false,
+        )
+        .unwrap();
+        let (existing, created) = host
+            .add_local_project(&folder, None, Some("chat-1".into()))
+            .unwrap();
+        assert!(!created);
+        assert_eq!(existing.id, "picked");
+        assert_eq!(
+            existing.created_by_chat_id, None,
+            "the person's row is untouched"
+        );
+        // ...and the trailing-slash spelling no-ops on the picker path too.
+        host.create_space(
+            "again",
+            "test-device",
+            &folder.to_string_lossy(),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(host.read(|doc| doc.read_spaces()).unwrap().len(), 1);
+
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let other = crate::repos::canonical_folder(&other).unwrap();
+        let (space, created) = host
+            .add_local_project(&other, Some("  Other  ".into()), Some("chat-1".into()))
+            .unwrap();
+        assert!(created);
+        assert_eq!(space.device_id, "test-device");
+        assert_eq!(space.name.as_deref(), Some("Other"));
+        assert!(!space.git_detected);
+        let stored = host.read(|doc| doc.space(&space.id)).unwrap().unwrap();
+        assert_eq!(stored.created_by_chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(stored.path, other.to_string_lossy());
+        #[cfg(unix)]
+        {
+            // A symlink to a known folder resolves to that project.
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&other, &link).unwrap();
+            host.create_space(
+                "linked",
+                "test-device",
+                &link.to_string_lossy(),
+                None,
+                false,
+            )
+            .unwrap();
+            let (again, created) = host.add_local_project(&other, None, None).unwrap();
+            assert!(!created);
+            assert!(again.id == space.id || again.id == "linked");
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_agent_adds_of_one_folder_make_one_project() {
+        use super::*;
+
+        let docs = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(docs.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "linux".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        let folder = crate::repos::canonical_folder(dir.path()).unwrap();
+        let barrier = std::sync::Barrier::new(32);
+        let results: Vec<(Space, bool)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..32)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        host.add_local_project(&folder, None, Some("chat".into()))
+                            .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results.iter().filter(|(_, created)| *created).count(), 1);
+        let id = &results[0].0.id;
+        assert!(results.iter().all(|(space, _)| &space.id == id));
+        assert_eq!(host.read(|doc| doc.read_spaces()).unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -169,6 +169,10 @@ pub mod methods {
     pub const SEARCH_HOME_FOLDERS: &str = "SearchHomeFolders";
     /// The new-project picker closed: drop the host's home index if unpinned.
     pub const RELEASE_HOME_FOLDER_SEARCH: &str = "ReleaseHomeFolderSearch";
+    /// Agent-facing project creation (Zeron MCP `add_project`): this device
+    /// validates a folder under its own home and writes the project row.
+    /// Never forwarded — an agent adds projects only where it runs.
+    pub const ADD_PROJECT: &str = "AddProject";
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
     pub const SEARCH_FILES: &str = "SearchFiles";
     // Device-local workspace filesystem operations. All are relay-forwardable;

@@ -59,6 +59,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         git_checked_at: None,
         checkout_id: None,
         repository_id: None,
+        created_by_chat_id: None,
         created_at: now,
     };
     let chat = Chat {

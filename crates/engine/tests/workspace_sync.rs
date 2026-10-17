@@ -697,6 +697,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 git_checked_at: Some(now),
                 checkout_id: Some("co-1".into()),
                 repository_id: None,
+                created_by_chat_id: None,
                 created_at: now,
             })
             .unwrap();

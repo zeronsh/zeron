@@ -773,6 +773,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            created_by_chat_id: None,
             created_at: Utc::now(),
         }
     }

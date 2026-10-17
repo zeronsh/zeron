@@ -2842,6 +2842,9 @@ impl Shell {
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.show_notice(crate::toast::ToastKind::Info, notice, cx);
         }
+        for space_id in state.update(cx, |state, _| state.take_agent_added_spaces()) {
+            self.announce_agent_project(space_id, cx);
+        }
         let next_sync_flow = {
             let state = state.read(cx);
             sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())
@@ -17023,6 +17026,7 @@ mod exit_regressions {
                     git_checked_at: None,
                     checkout_id: None,
                     repository_id: None,
+                    created_by_chat_id: None,
                     created_at: Utc::now(),
                 };
                 shell.state.update(cx, |state, cx| {
@@ -17291,6 +17295,7 @@ mod exit_regressions {
                         git_checked_at: None,
                         checkout_id: None,
                         repository_id: None,
+                        created_by_chat_id: None,
                         created_at: Utc::now(),
                     }]);
                     // Boot opened an existing project session after loading defaults.
@@ -17360,6 +17365,7 @@ mod exit_regressions {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            created_by_chat_id: None,
             created_at: Utc::now(),
         };
         window
@@ -17441,6 +17447,7 @@ mod exit_regressions {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            created_by_chat_id: None,
             created_at: Utc::now(),
         };
         window
@@ -17711,6 +17718,7 @@ mod exit_regressions {
                         git_checked_at: None,
                         checkout_id: None,
                         repository_id: None,
+                        created_by_chat_id: None,
                         created_at: Utc::now(),
                     }]);
                 });

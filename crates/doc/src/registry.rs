@@ -1115,6 +1115,10 @@ impl RegistryDoc {
             ("gitCheckedAt", opt_ms(space.git_checked_at)),
             ("checkoutId", opt_str(space.checkout_id.as_deref())),
             ("repositoryId", opt_str(space.repository_id.as_deref())),
+            (
+                "createdByChatId",
+                opt_str(space.created_by_chat_id.as_deref()),
+            ),
             ("createdAt", json!(space.created_at.timestamp_millis())),
         ]);
         self.write(KIND_SPACES, &space.id.clone(), OpKind::Upsert, set);
@@ -1625,6 +1629,10 @@ impl RegistryDoc {
                     ("gitCheckedAt", opt_ms(space.git_checked_at)),
                     ("checkoutId", opt_str(space.checkout_id.as_deref())),
                     ("repositoryId", opt_str(space.repository_id.as_deref())),
+                    (
+                        "createdByChatId",
+                        opt_str(space.created_by_chat_id.as_deref()),
+                    ),
                     ("createdAt", json!(space.created_at.timestamp_millis())),
                 ]),
             );

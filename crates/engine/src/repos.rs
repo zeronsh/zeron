@@ -2267,6 +2267,15 @@ fn folder_browser_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// `path` with symlinks and `..` resolved, spelled as the folder browser
+/// spells it (no `\\?\` prefix on ordinary Windows paths).
+pub(crate) fn canonical_folder(path: &Path) -> std::io::Result<PathBuf> {
+    let path = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    let path = dunce::simplified(&path).to_path_buf();
+    Ok(path)
+}
+
 /// Re-rank fuzzy folder candidates `(relative path, is a repository)`, given
 /// in index order, by how well the folder itself matches: an exact name,
 /// then a name starting with the query, then one containing it. A query
