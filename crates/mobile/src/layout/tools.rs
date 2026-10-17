@@ -54,6 +54,14 @@ pub(crate) struct ToolLine {
     pub key: u64,
     pub open: bool,
     pub body: Vec<DetailBlock>,
+    /// Spawn cards whose subagent doc exists: tapping opens it.
+    pub link: Option<SubagentLink>,
+}
+
+pub(crate) struct SubagentLink {
+    pub doc_id: String,
+    pub title: String,
+    pub frozen: bool,
 }
 
 pub(crate) struct ToolGroup {
@@ -812,6 +820,13 @@ impl RowBuilder {
                             body.extend(lines_block(ctx, &st, &call_text(call), Some(CALL_WRAP_COLS)));
                             body.extend(result_block(ctx, &st, part));
                         }
+                        // Spawn cards are links once the engine stamped the
+                        // subagent's doc (desktop `is_spawn_link`).
+                        let link = subagent_ref.as_ref().filter(|_| agents).map(|doc_id| SubagentLink {
+                            doc_id: doc_id.clone(),
+                            title: zeron_proto::view::tool_chip_content(call).1.lines().next().map(str::trim).filter(|t| !t.is_empty()).unwrap_or("Subagent").to_owned(),
+                            frozen: matches!(subagent_status, Some(SubagentStatus::Done | SubagentStatus::Failed)),
+                        });
                         lines.push(ToolLine {
                             icon: tool_icon(call).to_owned(),
                             label: prepare_plain(ctx, label, if agents { medium } else { st.label }, st.lh, color, WhiteSpace::Pre),
@@ -822,6 +837,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link,
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
@@ -849,6 +865,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link: None,
                         });
                     }
                     _ => {}
@@ -1107,6 +1124,13 @@ fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<
         if line.running {
             let s = d(px, 14.0);
             o.widget(WidgetKind::Spinner, (x + cw - d(px, 8.0) - s, card_y + (card_h - s) / 2.0, s, s), None);
+        }
+        if let Some(link) = &line.link {
+            o.widget(
+                WidgetKind::SubagentLink { doc_id: link.doc_id.clone(), title: link.title.clone(), frozen: link.frozen },
+                (x, card_y, cw, card_h),
+                None,
+            );
         }
     }
     h

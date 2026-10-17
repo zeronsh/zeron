@@ -1077,6 +1077,13 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func executionDevices()  -> [DeviceView]
     
     /**
+     * Fork `source_id` through its latest completed response into a side
+     * chat (a side chat's fork is its sibling). Returns the new chat id; the
+     * error carries the host's reason (e.g. nothing completed yet).
+     */
+    func forkSideChat(sourceId: String) async throws  -> String
+    
+    /**
      * Threads page: pinned, sections, recent.
      */
     func frontPage()  -> FrontPage
@@ -1122,6 +1129,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Open (or return the open) session — instant from the local snapshot.
      */
     func openSession(chatId: String) throws  -> SessionHandle
+    
+    /**
+     * Open a subagent's transcript read-only (a spawn chip's doc id). A
+     * `frozen` (finished) subagent reads its uploaded blob first.
+     */
+    func openSubagent(docId: String, frozen: Bool) async throws  -> SessionHandle
     
     func orgId()  -> String
     
@@ -1512,6 +1525,27 @@ open func executionDevices() -> [DeviceView]  {
 }
     
     /**
+     * Fork `source_id` through its latest completed response into a side
+     * chat (a side chat's fork is its sibling). Returns the new chat id; the
+     * error carries the host's reason (e.g. nothing completed yet).
+     */
+open func forkSideChat(sourceId: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_fork_side_chat(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(sourceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
      * Threads page: pinned, sections, recent.
      */
 open func frontPage() -> FrontPage  {
@@ -1664,6 +1698,26 @@ open func openSession(chatId: String)throws  -> SessionHandle  {
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Open a subagent's transcript read-only (a spawn chip's doc id). A
+     * `frozen` (finished) subagent reads its uploaded blob first.
+     */
+open func openSubagent(docId: String, frozen: Bool)async throws  -> SessionHandle  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_open_subagent(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(docId),FfiConverterBool.lower(frozen)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_u64,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_u64,
+            freeFunc: ffi_zeron_mobile_rust_future_free_u64,
+            liftFunc: FfiConverterTypeSessionHandle_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func orgId() -> String  {
@@ -3197,6 +3251,12 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
      */
     func setViewAttached(attached: Bool) 
     
+    /**
+     * Subagents spawned in this transcript, in spawn order (pull after
+     * `SessionChanged`).
+     */
+    func subagents()  -> [SubagentInfo]
+    
     func transcriptStatus()  -> TranscriptStatus
     
 }
@@ -3510,6 +3570,19 @@ open func setViewAttached(attached: Bool)  {try! rustCall() {
         FfiConverterBool.lower(attached),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Subagents spawned in this transcript, in spawn order (pull after
+     * `SessionChanged`).
+     */
+open func subagents() -> [SubagentInfo]  {
+    return try!  FfiConverterSequenceTypeSubagentInfo.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_subagents(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
 open func transcriptStatus() -> TranscriptStatus  {
@@ -7565,6 +7638,11 @@ public struct NewSession: Equatable, Hashable {
      */
     public var cwd: String?
     public var title: String?
+    /**
+     * A side chat of this chat: runs in its parent's checkout and host
+     * (`target`, `cwd`, `branch` ignored).
+     */
+    public var parentChatId: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7574,12 +7652,17 @@ public struct NewSession: Equatable, Hashable {
          */branch: String?, 
         /**
          * Checkout override (an existing worktree's path).
-         */cwd: String?, title: String?) {
+         */cwd: String?, title: String?, 
+        /**
+         * A side chat of this chat: runs in its parent's checkout and host
+         * (`target`, `cwd`, `branch` ignored).
+         */parentChatId: String?) {
         self.target = target
         self.config = config
         self.branch = branch
         self.cwd = cwd
         self.title = title
+        self.parentChatId = parentChatId
     }
 
     
@@ -7602,7 +7685,8 @@ public struct FfiConverterTypeNewSession: FfiConverterRustBuffer {
                 config: FfiConverterOptionTypeChatConfig.read(from: &buf), 
                 branch: FfiConverterOptionString.read(from: &buf), 
                 cwd: FfiConverterOptionString.read(from: &buf), 
-                title: FfiConverterOptionString.read(from: &buf)
+                title: FfiConverterOptionString.read(from: &buf), 
+                parentChatId: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -7612,6 +7696,7 @@ public struct FfiConverterTypeNewSession: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.branch, into: &buf)
         FfiConverterOptionString.write(value.cwd, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.parentChatId, into: &buf)
     }
 }
 
@@ -9161,6 +9246,10 @@ public struct SessionRow: Equatable, Hashable {
      * Run start of the live turn while Working/AwaitingInput.
      */
     public var workingSinceMs: Int64?
+    /**
+     * Subagents of this chat streaming right now.
+     */
+    public var runningSubagents: UInt32
     public var lastActivityMs: Int64
     /**
      * `now` / `34m` / `4h` / `2d` at derive time.
@@ -9208,7 +9297,10 @@ public struct SessionRow: Equatable, Hashable {
          */hostIndicator: ChatIndicator, 
         /**
          * Run start of the live turn while Working/AwaitingInput.
-         */workingSinceMs: Int64?, lastActivityMs: Int64, 
+         */workingSinceMs: Int64?, 
+        /**
+         * Subagents of this chat streaming right now.
+         */runningSubagents: UInt32, lastActivityMs: Int64, 
         /**
          * `now` / `34m` / `4h` / `2d` at derive time.
          */timeLabel: String, createdAtMs: Int64, unseen: Bool, archived: Bool, pinned: Bool, sectionId: String?, pullRequest: PullRequest?, 
@@ -9237,6 +9329,7 @@ public struct SessionRow: Equatable, Hashable {
         self.indicator = indicator
         self.hostIndicator = hostIndicator
         self.workingSinceMs = workingSinceMs
+        self.runningSubagents = runningSubagents
         self.lastActivityMs = lastActivityMs
         self.timeLabel = timeLabel
         self.createdAtMs = createdAtMs
@@ -9285,6 +9378,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 indicator: FfiConverterTypeChatIndicator.read(from: &buf), 
                 hostIndicator: FfiConverterTypeChatIndicator.read(from: &buf), 
                 workingSinceMs: FfiConverterOptionInt64.read(from: &buf), 
+                runningSubagents: FfiConverterUInt32.read(from: &buf), 
                 lastActivityMs: FfiConverterInt64.read(from: &buf), 
                 timeLabel: FfiConverterString.read(from: &buf), 
                 createdAtMs: FfiConverterInt64.read(from: &buf), 
@@ -9319,6 +9413,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterTypeChatIndicator.write(value.indicator, into: &buf)
         FfiConverterTypeChatIndicator.write(value.hostIndicator, into: &buf)
         FfiConverterOptionInt64.write(value.workingSinceMs, into: &buf)
+        FfiConverterUInt32.write(value.runningSubagents, into: &buf)
         FfiConverterInt64.write(value.lastActivityMs, into: &buf)
         FfiConverterString.write(value.timeLabel, into: &buf)
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
@@ -9411,6 +9506,97 @@ public func FfiConverterTypeStyleDesc_lift(_ buf: RustBuffer) throws -> StyleDes
 #endif
 public func FfiConverterTypeStyleDesc_lower(_ value: StyleDesc) -> RustBuffer {
     return FfiConverterTypeStyleDesc.lower(value)
+}
+
+
+/**
+ * A subagent the session's agent spawned (one linked spawn chip).
+ */
+public struct SubagentInfo: Equatable, Hashable {
+    /**
+     * Its transcript doc — `CoreClient.open_subagent`.
+     */
+    public var docId: String
+    public var title: String
+    public var state: SubagentState
+    /**
+     * One-line live tail of its output.
+     */
+    public var tail: String?
+    /**
+     * The model the spawn picked, when it named one.
+     */
+    public var model: String?
+    public var spawnedAtMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Its transcript doc — `CoreClient.open_subagent`.
+         */docId: String, title: String, state: SubagentState, 
+        /**
+         * One-line live tail of its output.
+         */tail: String?, 
+        /**
+         * The model the spawn picked, when it named one.
+         */model: String?, spawnedAtMs: Int64) {
+        self.docId = docId
+        self.title = title
+        self.state = state
+        self.tail = tail
+        self.model = model
+        self.spawnedAtMs = spawnedAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SubagentInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubagentInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubagentInfo {
+        return
+            try SubagentInfo(
+                docId: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                state: FfiConverterTypeSubagentState.read(from: &buf), 
+                tail: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                spawnedAtMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SubagentInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.docId, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterTypeSubagentState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.tail, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterInt64.write(value.spawnedAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentInfo_lift(_ buf: RustBuffer) throws -> SubagentInfo {
+    return try FfiConverterTypeSubagentInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentInfo_lower(_ value: SubagentInfo) -> RustBuffer {
+    return FfiConverterTypeSubagentInfo.lower(value)
 }
 
 
@@ -13678,6 +13864,79 @@ public func FfiConverterTypeStreamSpeed_lower(_ value: StreamSpeed) -> RustBuffe
 
 
 
+
+public enum SubagentState: Equatable, Hashable {
+    
+    case running
+    case done
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SubagentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubagentState: FfiConverterRustBuffer {
+    typealias SwiftType = SubagentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubagentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .running
+        
+        case 2: return .done
+        
+        case 3: return .failed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SubagentState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .running:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .done:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentState_lift(_ buf: RustBuffer) throws -> SubagentState {
+    return try FfiConverterTypeSubagentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentState_lower(_ value: SubagentState) -> RustBuffer {
+    return FfiConverterTypeSubagentState.lower(value)
+}
+
+
+
 /**
  * How a surface takes touches.
  */
@@ -14714,6 +14973,12 @@ public enum WidgetKind: Equatable, Hashable {
     case toolToggle(detail: UInt64, `open`: Bool
     )
     /**
+     * Tap target over a subagent spawn card: opens the subagent's
+     * transcript (`doc_id`, read-only). `frozen` = it finished (done/failed).
+     */
+    case subagentLink(docId: String, title: String, frozen: Bool
+    )
+    /**
      * Shimmer sweep over the active group's title (text drawn by the canvas
      * underneath; the painter re-draws those runs brighter through a moving
      * gradient).
@@ -14776,9 +15041,12 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case 11: return .toolToggle(detail: try FfiConverterUInt64.read(from: &buf), open: try FfiConverterBool.read(from: &buf)
         )
         
-        case 12: return .shimmer
+        case 12: return .subagentLink(docId: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), frozen: try FfiConverterBool.read(from: &buf)
+        )
         
-        case 13: return .visual(id: try FfiConverterString.read(from: &buf)
+        case 13: return .shimmer
+        
+        case 14: return .visual(id: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -14851,12 +15119,19 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             FfiConverterBool.write(`open`, into: &buf)
             
         
-        case .shimmer:
+        case let .subagentLink(docId,title,frozen):
             writeInt(&buf, Int32(12))
+            FfiConverterString.write(docId, into: &buf)
+            FfiConverterString.write(title, into: &buf)
+            FfiConverterBool.write(frozen, into: &buf)
+            
+        
+        case .shimmer:
+            writeInt(&buf, Int32(13))
         
         
         case let .visual(id):
-            writeInt(&buf, Int32(13))
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(id, into: &buf)
             
         }
@@ -16302,6 +16577,31 @@ fileprivate struct FfiConverterSequenceTypeStyleDesc: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSubagentInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [SubagentInfo]
+
+    public static func write(_ value: [SubagentInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSubagentInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SubagentInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SubagentInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSubagentInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTextRun: FfiConverterRustBuffer {
     typealias SwiftType = [TextRun]
 
@@ -17056,6 +17356,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_execution_devices() != 15578) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_fork_side_chat() != 45854) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_front_page() != 3792) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17087,6 +17390,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_open_session() != 32134) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_open_subagent() != 36931) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_org_id() != 50248) {
@@ -17249,6 +17555,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_set_view_attached() != 11843) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_subagents() != 6011) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_transcript_status() != 12910) {

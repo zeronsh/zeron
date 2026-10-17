@@ -219,6 +219,14 @@ impl CoreClient {
         Ok(self.client.create_session(new_session.try_into()?)?)
     }
 
+    /// Fork `source_id` through its latest completed response into a side
+    /// chat (a side chat's fork is its sibling). Returns the new chat id; the
+    /// error carries the host's reason (e.g. nothing completed yet).
+    pub async fn fork_side_chat(&self, source_id: String) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.fork_side_chat(&source_id).await }).await
+    }
+
     pub fn archive_session(&self, chat_id: String) -> CoreResult<()> {
         Ok(self.client.archive_session(&chat_id)?)
     }
@@ -339,6 +347,18 @@ impl CoreClient {
     /// Open (or return the open) session — instant from the local snapshot.
     pub fn open_session(&self, chat_id: String) -> CoreResult<Arc<SessionHandle>> {
         Ok(SessionHandle::new(self.client.open_session(&chat_id)?))
+    }
+
+    /// Open a subagent's transcript read-only (a spawn chip's doc id). A
+    /// `frozen` (finished) subagent reads its uploaded blob first.
+    pub async fn open_subagent(
+        &self,
+        doc_id: String,
+        frozen: bool,
+    ) -> CoreResult<Arc<SessionHandle>> {
+        let client = self.client.clone();
+        let handle = on_runtime(async move { client.open_subagent(&doc_id, frozen).await }).await?;
+        Ok(SessionHandle::new(handle))
     }
 
     /// An already-open session.

@@ -4,6 +4,7 @@
 //! groups, questions, errors, attachments), the synthetic big transcripts
 //! for benchmarks, and the scripted streaming reply.
 
+use zeron_doc::parts::SubagentStatus;
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
 use zeron_proto::{TodoItem, TodoStatus, ToolCall, UserInputQuestion};
 
@@ -60,6 +61,174 @@ fn edit(id: &str, path: &str, additions: u64, deletions: u64) -> MessagePart {
         }]);
     }
     part
+}
+
+/// The finished subagent `chat-tabs` spawned (its chip links here).
+pub(crate) const TABS_SUBAGENT: &str = "chat-tabs--sub--toolu_demo_audit";
+/// The finished subagent `chat-veil` spawned — the chat that also has a
+/// side chat.
+pub(crate) const VEIL_SUBAGENT: &str = "chat-veil--sub--toolu_demo_graphemes";
+
+/// A finished subagent spawn chip linking to `doc`.
+fn spawn(id: &str, description: &str, doc: &str, tail: &str) -> MessagePart {
+    spawn_as(id, description, doc, tail, SubagentStatus::Done, None)
+}
+
+/// A subagent spawn chip linking to `doc`, in `status`, on `model` when the
+/// spawn named one.
+fn spawn_as(
+    id: &str,
+    description: &str,
+    doc: &str,
+    tail: &str,
+    status: SubagentStatus,
+    model: Option<&str>,
+) -> MessagePart {
+    let mut input = serde_json::json!({ "subagent_type": "Explore" });
+    if let Some(model) = model {
+        input["model"] = model.into();
+    }
+    let mut part = tool(
+        id,
+        ToolCall::Unknown {
+            name: format!("Agent: {description}"),
+            input: Some(input),
+        },
+        status == SubagentStatus::Failed,
+        None,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        subagent_status,
+        subagent_tail,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = Some(doc.into());
+        *subagent_status = Some(status);
+        *subagent_tail = Some(tail.into());
+    }
+    if status == SubagentStatus::Running
+        && let MessagePart::Tool { resolved, .. } = &mut part
+    {
+        *resolved = false;
+    }
+    part
+}
+
+/// `chat-veil`'s other subagents (beside [`VEIL_SUBAGENT`]): four still
+/// running in its live turn, three finished in earlier ones.
+struct DemoAgent {
+    /// Doc id suffix after `chat-veil--sub--toolu_demo_`.
+    key: &'static str,
+    task: &'static str,
+    status: SubagentStatus,
+    model: Option<&'static str>,
+    /// Live tail (running) / last line (finished).
+    tail: &'static str,
+    /// Its full answer (finished) — running ones stream their tail.
+    reply: &'static str,
+}
+
+const VEIL_AGENTS: [DemoAgent; 7] = [
+    DemoAgent {
+        key: "chunks",
+        task: "Map how the veil splits chunks",
+        status: SubagentStatus::Done,
+        model: Some("haiku"),
+        tail: "Splits on append boundaries; spans keep their own start time.",
+        reply: "Each append becomes one chunk span with its own start time; the veil fades spans independently, so a slow token never holds back the text before it.",
+    },
+    DemoAgent {
+        key: "cost",
+        task: "Measure the veil's paint cost",
+        status: SubagentStatus::Failed,
+        model: None,
+        tail: "xctrace: no device found — run it on a simulator.",
+        reply: "Couldn't record: `xctrace record` found no device to attach to. Run the Time Profiler template against a booted simulator instead.",
+    },
+    DemoAgent {
+        key: "cjk",
+        task: "Check CJK line breaking",
+        status: SubagentStatus::Done,
+        model: Some("haiku"),
+        tail: "Breaks fall between ideographs; no cluster is split.",
+        reply: "Line breaks fall between ideographs, and kinsoku rules keep closing punctuation off line starts. No grapheme cluster is split across a break.",
+    },
+    DemoAgent {
+        key: "tests",
+        task: "Run the veil test matrix",
+        status: SubagentStatus::Running,
+        model: None,
+        tail: "cargo test -p zeron-ui veil — 9 of 14 passed so far",
+        reply: "",
+    },
+    DemoAgent {
+        key: "screens",
+        task: "Screenshot the veil on iPhone and iPad",
+        status: SubagentStatus::Running,
+        model: Some("haiku"),
+        tail: "xcodebuild test — capturing iPad Pro 13-inch",
+        reply: "",
+    },
+    DemoAgent {
+        key: "pr",
+        task: "Draft the PR description",
+        status: SubagentStatus::Running,
+        model: Some("sonnet"),
+        tail: "Summarizing the 6 commits on veil-fade…",
+        reply: "",
+    },
+    DemoAgent {
+        key: "motion",
+        task: "Audit the reduced-motion fallback",
+        status: SubagentStatus::Running,
+        model: None,
+        tail: "Reading apps/ios/Zeron/Transcript/RowView.swift",
+        reply: "",
+    },
+];
+
+fn veil_agent_doc(key: &str) -> String {
+    format!("chat-veil--sub--toolu_demo_{key}")
+}
+
+/// The spawn chip for `chat-veil`'s subagent `key`.
+fn veil_spawn(id: &str, key: &str) -> MessagePart {
+    let agent = VEIL_AGENTS
+        .iter()
+        .find(|a| a.key == key)
+        .expect("demo agent");
+    spawn_as(
+        id,
+        agent.task,
+        &veil_agent_doc(key),
+        agent.tail,
+        agent.status,
+        agent.model,
+    )
+}
+
+/// The transcript a [`VEIL_AGENTS`] subagent wrote into its own doc.
+fn veil_agent_transcript(doc_id: &str, host: &str, now: i64) -> Option<Vec<SessionMessageEntry>> {
+    let agent = VEIL_AGENTS
+        .iter()
+        .find(|a| veil_agent_doc(a.key) == doc_id)?;
+    let running = agent.status == SubagentStatus::Running;
+    let mut reply = assistant(
+        "s2",
+        host,
+        now - 50_000,
+        vec![
+            tool("q1", read("crates/ui/src/markdown/veil.rs"), false, None),
+            text("t0", if running { agent.tail } else { agent.reply }),
+        ],
+    );
+    if running {
+        reply.status = Some(MessageStatus::Streaming);
+        reply.duration_ms = None;
+    }
+    Some(vec![user("s1", now - 55_000, agent.task), reply])
 }
 
 fn exec(command: &str) -> ToolCall {
@@ -229,6 +398,10 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
         now - 60_000,
         vec![
             text("t0", "Opening the PR now. Running the checks first:"),
+            veil_spawn("a1", "tests"),
+            veil_spawn("a2", "screens"),
+            veil_spawn("a3", "pr"),
+            veil_spawn("a4", "motion"),
             tool(
                 "k1",
                 exec("cargo test -p zeron-ui veil -- --nocapture"),
@@ -252,6 +425,8 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     "The veil must be paint-only. Check how veil.rs splits chunk spans and where the fade duration comes from before touching the Swift side.",
                 ),
                 text("t0", VEIL_PLAN),
+                veil_spawn("a1", "chunks"),
+                veil_spawn("a2", "cost"),
                 tool("k1", read("crates/ui/src/markdown/veil.rs"), false, None),
                 tool(
                     "k2",
@@ -284,6 +459,13 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 1_700_000,
             vec![
+                spawn(
+                    "k0",
+                    "Audit grapheme handling in the veil",
+                    VEIL_SUBAGENT,
+                    "Chunk splits cut ZWJ sequences; snap them to clusters.",
+                ),
+                veil_spawn("a1", "cjk"),
                 tool(
                     "k1",
                     ToolCall::Glob {
@@ -408,6 +590,12 @@ fn tabs(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 950_000,
             vec![
+                spawn(
+                    "k0",
+                    "Find every tool group header color",
+                    TABS_SUBAGENT,
+                    "3 call sites; only the header path picks up danger.",
+                ),
                 tool(
                     "k1",
                     ToolCall::Search {
@@ -433,6 +621,69 @@ fn tabs(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 text(
                     "t0",
                     "Done — the header keeps `text_muted` even on failure; only the chip label and the summary segment (\"1 failed\") pick up `danger`. Matches the desktop fix in `1749890`.",
+                ),
+            ],
+        ),
+    ]
+}
+
+/// The transcript `chat-veil`'s subagent wrote into its own doc.
+fn veil_subagent(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user(
+            "s1",
+            now - 1_690_000,
+            "Check whether veil.rs splits chunks on grapheme cluster boundaries. Report any case that cuts a cluster.",
+        ),
+        assistant(
+            "s2",
+            host,
+            now - 1_680_000,
+            vec![
+                tool("q1", read("crates/ui/src/markdown/veil.rs"), false, None),
+                tool(
+                    "q2",
+                    exec("cargo test -p zeron-ui veil_graphemes"),
+                    true,
+                    Some("assertion failed: split 👩‍💻 at byte 4 (inside a ZWJ sequence)"),
+                ),
+                text(
+                    "t0",
+                    "Chunk splits use `char_indices`, so a ZWJ sequence like 👩‍💻 can be cut in half — the failing test above. CJK is fine (one char per cluster). Snap each split with `unicode-segmentation`'s `grapheme_indices` and the test passes.",
+                ),
+            ],
+        ),
+    ]
+}
+
+/// The transcript `chat-tabs`' subagent wrote into its own doc.
+fn tabs_subagent(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user(
+            "s1",
+            now - 990_000,
+            "Find every place a tool group header picks its color, and whether a failed child changes it.",
+        ),
+        assistant(
+            "s2",
+            host,
+            now - 980_000,
+            vec![
+                tool(
+                    "q1",
+                    ToolCall::Search {
+                        pattern: "group_header_color".into(),
+                        path: Some("crates/ui/src".into()),
+                    },
+                    false,
+                    Some(
+                        "crates/ui/src/shell/transcript.rs:812\ncrates/ui/src/shell/transcript.rs:1490\ncrates/ui/src/tool_group.rs:64",
+                    ),
+                ),
+                tool("q2", read("crates/ui/src/tool_group.rs"), false, None),
+                text(
+                    "t0",
+                    "Three call sites. Only `tool_group.rs:64` reacts to a failed child: it swaps `text_muted` for `danger` when `any_failed` is set. The other two read the theme's muted role unconditionally.",
                 ),
             ],
         ),
@@ -658,6 +909,29 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         "chat-veil" => veil(host, crate::now_ms()),
         "chat-picker" => picker(host, now),
         "chat-tabs" => tabs(host, now),
+        TABS_SUBAGENT => tabs_subagent(host, now),
+        VEIL_SUBAGENT => veil_subagent(host, now),
+        "chat-side-2" => short(
+            host,
+            now,
+            "Does the veil run under Reduce Motion?",
+            "No — with Reduce Motion on, rows render settled at once; the fade is skipped entirely.",
+        ),
+        "chat-side-3" => short(
+            host,
+            now,
+            "Compare our fade curve with the desktop's.",
+            "Same ease-out, 220 ms on both; the desktop clamps the minimum to 120 ms for tiny chunks.",
+        ),
+        "chat-side-4" => short(
+            host,
+            now,
+            "Write a changelog line for the veil.",
+            "Streaming replies now fade in chunk by chunk instead of popping in, on iPhone and iPad.",
+        ),
+        id if id.starts_with("chat-veil--sub--") => {
+            veil_agent_transcript(id, host, now).unwrap_or_default()
+        }
         "chat-errored" => errored(host, now),
         "chat-ios-scroll" => scroll(host, now),
         "chat-home" => home(host, now),

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
-use zeron_doc::RegistryDoc;
+use zeron_doc::{RegistryDoc, SessionDoc};
 use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
 
 use crate::attachments::{self, AttachmentCache};
@@ -22,7 +22,9 @@ use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
-use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
+use crate::session::{
+    DocSource, HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle,
+};
 use crate::workspace::{SearchHit, WorkspaceSnapshot, WorkspaceStore};
 use crate::{lock, now_ms, read, write};
 
@@ -36,6 +38,16 @@ const TICK: Duration = Duration::from_secs(1);
 pub const WARM_SESSION_CAP: usize = 6;
 /// Sessions `preload_sessions` warms (front page order).
 pub const PRELOAD_CAP: usize = 4;
+
+/// The chat a subagent doc (`{chatId}--sub--{id}`) belongs to — the
+/// top-level chat even for nested spawns (the engine names every subagent
+/// doc of a run off the run's own chat).
+pub fn subagent_parent(doc_id: &str) -> Option<&str> {
+    doc_id
+        .split_once("--sub--")
+        .map(|(parent, _)| parent)
+        .filter(|parent| !parent.is_empty())
+}
 
 /// Where a new session runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +68,10 @@ pub struct NewSession {
     /// Checkout override (an existing worktree's path).
     pub cwd: Option<String>,
     pub title: Option<String>,
+    /// A side chat of this chat: `target`, `cwd` and `branch` are ignored —
+    /// it runs in its parent's checkout on its parent's host. A side chat's
+    /// own side chats hang off its parent instead (siblings).
+    pub parent_chat_id: Option<String>,
 }
 
 pub(crate) enum Backend {
@@ -117,6 +133,24 @@ impl ClientInner {
 
     pub(crate) fn cores(&self) -> Vec<Arc<SessionCore>> {
         lock(&self.sessions).values().cloned().collect()
+    }
+
+    /// Forget `core` (if it is still the one registered for `chat_id`): the
+    /// next open builds a fresh one. Views holding it keep their copy.
+    fn release_core(&self, chat_id: &str, core: &Arc<SessionCore>) {
+        let mut sessions = lock(&self.sessions);
+        if sessions.get(chat_id).is_some_and(|c| Arc::ptr_eq(c, core)) {
+            sessions.remove(chat_id);
+        }
+    }
+
+    /// Register a freshly built core, or return the one a racing open
+    /// registered first.
+    fn adopt_core(&self, chat_id: &str, core: Arc<SessionCore>) -> Arc<SessionCore> {
+        lock(&self.sessions)
+            .entry(chat_id.to_owned())
+            .or_insert(core)
+            .clone()
     }
 
     pub(crate) fn network_online(&self) -> bool {
@@ -707,6 +741,9 @@ impl Client {
     /// Mint a chat row (born on chat2: `roomGen: 2`). The row is written
     /// before any session doc opens, so the host never reads it as legacy.
     pub fn create_session(&self, new: NewSession) -> Result<String> {
+        if let Some(parent_id) = &new.parent_chat_id {
+            return self.create_side_chat(parent_id, new.config, new.title);
+        }
         let (state, _) = self.inner.workspace.state();
         let id = crate::new_id();
         let now = Utc::now();
@@ -771,6 +808,96 @@ impl Client {
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
         Ok(id)
+    }
+
+    /// The chat side chats of `chat_id` hang off: itself, or its parent when
+    /// it is a side chat (a dangling parent leaves it as the root).
+    fn side_chat_root(&self, chat_id: &str) -> Result<Chat> {
+        let chat = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        Ok(chat
+            .parent_chat_id
+            .as_deref()
+            .and_then(|parent| self.inner.workspace.chat(parent))
+            .unwrap_or(chat))
+    }
+
+    /// An empty side chat, minted the way the desktop's "New side chat"
+    /// does: the parent's row (host, project, checkout) with a fresh
+    /// identity. The run config is the caller's pick, but the sandbox stays
+    /// the parent's.
+    fn create_side_chat(
+        &self,
+        parent_id: &str,
+        config: Option<ChatConfig>,
+        title: Option<String>,
+    ) -> Result<String> {
+        let parent = self.side_chat_root(parent_id)?;
+        let mut chat = parent.clone();
+        chat.id = crate::new_id();
+        chat.parent_chat_id = Some(parent.id.clone());
+        chat.title = title.filter(|t| !t.trim().is_empty());
+        chat.archived = false;
+        chat.created_at = Utc::now();
+        chat.last_message_at = None;
+        chat.last_message_preview = None;
+        chat.last_seen_at = None;
+        chat.harness_session_id = None;
+        chat.harness_session_cwd = None;
+        chat.room_gen = Some(2);
+        if let Some(mut config) = config {
+            if let Some(sandbox) = parent.config.as_ref().map(|c| c.sandbox) {
+                config.sandbox = sandbox;
+            }
+            chat.config = Some(config);
+        }
+        let id = chat.id.clone();
+        self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        Ok(id)
+    }
+
+    /// Fork `source_id` through its latest completed response into a side
+    /// chat, on the source's host (which copies the history). A side chat's
+    /// fork lists as its sibling. Fails with the host's reason when there is
+    /// no completed response yet.
+    pub async fn fork_side_chat(&self, source_id: &str) -> Result<String> {
+        let source = self
+            .inner
+            .workspace
+            .chat(source_id)
+            .ok_or_else(|| ClientError::NotFound(source_id.to_owned()))?;
+        let parent = self.side_chat_root(source_id)?;
+        let params = serde_json::json!({
+            "chatId": crate::new_id(),
+            "sourceChatId": source.id,
+            "parentChatId": parent.id,
+        });
+        let method = zeron_rpc::methods::FORK_SIDE_CHAT;
+        let reply = self
+            .inner
+            .host_rpc(&source.device_id, method, params)
+            .await
+            .map_err(|err| match err {
+                // The host's own words, without the method prefix.
+                ClientError::HostError(message) => ClientError::HostError(
+                    message
+                        .strip_prefix(&format!("{method}: "))
+                        .unwrap_or(&message)
+                        .to_owned(),
+                ),
+                err => err,
+            })?;
+        let chat: Chat = serde_json::from_value(reply)
+            .map_err(|err| ClientError::HostError(format!("unexpected fork reply: {err}")))?;
+        // The host published the row; this replica may not have it yet, and
+        // the caller opens the fork right away.
+        if self.inner.workspace.chat(&chat.id).is_none() {
+            self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        }
+        Ok(chat.id)
     }
 
     fn chat_write(
@@ -1082,14 +1209,8 @@ impl Client {
                 (local.doc, local.cursor, local.had_content)
             }
         };
-        let core = SessionCore::new(chat_id, &self.inner, doc, cursor);
-        let core = {
-            let mut sessions = lock(&self.inner.sessions);
-            sessions
-                .entry(chat_id.to_owned())
-                .or_insert_with(|| core.clone())
-                .clone()
-        };
+        let core = SessionCore::new(chat_id, &self.inner, doc, cursor, DocSource::Chat);
+        let core = self.inner.adopt_core(chat_id, core);
         if hydrated {
             core.set_hydrated();
         }
@@ -1113,6 +1234,94 @@ impl Client {
         }
         self.inner.evict_sessions();
         Ok(SessionHandle { core })
+    }
+
+    /// Open a subagent's transcript read-only: the doc a spawn chip's
+    /// `subagent_ref` names (`{chatId}--sub--{id}`). It has no registry row;
+    /// the parent chat's host serves its chat2 room. A `frozen` (done/failed)
+    /// subagent reads its uploaded blob first and never wakes the room; any
+    /// blob failure falls back to the live room.
+    pub async fn open_subagent(&self, doc_id: &str, frozen: bool) -> Result<SessionHandle> {
+        let parent = subagent_parent(doc_id)
+            .ok_or_else(|| ClientError::InvalidArgument(format!("not a subagent doc: {doc_id}")))?;
+        if let Some(core) = self.inner.session_core(doc_id) {
+            // A frozen copy never dials, so it can't follow a subagent that
+            // runs (again — a resumed one keeps its doc): a live open
+            // replaces it with the live doc.
+            if frozen || !core.is_frozen() {
+                return Ok(SessionHandle { core });
+            }
+            self.inner.release_core(doc_id, &core);
+        }
+        let host = self
+            .inner
+            .workspace
+            .chat(parent)
+            .map(|chat| chat.device_id)
+            .ok_or_else(|| ClientError::NotFound(parent.to_owned()))?;
+        let (doc, cursor, source) = match self.inner.backend() {
+            Backend::Demo(demo) => (demo.session_doc(doc_id)?, 0, DocSource::Frozen),
+            Backend::Live(live) => {
+                let blob = if frozen {
+                    self.fetch_subagent_blob(parent, doc_id).await
+                } else {
+                    None
+                };
+                match blob {
+                    Some(doc) => (doc, 0, DocSource::Frozen),
+                    None => {
+                        let local = crate::live::room::load_local(&live.store, doc_id);
+                        (local.doc, local.cursor, DocSource::Subagent { host })
+                    }
+                }
+            }
+        };
+        let blob_served = source == DocSource::Frozen;
+        let core = SessionCore::new(doc_id, &self.inner, doc, cursor, source);
+        let core = self.inner.adopt_core(doc_id, core);
+        if blob_served {
+            core.set_hydrated();
+        }
+        core.ensure_room(&self.inner);
+        core.touch();
+        core.refresh();
+        self.inner.evict_sessions();
+        Ok(SessionHandle { core })
+    }
+
+    /// The frozen transcript blob (`blob/{chatId}/{docId}`: a JSON array of
+    /// entries) as a local doc. `None` on any failure — the upload is
+    /// best-effort host-side.
+    async fn fetch_subagent_blob(&self, chat_id: &str, doc_id: &str) -> Option<SessionDoc> {
+        let live = self.inner.live()?;
+        let url = format!(
+            "{}/blob/{}/{}",
+            live.edge.trim_end_matches('/'),
+            crate::live::urls::encode(chat_id),
+            crate::live::urls::encode(doc_id)
+        );
+        let token = crate::live::LiveBackend::bearer(&self.inner)
+            .get()
+            .await
+            .ok()?;
+        let response = crate::auth::http()
+            .get(&url)
+            .bearer_auth(&token)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            tracing::debug!(doc = %doc_id, status = %response.status(), "subagent blob unavailable");
+            return None;
+        }
+        let entries: Vec<zeron_doc::SessionMessageEntry> =
+            serde_json::from_slice(&response.bytes().await.ok()?).ok()?;
+        let doc = SessionDoc::from_doc(loro::LoroDoc::new());
+        for entry in &entries {
+            doc.push_message(entry).ok()?;
+        }
+        Some(doc)
     }
 
     /// An already-open session, if any.

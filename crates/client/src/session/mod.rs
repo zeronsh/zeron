@@ -29,7 +29,7 @@ use zeron_proto::{
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
-    SnapshotDelta,
+    SnapshotDelta, SubagentRow, SubagentState,
 };
 use transcript::{Dirty, Tracker};
 
@@ -158,6 +158,18 @@ pub enum QueueEditFinish {
     Unavailable,
 }
 
+/// Where a session's doc comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DocSource {
+    /// A registry chat: its row names the room generation and the host.
+    Chat,
+    /// A running subagent's transcript doc (`{chatId}--sub--{id}`): no
+    /// registry row, always a chat2 room, served by the parent's `host`.
+    Subagent { host: String },
+    /// A finished subagent read from its frozen blob: local only, never dials.
+    Frozen,
+}
+
 /// Mutable per-session state behind one lock.
 struct CoreState {
     tracker: Tracker,
@@ -180,6 +192,7 @@ struct CoreState {
 
 pub(crate) struct SessionCore {
     pub(crate) chat_id: String,
+    source: DocSource,
     client: Weak<ClientInner>,
     /// Live chat2 room (declared before `doc`: it drops — and flushes — first).
     room: Mutex<Option<Arc<crate::live::room::Room>>>,
@@ -208,6 +221,7 @@ impl SessionCore {
         client: &Arc<ClientInner>,
         doc: SessionDoc,
         cursor: u64,
+        source: DocSource,
     ) -> Arc<Self> {
         let doc = Arc::new(doc);
         let dirty = Arc::new(Mutex::new(Dirty::all()));
@@ -224,6 +238,7 @@ impl SessionCore {
         let tasks = client.cancel.child_token();
         let core = Arc::new(Self {
             chat_id: chat_id.to_owned(),
+            source,
             client: Arc::downgrade(client),
             room: Mutex::new(None),
             initial_cursor: cursor,
@@ -282,6 +297,11 @@ impl SessionCore {
         lock(&self.room).clone()
     }
 
+    /// Served from a finished subagent's frozen blob: it never dials.
+    pub(crate) fn is_frozen(&self) -> bool {
+        self.source == DocSource::Frozen
+    }
+
     /// Drop the room (deleted chat): its tasks stop and it flushes once.
     pub(crate) fn close_room(&self) {
         let room = lock(&self.room).take();
@@ -295,18 +315,25 @@ impl SessionCore {
         if lock(&self.room).is_some() {
             return;
         }
-        let Some(chat) = client.workspace.chat(&self.chat_id) else {
-            return;
-        };
-        if chat.room_gen.unwrap_or(1) < 2 {
-            // A retired legacy (s2) room: nothing to dial. Show what's local
-            // instead of an endless loader.
-            let newly = !std::mem::replace(&mut lock(&self.state).hydrated, true);
-            if newly {
-                self.schedule_refresh();
+        let host_device_id = match &self.source {
+            DocSource::Frozen => return,
+            DocSource::Subagent { host } => host.clone(),
+            DocSource::Chat => {
+                let Some(chat) = client.workspace.chat(&self.chat_id) else {
+                    return;
+                };
+                if chat.room_gen.unwrap_or(1) < 2 {
+                    // A retired legacy (s2) room: nothing to dial. Show what's
+                    // local instead of an endless loader.
+                    let newly = !std::mem::replace(&mut lock(&self.state).hydrated, true);
+                    if newly {
+                        self.schedule_refresh();
+                    }
+                    return;
+                }
+                chat.device_id
             }
-            return;
-        }
+        };
         let core = Arc::downgrade(self);
         let on_applied: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             if let Some(core) = core.upgrade() {
@@ -343,7 +370,7 @@ impl SessionCore {
                 bearer: crate::live::LiveBackend::bearer(client),
                 edge: live.edge.clone(),
                 device_id: client.config.device_id.clone(),
-                host_device_id: chat.device_id.clone(),
+                host_device_id,
                 store: live.store.clone(),
                 on_applied,
                 on_status,

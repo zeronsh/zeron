@@ -57,6 +57,8 @@ struct Shared {
     nudge_status_by_chat: Mutex<HashMap<String, u16>>,
     nudges: Mutex<Vec<(String, usize)>>,
     host_hints: Mutex<HashMap<String, String>>,
+    /// Tool-output sidecars (`/blob/{chat}/{part}`), by `chat/part`.
+    blobs: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 enum Out {
@@ -94,6 +96,7 @@ impl MockEdge {
             nudge_status_by_chat: Mutex::new(HashMap::new()),
             nudges: Mutex::new(Vec::new()),
             host_hints: Mutex::new(HashMap::new()),
+            blobs: Mutex::new(HashMap::new()),
         });
         let accept_shared = shared.clone();
         let task = tokio::spawn(async move {
@@ -104,8 +107,12 @@ impl MockEdge {
                 let shared = accept_shared.clone();
                 let registry_url = registry_url.clone();
                 tokio::spawn(async move {
-                    let mut first = [0u8; 4];
-                    if stream.peek(&mut first).await.is_ok() && first[0] == b'P' {
+                    let mut first = [0u8; 10];
+                    let peeked = stream.peek(&mut first).await.unwrap_or(0);
+                    if first[..peeked].starts_with(b"GET /blob/") {
+                        return serve_blob(stream, &shared).await;
+                    }
+                    if peeked > 0 && first[0] == b'P' {
                         let mut request = Vec::new();
                         let mut buf = [0u8; 4096];
                         loop {
@@ -218,6 +225,15 @@ impl MockEdge {
             shared,
             task,
         }
+    }
+
+    /// Serve `body` at `GET /blob/{chat}/{part}` (a frozen subagent copy).
+    pub fn put_blob(&self, chat: &str, part: &str, body: Vec<u8>) {
+        self.shared
+            .blobs
+            .lock()
+            .unwrap()
+            .insert(format!("{chat}/{part}"), body);
     }
 
     pub fn nudge_status(&self, status: u16) {
@@ -357,6 +373,32 @@ fn row_frame(row: &Row) -> Vec<u8> {
         &json!({ "seq": row.seq, "device": row.device, "batchId": row.batch_id }),
         &row.bytes,
     )
+}
+
+/// `GET /blob/{chat}/{part}`: the stored body, else 404.
+async fn serve_blob(mut stream: tokio::net::TcpStream, shared: &Shared) {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !request.windows(4).any(|b| b == b"\r\n\r\n") {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => request.extend_from_slice(&buf[..n]),
+        }
+    }
+    let head = String::from_utf8_lossy(&request);
+    let path = head.split_whitespace().nth(1).unwrap_or_default();
+    let key = path.trim_start_matches("/blob/").to_owned();
+    let body = shared.blobs.lock().unwrap().get(&key).cloned();
+    let (status, body) = match body {
+        Some(body) => ("200 OK", body),
+        None => ("404 Not Found", b"{}".to_vec()),
+    };
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes()).await;
+    let _ = stream.write_all(&body).await;
 }
 
 async fn serve_chat(ws: Ws, chat: String, shared: Arc<Shared>) {

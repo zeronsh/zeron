@@ -36,6 +36,7 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, toggleDetail detail: UInt64, open: Bool)
     func rowView(_ view: RowView, open url: URL)
     func rowView(_ view: RowView, imageFor reference: String, into imageView: UIImageView)
+    func rowView(_ view: RowView, openSubagent docId: String, title: String, frozen: Bool)
     /// The live view for an agent visual (kept across row reuse).
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
 }
@@ -295,6 +296,19 @@ final class RowView: UIView {
                 view = b
             case .shimmer:
                 view = ShimmerView(model: model!, rect: rect)
+            case let .subagentLink(docId, title, frozen):
+                let b = ToolToggleControl()
+                b.layer.cornerRadius = 10
+                b.layer.cornerCurve = .continuous
+                b.accessibilityTraits = .button
+                b.accessibilityLabel = "Open subagent: \(title)"
+                b.accessibilityIdentifier = "subagent-link"
+                b.addAction(UIAction { [weak self] _ in
+                    guard let self else { return }
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    self.delegate?.rowView(self, openSubagent: docId, title: title, frozen: frozen)
+                }, for: .touchUpInside)
+                view = b
             case let .visual(id):
                 view = delegate?.rowView(self, visualFor: id) ?? UIView()
                 (view as? VisualView)?.active = !isHidden
