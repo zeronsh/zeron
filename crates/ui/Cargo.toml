@@ -70,6 +70,7 @@ similar.workspace = true
 zeron-doc.workspace = true
 zeron-engine.workspace = true
 zeron-harness.workspace = true
+zeron-mcp.workspace = true
 zeron-rpc.workspace = true
 zeron-update.workspace = true
 zeron-syntax.workspace = true
@@ -123,6 +124,12 @@ core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["elcapitan", "highsierra", "link"] }
 foreign-types = "0.5"
 block = "0.1"
+# Video wallpapers decode through AVFoundation (AVAssetReader).
+objc2-av-foundation = { version = "=0.3.2", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVMediaFormat", "AVAsynchronousKeyValueLoading", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "CMBase", "objc2-core-video"] }
+objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString", "CFBase"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "global_shortcuts", "screenshot", "settings"] }

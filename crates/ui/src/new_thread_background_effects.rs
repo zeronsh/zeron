@@ -88,9 +88,92 @@ impl Readiness {
     }
 }
 type EffectEntry = (
-    (NewThreadBackgroundEffect, bool),
+    (NewThreadBackgroundEffect, bool, u8),
     Option<Arc<gpui::RenderImage>>,
 );
+
+/// Blur is quantized to whole pixels: nearby slider values share one raster.
+fn blur_key(blur: f32) -> u8 {
+    blur.clamp(0.0, 255.0).round() as u8
+}
+
+/// Gaussian-soften source colors so a treatment can composite over them.
+fn blur_source(colors: &[[u8; 4]], width: u32, height: u32, sigma: f32) -> image::RgbaImage {
+    let flat: Vec<u8> = colors.iter().flat_map(|pixel| *pixel).collect();
+    blur_image(
+        &image::RgbaImage::from_raw(width, height, flat).expect("source size"),
+        sigma,
+    )
+}
+
+/// Channel-order agnostic Gaussian blur. A Gaussian keeps only low
+/// frequencies, so blurring a proportionally smaller copy and scaling it
+/// back looks the same at a fraction of the cost (a full-size sigma 24 blur
+/// of a 1080p frame took ~275 ms; this path takes a few ms).
+fn blur_image(source: &image::RgbaImage, sigma: f32) -> image::RgbaImage {
+    let (width, height) = source.dimensions();
+    let factor = (sigma / 1.5).floor().max(2.0);
+    let small_width = ((width as f32 / factor).round() as u32).max(1);
+    let small_height = ((height as f32 / factor).round() as u32).max(1);
+    if small_width < 2 || small_height < 2 {
+        return image::imageops::blur(source, sigma);
+    }
+    let small = image::imageops::thumbnail(source, small_width, small_height);
+    let blurred = image::imageops::blur(&small, sigma / factor);
+    upscale_bilinear(&blurred, width, height)
+}
+
+/// Plain bilinear upscale in 8-bit fixed point; enough for an already-blurred
+/// image and several times cheaper than `imageops::resize`'s separable filter.
+fn upscale_bilinear(source: &image::RgbaImage, width: u32, height: u32) -> image::RgbaImage {
+    let (sw, sh) = (source.width() as usize, source.height() as usize);
+    let (width, height) = (width as usize, height as usize);
+    let raw = source.as_raw();
+    // Source sample and weight (0..=256) for each output coordinate.
+    let taps = |out: usize, src: usize| -> Vec<(usize, usize, u32)> {
+        let scale = src as f32 / out as f32;
+        (0..out)
+            .map(|i| {
+                let f = ((i as f32 + 0.5) * scale - 0.5).clamp(0.0, (src - 1) as f32);
+                let i0 = f as usize;
+                (i0, (i0 + 1).min(src - 1), ((f - i0 as f32) * 256.0) as u32)
+            })
+            .collect()
+    };
+    let columns = taps(width, sw);
+    let rows = taps(height, sh);
+    let mut out = vec![0u8; width * height * 4];
+    // One horizontally-filtered source row pair per output row.
+    let mut top = vec![0u32; width * 4];
+    let mut bottom = vec![0u32; width * 4];
+    let filter_row = |row: usize, into: &mut [u32]| {
+        let line = &raw[row * sw * 4..(row + 1) * sw * 4];
+        for (x, &(x0, x1, w)) in columns.iter().enumerate() {
+            for ch in 0..4 {
+                let a = line[x0 * 4 + ch] as u32;
+                let b = line[x1 * 4 + ch] as u32;
+                into[x * 4 + ch] = a * (256 - w) + b * w;
+            }
+        }
+    };
+    let mut cached = (usize::MAX, usize::MAX);
+    for (y, &(y0, y1, w)) in rows.iter().enumerate() {
+        if cached != (y0, y1) {
+            if cached.1 == y0 {
+                std::mem::swap(&mut top, &mut bottom);
+            } else {
+                filter_row(y0, &mut top);
+            }
+            filter_row(y1, &mut bottom);
+            cached = (y0, y1);
+        }
+        let line = &mut out[y * width * 4..(y + 1) * width * 4];
+        for (o, (t, b)) in line.iter_mut().zip(top.iter().zip(bottom.iter())) {
+            *o = ((t * (256 - w) + b * w + (1 << 15)) >> 16) as u8;
+        }
+    }
+    image::RgbaImage::from_raw(width as u32, height as u32, out).expect("upscale size")
+}
 #[derive(Debug)]
 struct BackgroundLuminance {
     width: u32,
@@ -104,6 +187,7 @@ impl BackgroundLuminance {
         self: &Arc<Self>,
         effect: NewThreadBackgroundEffect,
         light: bool,
+        blur: f32,
         cx: &mut gpui::App,
     ) -> Option<Arc<gpui::RenderImage>> {
         let mut effects = self.effects.lock().unwrap();
@@ -114,6 +198,7 @@ impl BackgroundLuminance {
                     effect,
                     NewThreadBackgroundEffect::Dither | NewThreadBackgroundEffect::None
                 ),
+            blur_key(blur),
         );
         if let Some((_, image)) = effects.iter().find(|(cached, _)| *cached == key) {
             return image.clone();
@@ -126,7 +211,7 @@ impl BackgroundLuminance {
             let worker = source.clone();
             let image = cx
                 .background_executor()
-                .spawn(async move { worker.render_image(effect, light) })
+                .spawn(async move { worker.render_image(effect, light, blur) })
                 .await;
             cx.update(|cx| {
                 if let Some((_, ready)) = source
@@ -148,8 +233,27 @@ impl BackgroundLuminance {
         &self,
         effect: NewThreadBackgroundEffect,
         light: bool,
+        blur: f32,
     ) -> Arc<gpui::RenderImage> {
-        let pixels = match effect {
+        Arc::new(gpui::RenderImage::new([image::Frame::new(
+            self.render_pixels(effect, light, blur),
+        )]))
+    }
+    /// Effect pixels in BGRA, ready for `RenderImage`.
+    fn render_pixels(
+        &self,
+        effect: NewThreadBackgroundEffect,
+        light: bool,
+        blur: f32,
+    ) -> image::RgbaImage {
+        let sigma = blur_key(blur) as f32;
+        if sigma >= 1.0 {
+            // The treatment composites over a softened backdrop
+            // instead of softening its own texture.
+            return from_rgba(blur_source(&self.colors, self.width, self.height, sigma))
+                .render_pixels(effect, light, 0.0);
+        }
+        match effect {
             NewThreadBackgroundEffect::None => {
                 image::RgbaImage::from_fn(self.width, self.height, |x, y| {
                     let [r, g, b, a] = self.colors[(y * self.width + x) as usize];
@@ -162,8 +266,7 @@ impl BackgroundLuminance {
             }
             NewThreadBackgroundEffect::Ascii => self.ascii_pixels(light),
             _ => self.scanline_pixels(light),
-        };
-        Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)]))
+        }
     }
     fn scanline_pixels(&self, light: bool) -> image::RgbaImage {
         image::RgbaImage::from_fn(self.width, self.height, |x, y| {
@@ -310,15 +413,46 @@ fn decode_source(bytes: &[u8]) -> Option<Arc<BackgroundLuminance>> {
 }
 
 fn source_from_image(image: &image::DynamicImage) -> Arc<BackgroundLuminance> {
-    let proxy = image.thumbnail(2048, 2048);
-    let gray = proxy.to_luma8();
+    from_rgba(image.thumbnail(2048, 2048).to_rgba8())
+}
+
+/// Build effect source pixels from an RGBA frame.
+fn from_rgba(proxy: image::RgbaImage) -> Arc<BackgroundLuminance> {
+    let dynamic = image::DynamicImage::ImageRgba8(proxy);
+    let gray = dynamic.to_luma8();
     Arc::new(BackgroundLuminance {
         width: gray.width(),
         height: gray.height(),
         pixels: gray.into_raw().into_boxed_slice(),
-        colors: proxy.to_rgba8().pixels().map(|pixel| pixel.0).collect(),
+        colors: dynamic.to_rgba8().pixels().map(|pixel| pixel.0).collect(),
         effects: Mutex::new(Vec::new()),
     })
+}
+
+/// Apply a raster effect to one BGRA video frame, returning BGRA pixels
+/// ready for `RenderImage`. `None` is identity.
+pub(super) fn render_frame_effect(
+    frame: &image::RgbaImage,
+    effect: NewThreadBackgroundEffect,
+    light: bool,
+    blur: f32,
+) -> image::RgbaImage {
+    let sigma = blur_key(blur) as f32;
+    // Blur is per channel, so it runs on the BGRA frame as decoded.
+    let softened = if sigma >= 1.0 {
+        blur_image(frame, sigma)
+    } else {
+        frame.clone()
+    };
+    if matches!(effect, NewThreadBackgroundEffect::None) {
+        return softened;
+    }
+    // The effect pipeline is RGBA in, BGRA out.
+    let mut rgba = softened;
+    for pixel in rgba.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    from_rgba(rgba).render_pixels(effect, light, 0.0)
 }
 
 /// Fully decoded source and selected effect, built on the background executor.
@@ -331,6 +465,7 @@ impl PreloadedArtwork {
         image: &image::DynamicImage,
         effect: NewThreadBackgroundEffect,
         light: bool,
+        blur: f32,
     ) -> Self {
         let source = source_from_image(image);
         let light = light
@@ -338,12 +473,12 @@ impl PreloadedArtwork {
                 effect,
                 NewThreadBackgroundEffect::None | NewThreadBackgroundEffect::Dither
             );
-        let image = source.render_image(effect, light);
+        let image = source.render_image(effect, light, blur);
         source
             .effects
             .lock()
             .unwrap()
-            .push(((effect, light), Some(image)));
+            .push(((effect, light, blur_key(blur)), Some(image)));
         Self(source)
     }
 
@@ -406,8 +541,17 @@ pub(super) fn prepare(
     path: &Path,
     cx: &mut gpui::App,
 ) -> Option<Arc<gpui::RenderImage>> {
+    // A video background yields its live frame, with the selected
+    // raster effect applied per frame off the UI thread.
     let light = matches!(theme.appearance, crate::theme::Appearance::Light);
-    background_luminance(path, cx).and_then(|source| source.raster_image(effect, light, cx))
+    let blur = crate::settings::new_thread_background_blur_value(cx);
+    if crate::new_thread_background_video::is_video(path) {
+        let animate = !crate::motion::reduced_motion(cx);
+        return crate::new_thread_background_video::current_frame(
+            path, animate, effect, light, blur, cx,
+        );
+    }
+    background_luminance(path, cx).and_then(|source| source.raster_image(effect, light, blur, cx))
 }
 fn dither_color([r, g, b, a]: [u8; 4], threshold: u8) -> [u8; 4] {
     let peak = r.max(g).max(b) as f32;
@@ -555,7 +699,7 @@ mod tests {
         cx.update(|cx| {
             assert!(
                 source
-                    .raster_image(NewThreadBackgroundEffect::None, false, cx)
+                    .raster_image(NewThreadBackgroundEffect::None, false, 0.0, cx)
                     .is_none()
             )
         });
@@ -564,14 +708,14 @@ mod tests {
             let warm = background_luminance(&path, cx).unwrap();
             assert!(Arc::ptr_eq(&source, &warm));
             let image = warm
-                .raster_image(NewThreadBackgroundEffect::None, false, cx)
+                .raster_image(NewThreadBackgroundEffect::None, false, 0.0, cx)
                 .unwrap();
             assert_eq!(image.as_bytes(0).unwrap()[..4], [231, 89, 173, 180]);
             for _ in 0..20 {
                 assert!(Arc::ptr_eq(
                     &image,
                     &warm
-                        .raster_image(NewThreadBackgroundEffect::None, false, cx)
+                        .raster_image(NewThreadBackgroundEffect::None, false, 0.0, cx)
                         .unwrap()
                 ));
             }
@@ -597,7 +741,7 @@ mod tests {
         ] {
             cx.update(|cx| {
                 for _ in 0..100 {
-                    assert!(source.raster_image(effect, false, cx).is_none());
+                    assert!(source.raster_image(effect, false, 0.0, cx).is_none());
                 }
                 assert_eq!(
                     source
@@ -605,20 +749,20 @@ mod tests {
                         .lock()
                         .unwrap()
                         .iter()
-                        .filter(|(key, _)| *key == (effect, false))
+                        .filter(|(key, _)| *key == (effect, false, 0))
                         .count(),
                     1
                 );
             });
             cx.run_until_parked();
             cx.update(|cx| {
-                let first = source.raster_image(effect, false, cx).unwrap();
+                let first = source.raster_image(effect, false, 0.0, cx).unwrap();
                 assert_eq!(first.size(0).width.0, 60);
                 assert_eq!(first.size(0).height.0, 32);
                 for _ in 0..100 {
                     assert!(Arc::ptr_eq(
                         &first,
-                        &source.raster_image(effect, false, cx).unwrap()
+                        &source.raster_image(effect, false, 0.0, cx).unwrap()
                     ));
                 }
             });
@@ -660,13 +804,13 @@ mod tests {
             NewThreadBackgroundEffect::Dither,
         ] {
             cx.update(|cx| {
-                source.raster_image(effect, false, cx);
-                source.raster_image(effect, true, cx);
+                source.raster_image(effect, false, 0.0, cx);
+                source.raster_image(effect, true, 0.0, cx);
             });
             cx.run_until_parked();
             cx.update(|cx| {
-                let dark = source.raster_image(effect, false, cx).unwrap();
-                let light = source.raster_image(effect, true, cx).unwrap();
+                let dark = source.raster_image(effect, false, 0.0, cx).unwrap();
+                let light = source.raster_image(effect, true, 0.0, cx).unwrap();
                 assert_eq!(
                     Arc::ptr_eq(&dark, &light),
                     effect == NewThreadBackgroundEffect::Dither
@@ -674,16 +818,56 @@ mod tests {
                 for _ in 0..100 {
                     assert!(Arc::ptr_eq(
                         &dark,
-                        &source.raster_image(effect, false, cx).unwrap()
+                        &source.raster_image(effect, false, 0.0, cx).unwrap()
                     ));
                     assert!(Arc::ptr_eq(
                         &light,
-                        &source.raster_image(effect, true, cx).unwrap()
+                        &source.raster_image(effect, true, 0.0, cx).unwrap()
                     ));
                 }
             });
         }
         assert_eq!(source.effects.lock().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn downscaled_blur_matches_a_full_size_blur() {
+        // Smooth gradient plus a hard edge: what a wallpaper blur sees.
+        let source = image::RgbaImage::from_fn(320, 180, |x, y| {
+            let edge = if x > 160 { 200 } else { 40 };
+            image::Rgba([edge, (y * 255 / 179) as u8, (x * 255 / 319) as u8, 255])
+        });
+        for sigma in [3.0, 8.0, 24.0] {
+            let fast = blur_image(&source, sigma);
+            let exact = image::imageops::blur(&source, sigma);
+            assert_eq!(fast.dimensions(), exact.dimensions());
+            // Ignore the borders, where both kernels clamp differently.
+            let margin = (sigma * 2.0) as u32;
+            let mut worst = 0i32;
+            for y in margin..180 - margin {
+                for x in margin..320 - margin {
+                    for ch in 0..4 {
+                        let diff =
+                            fast.get_pixel(x, y).0[ch] as i32 - exact.get_pixel(x, y).0[ch] as i32;
+                        worst = worst.max(diff.abs());
+                    }
+                }
+            }
+            assert!(worst <= 12, "sigma {sigma}: max channel error {worst}");
+        }
+    }
+
+    #[test]
+    fn bilinear_upscale_keeps_flat_color_and_corners() {
+        let flat = image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 40]));
+        let up = upscale_bilinear(&flat, 17, 9);
+        assert_eq!(up.dimensions(), (17, 9));
+        assert!(up.pixels().all(|pixel| pixel.0 == [10, 20, 30, 40]));
+        let ramp = image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba([x as u8 * 200, 0, 0, 255]));
+        let up = upscale_bilinear(&ramp, 8, 1);
+        assert_eq!(up.get_pixel(0, 0).0[0], 0);
+        assert_eq!(up.get_pixel(7, 0).0[0], 200);
+        assert!(up.get_pixel(3, 0).0[0] < up.get_pixel(4, 0).0[0]);
     }
 
     #[test]

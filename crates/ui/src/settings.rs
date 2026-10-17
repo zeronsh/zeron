@@ -20,10 +20,12 @@ pub mod accounts;
 pub mod appearance;
 pub mod archived;
 pub mod composer;
+pub mod computer_use;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod pets;
 pub mod shortcuts;
 pub mod thread_naming;
 pub mod wallpaper;
@@ -69,6 +71,21 @@ pub const FILES_AUTOSAVE_DELAY_DEFAULT_MS: u64 = 900;
 pub const FILES_AUTOSAVE_DELAY_MIN_MS: u64 = 100;
 pub const FILES_AUTOSAVE_DELAY_MAX_MS: u64 = 10_000;
 
+// Video background playback.
+pub const VIDEO_SPEED_MIN: f32 = 0.25;
+pub const VIDEO_SPEED_MAX: f32 = 2.0;
+pub const VIDEO_SPEED_DEFAULT: f32 = 1.0;
+/// Longest video the trim bar maps over, in seconds.
+pub const VIDEO_DURATION_MAX: f32 = 3600.0;
+/// Smallest selectable video loop segment, in seconds.
+pub const VIDEO_TRIM_MIN_GAP: f32 = 0.5;
+/// Gaussian softening of the background artwork (sigma, in px).
+pub const BACKGROUND_BLUR_MAX: f32 = 24.0;
+pub const BACKGROUND_BLUR_STEP: f32 = 2.0;
+
+fn default_video_speed() -> f32 {
+    VIDEO_SPEED_DEFAULT
+}
 const FILE_NAME: &str = "ui-settings.json";
 const NEW_THREAD_BACKGROUND_DIR: &str = "new-thread-backgrounds";
 
@@ -355,6 +372,12 @@ impl SettingsStore {
     }
 }
 
+/// The app data dir settings persist under (None before [`init`]).
+pub fn data_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+}
+
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     let data_dir = data_dir.into();
     crate::dictation::init(data_dir.clone(), cx);
@@ -385,6 +408,9 @@ pub fn compact_model_picker(cx: &App) -> bool {
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
 pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Result<(), String> {
+    if crate::new_thread_background_video::is_video(source) {
+        return install_video_background(source, cx);
+    }
     let staged = crate::attachments::stage_file_verbatim(source)?;
     // Do not persist the candidate or retire the old managed file until the
     // renderer's decoder has accepted the exact bytes we are about to save.
@@ -394,6 +420,56 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     let proxy = image.thumbnail(64, 64).to_rgba8();
     let color = wallpaper_colors::extract(proxy.pixels().map(|pixel| pixel.0));
     install_staged_background(source, staged, color, cx)
+}
+
+/// Video wallpapers. Videos are copied file-to-file (they are far
+/// larger than the attachment budget) after AVFoundation decodes a frame.
+fn install_video_background(source: &Path, cx: &mut App) -> Result<(), String> {
+    let meta = std::fs::metadata(source)
+        .map_err(|_| "Unable to read the video. Check that the file still exists.".to_string())?;
+    if !meta.is_file() {
+        return Err("Choose a video file.".into());
+    }
+    if meta.len() > crate::new_thread_background_video::MAX_VIDEO_BYTES {
+        return Err("This video is larger than 2 GB. Choose a shorter or compressed video.".into());
+    }
+    let frame = crate::new_thread_background_video::first_frame(source)?;
+    let proxy = image::imageops::thumbnail(&frame, 64, 64);
+    let color = wallpaper_colors::extract(proxy.pixels().map(|pixel| pixel.0));
+    let data_dir = cx
+        .try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+        .ok_or_else(|| "Unable to save the video. Restart Zeron and try again.".to_string())?;
+    let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
+    let save_error = || "Unable to save the video. Check folder permissions and free space.".to_string();
+    std::fs::create_dir_all(&backgrounds_dir).map_err(|_| save_error())?;
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let destination = backgrounds_dir.join(format!(
+        "new-thread-background-{}.{extension}",
+        uuid::Uuid::new_v4()
+    ));
+    let temporary = destination.with_extension(format!("{extension}.tmp"));
+    if std::fs::copy(source, &temporary)
+        .and_then(|_| std::fs::rename(&temporary, &destination))
+        .is_err()
+    {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(save_error());
+    }
+    let name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("video.{extension}"));
+    let prepared = PreparedBackgroundFile(Some(NewThreadComposerBackground {
+        path: destination.to_string_lossy().into_owned(),
+        name,
+        adjustment: NewThreadBackgroundAdjustment::default(),
+    }));
+    commit_background(source, prepared, color, cx)
 }
 
 fn install_staged_background(
@@ -570,6 +646,62 @@ fn remove_managed_new_thread_background(
     }
 }
 
+
+// Video background playback.
+
+pub fn set_new_thread_video_speed(speed: f32, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.new_thread_video_speed =
+            speed.clamp(VIDEO_SPEED_MIN, VIDEO_SPEED_MAX);
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+/// Loop segment of a video background in seconds; `end` 0 plays to the end.
+pub fn set_new_thread_video_trim(start: f32, end: f32, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        let start = start.clamp(0.0, VIDEO_DURATION_MAX);
+        let end = if end > start {
+            end.min(VIDEO_DURATION_MAX)
+        } else {
+            0.0
+        };
+        settings.new_thread_video_start = start;
+        settings.new_thread_video_end = end;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn set_new_thread_background_blur(blur: f32, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.new_thread_background_blur = blur.clamp(0.0, BACKGROUND_BLUR_MAX);
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+/// Video playback parameters (speed, loop start/end seconds) without cloning
+/// the full settings for every video frame.
+pub fn new_thread_video_playback(cx: &App) -> (f32, f32, f32) {
+    cx.try_global::<SettingsStore>()
+        .map(|store| {
+            (
+                store.current.new_thread_video_speed,
+                store.current.new_thread_video_start,
+                store.current.new_thread_video_end,
+            )
+        })
+        .unwrap_or((VIDEO_SPEED_DEFAULT, 0.0, 0.0))
+}
+
+/// Background blur (sigma, in px) without cloning the full settings.
+pub fn new_thread_background_blur_value(cx: &App) -> f32 {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.new_thread_background_blur)
+        .unwrap_or(0.0)
+}
 /// Monotonic id of the global code-fence layout choice. Every transcript
 /// compares this during render so inactive subagent tabs can observe all mode
 /// transitions when they next become visible.
@@ -1002,6 +1134,18 @@ pub struct UiSettings {
     pub wallpaper_color: Option<zeron_theme::Color>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// Gaussian softening applied to the background artwork (sigma, in px).
+    #[serde(default)]
+    pub new_thread_background_blur: f32,
+    /// Playback speed for a video background (1.0 is real time).
+    #[serde(default = "default_video_speed")]
+    pub new_thread_video_speed: f32,
+    /// Loop segment start within a video background, in seconds.
+    #[serde(default)]
+    pub new_thread_video_start: f32,
+    /// Loop segment end within a video background, in seconds; 0 plays to the end.
+    #[serde(default)]
+    pub new_thread_video_end: f32,
     /// Snap animations to rest. Defaults to following the OS.
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
@@ -1012,6 +1156,15 @@ pub struct UiSettings {
     /// Local preference: never transfers an active call or credentials.
     #[serde(default)]
     pub codex_voice_device: Option<String>,
+    /// Desktop pet (Settings → Pets). Device-local; off until chosen.
+    pub pet_enabled: bool,
+    /// [`crate::pets::DEFAULT_PET`] or a `{data_dir}/pets/<id>` folder name.
+    pub pet_id: String,
+    /// Pet width in logical pixels.
+    pub pet_size: f32,
+    /// Where the pet was last dragged to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pet_position: Option<crate::pets::PetPosition>,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1105,10 +1258,18 @@ impl Default for UiSettings {
             wallpaper_theme_colors: false,
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            new_thread_background_blur: 0.0,
+            new_thread_video_speed: VIDEO_SPEED_DEFAULT,
+            new_thread_video_start: 0.0,
+            new_thread_video_end: 0.0,
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
             codex_voice: None,
             codex_voice_device: None,
+            pet_enabled: false,
+            pet_id: crate::pets::DEFAULT_PET.into(),
+            pet_size: crate::pets::SIZE_DEFAULT,
+            pet_position: None,
             legacy_accent_color: None,
         }
     }
@@ -1750,10 +1911,18 @@ impl UiSettings {
             wallpaper_theme_colors,
             wallpaper_color,
             new_thread_background_effect,
+            new_thread_background_blur,
+            new_thread_video_speed,
+            new_thread_video_start,
+            new_thread_video_end,
             reduce_motion,
             pause_animations_in_background,
             codex_voice,
             codex_voice_device,
+            pet_enabled,
+            pet_id,
+            pet_size,
+            pet_position,
             legacy_accent_color,
             pull_request_destination,
             last_pull_request_repository,
@@ -1782,6 +1951,12 @@ impl UiSettings {
             FILES_PANEL_DEFAULT,
         );
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
+        self.pet_size = clamp_or(
+            self.pet_size,
+            crate::pets::SIZE_MIN,
+            crate::pets::SIZE_MAX,
+            crate::pets::SIZE_DEFAULT,
+        );
         self.pull_request_pane_width = min_or(
             self.pull_request_pane_width,
             RIGHT_PANE_MIN,
@@ -1811,6 +1986,21 @@ impl UiSettings {
         self.git_history_column_widths = self.git_history_column_widths.clamped();
         self.git_history_column_order = self.git_history_column_order.normalized();
         self.ui_font_size = self.ui_font_size.normalized();
+        self.new_thread_video_speed = clamp_or(
+            self.new_thread_video_speed,
+            VIDEO_SPEED_MIN,
+            VIDEO_SPEED_MAX,
+            VIDEO_SPEED_DEFAULT,
+        );
+        self.new_thread_video_start =
+            clamp_or(self.new_thread_video_start, 0.0, VIDEO_DURATION_MAX, 0.0);
+        self.new_thread_video_end =
+            clamp_or(self.new_thread_video_end, 0.0, VIDEO_DURATION_MAX, 0.0);
+        if self.new_thread_video_end > 0.0 && self.new_thread_video_end <= self.new_thread_video_start {
+            self.new_thread_video_end = 0.0;
+        }
+        self.new_thread_background_blur =
+            clamp_or(self.new_thread_background_blur, 0.0, BACKGROUND_BLUR_MAX, 0.0);
         if let Some(background) = self.new_thread_composer_background.as_mut() {
             background.adjustment = background.adjustment.normalized();
         }
@@ -2711,6 +2901,14 @@ mod tests {
             window_geometry: None,
             codex_voice: Some("ember".into()),
             codex_voice_device: Some("fedora".into()),
+            pet_enabled: true,
+            pet_id: "custom".into(),
+            pet_size: 160.0,
+            pet_position: Some(crate::pets::PetPosition {
+                display_uuid: None,
+                x: 40.0,
+                y: 60.0,
+            }),
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
@@ -2840,6 +3038,10 @@ mod tests {
             wallpaper_theme_colors: false,
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            new_thread_background_blur: 6.0,
+            new_thread_video_speed: 1.25,
+            new_thread_video_start: 2.0,
+            new_thread_video_end: 15.0,
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
             legacy_accent_color: None,

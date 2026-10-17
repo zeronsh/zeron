@@ -6,6 +6,9 @@
 #
 # Usage: scripts/package-macos.sh
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
+#        Without it, the local "Zeron Local Signing" identity is used when
+#        present (scripts/provision-local-signing.sh), else an ad-hoc signature.
+#        A stable identity keeps macOS privacy grants across rebuilds.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #        API key (.p8) for notarization; all three set → notarize + staple the
 #        app and the dmg, which removes the Gatekeeper warning entirely.
@@ -22,6 +25,16 @@ DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
+
+# Local identity: self-signed, untrusted (so `find-identity -v` hides it) but
+# usable — it pins TCC grants to its certificate instead of each build's cdhash.
+LOCAL_IDENTITY=""
+if [[ -z "${CODESIGN_IDENTITY:-}" ]] &&
+  security find-identity -p codesigning 2>/dev/null | grep -q '"Zeron Local Signing"'; then
+  LOCAL_IDENTITY="Zeron Local Signing"
+fi
+BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$ROOT/dist/macos/Info.plist")"
+
 cargo build --release -p zeron
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
@@ -34,6 +47,45 @@ cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licen
 
 mkdir -p "$APP/Contents/Resources/licenses"
 cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses"/parakeet-v3.txt
+
+# Zeron computer use: bundle the cua-driver runtime (staged by
+# scripts/provision-cua-driver.sh). The runtime is the whole CuaDriver.app
+# bundle: upstream refuses to run a bare copied Mach-O, because the daemon
+# needs its own bundle identity for a WindowServer connection. The bundle is
+# signed and notarized upstream, so it is copied as-is and the outer app's
+# signature covers it through a nested-bundle seal; re-signing its executable
+# ad-hoc would break the identity the daemon relies on.
+if [[ -x "$ROOT/vendor/cua-driver/CuaDriver.app/Contents/MacOS/cua-driver" ]]; then
+  mkdir -p "$APP/Contents/Resources/cua-driver"
+  rm -rf "$APP/Contents/Resources/cua-driver/CuaDriver.app"
+  ditto "$ROOT/vendor/cua-driver/CuaDriver.app" "$APP/Contents/Resources/cua-driver/CuaDriver.app"
+  # Zeron's agent cursor theme, staged by provision-cua-driver.sh. The driver
+  # scans this directory and needs the filename to match the theme id.
+  if [[ -d "$ROOT/vendor/cua-driver/cursor-themes" ]]; then
+    rm -rf "$APP/Contents/Resources/cua-driver/cursor-themes"
+    cp -R "$ROOT/vendor/cua-driver/cursor-themes" "$APP/Contents/Resources/cua-driver/cursor-themes"
+  fi
+  for extra in provenance.json LICENSE.md; do
+    [[ -f "$ROOT/vendor/cua-driver/$extra" ]] && \
+      cp "$ROOT/vendor/cua-driver/$extra" "$APP/Contents/Resources/cua-driver/$extra"
+  done
+else
+  echo "warning: vendor/cua-driver missing; run scripts/provision-cua-driver.sh for computer use" >&2
+fi
+
+# Computer-use helpers: the capture indicator on the driven window (purple
+# title-bar pill) and the physical-Escape kill switch.
+for HELPER in zeron-window-indicator zeron-escape-monitor; do
+  DEST="$APP/Contents/Resources/$HELPER"
+  install -m 755 "$("$ROOT/scripts/build-window-indicator.sh" "$HELPER")" "$DEST"
+  if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$DEST"
+  elif [[ -n "$LOCAL_IDENTITY" ]]; then
+    codesign --force --sign "$LOCAL_IDENTITY" "$DEST"
+  else
+    codesign --force --sign - "$DEST"
+  fi
+done
 
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
 # baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is
@@ -52,10 +104,15 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
   # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
+elif [[ -n "$LOCAL_IDENTITY" ]]; then
+  # Stable designated requirement (bundle id + certificate leaf): Accessibility
+  # and Screen Recording grants survive reinstalls. No notarization possible.
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign "$LOCAL_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
   codesign --deep --force --entitlements "$ROOT/dist/macos/Zeron.entitlements" --sign - "$APP"
+  echo "warning: ad-hoc signature; macOS privacy grants reset on every rebuild (run scripts/provision-local-signing.sh)" >&2
 fi
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may

@@ -554,12 +554,16 @@ pub enum SettingsSection {
     #[default]
     General,
     Appshots,
+    /// Agent desktop control (cua-driver) and its macOS permissions.
+    ComputerUse,
+    /// The desktop pet companion.
+    Pets,
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 10] = [
+    pub const ALL: [SettingsSection; 12] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -569,6 +573,8 @@ impl SettingsSection {
         SettingsSection::Devices,
         SettingsSection::Files,
         SettingsSection::Appshots,
+        SettingsSection::ComputerUse,
+        SettingsSection::Pets,
         SettingsSection::Archived,
     ];
 
@@ -583,7 +589,10 @@ impl SettingsSection {
     }
 
     fn visible_in_nav(self) -> bool {
-        self != Self::Agents && (self != Self::Appshots || crate::appshots::is_desktop())
+        self != Self::Agents
+            && (self != Self::Appshots || crate::appshots::is_desktop())
+            && (self != Self::ComputerUse || cfg!(target_os = "macos"))
+            && (self != Self::Pets || crate::pets::supported())
     }
 
     /// Where a generic "open Settings" lands for a remembered section: legacy
@@ -611,6 +620,8 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "shortcuts",
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
+            SettingsSection::ComputerUse => "computer-use",
+            SettingsSection::Pets => "pets",
             SettingsSection::Archived => "archived",
         }
     }
@@ -628,6 +639,8 @@ impl SettingsSection {
             "shortcuts" => SettingsSection::Shortcuts,
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
+            "computer-use" => SettingsSection::ComputerUse,
+            "pets" => SettingsSection::Pets,
             "archived" => SettingsSection::Archived,
             _ => return None,
         })
@@ -653,6 +666,8 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
+            SettingsSection::ComputerUse => "Computer use",
+            SettingsSection::Pets => "Pets",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -1027,7 +1042,6 @@ const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
 /// The sidebar footer's profile and settings buttons share one hit target.
 const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
 const SIDEBAR_FOOTER_AVATAR_SIZE: f32 = 16.0;
-
 /// Keep the fade short so only the last few glyphs recede. Tracking clipped
 /// content lets the shared paint-time overflow gate leave fitting labels intact.
 pub(crate) fn sidebar_faded_label(
@@ -2098,6 +2112,8 @@ pub struct Shell {
         std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
+    computer_use_page: Option<Entity<crate::settings::computer_use::ComputerUsePage>>,
+    pets_page: Option<Entity<crate::settings::pets::PetsPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -2622,6 +2638,8 @@ impl Shell {
             pull_request_cache: Default::default(),
             devices_page: None,
             archived_page: None,
+            computer_use_page: None,
+            pets_page: None,
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
@@ -5822,6 +5840,20 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::ComputerUse => {
+                let page = self
+                    .computer_use_page
+                    .get_or_insert_with(|| {
+                        cx.new(crate::settings::computer_use::ComputerUsePage::new)
+                    })
+                    .clone();
+                page.into_any_element()
+            }
+            SettingsSection::Pets => self
+                .pets_page
+                .get_or_insert_with(|| cx.new(crate::settings::pets::PetsPage::new))
+                .clone()
+                .into_any_element(),
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
@@ -7923,6 +7955,8 @@ impl Shell {
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::MONITOR,
+            SettingsSection::ComputerUse => icons::MAGIC_STICK_3,
+            SettingsSection::Pets => icons::PAW,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
         settings::widgets::scroll_faded(
@@ -11179,16 +11213,37 @@ impl Shell {
                     cx,
                 )
             });
-        let artwork_frame = self.new_thread_artwork_ready.frame(
-            artwork,
-            new_thread_background_setting
-                .as_ref()
-                .map(|background| std::path::Path::new(&background.path)),
-            new_thread_background_adjustment,
-            new_thread_background_setting.is_some(),
-            self.reduced_motion,
-            frame_time,
-        );
+        let video_background = new_thread_background_setting
+            .as_ref()
+            .is_some_and(|background| {
+                crate::new_thread_background_video::is_video(std::path::Path::new(&background.path))
+            });
+        let artwork_frame = if video_background {
+            // Live video frames replace each other in place; the
+            // still-image crossfade would restart on every frame.
+            crate::new_thread_background_video::release_retired(window);
+            crate::new_thread_background_effects::ArtworkFrame {
+                current: artwork,
+                previous: None,
+                current_adjustment: new_thread_background_adjustment.normalized(),
+                previous_adjustment: new_thread_background_adjustment.normalized(),
+                mix: 1.0,
+                active: false,
+            }
+        } else {
+            crate::new_thread_background_video::stop(cx);
+            crate::new_thread_background_video::release_retired(window);
+            self.new_thread_artwork_ready.frame(
+                artwork,
+                new_thread_background_setting
+                    .as_ref()
+                    .map(|background| std::path::Path::new(&background.path)),
+                new_thread_background_adjustment,
+                new_thread_background_setting.is_some(),
+                self.reduced_motion,
+                frame_time,
+            )
+        };
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
@@ -11231,7 +11286,9 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
-        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
+        // The wallpaper stays behind open conversations as well, instead
+        // of dissolving when the composer docks into a chat.
+        let new_thread_background_layer = {
             if artwork_frame.active {
                 window.request_animation_frame();
             }
@@ -11247,7 +11304,7 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds.clone(),
-                    dock_frame.dissolve(),
+                    0.0,
                     (1.0 - artwork_frame.mix) * opacity,
                 ))
                 .child(new_thread_background(
@@ -11256,11 +11313,11 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds,
-                    dock_frame.dissolve(),
+                    0.0,
                     artwork_frame.mix * opacity,
                 ))
                 .into_any_element()
-        });
+        };
 
         // Content outlet: selected chat → transcript; nothing selected → the
         // centered new-thread composition; no spaces at all → the onboarding
@@ -11390,7 +11447,7 @@ impl Shell {
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
-            .children(new_thread_background_layer)
+            .child(new_thread_background_layer)
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the

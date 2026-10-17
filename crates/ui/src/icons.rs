@@ -216,6 +216,8 @@ icon_assets![
     // plus/return ports) — outline for the favorite affordance, bold for the
     // favorited state and the picker's favorites rail tab.
     (STAR, "star"),
+    // Hand-drawn paw in the same Solar Linear style (Settings → Pets).
+    (PAW, "paw"),
     (STAR_BOLD, "star-bold"),
     (ZERON_LOGO, "zeron-logo"),
     // Harness brand marks (icons.tsx).

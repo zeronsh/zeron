@@ -40,6 +40,8 @@ pub struct ToolDef {
 
 pub struct Tools {
     zeron: Arc<Zeron>,
+    /// Zeron computer use: `cua-driver` tools proxied as `computer_*`.
+    computer: Option<Arc<crate::computer::Computer>>,
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
@@ -658,8 +660,20 @@ impl Tools {
     pub fn new(zeron: Arc<Zeron>) -> Self {
         Self {
             zeron,
+            computer: None,
             pending_turns: Default::default(),
         }
+    }
+
+    /// Attach the computer-use proxy (started in the background).
+    pub fn with_computer(mut self, computer: Arc<crate::computer::Computer>) -> Self {
+        computer.warm();
+        self.computer = Some(computer);
+        self
+    }
+
+    pub fn computer(&self) -> Option<&Arc<crate::computer::Computer>> {
+        self.computer.as_ref()
     }
 
     pub fn list(&self) -> Vec<ToolDef> {

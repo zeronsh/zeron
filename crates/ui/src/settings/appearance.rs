@@ -271,6 +271,42 @@ impl Render for TranscriptWidthDrag {
     }
 }
 
+#[derive(Clone)]
+struct VideoTrimDrag;
+
+impl Render for VideoTrimDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+#[derive(Clone)]
+struct BackgroundBlurDrag;
+
+impl Render for BackgroundBlurDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TrimHandle {
+    Start,
+    End,
+}
+
+/// Video trim bar geometry: the filmstrip spans between the two handles' inner edges.
+const TRIM_WIDTH: f32 = 280.0;
+const TRIM_HEIGHT: f32 = 44.0;
+const TRIM_HANDLE: f32 = 12.0;
+const TRIM_BORDER: f32 = 3.0;
+const VIDEO_TRIM_THUMBS: usize = 8;
+
+/// Fraction along a 7px-inset slider track, matching the zoom slider geometry.
+fn track_fraction(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
+    ((f32::from(x - bounds.left()) - 7.0) / (f32::from(bounds.size.width) - 14.0).max(1.0))
+        .clamp(0.0, 1.0)
+}
 pub struct AppearancePage {
     width_focus: FocusHandle,
     width_hovered: bool,
@@ -311,6 +347,24 @@ pub struct AppearancePage {
     dark_theme_select: widgets::SelectState,
     surface_select: widgets::SelectState,
     background_effect_select: widgets::SelectState,
+    video_speed_select: widgets::SelectState,
+    video_trim_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// Total seconds the trim bar maps over; recorded while rendering it.
+    video_trim_total: Cell<Option<f64>>,
+    video_trim_drag: Option<TrimHandle>,
+    /// Pixel offset from the pointer to the held handle's edge.
+    video_trim_grab: f32,
+    pending_trim: Option<(f32, f32)>,
+    trim_frame_pending: bool,
+    blur_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pending_blur: Option<f32>,
+    blur_frame_pending: bool,
+    /// Frame under the held trim handle, shown while dragging.
+    video_trim_preview: Option<Arc<gpui::RenderImage>>,
+    video_trim_preview_at: f64,
+    video_trim_preview_generation: u64,
+    /// Filmstrip thumbnails behind the trim bar, for the video they came from.
+    video_trim_filmstrip: (Option<PathBuf>, Vec<Arc<gpui::RenderImage>>),
     reduce_motion_select: widgets::SelectState,
     import_dialog: Option<ImportDialog>,
     background_adjustment_dialog: Option<BackgroundAdjustmentDialog>,
@@ -365,6 +419,247 @@ impl AppearancePage {
             window,
             cx,
         );
+    }
+
+    // The video trim bar (loop start/end) and the background blur
+    // slider reuse the transcript width slider's drag plumbing.
+
+    fn pending_video_trim(&self, cx: &gpui::App) -> (f32, f32) {
+        self.pending_trim.unwrap_or_else(|| {
+            let settings = crate::settings::current(cx);
+            (
+                settings.new_thread_video_start,
+                settings.new_thread_video_end,
+            )
+        })
+    }
+
+    fn queue_video_trim(&mut self, trim: (f32, f32), window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_video_trim(cx) == trim {
+            return;
+        }
+        self.pending_trim = Some(trim);
+        if !self.trim_frame_pending {
+            self.trim_frame_pending = true;
+            let page = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                let _ = page.update(cx, |this, cx| {
+                    this.trim_frame_pending = false;
+                    this.apply_pending_video_trim(cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    fn apply_pending_video_trim(&mut self, cx: &mut Context<Self>) {
+        if let Some((start, end)) = self.pending_trim.take() {
+            crate::settings::set_new_thread_video_trim(start, end, cx);
+            cx.notify();
+        }
+    }
+
+    /// Handle positions as fractions of the video's total duration.
+    fn video_trim_displayed(&self, cx: &gpui::App) -> (f32, f32) {
+        let total = (self.video_trim_total.get().unwrap_or(0.0) as f32).max(0.001);
+        let (start, end) = self.pending_video_trim(cx);
+        let end = if end > 0.0 { end.min(total) } else { total };
+        (
+            (start / total).clamp(0.0, 1.0),
+            (end / total).clamp(0.0, 1.0),
+        )
+    }
+
+    fn video_trim_fraction(&self, x: gpui::Pixels) -> Option<f32> {
+        let bounds = self.video_trim_bounds.get()?;
+        let local = f32::from(x - bounds.left()) + self.video_trim_grab - TRIM_HANDLE;
+        Some((local / (f32::from(bounds.size.width) - 2.0 * TRIM_HANDLE).max(1.0)).clamp(0.0, 1.0))
+    }
+
+    fn press_video_trim(&mut self, x: gpui::Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        self.video_trim_grab = 0.0;
+        let (Some(bounds), Some(fraction)) =
+            (self.video_trim_bounds.get(), self.video_trim_fraction(x))
+        else {
+            return;
+        };
+        let (start, end) = self.video_trim_displayed(cx);
+        let which = if (fraction - start).abs() <= (fraction - end).abs() {
+            TrimHandle::Start
+        } else {
+            TrimHandle::End
+        };
+        // Grabbing a handle keeps it under the pointer instead of jumping its edge there.
+        let span = f32::from(bounds.size.width) - 2.0 * TRIM_HANDLE;
+        let (edge, handle_center) = match which {
+            TrimHandle::Start => {
+                let edge = TRIM_HANDLE + start * span;
+                (edge, edge - TRIM_HANDLE / 2.0)
+            }
+            TrimHandle::End => {
+                let edge = TRIM_HANDLE + end * span;
+                (edge, edge + TRIM_HANDLE / 2.0)
+            }
+        };
+        let pointer = f32::from(x - bounds.left());
+        if (pointer - handle_center).abs() <= TRIM_HANDLE / 2.0 + 2.0 {
+            self.video_trim_grab = edge - pointer;
+        }
+        self.video_trim_drag = Some(which);
+        self.drag_video_trim(which, x, window, cx);
+    }
+
+    fn drag_video_trim(
+        &mut self,
+        which: TrimHandle,
+        x: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(fraction) = self.video_trim_fraction(x) else {
+            return;
+        };
+        let Some(total) = self.video_trim_total.get().map(|total| total as f32) else {
+            return;
+        };
+        let seconds = fraction * total;
+        let (start, end) = self.pending_video_trim(cx);
+        let end = if end > 0.0 { end.min(total) } else { total };
+        let gap = crate::settings::VIDEO_TRIM_MIN_GAP.min(total / 2.0);
+        let trim = match which {
+            TrimHandle::Start => (seconds.clamp(0.0, (end - gap).max(0.0)), end),
+            TrimHandle::End => {
+                if seconds >= total - 0.05 {
+                    // The far right handle means "to the end of the video".
+                    (start, 0.0)
+                } else {
+                    (start, seconds.max(start + gap))
+                }
+            }
+        };
+        self.queue_video_trim(trim, window, cx);
+        // Preview the clamped edge, not the raw pointer, so the frame matches the handle.
+        let edge = match which {
+            TrimHandle::Start => trim.0,
+            TrimHandle::End if trim.1 > 0.0 => trim.1,
+            TrimHandle::End => total,
+        };
+        self.request_video_trim_preview(f64::from(edge.min(total - 0.05).max(0.0)), cx);
+    }
+
+    fn pending_background_blur(&self, cx: &gpui::App) -> f32 {
+        self.pending_blur
+            .unwrap_or_else(|| crate::settings::new_thread_background_blur_value(cx))
+    }
+
+    fn queue_background_blur(&mut self, blur: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let blur = blur.clamp(0.0, crate::settings::BACKGROUND_BLUR_MAX);
+        if (self.pending_background_blur(cx) - blur).abs() < 0.01 {
+            return;
+        }
+        self.pending_blur = Some(blur);
+        if !self.blur_frame_pending {
+            self.blur_frame_pending = true;
+            let page = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                let _ = page.update(cx, |this, cx| {
+                    this.blur_frame_pending = false;
+                    this.apply_pending_blur(cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    fn apply_pending_blur(&mut self, cx: &mut Context<Self>) {
+        if let Some(blur) = self.pending_blur.take() {
+            crate::settings::set_new_thread_background_blur(blur, cx);
+            cx.notify();
+        }
+    }
+
+    fn drag_background_blur(
+        &mut self,
+        x: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.blur_bounds.get() else {
+            return;
+        };
+        let blur = track_fraction(bounds, x) * crate::settings::BACKGROUND_BLUR_MAX;
+        self.queue_background_blur(blur, window, cx);
+    }
+
+    /// Fetch the frame under the held handle (0.2 s steps), off the UI thread.
+    fn request_video_trim_preview(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        let quantized = (seconds.max(0.0) * 5.0).round() / 5.0;
+        if self.video_trim_preview_at == quantized {
+            return;
+        }
+        self.video_trim_preview_at = quantized;
+        self.video_trim_preview_generation += 1;
+        let generation = self.video_trim_preview_generation;
+        let Some(path) = crate::settings::current(cx)
+            .new_thread_composer_background
+            .map(|background| PathBuf::from(background.path))
+        else {
+            self.video_trim_preview = None;
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let frame = cx
+                .background_executor()
+                .spawn(
+                    async move { crate::new_thread_background_video::frame_at(&path, quantized) },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                if this.video_trim_preview_generation == generation {
+                    this.video_trim_preview = frame;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn clear_video_trim_preview(&mut self, cx: &mut Context<Self>) {
+        self.video_trim_preview_at = f64::NAN;
+        if self.video_trim_preview.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Thumbnails for the trim bar; decoded once per video, off the UI thread.
+    fn video_trim_filmstrip(
+        &mut self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Vec<Arc<gpui::RenderImage>> {
+        if self.video_trim_filmstrip.0.as_deref() != Some(path) {
+            self.video_trim_filmstrip = (Some(path.to_path_buf()), Vec::new());
+            let path = path.to_path_buf();
+            cx.spawn(async move |this, cx| {
+                let source = path.clone();
+                let frames = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::new_thread_background_video::filmstrip(&source, VIDEO_TRIM_THUMBS)
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.video_trim_filmstrip.0.as_deref() == Some(path.as_path()) {
+                        this.video_trim_filmstrip.1 = frames;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        self.video_trim_filmstrip.1.clone()
     }
 
     fn render_transcript_width(
@@ -575,6 +870,20 @@ impl AppearancePage {
             dark_theme_select: widgets::SelectState::default(),
             surface_select: widgets::SelectState::default(),
             background_effect_select: widgets::SelectState::default(),
+            video_speed_select: widgets::SelectState::default(),
+            video_trim_bounds: Rc::new(Cell::new(None)),
+            video_trim_total: Cell::new(None),
+            video_trim_drag: None,
+            video_trim_grab: 0.0,
+            pending_trim: None,
+            trim_frame_pending: false,
+            blur_bounds: Rc::new(Cell::new(None)),
+            pending_blur: None,
+            blur_frame_pending: false,
+            video_trim_preview: None,
+            video_trim_preview_at: f64::NAN,
+            video_trim_preview_generation: 0,
+            video_trim_filmstrip: (None, Vec::new()),
             reduce_motion_select: widgets::SelectState::default(),
             import_dialog: None,
             background_adjustment_dialog: None,
@@ -1028,7 +1337,7 @@ impl AppearancePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose New Thread Composer Background".into()),
+            prompt: Some("Choose a Background Image or Video (MP4, MOV)".into()),
         });
         cx.spawn(async move |this, cx| {
             let path = match receiver.await {
@@ -3559,25 +3868,42 @@ impl Render for AppearancePage {
             .as_ref()
             .is_some_and(|background| Path::new(&background.path).is_file());
         // The chosen image previews in the row; without one the row is text only.
-        let background_tile: Option<AnyElement> = current_background
-            .as_ref()
-            .filter(|_| background_available)
-            .map(|background| {
-                div()
-                    .flex_none()
-                    .size(px(36.0))
-                    .rounded(px(10.0))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(crate::theme::hairline(0.10))
-                    .child(
-                        img(PathBuf::from(background.path.clone()))
+        let background_tile: Option<AnyElement> =
+            current_background
+                .as_ref()
+                .filter(|_| background_available)
+                .map(|background| {
+                    div()
+                        .flex_none()
+                        .size(px(36.0))
+                        .rounded(px(10.0))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.10))
+                        .child(
+                            // A video shows its current (held) frame.
+                            if crate::new_thread_background_video::is_video(Path::new(
+                                &background.path,
+                            )) {
+                                crate::new_thread_background_video::current_frame(
+                                    Path::new(&background.path),
+                                    false,
+                                    current_background_effect,
+                                    matches!(theme.appearance, crate::theme::Appearance::Light),
+                                    crate::settings::new_thread_background_blur_value(cx),
+                                    cx,
+                                )
+                                .map(|frame| img(frame))
+                                .unwrap_or_else(|| img(PathBuf::new()))
+                            } else {
+                                img(PathBuf::from(background.path.clone()))
+                            }
                             .size(px(34.0))
                             .rounded(px(9.0))
                             .object_fit(ObjectFit::Cover),
-                    )
-                    .into_any_element()
-            });
+                        )
+                        .into_any_element()
+                });
         let background_meta = match current_background.as_ref() {
             Some(background) if background_available => vec![
                 div()
@@ -3779,6 +4105,372 @@ impl Render for AppearancePage {
                     .child(effect_control)
                     .into_any_element(),
             );
+            // Blur softens the artwork, for stills and video alike.
+            let blur_value = self.pending_background_blur(cx);
+            let blur_fraction = (blur_value / crate::settings::BACKGROUND_BLUR_MAX).clamp(0.0, 1.0);
+            let blur_bounds = self.blur_bounds.clone();
+            let blur_slider = div()
+                .id("new-thread-background-blur")
+                .relative()
+                .w(px(168.0))
+                .h(px(28.0))
+                .cursor_pointer()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                        this.drag_background_blur(event.position.x, window, cx);
+                        cx.stop_propagation();
+                        window.prevent_default();
+                    }),
+                )
+                .on_drag(BackgroundBlurDrag, |drag, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| drag.clone())
+                })
+                .child(
+                    gpui::canvas(
+                        move |bounds, _, _| blur_bounds.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(7.0))
+                        .right(px(7.0))
+                        .top(px(12.0))
+                        .h(px(4.0))
+                        .rounded_full()
+                        .bg(theme.border)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(blur_fraction))
+                                .rounded_full()
+                                .bg(theme.accent),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(gpui::relative(blur_fraction))
+                                .ml(px(-7.0))
+                                .top(px(-5.0))
+                                .size(px(14.0))
+                                .rounded_full()
+                                .bg(theme.accent),
+                        ),
+                );
+            settings_rows.push(
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(widgets::row_title(&theme, "Background blur"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![
+                                    div()
+                                        .child("Softens the background artwork.")
+                                        .into_any_element(),
+                                ],
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(blur_slider)
+                            .child(
+                                div()
+                                    .w(px(52.0))
+                                    .text_center()
+                                    .text_size(typography::ui_rems(11.5))
+                                    .text_color(theme.text_muted)
+                                    .child(format!("{blur_value:.0} px")),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+            // A video background also drives its own playback settings.
+            if crate::new_thread_background_video::is_video(Path::new(
+                &current_background.as_ref().expect("checked above").path,
+            )) {
+                const VIDEO_SPEEDS: [f32; 7] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+                let video_speed_label = |speed: f32| format!("{speed}×");
+                let current_video_speed = ui_settings.new_thread_video_speed;
+                let video_speed_control = widgets::select(
+                    "new-thread-video-speed",
+                    "Video speed",
+                    &theme,
+                    |page: &mut Self| &mut page.video_speed_select,
+                )
+                .options(
+                    VIDEO_SPEEDS
+                        .iter()
+                        .map(|speed| widgets::SelectOption::new(video_speed_label(*speed))),
+                    VIDEO_SPEEDS
+                        .iter()
+                        .position(|speed| (*speed - current_video_speed).abs() < 0.01)
+                        .unwrap_or(3),
+                )
+                .width(128.0)
+                .on_select(|_, ix, _, cx| {
+                    crate::settings::set_new_thread_video_speed(VIDEO_SPEEDS[ix], cx);
+                    cx.notify();
+                })
+                .render(&self.video_speed_select, cx);
+                settings_rows.push(
+                    widgets::card_row(&theme, false)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(160.0))
+                                .child(widgets::row_title(&theme, "Video speed"))
+                                .child(widgets::meta_line(
+                                    &theme,
+                                    vec![
+                                        div()
+                                            .child("Playback rate for the video background.")
+                                            .into_any_element(),
+                                    ],
+                                )),
+                        )
+                        .child(video_speed_control)
+                        .into_any_element(),
+                );
+                // The trim bar: a filmstrip with a draggable frame over the loop segment.
+                let video_path =
+                    PathBuf::from(&current_background.as_ref().expect("checked above").path);
+                let total = crate::new_thread_background_video::duration(&video_path);
+                self.video_trim_total.set(total);
+                if let Some(total_seconds) = total.filter(|total| *total > 0.0) {
+                    let (start_fraction, end_fraction) = self.video_trim_displayed(cx);
+                    let total_f32 = total_seconds as f32;
+                    let start_seconds = start_fraction * total_f32;
+                    let end_seconds = end_fraction * total_f32;
+                    let span = TRIM_WIDTH - 2.0 * TRIM_HANDLE;
+                    let start_x = TRIM_HANDLE + start_fraction * span;
+                    let end_x = TRIM_HANDLE + end_fraction * span;
+                    let filmstrip = self.video_trim_filmstrip(&video_path, cx);
+                    let trim_bounds = self.video_trim_bounds.clone();
+                    let dim = gpui::hsla(0.0, 0.0, 0.0, 0.55);
+                    // While a handle is held, float the frame at its edge above the bar.
+                    // Deferred so the settings card's clipping can't cut it off.
+                    let preview = self.video_trim_drag.map(|held| {
+                        let (fraction, seconds) = match held {
+                            TrimHandle::Start => (start_fraction, start_seconds),
+                            TrimHandle::End => (end_fraction, end_seconds),
+                        };
+                        // Until the exact frame decodes, show the nearest filmstrip thumb.
+                        let frame = self.video_trim_preview.clone().or_else(|| {
+                            let ix = (fraction * VIDEO_TRIM_THUMBS as f32) as usize;
+                            filmstrip
+                                .get(ix.min(filmstrip.len().saturating_sub(1)))
+                                .cloned()
+                        });
+                        let bubble = div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .w(px(160.0))
+                                    .h(px(90.0))
+                                    .rounded(px(8.0))
+                                    .overflow_hidden()
+                                    .border_2()
+                                    .border_color(theme.accent)
+                                    .bg(theme.surface_dialog)
+                                    .shadow_lg()
+                                    .when_some(frame, |el, frame| {
+                                        el.child(
+                                            img(frame).size_full().object_fit(ObjectFit::Cover),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
+                                    .bg(theme.surface_dialog)
+                                    .text_size(typography::ui_rems(11.5))
+                                    .text_color(theme.text)
+                                    .child(format!("{seconds:.1} s")),
+                            );
+                        div()
+                            .absolute()
+                            .left(px(TRIM_HANDLE + fraction * span))
+                            .top_0()
+                            .child(gpui::deferred(
+                                gpui::anchored()
+                                    .anchor(gpui::Anchor::BottomCenter)
+                                    .offset(gpui::point(px(0.0), px(-8.0)))
+                                    .snap_to_window_with_margin(px(8.0))
+                                    .child(bubble),
+                            ))
+                    });
+                    let handle = |left: f32, rounded_left: bool| {
+                        div()
+                            .absolute()
+                            .left(px(left))
+                            .top_0()
+                            .w(px(TRIM_HANDLE))
+                            .h(px(TRIM_HEIGHT))
+                            .bg(theme.accent)
+                            .map(|el| {
+                                if rounded_left {
+                                    el.rounded_l(px(6.0))
+                                } else {
+                                    el.rounded_r(px(6.0))
+                                }
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(2.0))
+                                    .h(px(14.0))
+                                    .rounded_full()
+                                    .bg(theme.on_accent),
+                            )
+                    };
+                    let trim_bar = div()
+                        .id("new-thread-video-trim")
+                        .relative()
+                        .w(px(TRIM_WIDTH))
+                        .h(px(TRIM_HEIGHT))
+                        .cursor(gpui::CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.press_video_trim(event.position.x, window, cx);
+                                cx.stop_propagation();
+                                window.prevent_default();
+                            }),
+                        )
+                        .on_drag(VideoTrimDrag, |drag, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.new(|_| drag.clone())
+                        })
+                        .child(
+                            gpui::canvas(
+                                move |bounds, _, _| trim_bounds.set(Some(bounds)),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
+                        // Filmstrip across the whole video.
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(TRIM_HANDLE))
+                                .right(px(TRIM_HANDLE))
+                                .top(px(TRIM_BORDER))
+                                .bottom(px(TRIM_BORDER))
+                                .overflow_hidden()
+                                .bg(theme.border)
+                                .flex()
+                                .children(filmstrip.iter().map(|frame| {
+                                    div().flex_1().h_full().overflow_hidden().child(
+                                        img(frame.clone()).size_full().object_fit(ObjectFit::Cover),
+                                    )
+                                })),
+                        )
+                        // Dim what the loop leaves out.
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(TRIM_HANDLE))
+                                .w(px(start_x - TRIM_HANDLE))
+                                .top(px(TRIM_BORDER))
+                                .bottom(px(TRIM_BORDER))
+                                .bg(dim),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(end_x))
+                                .right(px(TRIM_HANDLE))
+                                .top(px(TRIM_BORDER))
+                                .bottom(px(TRIM_BORDER))
+                                .bg(dim),
+                        )
+                        // The selection frame: top and bottom rails between the handles.
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(start_x))
+                                .w(px(end_x - start_x))
+                                .top_0()
+                                .h(px(TRIM_BORDER))
+                                .bg(theme.accent),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(start_x))
+                                .w(px(end_x - start_x))
+                                .bottom_0()
+                                .h(px(TRIM_BORDER))
+                                .bg(theme.accent),
+                        )
+                        .child(handle(start_x - TRIM_HANDLE, true))
+                        .child(handle(end_x, false));
+                    let trim_bar = trim_bar.children(preview);
+                    settings_rows.push(
+                        widgets::card_row(&theme, false)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(160.0))
+                                    .child(widgets::row_title(&theme, "Video length"))
+                                    .child(widgets::meta_line(
+                                        &theme,
+                                        vec![
+                                            div()
+                                                .child(format!(
+                                                    "Loops {start_seconds:.1} s → {end_seconds:.1} s \
+                                                     of {total_f32:.1} s. Drag a handle to trim.",
+                                                ))
+                                                .into_any_element(),
+                                        ],
+                                    )),
+                            )
+                            .child(
+                                div().flex_none().w(px(TRIM_WIDTH)).child(trim_bar),
+                            )
+                            .into_any_element(),
+                    );
+                } else {
+                    settings_rows.push(
+                        widgets::card_row(&theme, false)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(160.0))
+                                    .child(widgets::row_title(&theme, "Video length"))
+                                    .child(widgets::meta_line(
+                                        &theme,
+                                        vec![
+                                            div()
+                                                .child("Video duration is unavailable.")
+                                                .into_any_element(),
+                                        ],
+                                    )),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
         }
         let current_reduce_motion = crate::motion::preference(cx);
         let reduce_motion_control = widgets::select(
@@ -3980,6 +4672,18 @@ impl Render for AppearancePage {
                     this.set_background_zoom_from_x(event.event.position.x, cx);
                 },
             ))
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<VideoTrimDrag>, window, cx| {
+                    if let Some(which) = this.video_trim_drag {
+                        this.drag_video_trim(which, event.event.position.x, window, cx);
+                    }
+                },
+            ))
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<BackgroundBlurDrag>, window, cx| {
+                    this.drag_background_blur(event.event.position.x, window, cx);
+                },
+            ))
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
@@ -3988,6 +4692,12 @@ impl Render for AppearancePage {
                         cx.notify();
                     }
                     this.apply_pending_width(cx);
+                    if this.video_trim_drag.take().is_some() {
+                        cx.notify();
+                    }
+                    this.apply_pending_video_trim(cx);
+                    this.apply_pending_blur(cx);
+                    this.clear_video_trim_preview(cx);
                     this.finish_background_drag(cx);
                 }),
             )
@@ -3999,6 +4709,12 @@ impl Render for AppearancePage {
                         cx.notify();
                     }
                     this.apply_pending_width(cx);
+                    if this.video_trim_drag.take().is_some() {
+                        cx.notify();
+                    }
+                    this.apply_pending_video_trim(cx);
+                    this.apply_pending_blur(cx);
+                    this.clear_video_trim_preview(cx);
                     this.finish_background_drag(cx);
                 }),
             )
