@@ -118,6 +118,73 @@ async fn update_harness_enabled(
         .map_err(RpcError::Failed)
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListAcpRegistryParams {
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddAcpAgentParams {
+    #[serde(default)]
+    registry_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    program: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+}
+
+/// Build, install and register the requested agent.
+async fn add_acp_agent(registry: &HarnessRegistry, p: AddAcpAgentParams) -> Result<(), RpcError> {
+    let agent = match (p.registry_id, p.program) {
+        (Some(registry_id), _) => {
+            let agents = zeron_harness::acp_agents::registry(false)
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+            let entry = agents
+                .iter()
+                .find(|agent| agent.id == registry_id)
+                .ok_or_else(|| {
+                    RpcError::Failed(format!("{registry_id} is not in the ACP registry"))
+                })?;
+            if let Some(built_in) = crate::registry::built_in_for_registry_id(&registry_id) {
+                return Err(RpcError::Failed(format!(
+                    "{} is built into Zeron as {built_in}",
+                    entry.name
+                )));
+            }
+            zeron_harness::acp_agents::AcpAgentConfig::from_registry(entry)
+                .map_err(RpcError::Failed)?
+        }
+        (None, Some(program)) => registry
+            .custom_acp_agent(p.name.as_deref().unwrap_or(""), &program, p.args, p.env)
+            .map_err(RpcError::Failed)?,
+        (None, None) => {
+            return Err(RpcError::Failed(
+                "AddAcpAgent needs a registryId or a program".into(),
+            ));
+        }
+    };
+    if registry
+        .acp_agents()
+        .iter()
+        .any(|added| added.id == agent.id)
+    {
+        return Err(RpcError::Failed(format!("{} is already added", agent.name)));
+    }
+    agent
+        .prepare()
+        .await
+        .map_err(|e| RpcError::Failed(e.to_string()))?;
+    registry.add_acp_agent(agent).map_err(RpcError::Failed)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HarnessUpdateParams {
@@ -1463,7 +1530,7 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
             Duration::from_secs(15 * 60)
         }
-        methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
+        methods::INSTALL_HARNESS | methods::ADD_ACP_AGENT => Duration::from_secs(15 * 60),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
@@ -1497,6 +1564,10 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
             | methods::SET_HARNESS_ENABLED
+            | methods::LIST_ACP_REGISTRY
+            | methods::ADD_ACP_AGENT
+            | methods::REMOVE_ACP_AGENT
+            | methods::SET_ACP_AGENT_ENV
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
@@ -1922,6 +1993,45 @@ impl RpcService for EngineRpc {
                 }
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
+                RpcReply::value(&self.registry.descriptors())
+            }
+            methods::LIST_ACP_REGISTRY => {
+                let p: ListAcpRegistryParams = parse_params(params)?;
+                let agents = zeron_harness::acp_agents::registry(p.force)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&self.registry.acp_registry_listing(&agents))
+            }
+            methods::ADD_ACP_AGENT => {
+                let p: AddAcpAgentParams = parse_params(params)?;
+                add_acp_agent(&self.registry, p).await?;
+                if let Some(coordinator) = &self.harness_updates {
+                    coordinator.refresh_enabled();
+                }
+                RpcReply::value(&self.registry.descriptors())
+            }
+            methods::REMOVE_ACP_AGENT => {
+                let p: ListModelsParams = parse_params(params)?;
+                let removed = self
+                    .registry
+                    .remove_acp_agent(p.harness)
+                    .map_err(RpcError::Failed)?;
+                removed.remove_files();
+                if let Some(coordinator) = &self.harness_updates {
+                    coordinator.refresh_enabled();
+                }
+                RpcReply::value(&self.registry.descriptors())
+            }
+            methods::SET_ACP_AGENT_ENV => {
+                #[derive(Deserialize)]
+                struct Params {
+                    harness: HarnessId,
+                    env: std::collections::BTreeMap<String, String>,
+                }
+                let p: Params = parse_params(params)?;
+                self.registry
+                    .update_acp_agent_env(p.harness, p.env)
+                    .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.descriptors())
             }
             methods::LIST_MODELS => {

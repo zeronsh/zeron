@@ -261,7 +261,13 @@ pub fn claude_brand() -> Hsla {
 /// GPUI's SVG painter reads the SVG's own text color; a color on its parent
 /// does not provide the paint input. Always set `.text_color(..)` on the icon.
 pub fn icon(path: &'static str) -> Svg {
-    svg().path(path).flex_none()
+    // Downloaded marks (user-added ACP agents, see `crate::acp_icons`) live
+    // on disk; everything else is an embedded asset.
+    if std::path::Path::new(path).is_absolute() {
+        svg().external_path(path).flex_none()
+    } else {
+        svg().path(path).flex_none()
+    }
 }
 
 /// The Zeron Icons sidebar glyph (icons.zeron.sh "Sidebar" / "Right

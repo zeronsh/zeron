@@ -1,4 +1,8 @@
 //! Settings → Providers: install and enable harnesses, one card row per agent.
+//! Any ACP agent can join the list too — from the ACP registry or as a custom
+//! command — from the Add a provider section under the list
+//! ([`add_provider`]), and leaves it again
+//! from its expanded details.
 //!
 //! The state is PER-DEVICE and lives on the engine (`harness-prefs.json` in
 //! its data dir): CLI installs are per-device, so enablement is too. The
@@ -37,6 +41,8 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
+#[path = "add_provider.rs"]
+mod add_provider;
 #[path = "completion.rs"]
 mod completion;
 
@@ -64,11 +70,38 @@ const UPDATE_POLICIES: [(HarnessUpdatePolicy, &str, &str); 3] = [
     ),
 ];
 
+/// A provider row's mark: widgets::row_tile with the brand tint honored (the
+/// Claude mark keeps its orange, like the picker rail).
+fn provider_tile(theme: &Theme, icon_path: &'static str, tint: Option<gpui::Hsla>) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(36.0))
+        .rounded(px(10.0))
+        .bg(theme.wash(0.06))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(icon_path)
+                .size(px(16.0))
+                .text_color(tint.unwrap_or(theme.text_muted)),
+        )
+}
+
+/// Whether a provider row opens its details: enabled providers, and every
+/// user-added ACP agent (its Remove lives there, on or off).
+fn expandable(descriptor: &HarnessDescriptor) -> bool {
+    descriptor_enabled(descriptor) || descriptor.acp.is_some()
+}
+
 fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> bool {
     harness != HarnessId::Mock && !installed && can_install
 }
 
 fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String {
+    if harness.is_acp() {
+        return "Can't start on this device — remove it and add it again".into();
+    }
     if harness == HarnessId::Antigravity {
         return if can_install {
             "Install Antigravity to enable"
@@ -113,6 +146,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Mock => "mock",
+        HarnessId::Acp(id) => id,
     }
 }
 
@@ -190,6 +224,22 @@ pub struct HarnessesPage {
     /// "Check now" is running: the button says so, since rows no longer
     /// show "Checking…" while a check is in flight.
     checking_updates: bool,
+    /// The Add a provider section, once the target device supports it.
+    add_provider: Option<add_provider::AddProvider>,
+    /// A user-added agent awaiting the Remove confirmation.
+    remove_confirm: Option<HarnessId>,
+    remove_task: Option<Task<()>>,
+    /// The environment dialog of a user-added agent, while open.
+    env_dialog: Option<EnvDialog>,
+    env_task: Option<Task<()>>,
+}
+
+struct EnvDialog {
+    harness: HarnessId,
+    input: Entity<crate::composer::ComposerInput>,
+    error: Option<String>,
+    focus_pending: bool,
+    _events: gpui::Subscription,
 }
 
 impl HarnessesPage {
@@ -214,6 +264,11 @@ impl HarnessesPage {
             update_task: None,
             update_action_task: None,
             checking_updates: false,
+            add_provider: None,
+            remove_confirm: None,
+            remove_task: None,
+            env_dialog: None,
+            env_task: None,
         };
         page.load(cx);
         page
@@ -223,7 +278,7 @@ impl HarnessesPage {
         if !self.harnesses.ready().is_some_and(|items| {
             items
                 .iter()
-                .any(|item| item.id == harness && descriptor_enabled(item))
+                .any(|item| item.id == harness && expandable(item))
         }) {
             return;
         }
@@ -247,10 +302,11 @@ impl HarnessesPage {
 
     fn render_agent_details(
         &self,
-        harness: HarnessId,
+        descriptor: &HarnessDescriptor,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let harness = descriptor.id;
         let accounts = accounts::signs_in(harness)
             .then(|| self.accounts_page.clone())
             .flatten()
@@ -265,6 +321,7 @@ impl HarnessesPage {
             .flex()
             .flex_col()
             .gap(px(20.0))
+            .children(self.render_acp_agent_for(descriptor, theme, cx))
             .child(self.render_completion_for(harness, theme, cx))
             .children(self.render_updates_for(harness, theme, cx))
             .when_some(accounts, |details, accounts| details.child(accounts));
@@ -273,6 +330,375 @@ impl HarnessesPage {
         } else {
             motion::menu_in(format!("agent-details-{harness:?}"), content).into_any_element()
         }
+    }
+
+    /// A user-added ACP agent's section: where it came from, what runs, and
+    /// Remove (confirmed in a dialog).
+    fn render_acp_agent_for(
+        &self,
+        descriptor: &HarnessDescriptor,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let info = descriptor.acp.as_ref()?;
+        let harness = descriptor.id;
+        let source = match (&info.registry_id, &info.version) {
+            (Some(_), Some(version)) => format!("ACP registry · v{version}"),
+            (Some(_), None) => "ACP registry".to_string(),
+            (None, _) => "Custom command".to_string(),
+        };
+        let removing = self.remove_task.is_some();
+        let row = div()
+            .min_h(px(52.0))
+            .py(px(10.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, source))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .truncate()
+                                .child(info.command.clone())
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                widgets::ghost_action(theme)
+                    .id(SharedString::from(format!("acp-agent-remove-{harness}")))
+                    .flex_none()
+                    .text_color(theme.danger)
+                    .when(removing, |el| el.opacity(0.5))
+                    .when(!removing, |el| {
+                        el.on_click(cx.listener(move |page, _, _, cx| {
+                            page.remove_confirm = Some(harness);
+                            cx.notify();
+                        }))
+                    })
+                    .child("Remove"),
+            );
+        let env = if info.env.is_empty() {
+            "None".to_string()
+        } else {
+            info.env.join(", ")
+        };
+        let env_row = div()
+            .min_h(px(52.0))
+            .py(px(10.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .border_t_1()
+            .border_color(widgets::row_divider(theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Environment"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![div().truncate().child(env).into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::ghost_action(theme)
+                    .id(SharedString::from(format!("acp-agent-env-{harness}")))
+                    .flex_none()
+                    .on_click(cx.listener(move |page, _, _, cx| page.open_env_dialog(harness, cx)))
+                    .child("Edit"),
+            );
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(widgets::details_label(theme, "Agent"))
+                .child(row)
+                .child(env_row)
+                .into_any_element(),
+        )
+    }
+
+    fn open_env_dialog(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            crate::composer::ComposerInput::new("API_KEY=… OTHER=…", cx).with_single_line()
+        });
+        let events = cx.subscribe(&input, |page: &mut Self, _, event, cx| {
+            if matches!(event, crate::composer::ComposerInputEvent::Submitted) {
+                page.submit_env(cx);
+            }
+        });
+        self.env_dialog = Some(EnvDialog {
+            harness,
+            input,
+            error: None,
+            focus_pending: true,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    fn submit_env(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.env_dialog.as_mut() else {
+            return;
+        };
+        let line = dialog.input.read(cx).text().to_string();
+        let changes = match zeron_harness::acp_agents::parse_env_assignments(&line) {
+            Ok(changes) => changes,
+            Err(error) => {
+                dialog.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let harness = dialog.harness;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.with_target(serde_json::json!({ "harness": harness, "env": changes }));
+        let target = self.target_device.clone();
+        self.env_dialog = None;
+        self.env_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_ACP_AGENT_ENV, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<Vec<HarnessDescriptor>>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |page, cx| {
+                page.env_task = None;
+                if page.target_device != target {
+                    return;
+                }
+                match result {
+                    Ok(list) => {
+                        page.set_catalog(list, cx);
+                        // New credentials can unlock model discovery.
+                        crate::pickers::bump_harness_catalog(cx);
+                    }
+                    Err(error) => {
+                        page.error = Some(format!("Couldn't save the environment — {error}"))
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_env_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).for_popup();
+        let dialog = self.env_dialog.as_mut()?;
+        if std::mem::take(&mut dialog.focus_pending) {
+            window.focus(
+                &gpui::Focusable::focus_handle(dialog.input.read(cx), cx),
+                cx,
+            );
+        }
+        let input = dialog.input.clone();
+        let error = dialog.error.clone();
+        let harness = dialog.harness;
+        let name = self
+            .harnesses
+            .ready()
+            .and_then(|list| list.iter().find(|d| d.id == harness))
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| harness.to_string());
+        let card = popover::dialog_card(&theme)
+            .id("acp-env-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("Environment")
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    page.env_dialog = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(popover::dialog_title(&theme, &format!("{name} environment")))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                &theme,
+                "KEY=value sets a variable and KEY= removes it; others stay as they are. Values stay on this device.",
+            )))
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .child(popover::dialog_field(input.into_any_element())),
+            )
+            .when_some(error, |card, error| {
+                card.child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "acp-env-cancel")
+                            .id("acp-env-cancel")
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.env_dialog = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(&theme, "Save")
+                            .id("acp-env-save")
+                            .on_click(cx.listener(|page, _, _, cx| page.submit_env(cx))),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal(
+            "acp-env-dialog",
+            window.viewport_size(),
+            card,
+        ))
+    }
+
+    fn remove_acp_agent(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.with_target(serde_json::json!({ "harness": harness }));
+        let target = self.target_device.clone();
+        self.remove_confirm = None;
+        self.error = None;
+        self.remove_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::REMOVE_ACP_AGENT, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<Vec<HarnessDescriptor>>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |page, cx| {
+                page.remove_task = None;
+                if page.target_device != target {
+                    return;
+                }
+                match result {
+                    Ok(list) => {
+                        if page.expanded_harness == Some(harness) {
+                            page.expanded_harness = None;
+                        }
+                        page.set_catalog(list, cx);
+                        crate::pickers::bump_harness_catalog(cx);
+                    }
+                    Err(error) => {
+                        page.error = Some(format!("Couldn't remove the provider — {error}"))
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_remove_confirm(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let harness = self.remove_confirm?;
+        let theme = Theme::of(cx).for_popup();
+        let name = self
+            .harnesses
+            .ready()
+            .and_then(|list| list.iter().find(|d| d.id == harness))
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| harness.to_string());
+        let card = popover::dialog_card(&theme)
+            .id("remove-provider-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("Remove provider")
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    page.remove_confirm = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(popover::dialog_title(&theme, &format!("Remove {name}?")))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                &theme,
+                "It leaves the provider list on this device. Sessions that used it keep their history; add it again any time.",
+            )))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "remove-provider-cancel")
+                            .id("remove-provider-cancel")
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.remove_confirm = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(&theme, "Remove")
+                            .id("remove-provider-confirm")
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                page.remove_acp_agent(harness, cx)
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal(
+            "remove-provider-dialog",
+            window.viewport_size(),
+            card,
+        ))
+    }
+
+    /// Adopt a catalog reply (and fetch any new agent's mark).
+    fn set_catalog(&mut self, list: Vec<HarnessDescriptor>, cx: &mut Context<Self>) {
+        crate::acp_icons::note_catalog(&list, cx);
+        self.harnesses = Loadable::Ready(list);
+    }
+
+    fn supports_acp_agents(&self, cx: &Context<Self>) -> bool {
+        let state = self.state.read(cx);
+        let Some(engine) = state.engine() else {
+            return false;
+        };
+        self.target_device.as_deref().map_or_else(
+            || {
+                engine
+                    .engine_info()
+                    .supports(zeron_proto::capabilities::ACP_AGENTS_V1)
+            },
+            |device| state.device_supports(device, zeron_proto::capabilities::ACP_AGENTS_V1),
+        )
     }
 
     /// The expanded provider's Updates section: the update policy, short
@@ -351,6 +777,10 @@ impl HarnessesPage {
     /// Escape that reached Settings unclaimed goes to the expanded provider's
     /// accounts (an open login) first. Returns whether it was consumed.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.remove_confirm.take().is_some() || self.env_dialog.take().is_some() {
+            cx.notify();
+            return true;
+        }
         self.expanded_harness.is_some()
             && self
                 .accounts_page
@@ -396,6 +826,9 @@ impl HarnessesPage {
         self.installing = None;
         self.install_task = None;
         self.policy_selects.clear();
+        self.add_provider = None;
+        self.remove_confirm = None;
+        self.env_dialog = None;
         self.target_device = target;
         if let Some(accounts) = &self.accounts_page {
             accounts.update(cx, |page, cx| {
@@ -488,13 +921,13 @@ impl HarnessesPage {
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
             this.update(cx, |page, cx| {
-                page.harnesses = match result {
+                match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
-                        Ok(list) => Loadable::Ready(list),
-                        Err(err) => Loadable::Error(err.to_string()),
+                        Ok(list) => page.set_catalog(list, cx),
+                        Err(err) => page.harnesses = Loadable::Error(err.to_string()),
                     },
-                    Err(err) => Loadable::Error(err.to_string()),
-                };
+                    Err(err) => page.harnesses = Loadable::Error(err.to_string()),
+                }
                 cx.notify();
             })
             .ok();
@@ -559,7 +992,7 @@ impl HarnessesPage {
                 page.installing = None;
                 match result {
                     Ok(list) => {
-                        page.harnesses = Loadable::Ready(list);
+                        page.set_catalog(list, cx);
                         crate::pickers::bump_harness_catalog(cx);
                     }
                     Err(error) => page.error = Some(format!("Installation failed — {error}")),
@@ -594,7 +1027,7 @@ impl HarnessesPage {
                 match result {
                     Ok(value) => {
                         if let Ok(list) = serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
-                            page.harnesses = Loadable::Ready(list);
+                            page.set_catalog(list, cx);
                         }
                         if !enabled && page.expanded_harness == Some(harness) {
                             page.expanded_harness = None;
@@ -868,6 +1301,21 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
+                // Added ACP agents are pinned (no update stream): their
+                // version line is the release they were added at.
+                if let Some(version) = descriptor
+                    .acp
+                    .as_ref()
+                    .and_then(|acp| acp.version.as_deref())
+                    .filter(|_| installed && update.is_none())
+                {
+                    meta.push(
+                        div()
+                            .text_color(theme.text_muted.opacity(0.75))
+                            .child(format!("v{version}"))
+                            .into_any_element(),
+                    );
+                }
                 // Not installed: the hint above says all there is.
                 if let Some(status) = update.filter(|_| installed) {
                     let (text, color) = harness_update_label(status, &theme);
@@ -905,22 +1353,9 @@ impl HarnessesPage {
                         meta.push(div().text_color(color).child(text).into_any_element());
                     }
                 }
-                // widgets::row_tile with the brand tint honored (the Claude
-                // mark keeps its orange, like the picker rail).
-                let tile = div()
-                    .flex_none()
-                    .size(px(36.0))
-                    .rounded(px(10.0))
-                    .bg(theme.wash(0.06))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::icons::icon(icon_path)
-                            .size(px(16.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    );
-                let expanded = enabled && self.expanded_harness == Some(harness);
+                let tile = provider_tile(&theme, icon_path, tint);
+                let can_expand = enabled || descriptor.acp.is_some();
+                let expanded = can_expand && self.expanded_harness == Some(harness);
                 // The row's one update action sits inside the trigger, before
                 // the chevron, so it appearing never moves the chevron; the
                 // update policy lives in the expanded details.
@@ -991,7 +1426,7 @@ impl HarnessesPage {
                             .flex_row()
                             .items_center()
                             .gap(px(12.0))
-                            .when(enabled, |el| {
+                            .when(can_expand, |el| {
                                 el.role(gpui::Role::Button)
                                     .aria_label(format!("{} preferences", descriptor.name))
                                     .aria_expanded(expanded)
@@ -1073,14 +1508,14 @@ impl HarnessesPage {
                                 })
                                 .size(px(14.0))
                                 .flex_none()
-                                .when(enabled, |caret| {
+                                .when(can_expand, |caret| {
                                     caret
                                         .text_color(theme.text_muted)
                                         .group_hover(format!("harness-details-{ix}"), |s| {
                                             s.text_color(theme.text)
                                         })
                                 })
-                                .when(!enabled, |caret| {
+                                .when(!can_expand, |caret| {
                                     caret.text_color(theme.text_muted.opacity(0.35))
                                 }),
                             ),
@@ -1129,7 +1564,7 @@ impl HarnessesPage {
                     .flex_col()
                     .child(header)
                     .when(expanded, |row| {
-                        row.child(self.render_agent_details(harness, &theme, cx))
+                        row.child(self.render_agent_details(&descriptor, &theme, cx))
                     })
                     .into_any_element()
             })
@@ -1153,9 +1588,18 @@ impl popover::ScrollRailHost for HarnessesPage {
 }
 
 impl Render for HarnessesPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let supports_updates = self.supports_updates(cx);
+        let overlays: Vec<AnyElement> = self
+            .render_remove_confirm(window, cx)
+            .into_iter()
+            .chain(self.render_env_dialog(window, cx))
+            .collect();
+        let add_provider = match &self.harnesses {
+            Loadable::Ready(_) => self.render_add_provider(&theme, cx),
+            _ => None,
+        };
 
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
@@ -1275,12 +1719,14 @@ impl Render for HarnessesPage {
                                         ),
                                 )
                                 .children(update_error)
-                                .child(body),
+                                .child(body)
+                                .children(add_provider),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
+            .children(overlays)
     }
 }
 
@@ -1308,6 +1754,7 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            acp: None,
         };
         window
             .update(cx, |page, _, cx| {

@@ -50,6 +50,19 @@ pub mod methods {
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
+    /// The ACP registry as the target device sees it: `{force?}` →
+    /// `AcpRegistryListing[]` (availability and "added" are per device).
+    pub const LIST_ACP_REGISTRY: &str = "ListAcpRegistry";
+    /// Add an ACP agent on the target device — `{registryId}` or a custom
+    /// `{name, program, args, env}` — installing what it needs first;
+    /// replies with the device's fresh `ListHarnesses` catalog.
+    pub const ADD_ACP_AGENT: &str = "AddAcpAgent";
+    /// Remove a user-added ACP agent, `{harness}`; replies with the catalog.
+    pub const REMOVE_ACP_AGENT: &str = "RemoveAcpAgent";
+    /// Set/remove an added ACP agent's environment variables,
+    /// `{harness, env: {KEY: value}}` (empty value removes); replies with
+    /// the catalog.
+    pub const SET_ACP_AGENT_ENV: &str = "SetAcpAgentEnv";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";

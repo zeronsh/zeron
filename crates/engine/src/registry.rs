@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
+use zeron_harness::acp_agents::AcpAgentConfig;
 use zeron_harness::{Harness, HarnessError, mock::MockHarness};
 use zeron_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
@@ -38,6 +39,133 @@ pub struct HarnessDescriptor {
     /// "unknown": consumers fall back to detection (see [`descriptor_enabled`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Set on user-added ACP agents, which Settings → Providers can remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpAgentInfo>,
+}
+
+/// What Settings → Providers shows about a user-added ACP agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAgentInfo {
+    /// The ACP registry entry it came from; `None` for a custom command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Monochrome SVG url (the registry's CDN).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// What runs, as one command line.
+    pub command: String,
+    /// Names of the agent's environment variables. Values stay on the
+    /// device (they're usually API keys).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+}
+
+impl From<&AcpAgentConfig> for AcpAgentInfo {
+    fn from(agent: &AcpAgentConfig) -> Self {
+        Self {
+            registry_id: agent.registry_id.clone(),
+            version: agent.version.clone(),
+            description: agent.description.clone(),
+            icon: agent.icon.clone(),
+            command: agent.summary(),
+            env: agent.env().keys().cloned().collect(),
+        }
+    }
+}
+
+/// One `ListAcpRegistry` row: a registry agent as the listing device sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpRegistryListing {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// Already added on the listing device.
+    #[serde(default)]
+    pub added: bool,
+    /// Zeron drives this agent natively already (Claude Code, Codex, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_in: Option<HarnessId>,
+    /// Why the listing device can't run it (no build, no npm, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+/// Registry entries for agents Zeron already ships a native driver for.
+pub fn built_in_for_registry_id(registry_id: &str) -> Option<HarnessId> {
+    Some(match registry_id {
+        "claude-acp" => HarnessId::ClaudeCode,
+        "codex-acp" => HarnessId::Codex,
+        "cursor" => HarnessId::Cursor,
+        "devin" => HarnessId::Devin,
+        "grok-build" => HarnessId::Grok,
+        "opencode" => HarnessId::Opencode,
+        "pi-acp" => HarnessId::Pi,
+        "antigravity-acp" => HarnessId::Antigravity,
+        _ => return None,
+    })
+}
+
+impl HarnessRegistry {
+    /// The registry annotated for this device.
+    pub fn acp_registry_listing(
+        &self,
+        agents: &[zeron_harness::acp_agents::RegistryAgent],
+    ) -> Vec<AcpRegistryListing> {
+        let added: Vec<HarnessId> = self.acp_agents().iter().map(|agent| agent.id).collect();
+        agents
+            .iter()
+            .map(|agent| AcpRegistryListing {
+                id: agent.id.clone(),
+                name: agent.name.clone(),
+                version: agent.version.clone(),
+                description: agent.description.clone(),
+                icon: Some(agent.icon_url()),
+                website: agent.website.clone().or_else(|| agent.repository.clone()),
+                added: agent.harness_id().is_some_and(|id| added.contains(&id)),
+                built_in: built_in_for_registry_id(&agent.id),
+                unavailable: agent.launch_for_this_device().err(),
+            })
+            .collect()
+    }
+
+    /// The id a new custom agent named `name` gets: its slug, with `-2`,
+    /// `-3`, … when taken.
+    pub fn custom_acp_agent(
+        &self,
+        name: &str,
+        program: &str,
+        args: Vec<String>,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> Result<AcpAgentConfig, String> {
+        let mut suffix = None;
+        loop {
+            let agent = AcpAgentConfig::command(name, program, args.clone(), env.clone(), suffix)?;
+            if !self.slots().contains_key(&agent.id) {
+                return Ok(agent);
+            }
+            suffix = Some(suffix.map_or(2, |n| n + 1));
+        }
+    }
+}
+
+/// The persisted shape of `acp-agents.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct AcpAgentsFile {
+    agents: Vec<serde_json::Value>,
 }
 
 impl HarnessDescriptor {
@@ -81,6 +209,7 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
         installed: harness.installed(),
         can_install: false,
         enabled: None,
+        acp: None,
     }
 }
 
@@ -115,7 +244,7 @@ type InstalledProbe = Box<dyn Fn() -> bool + Send + Sync>;
 enum Slot {
     Ready(Arc<dyn Harness>),
     Lazy {
-        descriptor: HarnessDescriptor,
+        descriptor: Box<HarnessDescriptor>,
         /// Re-run on every `descriptors()` call — a CLI installed mid-session
         /// shows up on the next settings/picker open, no restart needed.
         installed: InstalledProbe,
@@ -138,6 +267,10 @@ pub struct HarnessRegistry {
     gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::RwLock<()>>>>,
     pending_updates: Mutex<std::collections::HashSet<HarnessId>>,
     update_generation: tokio::sync::watch::Sender<u64>,
+    /// User-added ACP agents (Settings → Providers → Add provider), in the
+    /// order they were added; persisted in `{data_dir}/acp-agents.json`.
+    acp_agents: Mutex<Vec<AcpAgentConfig>>,
+    acp_agents_path: Mutex<Option<PathBuf>>,
 }
 
 impl Default for HarnessRegistry {
@@ -220,6 +353,8 @@ impl HarnessRegistry {
             gates: Mutex::new(HashMap::new()),
             pending_updates: Mutex::new(std::collections::HashSet::new()),
             update_generation,
+            acp_agents: Mutex::new(Vec::new()),
+            acp_agents_path: Mutex::new(None),
         }
     }
 
@@ -470,7 +605,7 @@ impl HarnessRegistry {
             .insert(
                 id,
                 Slot::Lazy {
-                    descriptor,
+                    descriptor: Box::new(descriptor),
                     installed,
                     factory,
                 },
@@ -497,6 +632,7 @@ impl HarnessRegistry {
     /// Catalog for `ListHarnesses` — never forces a lazy resolve.
     pub fn descriptors(&self) -> Vec<HarnessDescriptor> {
         let enabled = self.enabled_set();
+        let acp_agents = self.acp_agents();
         let slots = self.slots();
         self.order()
             .iter()
@@ -509,15 +645,180 @@ impl HarnessRegistry {
                         ..
                     }) => HarnessDescriptor {
                         installed: installed(),
-                        ..descriptor.clone()
+                        ..(**descriptor).clone()
                     },
                     None => return None,
                 };
                 descriptor.enabled = Some(enabled.contains(id));
                 descriptor.can_install = zeron_harness::install::can_install(*id);
+                descriptor.acp = acp_agents
+                    .iter()
+                    .find(|agent| agent.id == *id)
+                    .map(AcpAgentInfo::from);
                 Some(descriptor)
             })
             .collect()
+    }
+
+    fn acp_agents_guard(&self) -> MutexGuard<'_, Vec<AcpAgentConfig>> {
+        self.acp_agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Register the agents saved in `{data_dir}/acp-agents.json`. Entries this
+    /// build can't read are kept on disk untouched, never dropped.
+    pub fn load_acp_agents(&self, data_dir: &Path) {
+        let path = data_dir.join("acp-agents.json");
+        let file: AcpAgentsFile = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        *self
+            .acp_agents_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(path);
+        for value in file.agents {
+            match serde_json::from_value::<AcpAgentConfig>(value) {
+                Ok(agent) if agent.id.is_acp() && !self.slots().contains_key(&agent.id) => {
+                    self.register_acp_slot(&agent);
+                    self.acp_agents_guard().push(agent);
+                }
+                Ok(agent) => tracing::warn!(id = %agent.id, "skipping duplicate ACP agent"),
+                Err(error) => tracing::warn!(%error, "skipping unreadable ACP agent"),
+            }
+        }
+    }
+
+    /// The user-added ACP agents on this device.
+    pub fn acp_agents(&self) -> Vec<AcpAgentConfig> {
+        self.acp_agents_guard().clone()
+    }
+
+    fn register_acp_slot(&self, agent: &AcpAgentConfig) {
+        let probe = agent.clone();
+        let build = agent.clone();
+        self.register_lazy(
+            HarnessDescriptor {
+                id: agent.id,
+                name: agent.name.clone(),
+                supports_steering: true,
+                // Mirrors AcpHarness::custom (descriptor stability).
+                steering_mode: SteeringMode::TurnBoundary,
+                reasoning_levels: Vec::new(),
+                installed: true,
+                can_install: false,
+                enabled: None,
+                acp: None,
+            },
+            Box::new(move || probe.installed()),
+            Box::new(move || {
+                Ok(Arc::new(zeron_harness::AcpHarness::custom(build.clone())) as Arc<dyn Harness>)
+            }),
+        );
+    }
+
+    /// Add an ACP agent whose launch is already prepared (installed). It
+    /// joins the enabled set at once — detection-based enablement.
+    pub fn add_acp_agent(&self, agent: AcpAgentConfig) -> Result<(), String> {
+        if !agent.id.is_acp() {
+            return Err(format!("{} is not an ACP agent id", agent.id));
+        }
+        if self.slots().contains_key(&agent.id) {
+            return Err(format!("{} is already added", agent.name));
+        }
+        self.register_acp_slot(&agent);
+        self.acp_agents_guard().push(agent.clone());
+        // A stale opt-out from an earlier add of the same agent must not
+        // leave the fresh one switched off.
+        let had_opt_out = {
+            let mut prefs = self.prefs();
+            let before = prefs.disabled.len();
+            prefs.disabled.retain(|id| *id != agent.id);
+            prefs.disabled.len() != before
+        };
+        if had_opt_out {
+            self.persist_prefs();
+        }
+        self.persist_acp_agents();
+        Ok(())
+    }
+
+    /// Change an added agent's environment ([`AcpAgentConfig::merge_env`]).
+    /// The slot is rebuilt, so the next session starts with it; running ones
+    /// keep the environment they started with.
+    pub fn update_acp_agent_env(
+        &self,
+        id: HarnessId,
+        changes: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let updated = {
+            let mut agents = self.acp_agents_guard();
+            let agent = agents
+                .iter_mut()
+                .find(|agent| agent.id == id)
+                .ok_or_else(|| format!("{id} is not an added provider"))?;
+            agent.merge_env(changes);
+            agent.clone()
+        };
+        self.register_acp_slot(&updated);
+        self.persist_acp_agents();
+        Ok(())
+    }
+
+    /// Remove a user-added ACP agent. Chats that used it keep their history;
+    /// new turns on them report the agent as not installed.
+    pub fn remove_acp_agent(&self, id: HarnessId) -> Result<AcpAgentConfig, String> {
+        let removed = {
+            let mut agents = self.acp_agents_guard();
+            let index = agents
+                .iter()
+                .position(|agent| agent.id == id)
+                .ok_or_else(|| format!("{id} is not a removable provider"))?;
+            agents.remove(index)
+        };
+        self.slots().remove(&id);
+        self.order().retain(|registered| *registered != id);
+        let had_opt_out = {
+            let mut prefs = self.prefs();
+            let before = prefs.disabled.len();
+            prefs.disabled.retain(|disabled| *disabled != id);
+            prefs.disabled.len() != before
+        };
+        if had_opt_out {
+            self.persist_prefs();
+        }
+        self.persist_acp_agents();
+        Ok(removed)
+    }
+
+    fn persist_acp_agents(&self) {
+        let Some(path) = self
+            .acp_agents_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return;
+        };
+        let file = AcpAgentsFile {
+            agents: self
+                .acp_agents_guard()
+                .iter()
+                .filter_map(|agent| serde_json::to_value(agent).ok())
+                .collect(),
+        };
+        let json = match serde_json::to_string_pretty(&file) {
+            Ok(json) => json,
+            Err(err) => {
+                tracing::warn!(error = %err, "acp-agents serialize failed");
+                return;
+            }
+        };
+        let tmp = path.with_extension("json.tmp");
+        if let Err(err) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
+            tracing::warn!(error = %err, "acp-agents save failed");
+        }
     }
 }
 
@@ -591,6 +892,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
@@ -619,6 +921,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
@@ -636,6 +939,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::CursorHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
@@ -654,6 +958,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::AcpHarness::devin().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
@@ -676,6 +981,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
@@ -694,6 +1000,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
@@ -709,6 +1016,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::PiHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
@@ -734,6 +1042,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
@@ -752,6 +1061,7 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         },
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
@@ -774,6 +1084,7 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            acp: None,
         };
         assert!(descriptor.steers_mid_turn());
 
@@ -801,6 +1112,7 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                acp: None,
             },
             Box::new(|| false),
             Box::new(move || {
@@ -948,6 +1260,7 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                acp: None,
             },
             Box::new(move || installed),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
@@ -1006,6 +1319,149 @@ mod tests {
         assert_eq!(reloaded.enabled_set(), vec![HarnessId::Grok]);
     }
 
+    /// Added ACP agents register as slots, enable through detection, persist
+    /// in `acp-agents.json`, carry their info in the catalog, and remove
+    /// cleanly (taking a stale opt-out with them).
+    #[test]
+    fn acp_agents_add_persist_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("my-agent");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        registry.load_acp_agents(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+
+        let agent = registry
+            .custom_acp_agent(
+                "My Agent",
+                program.to_str().unwrap(),
+                vec!["--acp".into()],
+                Default::default(),
+            )
+            .unwrap();
+        let id = agent.id;
+        assert_eq!(id.as_str(), "acp.custom-my-agent");
+        registry.add_acp_agent(agent.clone()).unwrap();
+        assert!(registry.add_acp_agent(agent).is_err(), "no duplicates");
+        // The next one with the same name gets its own id.
+        let twin = registry
+            .custom_acp_agent("My Agent", "my-agent", Vec::new(), Default::default())
+            .unwrap();
+        assert_eq!(twin.id.as_str(), "acp.custom-my-agent-2");
+
+        let added = registry
+            .descriptors()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap();
+        assert_eq!(added.name, "My Agent");
+        assert_eq!(added.enabled, Some(true));
+        assert!(added.installed);
+        let info = added.acp.unwrap();
+        assert_eq!(info.command, format!("{} --acp", program.display()));
+        assert!(info.registry_id.is_none());
+        assert!(
+            registry
+                .descriptors()
+                .iter()
+                .all(|d| d.id == id || d.acp.is_none())
+        );
+
+        // Environment edits rebuild the slot and surface only the names.
+        registry
+            .update_acp_agent_env(id, [("API_KEY".to_string(), "secret".to_string())].into())
+            .unwrap();
+        let info = registry
+            .descriptors()
+            .into_iter()
+            .find(|d| d.id == id)
+            .and_then(|d| d.acp)
+            .unwrap();
+        assert_eq!(info.env, vec!["API_KEY".to_string()]);
+        assert!(!serde_json::to_string(&info).unwrap().contains("secret"));
+        assert!(
+            registry
+                .update_acp_agent_env(HarnessId::ClaudeCode, Default::default())
+                .is_err()
+        );
+
+        registry.set_enabled(id, false).unwrap();
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        reloaded.load_acp_agents(dir.path());
+        test_slot(&reloaded, HarnessId::ClaudeCode, true);
+        assert_eq!(
+            reloaded
+                .acp_agents()
+                .iter()
+                .map(|a| a.id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(!reloaded.enabled_set().contains(&id));
+        assert_eq!(
+            reloaded.acp_agents()[0]
+                .env()
+                .get("API_KEY")
+                .map(String::as_str),
+            Some("secret")
+        );
+
+        let removed = reloaded.remove_acp_agent(id).unwrap();
+        assert_eq!(removed.name, "My Agent");
+        assert!(reloaded.descriptors().iter().all(|d| d.id != id));
+        assert!(reloaded.resolve(id).is_err());
+        assert!(reloaded.remove_acp_agent(id).is_err());
+        assert!(reloaded.remove_acp_agent(HarnessId::ClaudeCode).is_err());
+
+        // Added again: the old opt-out went with the removal.
+        let again = HarnessRegistry::new();
+        again.load_prefs(dir.path());
+        again.load_acp_agents(dir.path());
+        assert!(again.acp_agents().is_empty());
+        again
+            .add_acp_agent(
+                again
+                    .custom_acp_agent(
+                        "My Agent",
+                        program.to_str().unwrap(),
+                        Vec::new(),
+                        Default::default(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(again.enabled_set().contains(&id));
+    }
+
+    #[test]
+    fn registry_listing_marks_added_built_in_and_unavailable_agents() {
+        let index = br#"{"agents": [
+            {"id": "codex-acp", "name": "Codex", "version": "2.2.2",
+             "distribution": {"npx": {"package": "@zed-industries/codex-acp@2.2.2"}}},
+            {"id": "nothing-here", "name": "Nothing", "version": "1",
+             "distribution": {"binary": {"plan9-mips": {"archive": "https://x/a.zip", "cmd": "./a"}}}},
+            {"id": "local", "name": "Local", "version": "1",
+             "distribution": {"binary": {}}}
+        ]}"#;
+        let agents = zeron_harness::acp_agents::parse_registry(index).unwrap();
+        let registry = HarnessRegistry::new();
+        let listing = registry.acp_registry_listing(&agents);
+        let codex = listing.iter().find(|l| l.id == "codex-acp").unwrap();
+        assert_eq!(codex.built_in, Some(HarnessId::Codex));
+        let nothing = listing.iter().find(|l| l.id == "nothing-here").unwrap();
+        assert_eq!(
+            nothing.unavailable.as_deref(),
+            Some("No build for this device")
+        );
+        assert!(!nothing.added);
+        assert_eq!(
+            nothing.icon.as_deref(),
+            Some("https://cdn.agentclientprotocol.com/registry/v1/latest/nothing-here.svg")
+        );
+    }
+
     /// The point of following detection: an agent installed after the user has
     /// already edited Settings turns itself on, while the ones they switched
     /// off stay off. An allow-list can't express that — it can't tell "the
@@ -1031,6 +1487,7 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                acp: None,
             },
             Box::new(move || probe.load(Ordering::SeqCst)),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),

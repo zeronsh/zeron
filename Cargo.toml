@@ -145,6 +145,10 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 zip = { version = "7.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# ACP registry binaries also ship as .tar.gz / .tar.bz2 (pure-Rust codecs).
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+bzip2 = "0.6"
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"

@@ -3093,18 +3093,7 @@ fn provider_group(harness: HarnessId, store_key: Option<&str>) -> Option<String>
 }
 
 fn harness_slug(harness: HarnessId) -> &'static str {
-    match harness {
-        HarnessId::ClaudeCode => "claude-code",
-        HarnessId::Codex => "codex",
-        HarnessId::Cursor => "cursor",
-        HarnessId::Devin => "devin",
-        HarnessId::Grok => "grok",
-        HarnessId::Hermes => "hermes",
-        HarnessId::Pi => "pi",
-        HarnessId::Opencode => "opencode",
-        HarnessId::Antigravity => "antigravity",
-        HarnessId::Mock => "mock",
-    }
+    harness.as_str()
 }
 
 fn read_json(file: &Path) -> Option<serde_json::Value> {

@@ -396,6 +396,12 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     install_staged_background(source, staged, color, cx)
 }
 
+/// The UI's data dir (where Settings persist), once [`init`] ran.
+pub(crate) fn data_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+}
+
 fn install_staged_background(
     source: &Path,
     staged: crate::attachments::StagedAttachment,

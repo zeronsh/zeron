@@ -148,6 +148,9 @@ struct AcpAgentSpec {
     /// A prompt cancelled before it produced anything vanishes from the
     /// agent's history (Grok, verified live); preemption re-sends its text.
     drops_unstarted_cancelled_prompt: bool,
+    /// A user-added agent (ACP registry or custom command): its own launch
+    /// replaces every PATH/install lookup above.
+    custom: Option<std::sync::Arc<crate::acp_agents::AcpAgentConfig>>,
 }
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
@@ -266,6 +269,7 @@ fn grok_spec() -> AcpAgentSpec {
         skill_dirs: Vec::new,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: true,
+        custom: None,
     }
 }
 
@@ -343,6 +347,7 @@ fn devin_spec() -> AcpAgentSpec {
         skill_dirs: Vec::new,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: false,
+        custom: None,
     }
 }
 
@@ -414,6 +419,41 @@ fn hermes_spec() -> AcpAgentSpec {
         skill_dirs: Vec::new,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: false,
+        custom: None,
+    }
+}
+
+fn custom_spec(agent: crate::acp_agents::AcpAgentConfig) -> AcpAgentSpec {
+    let display_name = zeron_proto::intern(&agent.name);
+    AcpAgentSpec {
+        id: agent.id,
+        display_name,
+        executable: agent.id.as_str(),
+        env_override: "",
+        args: &[],
+        npm_package: None,
+        archive: None,
+        extra_paths: Vec::new,
+        cli_executable: agent.id.as_str(),
+        cli_extra_paths: Vec::new,
+        install_hint: display_name,
+        models: crate::acp_agents::AcpAgentConfig::fallback_models,
+        // No steering extension can be assumed: steers wait for the turn.
+        steering_mode: SteeringMode::TurnBoundary,
+        // Effort is whatever `thought_level` the agent advertises.
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
+        custom: Some(std::sync::Arc::new(agent)),
     }
 }
 
@@ -1122,6 +1162,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         skill_dirs: antigravity_skill_dirs,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: false,
+        custom: None,
     }
 }
 
@@ -1284,6 +1325,11 @@ impl AcpHarness {
     /// Hermes Agent (`hermes acp`) — Nous Research's native ACP server.
     pub fn hermes() -> Self {
         Self::with_spec(hermes_spec())
+    }
+
+    /// A user-added agent: an ACP registry entry or a custom command.
+    pub fn custom(agent: crate::acp_agents::AcpAgentConfig) -> Self {
+        Self::with_spec(custom_spec(agent))
     }
 
     /// google antigravity over its acp server (`agy_acp_server`).
@@ -1551,6 +1597,22 @@ impl AcpHarness {
             return crate::executable::validate_native_override(p)
                 .map(|program| Launch::Program(program, spec_args));
         }
+        if let Some(agent) = &self.spec.custom {
+            return Ok(match agent.resolve()? {
+                crate::acp_agents::Resolved::Program(program, args) => {
+                    Launch::Program(program, args)
+                }
+                crate::acp_agents::Resolved::Npm {
+                    pin,
+                    bin_name,
+                    args,
+                } => Launch::Managed {
+                    pin,
+                    bin_name,
+                    args,
+                },
+            });
+        }
         if let Some(p) = std::env::var_os(self.spec.env_override)
             && !p.is_empty()
         {
@@ -1658,6 +1720,9 @@ impl AcpHarness {
     }
 
     fn configure_adapter_environment(&self, cmd: &mut Command, executable: &Path) {
+        if let Some(agent) = &self.spec.custom {
+            cmd.envs(agent.env());
+        }
         if self.spec.id == HarnessId::Antigravity
             && let Some(parent) = executable.parent()
         {
@@ -2186,6 +2251,9 @@ impl Harness for AcpHarness {
         if let Some(p) = &self.executable {
             return crate::executable::validate_native_override(p).is_ok();
         }
+        if let Some(agent) = &self.spec.custom {
+            return agent.installed();
+        }
         if let Some(p) = std::env::var_os(self.spec.env_override)
             && !p.is_empty()
         {
@@ -2202,6 +2270,15 @@ impl Harness for AcpHarness {
     }
 
     fn executable_path(&self) -> Option<PathBuf> {
+        if self.spec.custom.is_some() {
+            return match self.resolve_launch().ok()? {
+                Launch::Program(program, _) => Some(program),
+                Launch::Archive { entry, .. } => Some(entry),
+                Launch::Managed { pin, bin_name, .. } => {
+                    crate::adapter_install::installed_entry(&pin, bin_name)
+                }
+            };
+        }
         if self.spec.id == HarnessId::Antigravity {
             return match self.resolve_launch().ok()? {
                 Launch::Program(program, _) => Some(program),

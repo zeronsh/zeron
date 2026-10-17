@@ -41,6 +41,9 @@ tracing.workspace = true
 sha2.workspace = true
 semver = "1"
 zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+bzip2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
