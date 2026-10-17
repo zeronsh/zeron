@@ -7,7 +7,9 @@
 # Kotlin generation needs only the host toolchain. The .so build needs the
 # Android NDK + cargo-ndk (`cargo install cargo-ndk`,
 # `rustup target add aarch64-linux-android x86_64-linux-android`); it is
-# skipped with a note when they are missing. (Not yet exercised in CI.)
+# skipped with a note when they are missing. Run by the app's `buildCore`
+# Gradle task (apps/android). `ZERON_ANDROID_ABIS` picks the ABIs (default
+# arm64-v8a x86_64).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,7 +25,9 @@ HOST_LIB="$ROOT/target/mobile/libzeron_mobile.$([[ "$(uname)" == Darwin ]] && ec
 echo "kotlin bindings: $OUT/kotlin"
 
 if command -v cargo-ndk >/dev/null && [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
-  cargo ndk -t arm64-v8a -t x86_64 -o "$OUT/jniLibs" \
+  ABIS=()
+  for abi in ${ZERON_ANDROID_ABIS:-arm64-v8a x86_64}; do ABIS+=(-t "$abi"); done
+  cargo ndk "${ABIS[@]}" -o "$OUT/jniLibs" \
     build --locked -p zeron-mobile --lib --profile mobile
   echo "jniLibs: $OUT/jniLibs"
 else
