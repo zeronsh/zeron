@@ -12168,7 +12168,6 @@ impl Shell {
             .inset_0()
             .occlude()
             .bg(theme.bg)
-            .child(grid_backdrop(&theme))
             .child(
                 div()
                     .absolute()
@@ -12756,7 +12755,6 @@ impl Shell {
             .size_full()
             .relative()
             .bg(theme.bg)
-            .child(grid_backdrop(&theme))
             .child(
                 div()
                     .absolute()
@@ -12992,7 +12990,6 @@ impl Shell {
             .inset_0()
             .occlude()
             .bg(theme.bg)
-            .child(grid_backdrop(&theme))
             .child(
                 div()
                     .absolute()
@@ -13004,95 +13001,6 @@ impl Shell {
             )
             .into_any_element()
     }
-}
-
-/// The sign-in gate's faint grid backdrop (zeron styles.css `.bg-grid`):
-/// 44px hairlines at white 3.5%, with the radial mask approximated by edge
-/// gradients back into the page background (gpui has no mask-image).
-fn grid_backdrop(theme: &Theme) -> AnyElement {
-    let line = crate::theme::hairline(0.035);
-    let bg = theme.bg;
-    const STEP: f32 = 44.0;
-    const SPAN: f32 = 2640.0;
-    let verticals = (1..(SPAN / STEP) as usize).map(|i| {
-        div()
-            .absolute()
-            .left(px(i as f32 * STEP))
-            .top_0()
-            .bottom_0()
-            .w(px(1.0))
-            .bg(line)
-    });
-    let horizontals = (1..((SPAN * 0.75) / STEP) as usize).map(|i| {
-        div()
-            .absolute()
-            .top(px(i as f32 * STEP))
-            .left_0()
-            .right_0()
-            .h(px(1.0))
-            .bg(line)
-    });
-    div()
-        .absolute()
-        .inset_0()
-        .overflow_hidden()
-        .children(verticals)
-        .children(horizontals)
-        // Mask approximation: fade the grid back into the background toward
-        // the window edges (the original masks to an ellipse at 50% / 40%).
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(120.0))
-                .bg(gpui::linear_gradient(
-                    180.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom_0()
-                .left_0()
-                .right_0()
-                .h(px(260.0))
-                .bg(gpui::linear_gradient(
-                    0.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left_0()
-                .w(px(200.0))
-                .bg(gpui::linear_gradient(
-                    90.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right_0()
-                .w(px(200.0))
-                .bg(gpui::linear_gradient(
-                    270.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .into_any_element()
 }
 
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
