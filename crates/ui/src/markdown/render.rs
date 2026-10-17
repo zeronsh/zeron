@@ -986,17 +986,24 @@ pub struct FlatText {
     pub file_glyphs: Vec<Range<usize>>,
 }
 
-/// Inline-code tint: a text-safe use of the selected accent identity.
+/// Inline-code text: neutral, a notch below the body foreground. Separation
+/// comes from the mono face and the wash, not from hue — an accent tint on an
+/// accent wash read poorly in identifier-dense prose.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.code_text
+    crate::theme::mix(theme.text, theme.text_muted, 0.22)
 }
+/// Neutral ink plate behind inline code (glass-safe in both appearances).
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.code_wash
+    theme.ink(0.07)
+}
+/// Faint hairline ring around the wash.
+pub fn inline_code_border(theme: &Theme) -> Hsla {
+    theme.hairline(0.07)
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
-/// x extends 2px past the glyphs, y insets 2px from the 22px line box).
-pub const INLINE_CODE_RADIUS: f32 = 4.5;
-pub const INLINE_CODE_PAD_X: f32 = 2.0;
+/// x extends 3px past the glyphs, y insets 2px from the 22px line box).
+pub const INLINE_CODE_RADIUS: f32 = 4.0;
+pub const INLINE_CODE_PAD_X: f32 = 3.0;
 pub const INLINE_CODE_INSET_Y: f32 = 2.0;
 
 /// Flatten inline runs into shaped-text inputs. Pure given a theme.
@@ -1223,6 +1230,7 @@ pub(super) fn flat_text_presented_element(
         .as_ref()
         .map(|original| original.offsets.clone());
     let wash = inline_code_wash(theme);
+    let wash_border = inline_code_border(theme);
     let sel_wash = selection_wash(theme);
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
@@ -1234,8 +1242,8 @@ pub(super) fn flat_text_presented_element(
                         rect,
                         px(INLINE_CODE_RADIUS),
                         wash,
-                        px(0.0),
-                        gpui::transparent_black(),
+                        px(1.0),
+                        wash_border,
                         BorderStyle::default(),
                     ));
                 }
