@@ -2212,7 +2212,7 @@ impl popover::ScrollRailHost for PullRequestsPage {
     fn rail_scroll(&self) -> Option<ScrollHandle> {
         self.scroll.rail_scroll()
     }
-    fn rail_metrics(&mut self) -> Option<popover::MenuScrollbarMetrics> {
+    fn rail_metrics(&mut self, _cx: &mut Context<Self>) -> Option<popover::MenuScrollbarMetrics> {
         if !self.board_list_active {
             let scroll = self.scroll.rail_scroll()?;
             self.rail_bar().note_scroll(&scroll);
@@ -2223,7 +2223,7 @@ impl popover::ScrollRailHost for PullRequestsPage {
         self.rail_bar().note_scroll_offset(offset);
         Some(metrics)
     }
-    fn rail_press(&mut self, pointer_y: gpui::Pixels) -> bool {
+    fn rail_press(&mut self, pointer_y: gpui::Pixels, _cx: &mut Context<Self>) -> bool {
         if !self.board_list_active {
             let Some(scroll) = self.scroll.rail_scroll() else {
                 return false;
@@ -2237,7 +2237,7 @@ impl popover::ScrollRailHost for PullRequestsPage {
             .begin_press_in(&metrics, track_top, pointer_y);
         self.apply_board_rail_target(&metrics, track_top, pointer_y)
     }
-    fn rail_drag_to(&mut self, pointer_y: gpui::Pixels) -> bool {
+    fn rail_drag_to(&mut self, pointer_y: gpui::Pixels, _cx: &mut Context<Self>) -> bool {
         if !self.board_list_active {
             let Some(scroll) = self.scroll.rail_scroll() else {
                 return false;
