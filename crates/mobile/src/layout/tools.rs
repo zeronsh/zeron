@@ -450,7 +450,8 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
                 .collect();
             push_runs(&bold, indent, out);
         }
-        Block::CodeBlock { code, .. } => {
+        // Thoughts stay source text: display math reads like a code block.
+        Block::CodeBlock { code, .. } | Block::Math { tex: code } => {
             let style = InlineStyle { code: true, ..InlineStyle::default() };
             for line in code.lines() {
                 let mut row = indent_run(indent);
@@ -601,7 +602,8 @@ fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: b
                 continue;
             }
             let s = &run.style;
-            let style = if s.code {
+            // Inline math, too, shows its source: `$…$` in the code face.
+            let style = if s.code || s.math {
                 if s.italic { mono_italic } else { st.mono }
             } else if s.bold {
                 if s.italic { semi_italic } else { semi }
@@ -611,13 +613,20 @@ fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: b
                 st.label
             };
             let start = text.len();
-            text.push_str(&run.text);
+            if s.math {
+                text.push('$');
+                text.push_str(&run.text);
+                text.push('$');
+            } else {
+                text.push_str(&run.text);
+            }
             spans.push(zeron_text::Span {
                 range: start..text.len(),
                 style: style.id,
                 pad_start: 0.0,
                 pad_end: 0.0,
                 atomic: false,
+                inline_box: None,
             });
             paints.push(SpanPaint {
                 color: ColorRole::TextFaint,
@@ -654,6 +663,7 @@ fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: b
             links: Vec::new(),
             chip: (0.0, 0.0),
             badges: Vec::new(),
+            math: Vec::new(),
         };
         prepared.push(ThoughtLine { indent, gutter, bars, body: Some(body) });
     }

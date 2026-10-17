@@ -93,6 +93,70 @@ pub struct TextRun {
     pub reveal_ms: Option<u32>,
 }
 
+/// One glyph of a math formula: glyph id `glyph` of math font `font` (an
+/// index for [`math_font_data`]) drawn at `size` with its origin at
+/// (`x`, `y`). Rules (fraction bars, radicals) are plain [`BoxPrim`] fills.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct GlyphPrim {
+    pub font: u8,
+    pub glyph: u16,
+    pub x: f32,
+    /// Baseline.
+    pub y: f32,
+    pub size: f32,
+    pub color: ColorRole,
+    pub scroller: Option<u32>,
+    /// UTF-16 offset in the row text of the formula's placeholder (U+FFFC),
+    /// so the streaming veil splits glyphs where it splits runs.
+    pub start: u32,
+}
+
+/// The bytes of math font `index` — one per [`MathFace`], in its declaration
+/// order (0 = Fira Math, 1 = STIX Two Math, …), the same table whichever face
+/// lays formulas out; empty past the end. Glyph ids in [`GlyphPrim`] index
+/// these exact files. Hosts load an index when a glyph first names it.
+#[uniffi::export]
+pub fn math_font_data(index: u8) -> Vec<u8> {
+    if index < zatex::bundled::FONTS {
+        zatex::bundled::font_at(index).data().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The face formulas are laid out in (STIX Two for what it lacks). Every
+/// face paints from the [`math_font_data`] table, so switching never
+/// re-registers fonts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, uniffi::Enum)]
+pub enum MathFace {
+    /// Fira Math: a sans that sits beside Geist.
+    #[default]
+    Fira,
+    /// STIX Two Math: the Times-like TeX look.
+    StixTwo,
+    /// New Computer Modern Math (Book): the classic LaTeX look.
+    ComputerModern,
+    /// Libertinus Math: a warm book serif.
+    Libertinus,
+    /// TeX Gyre Pagella Math: Palatino.
+    Pagella,
+    /// Euler Math: Zapf's upright, hand-drawn math.
+    Euler,
+}
+
+impl From<MathFace> for zatex::bundled::Face {
+    fn from(face: MathFace) -> Self {
+        match face {
+            MathFace::Fira => Self::Fira,
+            MathFace::StixTwo => Self::StixTwo,
+            MathFace::ComputerModern => Self::ComputerModern,
+            MathFace::Libertinus => Self::Libertinus,
+            MathFace::Pagella => Self::Pagella,
+            MathFace::Euler => Self::Euler,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum BoxStyle {
     Fill,
@@ -110,6 +174,10 @@ pub struct BoxPrim {
     pub style: BoxStyle,
     pub color: ColorRole,
     pub scroller: Option<u32>,
+    /// For a formula's fills (rules, decoration lines): the UTF-16 offset of
+    /// its placeholder, so the streaming veil fades them with the formula's
+    /// glyphs. `None`: painted with the row's settled boxes.
+    pub start: Option<u32>,
 }
 
 /// A tappable link region (one per fragment; multi-line links repeat).
@@ -218,6 +286,7 @@ pub struct RowDisplay {
     pub height: f32,
     pub text: String,
     pub runs: Vec<TextRun>,
+    pub glyphs: Vec<GlyphPrim>,
     pub boxes: Vec<BoxPrim>,
     pub links: Vec<LinkHit>,
     pub scrollers: Vec<Scroller>,
@@ -234,6 +303,7 @@ pub(crate) struct DisplayBuilder {
     pub text: String,
     utf16_len: u32,
     pub runs: Vec<TextRun>,
+    pub glyphs: Vec<GlyphPrim>,
     pub boxes: Vec<BoxPrim>,
     pub links: Vec<LinkHit>,
     pub scrollers: Vec<Scroller>,
@@ -263,6 +333,7 @@ impl DisplayBuilder {
             style: BoxStyle::Fill,
             color,
             scroller: self.scroller,
+            start: None,
         });
     }
 
@@ -276,7 +347,40 @@ impl DisplayBuilder {
             style: BoxStyle::Hairline,
             color,
             scroller: self.scroller,
+            start: None,
         });
+    }
+
+    /// A formula with its baseline origin at (`x`, `y`), drawn at `scale`
+    /// (1 = as laid out; less shrinks glyphs, offsets and rules uniformly
+    /// about the origin); `start` is its placeholder's UTF-16 offset in the
+    /// row text.
+    pub fn formula(&mut self, f: &zatex::Formula, x: f32, y: f32, scale: f32, color: ColorRole, start: u32) {
+        for item in &f.items {
+            match *item {
+                zatex::Item::Glyph { font, glyph, x: gx, y: gy, size } => self.glyphs.push(GlyphPrim {
+                    font,
+                    glyph,
+                    x: x + gx * scale,
+                    y: y + gy * scale,
+                    size: size * scale,
+                    color,
+                    scroller: self.scroller,
+                    start,
+                }),
+                zatex::Item::Rule { x: rx, y: ry, width, height } => {
+                    self.formula_fill(x + rx * scale, y + ry * scale, width * scale, height * scale, color, start)
+                }
+            }
+        }
+    }
+
+    /// A square fill that belongs to the formula at `start` (veils with it).
+    pub fn formula_fill(&mut self, x: f32, y: f32, w: f32, h: f32, color: ColorRole, start: u32) {
+        self.fill(x, y, w, h, 0.0, color);
+        if let Some(b) = self.boxes.last_mut() {
+            b.start = Some(start);
+        }
     }
 
     pub fn widget(

@@ -1,6 +1,84 @@
 import SafariServices
 import UIKit
 
+/// How transcripts show LaTeX math, local to this phone: rendered (in one of
+/// the core's bundled math faces) or as its TeX source.
+enum MathSettings {
+    static let didChange = Notification.Name("ZeronMathSettingsChanged")
+
+    /// Off shows `$…$` as an inline code chip and `$$…$$` as a code block.
+    static var render: Bool {
+        get { UserDefaults.standard.object(forKey: "mathRender") as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "mathRender")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    /// Stored by `key`; anything unknown reads as Fira Math.
+    static var face: MathFace {
+        get {
+            let stored = UserDefaults.standard.string(forKey: "mathFont")
+            return allFaces.first { key($0) == stored } ?? .fira
+        }
+        set {
+            UserDefaults.standard.set(key(newValue), forKey: "mathFont")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    static let allFaces: [MathFace] = [.fira, .stixTwo, .computerModern, .libertinus, .pagella, .euler]
+
+    private static func key(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "fira"
+        case .stixTwo: "stixTwo"
+        case .computerModern: "computerModern"
+        case .libertinus: "libertinus"
+        case .pagella: "pagella"
+        case .euler: "euler"
+        }
+    }
+
+    /// Formula size as a percent of the text around it (the desktop's
+    /// options; Rust clamps to 75–200).
+    static var size: Int {
+        get { UserDefaults.standard.object(forKey: "mathSize") as? Int ?? 100 }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "mathSize")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    static let allSizes = [90, 100, 110, 120, 135, 150]
+
+    static func label(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "Fira Math"
+        case .stixTwo: "STIX Two"
+        case .computerModern: "Computer Modern"
+        case .libertinus: "Libertinus"
+        case .pagella: "Palatino"
+        case .euler: "Euler"
+        }
+    }
+
+    static func detail(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "A sans that sits beside the interface font."
+        case .stixTwo: "A serif with the Times-like TeX look."
+        case .computerModern: "The classic LaTeX look."
+        case .libertinus: "A warm book serif."
+        case .pagella: "TeX Gyre Pagella, a Palatino serif."
+        case .euler: "Zapf's upright, hand-drawn math."
+        }
+    }
+
+    static func apply(to engine: TranscriptView) {
+        engine.setMath(enabled: render, face: face, sizePercent: UInt16(clamping: size))
+    }
+}
+
 /// Virtualized transcript host. Rust owns geometry: each `LayoutFrame` gives
 /// exact row offsets, so this view only (1) asks which rows intersect the
 /// viewport, (2) positions reusable `RowView`s there, and (3) keeps the user's
@@ -16,9 +94,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// its painted state survives row reconfigures.
     private var visuals: [String: VisualView] = [:]
     private var memoryObserver: NSObjectProtocol?
+    private var mathObserver: NSObjectProtocol?
 
     deinit {
         if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
+        if let mathObserver { NotificationCenter.default.removeObserver(mathObserver) }
     }
     private var cacheOrder: [ModelKey] = []
     private var knownKeys = Set<UInt64>()
@@ -198,6 +278,12 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             self?.cacheOrder.removeAll()
             self?.pool.forEach { $0.removeFromSuperview() }
             self?.pool.removeAll()
+        }
+        // Rebuilt rows get new versions, so stale models just stop matching.
+        MathSettings.apply(to: engine)
+        mathObserver = NotificationCenter.default.addObserver(forName: MathSettings.didChange, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            MathSettings.apply(to: self.engine)
         }
     }
 

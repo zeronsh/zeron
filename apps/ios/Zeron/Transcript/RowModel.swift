@@ -10,6 +10,12 @@ final class RowModel: @unchecked Sendable {
     /// Runs/boxes grouped by scroller (index 0 = the row canvas itself).
     let runsByLayer: [[Int]]
     let boxesByLayer: [[Int]]
+    /// Math glyphs per layer.
+    let glyphsByLayer: [[Int]]
+    /// The math fonts those glyphs name, by table index — resolved here, off
+    /// the main thread (a face's first use copies its ~1–2 MB out of the
+    /// core), so drawing only reads loaded fonts.
+    private let mathFonts: [UInt8: CTFont]
     /// Overflow fades per layer, each with the runs it masks. Those runs are
     /// painted through the fade instead of in the plain pass.
     let fadesByLayer: [[(fade: Int, runs: [Int])]]
@@ -40,6 +46,17 @@ final class RowModel: @unchecked Sendable {
         for (i, box) in display.boxes.enumerated() {
             boxes[box.scroller.map { Int($0) + 1 } ?? 0].append(i)
         }
+        var glyphs = Array(repeating: [Int](), count: layers)
+        var mathFonts: [UInt8: CTFont] = [:]
+        var unknown = Set<UInt8>()
+        for (i, g) in display.glyphs.enumerated() {
+            glyphs[g.scroller.map { Int($0) + 1 } ?? 0].append(i)
+            if mathFonts[g.font] == nil, !unknown.contains(g.font) {
+                if let font = Fonts.mathFont(g.font) { mathFonts[g.font] = font } else { unknown.insert(g.font) }
+            }
+        }
+        self.glyphsByLayer = glyphs
+        self.mathFonts = mathFonts
         var fades = Array(repeating: [(fade: Int, runs: [Int])](), count: layers)
         var faded = Set<Int>()
         for (fi, f) in display.fades.enumerated() {
@@ -78,6 +95,26 @@ final class RowModel: @unchecked Sendable {
             ctx.setFillColor(color)
             ctx.fill(CGRect(x: CGFloat(run.x), y: y, width: CGFloat(run.width), height: max(hairline, 1)))
         }
+    }
+
+    /// One math glyph, its origin on (`x`, `y`); flipped like a run, and
+    /// scaled from the face's reference size to the glyph's.
+    private func drawGlyph(_ i: Int, in ctx: CGContext) {
+        let g = display.glyphs[i]
+        guard let font = mathFonts[g.font] else { return }
+        var glyph = CGGlyph(g.glyph)
+        var origin = CGPoint.zero
+        let scale = CGFloat(g.size) / Fonts.mathReferenceSize
+        ctx.saveGState()
+        ctx.setFillColor(Palette.color(g.color).cgColor)
+        ctx.translateBy(x: CGFloat(g.x), y: CGFloat(g.y))
+        ctx.scaleBy(x: scale, y: -scale)
+        // Text matrix and position aren't graphics state: a prior CTLineDraw
+        // leaves the position at its line's end, which would shift the glyph.
+        ctx.textMatrix = .identity
+        ctx.textPosition = .zero
+        CTFontDrawGlyphs(font, &glyph, &origin, 1, ctx)
+        ctx.restoreGState()
     }
 
     /// Canvas-layer runs whose line box sits inside `rect`, in one color
@@ -147,9 +184,15 @@ final class RowModel: @unchecked Sendable {
 
     func draw(layer: Int, in ctx: CGContext, traits: UITraitCollection, hairline: CGFloat, pass: Pass = .all) {
         traits.performAsCurrent {
-            if case .fresh = pass {} else {
+            // A formula's fills (rules, decorations) veil with its glyphs;
+            // every other box is settled chrome.
             for i in boxesByLayer[layer] {
                 let b = display.boxes[i]
+                switch pass {
+                case .all: break
+                case let .settled(from): if let start = b.start, start >= from { continue }
+                case let .fresh(from): guard let start = b.start, start >= from else { continue }
+                }
                 let rect = CGRect(x: CGFloat(b.x), y: CGFloat(b.y), width: CGFloat(b.w), height: CGFloat(b.h))
                 let color = Palette.color(b.color).cgColor
                 switch b.style {
@@ -166,7 +209,6 @@ final class RowModel: @unchecked Sendable {
                     ctx.addPath(CGPath(roundedRect: inset, cornerWidth: r, cornerHeight: r, transform: nil))
                     ctx.strokePath()
                 }
-            }
             }
             ctx.textMatrix = .identity
             for i in runsByLayer[layer] {
@@ -196,6 +238,16 @@ final class RowModel: @unchecked Sendable {
                 }
                 defer { if clip != nil { ctx.restoreGState() } }
                 drawRun(i, line, in: ctx, hairline: hairline)
+            }
+            // A formula is one placeholder in the text: it veils whole.
+            for i in glyphsByLayer[layer] {
+                let start = display.glyphs[i].start
+                switch pass {
+                case .all: break
+                case let .settled(from): if start >= from { continue }
+                case let .fresh(from): if start < from { continue }
+                }
+                drawGlyph(i, in: ctx)
             }
             if case .fresh = pass {} else { drawFades(layer: layer, in: ctx, hairline: hairline) }
         }

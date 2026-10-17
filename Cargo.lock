@@ -13307,6 +13307,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zatex"
+version = "0.2.113"
+dependencies = [
+ "tiny-skia",
+ "ttf-parser",
+]
+
+[[package]]
 name = "zbus"
 version = "5.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13735,6 +13743,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uniffi",
+ "zatex",
  "zeron-client",
  "zeron-doc",
  "zeron-markdown",
@@ -13960,6 +13969,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "wry",
  "x11rb 0.14.0",
+ "zatex",
  "zeron-doc",
  "zeron-engine",
  "zeron-harness",

@@ -33,6 +33,11 @@ fn main() {
 | zeron-markdown | incremental parse | 1,700 |
 | zeron-mobile | layout + FFI | 1,400 |
 
+Math sits on the line: $E = mc^2$, $\frac{a}{b}$ and $\sum_{i=1}^{n} x_i$ grow
+their lines only as much as they need.
+
+$$\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}$$
+
 ---
 
 CJK: 日本語のテキストも正しく折り返されます。中文也可以。 Emoji: 🚀✨👩‍💻 and https://example.com/a/very/long/url/that/keeps/going/and/going?query=parameters&more=stuff

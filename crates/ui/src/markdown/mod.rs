@@ -19,6 +19,7 @@ mod link_destination;
 mod link_interaction;
 mod link_presentation;
 pub mod links;
+pub(crate) mod math;
 pub use zeron_markdown::{mend, parser};
 pub mod render;
 pub mod selection;
