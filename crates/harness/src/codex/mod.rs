@@ -762,9 +762,9 @@ impl CodexHarness {
         }
         // Pin the physical release for this process and its voice helper: an
         // installer may move the current symlink while this runtime stays warm.
+        // A version manager's dispatcher link stays as-is; it needs the name.
         let exe = plain_executable(
-            self.resolve_executable()?
-                .canonicalize()
+            crate::executable::pinned_executable(&self.resolve_executable()?)
                 .map_err(HarnessError::Io)?,
         );
         // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —

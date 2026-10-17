@@ -355,6 +355,51 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
     );
 }
 
+/// mise wrappers and shims (Omarchy's default `codex` install) are symlinks to
+/// one multicall binary that runs the tool named by argv[0]. The run must
+/// launch through the link: its target, invoked as `mise app-server`, exits.
+#[tokio::test]
+async fn a_version_manager_dispatcher_link_launches_the_tool_it_names() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let mise = dir.path().join("mise");
+    std::fs::write(
+        &mise,
+        format!(
+            "#!/bin/sh\ncase \"${{0##*/}}\" in\n  codex) exec '{}' \"$@\" ;;\n  *) echo 'mise ERROR no tasks defined' >&2; exit 1 ;;\nesac\n",
+            fixture_path().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&mise, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let wrapper = dir.path().join("codex");
+    symlink(&mise, &wrapper).unwrap();
+
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    req.model_options.insert(
+        "serviceTier".into(),
+        serde_json::Value::String("fast".into()),
+    );
+    let events = run_to_end(
+        &CodexHarness::new().with_executable(&wrapper),
+        req,
+        controls,
+    )
+    .await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn steering_uses_turn_steer_with_expected_turn_id() {
     let (controls, steer, _token) = controls("Yes");

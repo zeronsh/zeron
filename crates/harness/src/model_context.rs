@@ -78,9 +78,8 @@ pub(crate) fn context(
         }
         _ => vec![],
     };
-    let binary = binary
-        .canonicalize()
-        .unwrap_or_else(|_| binary.to_path_buf());
+    let binary =
+        crate::executable::pinned_executable(binary).unwrap_or_else(|_| binary.to_path_buf());
     let version = crate::executable::binary_version(&binary).map(|v| v.to_string());
     let mut hash = Sha256::new();
     field(&mut hash, binary.as_os_str().as_encoded_bytes());
