@@ -13454,7 +13454,12 @@ impl Render for Shell {
         let theme = Theme::of(cx);
         // The shell frost sits over native desktop blur on macOS and Windows.
         // Content surfaces add their own backgrounds over this shared tint.
-        let (frost, text, font) = (theme.glass(), theme.text, theme.font_sans.clone());
+        // A window that is not key drops the blur and paints the frost flat.
+        let (frost, text, font) = (
+            crate::appearance::window_base_fill(theme, window),
+            theme.text,
+            theme.font_sans.clone(),
+        );
         let (workspace_scope, auth) = {
             let state = self.state.read(cx);
             (state.workspace_scope, state.auth.clone())
@@ -13549,6 +13554,7 @@ impl Render for Shell {
                 window,
                 |this: &mut Shell, window, cx| {
                     motion::window_activation_changed(window.is_window_active(), cx);
+                    crate::appearance::window_activation_changed(window, cx);
                     if window.is_window_active()
                         && let Some(update) = crate::app_update::AppUpdate::global(cx)
                     {

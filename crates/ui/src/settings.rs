@@ -1004,7 +1004,12 @@ pub struct UiSettings {
     pub new_thread_background_effect: NewThreadBackgroundEffect,
     /// Snap animations to rest. Defaults to following the OS.
     pub reduce_motion: crate::motion::ReduceMotion,
-    /// Also snap animations while the main window is not focused.
+    /// Also snap animations while the main window is not focused. On by
+    /// default (battery). Stored under a new key: the original
+    /// `pauseAnimationsInBackground` was written on every save, so its
+    /// `false` cannot tell an explicit choice from the old default — see
+    /// [`UiSettings::load`] for the migration.
+    #[serde(rename = "pauseAnimationsWhenInactive")]
     pub pause_animations_in_background: bool,
     /// Stable native Codex voice id only; devices and microphone state are never persisted.
     #[serde(default)]
@@ -1106,7 +1111,7 @@ impl Default for UiSettings {
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             reduce_motion: crate::motion::ReduceMotion::System,
-            pause_animations_in_background: false,
+            pause_animations_in_background: true,
             codex_voice: None,
             codex_voice_device: None,
             legacy_accent_color: None,
@@ -1837,6 +1842,17 @@ impl UiSettings {
                         if let Some(legacy) = settings.remove("filesEditorFontSize") {
                             settings.entry("codeFontSize").or_insert(legacy);
                         }
+                        // The legacy pause key was serialized on every save
+                        // while its default was `false`, so only `true` is
+                        // provably a user choice. Keep that; a stored `false`
+                        // reads as unset and takes the new default (on).
+                        if let Some(legacy) = settings.remove("pauseAnimationsInBackground")
+                            && legacy.as_bool() == Some(true)
+                        {
+                            settings
+                                .entry("pauseAnimationsWhenInactive")
+                                .or_insert(serde_json::Value::Bool(true));
+                        }
                     }
                     if let Some(keymap) = value
                         .get_mut("keymap")
@@ -2059,6 +2075,34 @@ mod tests {
     }
 
     #[test]
+    fn background_pause_defaults_on_and_keeps_explicit_choices() {
+        let load = |json: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(UiSettings::path(dir.path()), json).unwrap();
+            UiSettings::load(dir.path()).pause_animations_in_background
+        };
+        assert!(UiSettings::default().pause_animations_in_background);
+        // Unset (fresh or partial file) takes the new default.
+        assert!(load(r#"{"sidebarWidth": 300}"#));
+        // The legacy key was written on every save with the old `false`
+        // default, so `false` is not a choice; `true` always was.
+        assert!(load(r#"{"pauseAnimationsInBackground": false}"#));
+        assert!(load(r#"{"pauseAnimationsInBackground": true}"#));
+        // A choice made under the new key round-trips, including off.
+        assert!(!load(r#"{"pauseAnimationsWhenInactive": false}"#));
+        assert!(!load(
+            r#"{"pauseAnimationsInBackground": true, "pauseAnimationsWhenInactive": false}"#
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let off = UiSettings {
+            pause_animations_in_background: false,
+            ..UiSettings::default()
+        };
+        off.save(dir.path()).unwrap();
+        assert!(!UiSettings::load(dir.path()).pause_animations_in_background);
+    }
+
+    #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2076,7 +2120,7 @@ mod tests {
             NewThreadBackgroundEffect::None
         );
         assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
-        assert!(!loaded.pause_animations_in_background);
+        assert!(loaded.pause_animations_in_background);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
         for sound in [
@@ -2855,7 +2899,8 @@ mod tests {
         assert!(json.contains(r#""focalY": 0.75"#));
         assert!(json.contains(r#""zoom": 1.8"#));
         assert!(json.contains(r#""reduceMotion": "on""#));
-        assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
+        assert!(json.contains(r#""pauseAnimationsWhenInactive": true"#));
+        assert!(!json.contains("pauseAnimationsInBackground"));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));

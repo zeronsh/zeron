@@ -347,16 +347,101 @@ pub fn reapply_window_background(cx: &mut App) {
     cx.defer(apply_window_background);
 }
 
+/// What `window` should composite with. Like native macOS apps, a frosted
+/// (blurred) window drops to opaque compositing while it is not key: the
+/// window server stops sampling and blurring the desktop behind it, and
+/// [`window_base_fill`] paints the solid tone the frost would read as. Every
+/// other theme keeps its own choice, active or not.
+pub fn window_background_for(theme: &Theme, active: bool) -> gpui::WindowBackgroundAppearance {
+    let wanted = theme.window_background_appearance();
+    if wanted == gpui::WindowBackgroundAppearance::Blurred && !active {
+        gpui::WindowBackgroundAppearance::Opaque
+    } else {
+        wanted
+    }
+}
+
+/// Whether `window` currently shows its frost as a flat fill (a frosted theme
+/// in a window that is not key). In-app backdrop blurs follow the same switch
+/// (see `frost::frosted`), so an unfocused window's redraws — a streaming
+/// reply, a spinner — never pay for a blur pass either.
+pub fn frost_flattened(theme: &Theme, window: &Window) -> bool {
+    theme.window_background_appearance() == gpui::WindowBackgroundAppearance::Blurred
+        && !window.is_window_active()
+}
+
+/// The shell's base fill. Over the live blur it is the translucent glass; with
+/// the blur off it is that same glass composited over the theme's surface
+/// tone — the color the frost settles to over a neutral backdrop, and exactly
+/// what opaque platforms already paint — so deactivation changes no layout
+/// and keeps every translucent overlay (panels, cards) composing as before.
+pub fn window_base_fill(theme: &Theme, window: &Window) -> gpui::Hsla {
+    if frost_flattened(theme, window) {
+        crate::theme::flatten(theme.glass(), theme.surface)
+    } else {
+        theme.glass()
+    }
+}
+
+/// A window gained or lost key status (called from its activation observer).
+///
+/// Ordering avoids any visible flash. Activating restores the blur first —
+/// the frame on screen is still the opaque one, so inserting the blur view
+/// under it changes nothing — and gpui's activation refresh then repaints the
+/// translucent frost. Deactivating repaints the opaque base first (that same
+/// refresh), and only one frame later switches compositing to opaque, so the
+/// layer never shows translucent content without the blur behind it. A quick
+/// re-activation before then cancels the switch.
+///
+/// gpui's macOS backend removes the `NSVisualEffectView` whenever the value is
+/// not `Blurred` and re-creates it on the next `Blurred` with the content
+/// view's current bounds, pinned below every subview with autoresizing — so
+/// resizes or fullscreen changes while inactive cannot leave it misplaced.
+pub fn window_activation_changed(window: &mut Window, cx: &mut App) {
+    let Some(theme) = cx.try_global::<Theme>() else {
+        return;
+    };
+    let wanted = window_background_for(theme, window.is_window_active());
+    if theme.window_background_appearance() != gpui::WindowBackgroundAppearance::Blurred {
+        return;
+    }
+    if wanted == gpui::WindowBackgroundAppearance::Blurred {
+        set_window_background(window, wanted);
+        return;
+    }
+    window.on_next_frame(|window, _| {
+        window.on_next_frame(|window, cx| {
+            let Some(theme) = cx.try_global::<Theme>() else {
+                return;
+            };
+            if !window.is_window_active() {
+                set_window_background(window, window_background_for(theme, false));
+            }
+        });
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static APPLIED_BACKGROUNDS: std::cell::RefCell<Vec<gpui::WindowBackgroundAppearance>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn set_window_background(window: &Window, appearance: gpui::WindowBackgroundAppearance) {
+    // The test platform discards the value; record what reached it.
+    #[cfg(test)]
+    APPLIED_BACKGROUNDS.with(|applied| applied.borrow_mut().push(appearance));
+    window.set_background_appearance(appearance);
+}
+
 fn apply_window_background(cx: &mut App) {
-    let Some(wanted) = cx
-        .try_global::<Theme>()
-        .map(|theme| theme.window_background_appearance())
-    else {
+    let Some(theme) = cx.try_global::<Theme>().cloned() else {
         return;
     };
     for window in cx.windows() {
         if let Err(error) = window.update(cx, |_, window, _| {
-            window.set_background_appearance(wanted);
+            let wanted = window_background_for(&theme, window.is_window_active());
+            set_window_background(window, wanted);
         }) {
             tracing::warn!(%error, "appearance: window background not applied");
         }
@@ -366,6 +451,127 @@ fn apply_window_background(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn themes() -> (Theme, Theme) {
+        let theme = |surface| {
+            Theme::for_selection(
+                Appearance::Dark,
+                "zeron-dark",
+                AccentSelection::ThemeDefault,
+                surface,
+            )
+        };
+        (
+            theme(SurfacePreference::Frosted),
+            theme(SurfacePreference::Opaque),
+        )
+    }
+
+    #[test]
+    fn frosted_windows_drop_the_blur_only_while_inactive() {
+        use gpui::WindowBackgroundAppearance::{Blurred, Opaque};
+        let (frosted, opaque) = themes();
+        let wanted = frosted.window_background_appearance();
+        assert_eq!(
+            window_background_for(&frosted, true),
+            wanted,
+            "active keeps the choice"
+        );
+        if wanted == Blurred {
+            assert_eq!(window_background_for(&frosted, false), Opaque);
+        } else {
+            // Platforms without window blur (Linux) are unaffected.
+            assert_eq!(window_background_for(&frosted, false), wanted);
+        }
+        for active in [true, false] {
+            assert_eq!(
+                window_background_for(&opaque, active),
+                opaque.window_background_appearance(),
+                "non-frosted themes never change"
+            );
+        }
+        // The flat base is fully opaque and is the frost's own hue.
+        let flat = crate::theme::flatten(frosted.glass(), frosted.surface);
+        assert_eq!(flat.a, 1.0);
+        assert!((flat.h - frosted.surface.h).abs() < 1e-3 || frosted.surface.s < 1e-3);
+    }
+
+    #[gpui::test]
+    fn activation_switches_compositing_without_a_flash(cx: &mut gpui::TestAppContext) {
+        use gpui::WindowBackgroundAppearance::{Blurred, Opaque};
+        let (frosted, opaque) = themes();
+        let blurs = frosted.window_background_appearance() == Blurred;
+        let take =
+            || APPLIED_BACKGROUNDS.with(|applied| std::mem::take(&mut *applied.borrow_mut()));
+        cx.update(|cx| cx.set_global(frosted));
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        take();
+        let changed = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window_activation_changed(window, cx))
+        };
+        let next_frame = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            })
+        };
+        let activate = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+        };
+        // Inactive (test windows start without key status): the opaque base
+        // paints first; compositing switches a frame later.
+        changed(cx);
+        assert!(
+            take().is_empty(),
+            "nothing switches before the opaque frame"
+        );
+        next_frame(cx);
+        assert!(take().is_empty());
+        next_frame(cx);
+        assert_eq!(take(), if blurs { vec![Opaque] } else { vec![] });
+
+        // Becoming key restores the blur at once.
+        activate(cx);
+        changed(cx);
+        assert_eq!(take(), if blurs { vec![Blurred] } else { vec![] });
+
+        // A quick blur → refocus before the deferred switch cancels it.
+        cx.deactivate_window();
+        changed(cx);
+        activate(cx);
+        changed(cx);
+        next_frame(cx);
+        next_frame(cx);
+        assert!(
+            take().iter().all(|applied| *applied != Opaque),
+            "a window that is key again never drops its blur"
+        );
+
+        // Non-frosted themes are left alone in both directions.
+        cx.update(|_, cx| cx.set_global(opaque));
+        cx.deactivate_window();
+        changed(cx);
+        next_frame(cx);
+        next_frame(cx);
+        activate(cx);
+        changed(cx);
+        assert!(take().is_empty());
+    }
+
+    /// In-app backdrop blurs follow the same switch: an unfocused window's
+    /// redraws paint the flat stand-in instead of a blur pass.
+    #[gpui::test]
+    fn floats_skip_backdrop_blur_while_inactive(cx: &mut gpui::TestAppContext) {
+        let (frosted, _) = themes();
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        let stand_in = cx.update(|window, _| crate::frost::backdrop_stand_in(&frosted, window));
+        let fill = stand_in.expect("inactive: flat fill instead of blur");
+        assert_eq!(fill.a, 1.0, "the stand-in hides what is behind the card");
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let stand_in = cx.update(|window, _| crate::frost::backdrop_stand_in(&frosted, window));
+        assert_eq!(stand_in, None, "key windows keep the blur");
+    }
 
     #[test]
     fn system_mode_follows_the_os() {

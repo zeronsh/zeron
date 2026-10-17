@@ -79,19 +79,37 @@ impl Element for Frosted {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if Theme::of(cx).is_frost() {
+        let theme = Theme::of(cx);
+        if theme.is_frost() {
+            let backing = backdrop_stand_in(theme, window);
             window.paint_layer(bounds, |window| {
-                window.paint_backdrop_blur(
-                    bounds,
-                    Corners::all(px(self.corner_radius)),
-                    px(self.blur_radius),
-                );
+                let corners = Corners::all(px(self.corner_radius));
+                match backing {
+                    // Unfocused window: no blur pass. A flat fill of what the
+                    // blur averages to stands in for it under the card's own
+                    // tint, so text behind the card stays hidden.
+                    Some(fill) => window.paint_quad(gpui::fill(bounds, fill).corner_radii(corners)),
+                    None => window.paint_backdrop_blur(bounds, corners, px(self.blur_radius)),
+                }
                 self.child.paint(window, cx);
             });
         } else {
             self.child.paint(window, cx);
         }
     }
+}
+
+/// While the window is not key, floats skip the backdrop blur — a background
+/// redraw such as a streaming reply must not pay for one (callers only get
+/// here on frosted themes). The stand-in is the window's base fill under the
+/// main panel's wash: the tone blurred content in the window averages to.
+pub(crate) fn backdrop_stand_in(theme: &Theme, window: &Window) -> Option<gpui::Hsla> {
+    (!window.is_window_active()).then(|| {
+        crate::theme::flatten(
+            theme.panel_bg(),
+            crate::appearance::window_base_fill(theme, window),
+        )
+    })
 }
 
 impl IntoElement for Frosted {
