@@ -12,9 +12,15 @@ starts. A busy proxy port produces an inline error instead of changing the URL.
 
 ## Discovery and identities
 
-On Linux, the scanner joins the current user's `/proc` process cwd, ancestry,
-creation time and socket descriptors to listening TCP sockets. On macOS it uses
-`lsof` and `ps` for equivalent metadata. Only loopback-reachable listeners whose
+Discovery observes only processes Zeron started: agent runs, terminals and
+everything below them. A server started in another terminal app is not listed;
+its address can still be typed into a Browser tab. A descendant stays in scope
+for its lifetime (same pid and start time) after its parent exits, so
+`npm run dev &` outliving an agent turn is still found.
+
+On Linux, the scanner reads each descendant's `/proc` cwd, ancestry, creation
+time and socket descriptors and joins them to listening TCP sockets. On macOS
+it reads the same metadata from libproc. Only loopback-reachable listeners whose
 cwd belongs to a known local project are probed. The deepest matching project
 wins. Commands with explicit authentication arguments (`login`, `auth`,
 `authenticate`, `signin`, `sign-in`, `sso`, `oauth`, or `oauth2`, before `--`)
@@ -25,12 +31,14 @@ browser's JSON body. This command check does not identify custom callback
 servers without an authentication argument.
 
 Unrelated listeners and non-HTTP services are excluded. Discovery runs every
-two seconds; bounded HEAD probes accept valid HTTP status responses (including
+two seconds while any Zeron-started process is alive or a run is being
+dispatched. With none, it parks with no timer until a run or terminal starts.
+Bounded HEAD probes accept valid HTTP status responses (including
 authentication and application errors). Confirmed HTTP listeners are not
 probed again during that socket's lifetime; non-HTTP results use a capped
 exponential backoff.
 
-Zeron terminal/task/agent descendants are marked as Zeron-owned. Framework
+Every listed listener is therefore Zeron-owned. Framework
 commands identify Vite, Next.js, Astro, Miniflare and Node servers; otherwise the
 list uses a generic HTTP label. Before a local backend connection, the daemon
 rechecks the listener's process identity and cwd to reject stale port reuse.

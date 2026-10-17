@@ -55,6 +55,10 @@ async fn preview_watch_follows_the_session_checkout_and_owning_device() {
         .set_remote("other", vec![service("other", &a, "other")])
         .unwrap();
     let rpc = core.rpc_service();
+    assert!(
+        !catalog.demand().is_held(),
+        "nothing needs the coordinator yet"
+    );
     let RpcReply::Stream(mut stream) = rpc
         .handle(
             methods::WATCH_PREVIEWS,
@@ -69,6 +73,10 @@ async fn preview_watch_follows_the_session_checkout_and_owning_device() {
     assert_eq!(first["services"].as_array().unwrap().len(), 1);
     assert_eq!(first["services"][0]["id"], "a");
     assert_eq!(first["remote"], true);
+    assert!(
+        catalog.demand().is_held(),
+        "viewing another device's previews needs the coordinator"
+    );
     core.workspace
         .set_chat_cwd("chat", &b.to_string_lossy())
         .unwrap();
@@ -84,5 +92,6 @@ async fn preview_watch_follows_the_session_checkout_and_owning_device() {
         .unwrap();
     assert_eq!(next["services"], serde_json::json!([]));
     drop(stream);
+    assert!(!catalog.demand().is_held(), "released with the watch");
     core.shutdown().await;
 }

@@ -104,6 +104,38 @@ async fn only_current_project_http_processes_are_exposed_and_removals_are_live()
     }
 }
 
+/// With nothing Zeron spawned alive, discovery does not run at all: a server
+/// appearing then stays unseen until the engine reports a spawn. After the
+/// last child exits its server is withdrawn and discovery parks again.
+#[tokio::test]
+async fn idle_discovery_does_not_scan_until_a_spawn_wakes_it() {
+    let _serial = SERIAL.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let service = PreviewService::new(
+        temp.path().join("names.json"),
+        "local".into(),
+        "Laptop".into(),
+    )
+    .unwrap();
+    let roots = vec![app.clone()];
+    service.start(Arc::new(move || roots.clone()), None).await;
+    // The opening pass finds nothing below this process and parks.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let server = launch(&app, true);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        service.catalog().snapshot().services.is_empty(),
+        "parked discovery must not scan"
+    );
+    service.wake_discovery();
+    wait(&service, Some(server.0.id())).await;
+    drop(server);
+    wait(&service, None).await;
+    service.shutdown().await;
+}
+
 /// A discovered dev server receives exactly one probe for its lifetime. The
 /// scanner used to send `HEAD /` every cycle to every project listener, which
 /// showed up as request spam (and growing memory) in dev servers like Expo.

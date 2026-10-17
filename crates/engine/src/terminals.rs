@@ -92,6 +92,8 @@ impl LiveTerminal {
 }
 
 struct TerminalsInner {
+    /// Bumped per shell spawned (preview discovery resumes on it).
+    opened: tokio::sync::watch::Sender<u64>,
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
 }
 
@@ -156,6 +158,7 @@ impl Terminals {
     pub fn new() -> Self {
         let terminals = Self {
             inner: Arc::new(TerminalsInner {
+                opened: tokio::sync::watch::channel(0).0,
                 sessions: Mutex::new(HashMap::new()),
             }),
         };
@@ -321,6 +324,7 @@ impl Terminals {
             exited: false,
         }));
         lock(&self.inner.sessions).insert(id.clone(), session.clone());
+        self.inner.opened.send_modify(|n| *n = n.wrapping_add(1));
 
         // Raw PTY bytes: blocking reader thread → batcher task (12ms windows).
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -473,6 +477,11 @@ impl Terminals {
     /// the auto-updater waits for none.
     pub fn any_open(&self) -> bool {
         !lock(&self.inner.sessions).is_empty()
+    }
+
+    /// Changes each time a shell is spawned.
+    pub fn watch_opened(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.opened.subscribe()
     }
 
     /// Engine shutdown: kill every live shell.

@@ -804,17 +804,33 @@ impl Engine {
             )?,
         };
         core.set_auth(auth.clone());
-        let preview_workspace = core.workspace.clone();
+        // Preview discovery looks only below processes this engine spawned,
+        // and only while one is alive: it parks (no timer) until a run or a
+        // terminal starts. Project folders come from the in-memory chat list
+        // (no registry decode per pass); archived chats are not projects.
+        let preview_chats = core.workspace.watch_chats();
         let preview_device = core.device_id.clone();
         let projects = Arc::new(move || {
-            preview_workspace
-                .read_chats()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|chat| chat.device_id == preview_device)
-                .filter_map(|chat| chat.cwd.map(std::path::PathBuf::from))
+            preview_chats
+                .borrow()
+                .iter()
+                .filter(|chat| chat.device_id == preview_device && !chat.archived)
+                .filter_map(|chat| chat.cwd.as_deref().map(std::path::PathBuf::from))
                 .collect()
         });
+        {
+            // A dispatched turn counts as live before its harness process
+            // exists. Terminals need no such hint: the shell is spawned
+            // before `watch_opened` fires (and an exited one, still listed
+            // for replay, must not keep discovery polling).
+            let sessions = core.sessions.clone();
+            core.previews
+                .set_busy(Arc::new(move || sessions.any_active()));
+            core.previews
+                .wake_discovery_on(core.sessions.watch_sessions());
+            core.previews
+                .wake_discovery_on(core.terminals.watch_opened());
+        }
         let preview_signaling = edge_enabled.then(|| zeron_preview::signaling::Config {
             edge_url: config.edge_url.clone(),
             org_id: preview_org,
