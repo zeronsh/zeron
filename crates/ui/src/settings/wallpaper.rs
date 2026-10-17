@@ -77,6 +77,8 @@ struct QueueKey {
     background: Option<String>,
     effect: super::NewThreadBackgroundEffect,
     light: bool,
+    /// Quantized blur (whole px): `f32` would break `Eq` on the queue key.
+    blur: u8,
     data_dir: PathBuf,
 }
 
@@ -97,6 +99,7 @@ impl QueueKey {
             light: cx
                 .try_global::<crate::theme::Theme>()
                 .is_some_and(|theme| matches!(theme.appearance, crate::theme::Appearance::Light)),
+            blur: settings.new_thread_background_blur.clamp(0.0, 255.0).round() as u8,
             data_dir: cx
                 .try_global::<super::SettingsStore>()
                 .map(|store| store.data_dir.clone())
@@ -120,7 +123,7 @@ impl Candidate {
             .ok_or_else(|| "Choose a wallpaper folder in Appearance first.".to_string())?;
         let (source, staged, image) = choose(folder, history)?;
         let artwork = crate::new_thread_background_effects::PreloadedArtwork::load(
-            &image, key.effect, key.light,
+            &image, key.effect, key.light, key.blur as f32,
         );
         drop(image);
         let color = artwork.color();

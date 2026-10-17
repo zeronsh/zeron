@@ -48,10 +48,12 @@ pub mod motion;
 mod new_thread_background_effects;
 mod new_thread_background_image;
 mod new_thread_background_mask;
+mod new_thread_background_video;
 mod notice;
 pub mod notify;
 pub mod orb;
 pub mod overscroll;
+pub mod pets;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;
@@ -162,7 +164,7 @@ pub fn run_app(config: UiConfig) {
     // around the still-running engine — zed does the same via `on_reopen`
     // (crates/zed/src/main.rs `app.on_reopen`).
     app.on_reopen(|cx| {
-        if cx.windows().is_empty()
+        if !has_main_window(cx)
             && let Some(reopen) = cx.try_global::<ReopenState>()
         {
             let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
@@ -264,7 +266,9 @@ pub fn run_app(config: UiConfig) {
             state: state.clone(),
             boot: config.boot(),
         });
-        open_main_window(state, config.boot(), cx);
+        open_main_window(state.clone(), config.boot(), cx);
+        // After the main window, so the non-activating pet never opens first.
+        pets::init(state, cx);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         start_appshot_service(config.boot().data_dir, cx);
         // Native menu bar — macOS gets the standard app menu (About/Services/
@@ -279,10 +283,17 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
+/// Whether a main (Shell) window is open — the pet's window doesn't count.
+fn has_main_window(cx: &App) -> bool {
+    cx.windows()
+        .into_iter()
+        .any(|window| window.downcast::<shell::Shell>().is_some())
+}
+
 /// Bring Zeron forward, reopening the main window first if ⌘W closed it.
 pub(crate) fn activate_main_window(cx: &mut App) {
     cx.activate(true);
-    if cx.windows().is_empty()
+    if !has_main_window(cx)
         && let Some(reopen) = cx.try_global::<ReopenState>()
     {
         let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
@@ -292,7 +303,11 @@ pub(crate) fn activate_main_window(cx: &mut App) {
 
 /// A clicked banner: bring Zeron forward on its chat or settings destination,
 /// reopening the main window first if ⌘W closed it.
-fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+pub(crate) fn open_notification_target(
+    target: String,
+    state: &gpui::Entity<state::AppState>,
+    cx: &mut App,
+) {
     activate_main_window(cx);
     let shell = cx
         .windows()

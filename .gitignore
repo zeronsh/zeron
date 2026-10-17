@@ -14,3 +14,4 @@ edge/dist/
 .claude
 CLAUDE.md
 /scripts/**/__pycache__/
+/vendor/cua-driver/

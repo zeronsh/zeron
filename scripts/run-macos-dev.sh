@@ -38,6 +38,44 @@ fi
 mkdir -p "$CONTENTS/Resources/licenses"
 cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/parakeet-v3.txt
 
+# A stable identity gives TCC a stable signing requirement across rebuilds:
+# ZERON_DEV_CODESIGN_IDENTITY, else an Apple Development identity, else the
+# self-signed "Zeron Local Signing" (scripts/provision-local-signing.sh; it is
+# untrusted, so `find-identity -v` hides it), else ad-hoc.
+IDENTITY="${ZERON_DEV_CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
+fi
+if [[ -z "$IDENTITY" ]] && security find-identity -p codesigning 2>/dev/null | grep -q '"Zeron Local Signing"'; then
+  IDENTITY="Zeron Local Signing"
+fi
+
+# Zeron computer use: bundle the cua-driver runtime (staged by
+# scripts/provision-cua-driver.sh). The runtime is the whole CuaDriver.app
+# bundle: upstream refuses to run a bare copied Mach-O, because the daemon
+# needs its own bundle identity for a WindowServer connection. The bundle stays
+# Developer ID signed and is left untouched here; only the theme artifact is
+# added beside it.
+if [[ -x "$ROOT/vendor/cua-driver/CuaDriver.app/Contents/MacOS/cua-driver" ]]; then
+  mkdir -p "$CONTENTS/Resources/cua-driver"
+  rm -rf "$CONTENTS/Resources/cua-driver/CuaDriver.app"
+  ditto "$ROOT/vendor/cua-driver/CuaDriver.app" "$CONTENTS/Resources/cua-driver/CuaDriver.app"
+  # Zeron's agent cursor theme, staged by provision-cua-driver.sh. The driver
+  # scans this directory and needs the filename to match the theme id.
+  if [[ -d "$ROOT/vendor/cua-driver/cursor-themes" ]]; then
+    rm -rf "$CONTENTS/Resources/cua-driver/cursor-themes"
+    cp -R "$ROOT/vendor/cua-driver/cursor-themes" "$CONTENTS/Resources/cua-driver/cursor-themes"
+  fi
+else
+  echo "warning: vendor/cua-driver missing; run scripts/provision-cua-driver.sh for computer use" >&2
+fi
+
+# Computer-use helpers: capture indicator (purple pill) and Escape kill switch.
+for HELPER in zeron-window-indicator zeron-escape-monitor; do
+  install -m 755 "$("$ROOT/scripts/build-window-indicator.sh" "$HELPER")" "$CONTENTS/Resources/$HELPER"
+  codesign --force --sign "${IDENTITY:--}" "$CONTENTS/Resources/$HELPER"
+done
+
 if [[ ! -f "$CONTENTS/Resources/zeron.icns" ]]; then
   ICONSET="$DEV_ROOT/zeron-dev.iconset"
   mkdir -p "$ICONSET"
@@ -49,18 +87,11 @@ if [[ ! -f "$CONTENTS/Resources/zeron.icns" ]]; then
   iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/zeron.icns"
 fi
 
-# A real Apple Development identity gives TCC a stable signing requirement
-# across rebuilds. Set ZERON_DEV_CODESIGN_IDENTITY explicitly when more than
-# one identity is installed; otherwise fall back to an ad-hoc signature.
-IDENTITY="${ZERON_DEV_CODESIGN_IDENTITY:-}"
-if [[ -z "$IDENTITY" ]]; then
-  IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
-fi
 if [[ -n "$IDENTITY" ]]; then
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
-  echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
+  echo "warning: no stable signing identity found; macOS may ask for permissions again after a rebuild (run scripts/provision-local-signing.sh)" >&2
 fi
 
 if [[ "${ZERON_DEV_BUILD_ONLY:-0}" == "1" ]]; then

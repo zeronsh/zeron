@@ -1588,6 +1588,12 @@ impl Inner {
                 ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
             ]
             .into_iter()
+            // The bridge reads the computer-use toggle from the data dir.
+            .chain(
+                std::env::var("ZERON_DATA_DIR")
+                    .ok()
+                    .map(|dir| ("ZERON_DATA_DIR".to_owned(), dir)),
+            )
             .collect(),
         })
     }

@@ -355,6 +355,10 @@ fn apply_window_background(cx: &mut App) {
         return;
     };
     for window in cx.windows() {
+        // The desktop pet stays transparent under every theme.
+        if window.downcast::<crate::pets::PetWindow>().is_some() {
+            continue;
+        }
         if let Err(error) = window.update(cx, |_, window, _| {
             window.set_background_appearance(wanted);
         }) {
