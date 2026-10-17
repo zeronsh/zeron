@@ -2402,30 +2402,35 @@ async fn drive_run(
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
     // routes into a live run) starts the next turn with zero respawn/resume
-    // latency. `Some(when)` = idle since then; the 30-min reaper below ends
-    // a session nobody comes back to (zeron SESSION_IDLE_MS). A voice
-    // orchestrator holds Codex and its MCP servers (~200 MB) for calls only,
-    // so it goes after 5 minutes. A call holds the reaper off, and the window
-    // restarts at hang-up. `ZERON_SESSION_IDLE_MS` overrides both (tests).
-    let session_idle = std::env::var("ZERON_SESSION_IDLE_MS")
+    // latency. `Some(when)` = idle since then; the 10-min reaper below ends
+    // a session nobody comes back to (zeron SESSION_IDLE_MS). A parked agent
+    // CLI is not free while it waits: idle claude measured ~0.4% of a core
+    // plus ~0.2% per stdio MCP server, against ~2 s of CPU once for a cold
+    // resume, so past a few minutes the warm child costs more than it saves.
+    // A voice orchestrator holds Codex and its MCP servers (~200 MB) for
+    // calls only, so it goes after 5 minutes. A call holds the reaper off,
+    // and the window restarts at hang-up. `ZERON_SESSION_IDLE_MS` overrides
+    // both (tests).
+    let idle_override = std::env::var("ZERON_SESSION_IDLE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(
-            if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
-                5 * 60
-            } else {
-                30 * 60
-            },
-        ));
+        .map(std::time::Duration::from_millis);
+    let session_idle = idle_override.unwrap_or(std::time::Duration::from_secs(
+        if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
+            5 * 60
+        } else {
+            10 * 60
+        },
+    ));
     // A live subagent stretches the window, but never unbounded: every
     // driver's subagent terminal is a best-effort vendor signal (claude's
     // untagged task_notification, grok's subagent_finished, codex thread
     // closure), and one lost signal would otherwise pin the child — and this
     // loop's registry heartbeat — until the chat is archived. A subagent
-    // silent this long (4h by default) is presumed lost; the reap stamps its
-    // chip failed.
-    let subagent_silence = session_idle * 8;
+    // silent this long (4h by default, 8x an overridden window) is presumed
+    // lost; the reap stamps its chip failed.
+    let subagent_silence =
+        idle_override.map_or(std::time::Duration::from_secs(4 * 60 * 60), |idle| idle * 8);
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
     // A parked runtime whose agent reports background work (see
