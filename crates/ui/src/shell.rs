@@ -1969,6 +1969,8 @@ pub struct Shell {
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    github_activity: Entity<crate::github_activity::GitHubActivity>,
+    _github_activity_sub: gpui::Subscription,
     /// The window's voice orchestrator: independent of the selected chat.
     voice: Entity<crate::voice::VoiceController>,
     /// Sidebar footer orb (session live) and the full-window stage's orb.
@@ -2390,6 +2392,9 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let github_activity =
+            cx.new(|cx| crate::github_activity::GitHubActivity::new(state.clone(), cx));
+        let _github_activity_sub = cx.observe(&github_activity, |_, _, cx| cx.notify());
         let voice = cx.new(|_| crate::voice::VoiceController::default());
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
@@ -2542,6 +2547,8 @@ impl Shell {
             sidebar_pane,
             transcript,
             composer,
+            github_activity,
+            _github_activity_sub,
             voice,
             voice_footer_orb,
             voice_stage_orb,
@@ -11382,6 +11389,31 @@ impl Shell {
         } else {
             None
         };
+        let viewport_height = self.viewport_height;
+        let surface = self
+            .composer
+            .read(cx)
+            .surface_bounds()
+            .get()
+            .filter(|bounds| f32::from(bounds.size.height) > 40.0);
+        let activity_home = ui_settings.github_activity
+            && matches!(self.route, Route::Chat)
+            && (has_spaces || no_project || has_appshots)
+            && dock_frame.selectors() > 0.001
+            && (!has_selection || dock_frame.active);
+        let activity_frame = surface.filter(|_| activity_home).map(|bounds| {
+            let top = f32::from(bounds.bottom()) + 28.0;
+            (
+                top,
+                f32::from(bounds.size.width),
+                viewport_height - top - term_h,
+            )
+        });
+        self.github_activity.update(cx, |activity, cx| {
+            let (_, width, room) = activity_frame.unwrap_or_default();
+            activity.set_frame(activity_frame.is_some(), room, width, cx);
+        });
+        let activity_frame = activity_frame.filter(|_| self.github_activity.read(cx).visible());
         let status = div()
             .relative()
             .left(px(-session_reserve / 2.0))
@@ -11460,10 +11492,10 @@ impl Shell {
             )
             .children(session_card)
             .when_some(harness_update_card, |column, chip| {
-                // Home notices stay anchored to the window bottom, behind the
-                // dock. Clip paint and hitboxes at the same measured terminal
-                // edge as the transcript, including during open/close motion;
-                // draw order alone would show them through the terminal glass.
+                let Some(bounds) = surface else {
+                    return column;
+                };
+                let bottom = self.viewport_height - f32::from(bounds.top()) + 36.0;
                 column.child(
                     div()
                         .absolute()
@@ -11475,7 +11507,7 @@ impl Shell {
                                         .absolute()
                                         .left_0()
                                         .right_0()
-                                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
+                                        .bottom(px(bottom - 8.0 * (1.0 - chip_opacity)))
                                         .opacity(chip_opacity)
                                         .flex()
                                         .justify_center()
@@ -11496,6 +11528,30 @@ impl Shell {
             // transcript clearance. The flex_1 spacer has no id/listeners, so
             // pointer + wheel events over it fall through to the list below.
             .child(div().flex_1().min_h_0())
+            .when_some(activity_frame, |column, (top, pill_width, _)| {
+                let fade = (if has_selection {
+                    1.0 - crate::composer_dock::stage(dock_frame.dissolve(), 0.0, 0.22)
+                } else {
+                    dock_frame.selectors()
+                }) * self.composer_dock.borrow().opacity();
+                column.child(
+                    div()
+                        .absolute()
+                        .top(px(top))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .opacity(fade)
+                        .child(
+                            div()
+                                .relative()
+                                .left(px(-session_reserve / 2.0))
+                                .w(px(pill_width))
+                                .child(self.github_activity.clone()),
+                        ),
+                )
+            })
             .child({
                 let measured = self.bottom_stack.clone();
                 let measured_has_composer = self.bottom_stack_has_composer.clone();
@@ -16789,6 +16845,131 @@ mod exit_regressions {
             // The active pull request stays active in its new slot.
             assert_eq!(shell.pull_request_pane.active_index(), Some(0));
         });
+    }
+
+    #[gpui::test]
+    fn github_activity_stays_inside_the_window_at_each_size(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.connection = zeron_proto::view::ConnectionStatus::Ready;
+                state.no_project = true;
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let day = |weekday: u8| zeron_proto::GitHubActivityDay {
+            date: "2026-10-01".into(),
+            level: weekday % 5,
+            weekday,
+        };
+        let stat = zeron_proto::GitHubActivityStat {
+            count: 984,
+            delta: 12,
+        };
+        let snapshot = zeron_proto::GitHubActivitySnapshot {
+            contributions: stat,
+            pull_requests_opened: stat,
+            pull_requests_merged: stat,
+            reviews: stat,
+            weeks: (0..53)
+                .map(|_| zeron_proto::GitHubActivityWeek {
+                    days: (0..7).map(day).collect(),
+                })
+                .collect(),
+        };
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell
+                .github_activity
+                .update(cx, |activity, _| activity.set_snapshot(snapshot));
+            cx.notify();
+        });
+        let mut shown = Vec::new();
+        for (width, height) in [
+            (1512.0, 903.0),
+            (1320.0, 880.0),
+            (1200.0, 760.0),
+            (1110.0, 676.0),
+            (900.0, 600.0),
+            (1512.0, 560.0),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            for _ in 0..3 {
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear());
+            }
+            let surface = shell
+                .read_with(cx, |shell, cx| {
+                    shell.composer.read(cx).surface_bounds().get()
+                })
+                .expect("the composer measures its surface");
+            let Some(panel) = cx.debug_bounds("github-activity") else {
+                continue;
+            };
+            shown.push((width, height));
+            assert!(
+                panel.top() >= surface.bottom() + px(27.5),
+                "{width}x{height}: the panel starts under the composer"
+            );
+            assert!(
+                panel.bottom() <= px(height),
+                "{width}x{height}: the panel ends {:?} past the window",
+                panel.bottom() - px(height)
+            );
+            assert!(
+                (panel.size.width - surface.size.width).abs() < px(1.0),
+                "{width}x{height}: the panel matches the composer width"
+            );
+        }
+        assert!(
+            shown.contains(&(1512.0, 903.0)),
+            "the panel shows in a full window: {shown:?}"
+        );
+        assert!(
+            !shown.contains(&(1512.0, 560.0)),
+            "the panel hides in a short window: {shown:?}"
+        );
+        cx.update(|_, cx| {
+            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings.github_activity = false
+            })
+        });
+        cx.simulate_resize(gpui::size(px(1512.0), px(903.0)));
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear());
+        }
+        assert!(
+            cx.debug_bounds("github-activity").is_none(),
+            "the setting hides the panel"
+        );
     }
 
     #[gpui::test]

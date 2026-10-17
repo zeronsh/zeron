@@ -35,6 +35,7 @@ pub mod rounded_clip;
 pub mod file_icons;
 pub mod files;
 pub mod frost;
+mod github_activity;
 mod glass;
 mod haptics;
 pub mod history;
