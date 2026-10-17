@@ -8158,16 +8158,17 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
-        // Subagents running under this chat show as a "● N" pill beside the
-        // row's own activity indicator, never in place of it: the pill takes
-        // the time stamp's spot (compact) or leads the status (regular), and
-        // keeps showing after the parent's own turn has settled.
-        let running_subagents = self.state.read(cx).running_subagents_for(&id, Utc::now());
+        // Subagents running under this chat, plus its side chats that are
+        // Working, show as one "● N" pill beside the row's own activity
+        // indicator, never in place of it: the pill takes the time stamp's
+        // spot (compact) or leads the status (regular), and keeps showing
+        // after the parent's own turn has settled.
+        let running = self.state.read(cx).running_pill_count_for(&id, Utc::now());
         let subagent_pill = |suffix: &str| {
-            (running_subagents > 0).then(|| {
+            (running > 0).then(|| {
                 crate::running_pill::running_pill(
                     format!("{row_id}-subagents-{suffix}"),
-                    running_subagents,
+                    running,
                     theme,
                 )
             })

@@ -46,22 +46,54 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let voiceBar = VoiceBarItem(app: app, host: self)
         self.voiceBar = voiceBar
         let menu = navigationItem.rightBarButtonItem!
-        let syncVoice = { [weak self, weak voiceBar] in
+        // This session's side chats and subagents, once it has any. While
+        // subagents run, the badge is the sidebar's "● N"; otherwise a quiet
+        // count (the default red reads as unread).
+        let sideChats = UIBarButtonItem(image: UIImage(systemName: "bubble.left.and.bubble.right"), primaryAction: UIAction { [weak self] _ in
+            self?.showSideChats()
+        })
+        sideChats.accessibilityLabel = "Side chats and agents"
+        sideChats.accessibilityIdentifier = "side-chats"
+        let syncBar = { [weak self, weak voiceBar] in
             guard let self, let voiceBar else { return }
-            let items = voiceBar.visible ? [menu, voiceBar.item] : [menu]
-            if self.navigationItem.rightBarButtonItems?.count != items.count {
+            let agents = self.app.subagents(of: self.chatId)
+            let running = agents.filter { $0.state == .running }.count
+            let total = self.app.children(of: self.chatId).count + agents.count
+            var badge: UIBarButtonItem.Badge?
+            if running > 0 {
+                badge = .string("● \(running)")
+                badge?.backgroundColor = Palette.accent
+                badge?.foregroundColor = .white
+            } else if total > 0 {
+                badge = .count(total)
+                badge?.backgroundColor = Palette.secondary
+                badge?.foregroundColor = Palette.background
+            }
+            if sideChats.badge != badge { sideChats.badge = badge }
+            sideChats.accessibilityValue = running > 0 ? "\(running) running" : nil
+            var items = [menu]
+            if voiceBar.visible { items.append(voiceBar.item) }
+            if total > 0 { items.append(sideChats) }
+            if self.navigationItem.rightBarButtonItems?.map(ObjectIdentifier.init) != items.map(ObjectIdentifier.init) {
                 self.navigationItem.setRightBarButtonItems(items, animated: self.view.window != nil)
             }
         }
-        voiceToken = app.voice.observe(syncVoice)
-        hostsToken = app.observe(syncVoice)
-        syncVoice()
+        voiceToken = app.voice.observe(syncBar)
+        hostsToken = app.observe(syncBar)
+        childrenToken = app.observeWorkspace(syncBar)
+        // Spawn chips land and settle with the transcript.
+        agentsToken = app.observeSession(chatId, syncBar)
+        syncBar()
 
         list.frame = view.bounds
         list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         list.accessibilityIdentifier = "transcript"
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
         list.imageFetcher = { [weak self] ref in await self?.source.image(ref) }
+        list.onOpenSubagent = { [weak self] docId, title, frozen in
+            guard let self else { return }
+            self.navigationController?.pushViewController(SubagentViewController(app: self.app, docId: docId, title: title, frozen: frozen), animated: true)
+        }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
@@ -183,6 +215,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var voiceBar: VoiceBarItem?
     private var voiceToken: AnyObject?
     private var hostsToken: AnyObject?
+    private var childrenToken: AnyObject?
+    private var agentsToken: AnyObject?
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
@@ -297,7 +331,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // Leaving mid-edit: give the queued row back and the draft its place.
         if editingQueueId != nil { endEdit(commit: nil) }
         saveDraft()
-        if isMovingFromParent { setAccessory(visible: true) }
+        // Back to the list — not to the session this one hangs off.
+        if isMovingFromParent, !MainTabController.hidesAccessory(navigationController?.topViewController) {
+            setAccessory(visible: true)
+        }
     }
 
     /// Tear down only once the pop has really happened: an interactive
@@ -497,12 +534,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self.queue.isHidden = c.queue.isEmpty || asking
             self.queue.configure(c.queue)
             let editing = self.editingQueueId != nil
-            self.pill.superview?.isHidden = c.banner == .none && !editing
-            self.pill.banner = editing ? .editing : c.banner
+            let banner: SessionChrome.Banner = editing ? .editing : self.forking ? .working(since: nil, word: "Forking into a side chat") : c.banner
+            self.pill.superview?.isHidden = banner == .none
+            self.pill.banner = banner
             self.bottom.layoutIfNeeded()
             self.view.layoutIfNeeded()
         }
-        let structural = (old.questions == nil) != (c.questions == nil) || old.queue.count != c.queue.count || (old.banner == .none) != (c.banner == .none)
+        let structural = (old.questions == nil) != (c.questions == nil) || old.queue.count != c.queue.count || (old.banner == .none) != (c.banner == .none) || forking != shownForking
+        shownForking = forking
         // Panels materialize when their content appears; a first render (the
         // session reopened with a queue or an open question) shows them at
         // once — they used to stay dematerialized, so the queue "vanished"
@@ -520,6 +559,82 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    /// This session's side chats in a sheet; picking one opens it on top.
+    private func showSideChats() {
+        let list = SideChatsViewController(app: app, parentId: chatId) { [weak self] childId in
+            guard let self else { return }
+            self.dismiss(animated: true)
+            self.openSideChat(childId)
+        }
+        list.onNew = { [weak self] in self?.dismiss(animated: true) { self?.newSideChat() } }
+        list.onFork = { [weak self] in self?.dismiss(animated: true) { self?.forkSideChat() } }
+        list.onOpenAgent = { [weak self] agent in
+            guard let self else { return }
+            self.dismiss(animated: true)
+            self.navigationController?.pushViewController(SubagentViewController(app: self.app, docId: agent.docId, title: agent.title, frozen: agent.state != .running), animated: true)
+        }
+        let sheet = UINavigationController(rootViewController: list)
+        if let s = sheet.sheetPresentationController {
+            s.detents = [.medium(), .large()]
+            s.prefersGrabberVisible = true
+        }
+        present(sheet, animated: true)
+    }
+
+    private func openSideChat(_ childId: String) {
+        guard let child = SessionViewController(app: app, chatId: childId) else {
+            return Toast.show("Couldn't open session. Try again.", in: view.window)
+        }
+        navigationController?.pushViewController(child, animated: true)
+    }
+
+    /// An empty side chat: a composer pushed on top that mints the chat on
+    /// its first send, then hands over to it in place (as a new session does).
+    /// From a side chat, it's a sibling.
+    private func newSideChat() {
+        let draft = NewSessionViewController(app: app, sideOf: chatId) { [weak self] childId, handoff in
+            self?.arrive(at: childId, handoff: handoff)
+        }
+        navigationController?.pushViewController(draft, animated: true)
+    }
+
+    /// The draft on top became `childId`: swap the chat in under it and play
+    /// the handoff.
+    private func arrive(at childId: String, handoff: DraftHandoff?) {
+        guard let nav = navigationController, let draft = nav.topViewController as? NewSessionViewController else { return }
+        guard let child = SessionViewController(app: app, chatId: childId) else {
+            nav.popViewController(animated: true)
+            return Toast.show("Couldn't open session. Try again.", in: view.window)
+        }
+        UIView.performWithoutAnimation {
+            nav.setViewControllers(nav.viewControllers.map { $0 === draft ? child : $0 }, animated: false)
+            nav.view.layoutIfNeeded()
+            child.prepareArrival()
+        }
+        guard let handoff, let window = view.window else { return child.finishArrival() }
+        DraftHandoffAnimator.run(handoff, into: child, window: window)
+    }
+
+    /// A fork in flight (one at a time, like the desktop's).
+    private var forking = false {
+        didSet { if forking != oldValue { render(animated: true) } }
+    }
+    private var shownForking = false
+
+    /// Copy this session's history (through its last completed reply) into a
+    /// side chat on its host, then open it. From a side chat, a sibling.
+    private func forkSideChat() {
+        guard !forking else { return }
+        forking = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let forkId = await self.app.forkSideChat(of: self.chatId)
+            self.forking = false
+            guard let forkId, self.view.window != nil else { return }
+            self.openSideChat(forkId)
+        }
+    }
+
     private func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
@@ -530,6 +645,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
+                UIMenu(options: .displayInline, children: [
+                    UIAction(title: "New Side Chat", image: UIImage(systemName: "plus.bubble")) { _ in self.newSideChat() },
+                    UIAction(title: "Fork into Side Chat", image: UIImage(systemName: "arrow.triangle.branch"), attributes: self.forking ? .disabled : []) { _ in self.forkSideChat() },
+                ]),
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
                     self.app.archive(self.chatId)
                     // Beside the iPad sidebar there's nothing to pop back to.

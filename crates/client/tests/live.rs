@@ -816,6 +816,7 @@ async fn phone_born_sessions_reach_the_host_before_their_first_command() {
             branch: None,
             cwd: None,
             title: None,
+            parent_chat_id: None,
         })
         .unwrap();
     let session = client.open_session(&chat_id).unwrap();
@@ -941,6 +942,66 @@ async fn a_refused_host_wake_settles_instead_of_retrying_forever() {
     client.shutdown();
 }
 
+/// A subagent first read finished (its frozen blob) and then resumed must
+/// follow the live doc on the next live open, not the cached frozen copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_subagent_leaves_its_frozen_copy_for_the_live_doc() {
+    let edge = MockEdge::start().await;
+    let _host = HostRegistry::start(&edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    await_chat(&client, CHAT).await;
+    let doc_id = format!("{CHAT}--sub--toolu_resume");
+    let reply = |id: &str, text: &str| SessionMessageEntry {
+        id: id.into(),
+        role: MessageRole::Assistant,
+        parts: vec![MessagePart::Text {
+            id: "t0".into(),
+            text: text.into(),
+        }],
+        created_at: zeron_client_now(),
+        device_id: HOST.into(),
+        status: Some(zeron_doc::MessageStatus::Complete),
+        continuation_of: None,
+        duration_ms: None,
+    };
+
+    // Finished once: read from its frozen copy, no room.
+    let first = vec![reply("r1", "First pass.")];
+    edge.put_blob(CHAT, &doc_id, serde_json::to_vec(&first).unwrap());
+    let frozen = client.open_subagent(&doc_id, true).await.unwrap();
+    assert_eq!(frozen.snapshot().transcript_messages().len(), 1);
+    assert_eq!(edge.chat_sockets(&doc_id), 0);
+    client.close_session(&doc_id);
+
+    // Resumed: the host writes a second reply into the live doc.
+    let host_doc = LoroDoc::new();
+    let session = SessionDoc::from_doc(host_doc.clone());
+    session.push_message(&first[0]).unwrap();
+    session.push_message(&reply("r2", "Second pass.")).unwrap();
+    host_doc.commit();
+    edge.inject(
+        &doc_id,
+        HOST,
+        host_doc.export(ExportMode::all_updates()).unwrap(),
+    );
+
+    let live = client.open_subagent(&doc_id, false).await.unwrap();
+    live.set_view_attached(true);
+    tokio::task::spawn_blocking({
+        let edge_sockets = move || edge.chat_sockets(&doc_id);
+        move || {
+            wait_for(
+                "the live doc, both replies",
+                Duration::from_secs(10),
+                || edge_sockets() > 0 && live.snapshot().transcript_messages().len() == 2,
+            )
+        }
+    })
+    .await
+    .unwrap();
+}
+
 async fn await_chat(client: &Client, chat: &str) {
     let start = Instant::now();
     while client.workspace().session(chat).is_none() {
@@ -982,6 +1043,7 @@ async fn immediate_exit_after_first_send_recovers_new_chat_on_each_host_platform
                 branch: None,
                 cwd: None,
                 title: None,
+                parent_chat_id: None,
             })
             .unwrap();
         let session = client.open_session(&chat).unwrap();

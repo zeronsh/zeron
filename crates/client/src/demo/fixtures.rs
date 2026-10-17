@@ -216,6 +216,47 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 "α = 0.2 over inter-append gaps",
             )
         },
+        // chat-veil's other side chats: it shows four of each (side chats,
+        // running and finished subagents). This one is still Working, so it
+        // adds to chat-veil's "● N" pill beside the four running subagents.
+        DemoChat {
+            parent: Some("chat-veil"),
+            harness: Codex,
+            model: "gpt-6-astra",
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 4 * MIN,
+            ..chat(
+                "chat-side-2",
+                Some("space-zeron"),
+                MAC,
+                "Veil under Reduce Motion",
+                "Rows render settled at once",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-veil"),
+            last_ago_ms: 12 * MIN,
+            ..chat(
+                "chat-side-3",
+                Some("space-zeron"),
+                MAC,
+                "Fade curve vs. desktop",
+                "Same ease-out, 220 ms on both",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-veil"),
+            harness: Codex,
+            model: "gpt-6-astra",
+            last_ago_ms: 2 * HOUR,
+            ..chat(
+                "chat-side-4",
+                Some("space-zeron"),
+                MAC,
+                "Changelog line for the veil",
+                "Streaming replies now fade in",
+            )
+        },
         DemoChat {
             archived: true,
             last_ago_ms: 3 * DAY,
@@ -445,7 +486,8 @@ pub(crate) fn seed(
         if let Some(status) = demo.status {
             doc.upsert_session(&Session {
                 last_completed_turn: None,
-                running_subagents: 0,
+                // chat-veil's live turn runs four subagents (its spawn chips).
+                running_subagents: if demo.id == "chat-veil" { 4 } else { 0 },
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,

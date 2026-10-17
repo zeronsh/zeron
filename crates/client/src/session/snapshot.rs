@@ -21,6 +21,30 @@ pub struct LocalEcho {
     pub sent_at_ms: i64,
 }
 
+/// Where a spawned subagent stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentState {
+    Running,
+    Done,
+    Failed,
+}
+
+/// A subagent this session's agent spawned: one linked spawn chip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentRow {
+    /// Its transcript doc (`{chatId}--sub--{id}`).
+    pub doc_id: String,
+    /// What the spawn asked for ("Audit grapheme handling").
+    pub title: String,
+    pub state: SubagentState,
+    /// The engine's one-line live tail of its output.
+    pub tail: Option<String>,
+    /// The model the spawn picked, when it named one.
+    pub model: Option<String>,
+    /// When the spawning reply started.
+    pub spawned_at_ms: i64,
+}
+
 /// "Only text grew" hint for streaming. Consumer rule: if you hold a version
 /// of this entry with `rev >= base_rev`, every part is unchanged except
 /// `parts[part_index]`, whose text (text or reasoning body) only grew — the
@@ -123,6 +147,60 @@ impl SessionSnapshot {
         self.transcript()
             .iter()
             .map(|e| e.message.clone())
+            .collect()
+    }
+
+    /// Subagents spawned in this transcript, in spawn order: every spawn chip
+    /// the engine linked to a subagent doc (direct children only — nested
+    /// spawns live in the subagent's own transcript).
+    pub fn subagents(&self) -> Vec<SubagentRow> {
+        self.transcript()
+            .iter()
+            .flat_map(|entry| {
+                let at = entry.message.created_at;
+                entry
+                    .message
+                    .parts
+                    .iter()
+                    .filter_map(move |part| match part {
+                        MessagePart::Tool {
+                            call,
+                            is_error,
+                            resolved,
+                            subagent_ref: Some(doc_id),
+                            subagent_status,
+                            subagent_tail,
+                            ..
+                        } if call.is_subagent_spawn() => {
+                            use zeron_doc::parts::SubagentStatus as S;
+                            let state = match subagent_status {
+                                Some(S::Running) => SubagentState::Running,
+                                Some(S::Failed) => SubagentState::Failed,
+                                _ if *is_error => SubagentState::Failed,
+                                Some(S::Done) => SubagentState::Done,
+                                None if *resolved => SubagentState::Done,
+                                None => SubagentState::Running,
+                            };
+                            let detail = zeron_proto::view::tool_chip_content(call).1;
+                            Some(SubagentRow {
+                                doc_id: doc_id.clone(),
+                                title: Some(detail.trim())
+                                    .filter(|t| !t.is_empty())
+                                    .unwrap_or("Subagent")
+                                    .to_owned(),
+                                state,
+                                tail: subagent_tail
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|t| !t.is_empty())
+                                    .map(str::to_owned),
+                                model: call.subagent_model().map(str::to_owned),
+                                spawned_at_ms: at,
+                            })
+                        }
+                        _ => None,
+                    })
+            })
             .collect()
     }
 

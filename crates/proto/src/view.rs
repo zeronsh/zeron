@@ -72,6 +72,25 @@ pub fn running_subagents(session: Option<&Session>, now: DateTime<Utc>) -> u32 {
         .map_or(0, |s| s.running_subagents)
 }
 
+/// Side chats of `parent_id` whose own run is Working right now — the share
+/// of a session row's "● N" pill that [`running_subagents`] does not count.
+/// Only unarchived children (the ones the side chats list shows) count, and
+/// only while Working through [`effective_indicator`]: one awaiting input,
+/// errored, or on a stale session row counts nothing. `chats` may hold the
+/// whole workspace or just the parent's children. Pure.
+pub fn working_side_chats<'c, 's>(
+    parent_id: &str,
+    chats: impl IntoIterator<Item = &'c Chat>,
+    session_for: impl Fn(&str) -> Option<&'s Session>,
+    now: DateTime<Utc>,
+) -> u32 {
+    chats
+        .into_iter()
+        .filter(|c| !c.archived && c.parent_chat_id.as_deref() == Some(parent_id))
+        .filter(|c| effective_indicator(session_for(&c.id), now) == Indicator::Working)
+        .count() as u32
+}
+
 /// The full display status for a chat row / tab dot: live states win, then the
 /// synced seen marker decides completed-vs-idle. Staleness gating rides on
 /// [`effective_indicator`]; the derivation itself is [`crate::chat_indicator`].
@@ -280,6 +299,75 @@ mod gate_tests {
         );
         assert_eq!(running_subagents(Some(&stale), now), 0);
         assert_eq!(running_subagents(None, now), 0);
+    }
+
+    fn side_chat(id: &str, parent: Option<&str>) -> Chat {
+        Chat {
+            id: id.into(),
+            device_id: "dev".into(),
+            title: None,
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            parent_chat_id: parent.map(str::to_string),
+        }
+    }
+
+    fn session_of(chat_id: &str, status: SessionStatus, updated_at: DateTime<Utc>) -> Session {
+        Session {
+            chat_id: chat_id.into(),
+            status,
+            ..running_session(0, updated_at)
+        }
+    }
+
+    #[test]
+    fn working_side_chats_count_only_fresh_working_children_of_the_parent() {
+        let now = Utc::now();
+        let fresh = now - chrono::Duration::seconds(10);
+        let stale = now - chrono::Duration::milliseconds(SESSION_STALE_MS + 1);
+        let mut archived = side_chat("archived", Some("main"));
+        archived.archived = true;
+        let chats = vec![
+            side_chat("main", None),
+            side_chat("working", Some("main")),
+            side_chat("working-too", Some("main")),
+            side_chat("awaiting", Some("main")),
+            side_chat("errored", Some("main")),
+            side_chat("stale", Some("main")),
+            side_chat("idle", Some("main")),
+            side_chat("no-session", Some("main")),
+            archived,
+            side_chat("other-parent", Some("elsewhere")),
+        ];
+        let sessions = vec![
+            session_of("main", SessionStatus::Working, fresh),
+            session_of("working", SessionStatus::Working, fresh),
+            session_of("working-too", SessionStatus::Working, fresh),
+            session_of("awaiting", SessionStatus::AwaitingInput, fresh),
+            session_of("errored", SessionStatus::Errored, fresh),
+            // A crashed engine's side chat must not keep the pill up.
+            session_of("stale", SessionStatus::Working, stale),
+            session_of("idle", SessionStatus::Idle, fresh),
+            session_of("archived", SessionStatus::Working, fresh),
+            session_of("other-parent", SessionStatus::Working, fresh),
+        ];
+        let session_for = |id: &str| sessions.iter().find(|s| s.chat_id == id);
+        // The parent's own Working run is its spinner, not a pill count.
+        assert_eq!(working_side_chats("main", &chats, session_for, now), 2);
+        assert_eq!(working_side_chats("elsewhere", &chats, session_for, now), 1);
+        assert_eq!(working_side_chats("working", &chats, session_for, now), 0);
     }
 
     #[test]

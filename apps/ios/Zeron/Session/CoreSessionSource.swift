@@ -55,6 +55,7 @@ final class CoreSessionSource: SessionSource {
         next.title = c.title
         let project = row?.project?.name ?? "No project"
         next.subtitle = c.host.name.map { "\(project) @ \($0)" } ?? project
+        if row?.parentChatId != nil { next.subtitle = "Side chat · " + next.subtitle }
         next.running = c.live.turnRunning
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"

@@ -189,6 +189,9 @@ pub enum WidgetKind {
     ToolRail { trunk_x: f32, bend: f32, branch_end: f32, row_mid: f32, tops: Vec<f32>, heights: Vec<f32> },
     /// Tap target toggling one tool row's inline detail.
     ToolToggle { detail: u64, open: bool },
+    /// Tap target over a subagent spawn card: opens the subagent's
+    /// transcript (`doc_id`, read-only). `frozen` = it finished (done/failed).
+    SubagentLink { doc_id: String, title: String, frozen: bool },
     /// Shimmer sweep over the active group's title (text drawn by the canvas
     /// underneath; the painter re-draws those runs brighter through a moving
     /// gradient).

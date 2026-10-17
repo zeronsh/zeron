@@ -437,6 +437,44 @@ pub enum QueueEditFinish {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SubagentState {
+    Running,
+    Done,
+    Failed,
+}
+
+/// A subagent the session's agent spawned (one linked spawn chip).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SubagentInfo {
+    /// Its transcript doc — `CoreClient.open_subagent`.
+    pub doc_id: String,
+    pub title: String,
+    pub state: SubagentState,
+    /// One-line live tail of its output.
+    pub tail: Option<String>,
+    /// The model the spawn picked, when it named one.
+    pub model: Option<String>,
+    pub spawned_at_ms: i64,
+}
+
+impl From<zc::SubagentRow> for SubagentInfo {
+    fn from(r: zc::SubagentRow) -> Self {
+        Self {
+            doc_id: r.doc_id,
+            title: r.title,
+            state: match r.state {
+                zc::SubagentState::Running => SubagentState::Running,
+                zc::SubagentState::Done => SubagentState::Done,
+                zc::SubagentState::Failed => SubagentState::Failed,
+            },
+            tail: r.tail,
+            model: r.model,
+            spawned_at_ms: r.spawned_at_ms,
+        }
+    }
+}
+
 /// One open chat. Obtain via `CoreClient.open_session`.
 #[derive(uniffi::Object)]
 pub struct SessionHandle {
@@ -488,6 +526,17 @@ impl SessionHandle {
             working_since_ms: snap.working_since_ms,
             last_entry_id: snap.entries.last().map(|e| e.id.clone()),
         }
+    }
+
+    /// Subagents spawned in this transcript, in spawn order (pull after
+    /// `SessionChanged`).
+    pub fn subagents(&self) -> Vec<SubagentInfo> {
+        self.inner
+            .snapshot()
+            .subagents()
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     /// Plain text of one entry's text parts (copy / share).

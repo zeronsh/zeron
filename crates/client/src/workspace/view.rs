@@ -85,6 +85,14 @@ pub struct SessionRow {
     pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
+    /// Subagents of this chat streaming right now (staleness-gated like
+    /// `host_indicator`).
+    pub running_subagents: u32,
+    /// This chat's side chats that are Working right now
+    /// ([`zeron_proto::view::working_side_chats`]). Kept apart from
+    /// `running_subagents` so each stays one fact; the row's "● N" pill shows
+    /// their sum, the same number the desktop sidebar draws.
+    pub working_side_chats: u32,
     /// `last_message_at`, falling back to `created_at` (the sort key).
     pub last_activity_ms: i64,
     /// [`relative_time_label`] of `last_activity_ms` at derive time (the 1 Hz
@@ -397,6 +405,8 @@ fn hash_row(row: &SessionRow) -> u64 {
     attention_rank(row.indicator).hash(&mut h);
     attention_rank(row.host_indicator).hash(&mut h);
     row.working_since_ms.hash(&mut h);
+    row.running_subagents.hash(&mut h);
+    row.working_side_chats.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
     row.time_label.hash(&mut h);
     row.created_at_ms.hash(&mut h);
@@ -421,6 +431,8 @@ struct RowContext<'a> {
     spaces: HashMap<&'a str, &'a Space>,
     devices: HashMap<&'a str, &'a Device>,
     sessions: HashMap<&'a str, &'a Session>,
+    /// Side chats by parent id, so a row counts its own without a scan.
+    side_chats: HashMap<&'a str, Vec<&'a Chat>>,
     pinned: HashSet<&'a str>,
     section_of: HashMap<&'a str, &'a str>,
 }
@@ -497,6 +509,17 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         indicator,
         host_indicator,
         working_since_ms,
+        running_subagents: zeron_proto::view::running_subagents(session, cx.now),
+        working_side_chats: zeron_proto::view::working_side_chats(
+            &chat.id,
+            rc.side_chats
+                .get(chat.id.as_str())
+                .into_iter()
+                .flatten()
+                .copied(),
+            |id| rc.sessions.get(id).copied(),
+            cx.now,
+        ),
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
         created_at_ms: chat.created_at.timestamp_millis(),
@@ -535,6 +558,12 @@ pub(crate) fn derive(
             section_of.entry(id.as_str()).or_insert(section.id.as_str());
         }
     }
+    let mut side_chats: HashMap<&str, Vec<&Chat>> = HashMap::new();
+    for chat in &state.chats {
+        if let Some(parent) = chat.parent_chat_id.as_deref() {
+            side_chats.entry(parent).or_default().push(chat);
+        }
+    }
     let rc = RowContext {
         all_spaces: &state.spaces,
         spaces: state.spaces.iter().map(|s| (s.id.as_str(), s)).collect(),
@@ -544,6 +573,7 @@ pub(crate) fn derive(
             .iter()
             .map(|s| (s.chat_id.as_str(), s))
             .collect(),
+        side_chats,
         pinned: pinned_order.iter().map(String::as_str).collect(),
         section_of,
     };

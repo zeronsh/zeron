@@ -599,6 +599,7 @@ pub use zeron_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
     parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
+    working_side_chats,
 };
 
 /// What a session row shows that ticks with the clock rather than with its
@@ -2232,6 +2233,13 @@ impl AppState {
     /// chat or not.
     pub fn running_subagents_for(&self, chat_id: &str, now: DateTime<Utc>) -> u32 {
         running_subagents(self.session_for(chat_id), now)
+    }
+
+    /// The count a session row's "● N" pill shows: its running subagents plus
+    /// its side chats that are Working ([`working_side_chats`]), one number.
+    pub fn running_pill_count_for(&self, chat_id: &str, now: DateTime<Utc>) -> u32 {
+        self.running_subagents_for(chat_id, now)
+            + working_side_chats(chat_id, &self.chats, |id| self.session_for(id), now)
     }
 
     /// Staleness-checked status dot for a chat row. A send in flight reads as
@@ -5433,6 +5441,46 @@ mod tests {
         assert_eq!(
             state.selected_chat_row().unwrap().parent_chat_id.as_deref(),
             Some("main")
+        );
+    }
+
+    #[test]
+    fn running_pill_sums_subagents_and_working_side_chats() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let side = |id: &str| {
+            let mut side = chat(id, 1, None);
+            side.parent_chat_id = Some("main".into());
+            side
+        };
+        state.apply_chats(vec![
+            chat("main", 0, None),
+            side("working"),
+            side("awaiting"),
+            side("errored"),
+            side("stale"),
+        ]);
+        let mut main = session("main", SessionStatus::Idle, 5, now);
+        main.running_subagents = 2;
+        state.sessions = vec![
+            main,
+            session("working", SessionStatus::Working, 5, now),
+            session("awaiting", SessionStatus::AwaitingInput, 5, now),
+            session("errored", SessionStatus::Errored, 5, now),
+            session("stale", SessionStatus::Working, 60, now),
+        ];
+        // 2 subagents + the one fresh Working side chat; waiting, failed and
+        // stale side chats add nothing.
+        assert_eq!(state.running_pill_count_for("main", now), 3);
+        // The tab-strip count stays subagents only.
+        assert_eq!(state.running_subagents_for("main", now), 2);
+        // Side chats alone raise the pill once the subagents are done.
+        state.sessions[0].running_subagents = 0;
+        assert_eq!(state.running_pill_count_for("main", now), 1);
+        // Once the Working side chat's row goes stale, nothing is left.
+        assert_eq!(
+            state.running_pill_count_for("main", now + TimeDelta::seconds(41)),
+            0
         );
     }
 

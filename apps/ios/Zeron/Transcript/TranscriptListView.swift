@@ -43,6 +43,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var imageLoader: ((String, UIImageView) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
+    /// A subagent spawn card was tapped: open its transcript (doc id, title,
+    /// finished).
+    var onOpenSubagent: ((String, String, Bool) -> Void)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -598,6 +601,10 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     func rowView(_ view: RowView, imageFor reference: String, into imageView: UIImageView) {
         imageLoader?(reference, imageView)
+    }
+
+    func rowView(_ view: RowView, openSubagent docId: String, title: String, frozen: Bool) {
+        onOpenSubagent?(docId, title, frozen)
     }
 
     func rowView(_ view: RowView, visualFor id: String) -> UIView? {

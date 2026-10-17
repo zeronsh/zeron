@@ -29,6 +29,11 @@ struct SessionRowVM: Hashable {
     var unseen: Bool
     var pinned: Bool
     var sendFailed: Bool
+    /// Subagents of this session streaming right now.
+    var runningSubagents: Int
+    /// Side chats of this session that are Working right now. The "● N" pill
+    /// shows this plus `runningSubagents`, like the desktop sidebar.
+    var workingSideChats: Int
 }
 
 /// Folder row ("Pinned 2 ›", "P0 3 ›").
@@ -54,6 +59,9 @@ final class SessionCell: UICollectionViewListCell {
     private let time = UILabel()
     private let status = StatusGlyph()
     private let prBadge = PRBadgeView()
+    /// "● N": subagents running under this session (the desktop sidebar's
+    /// running pill). Leads the status, never replaces it.
+    private let agents = UILabel()
     private var vm: SessionRowVM?
     /// The session open beside the sidebar (iPad): a quiet fill.
     var isCurrent = false { didSet { if isCurrent != oldValue { setNeedsUpdateConfiguration() } } }
@@ -64,7 +72,12 @@ final class SessionCell: UICollectionViewListCell {
         time.textAlignment = .right
         harness.contentMode = .scaleAspectFit
         harness.tintColor = Palette.text
-        for v in [harness, title, meta, time, status, prBadge] as [UIView] { contentView.addSubview(v) }
+        agents.textAlignment = .center
+        agents.textColor = StatusTone.working
+        agents.backgroundColor = Palette.controlFill
+        agents.layer.cornerCurve = .continuous
+        agents.clipsToBounds = true
+        for v in [harness, title, meta, time, status, prBadge, agents] as [UIView] { contentView.addSubview(v) }
         var bg = UIBackgroundConfiguration.listCell()
         bg.backgroundColor = .clear
         backgroundConfiguration = bg
@@ -149,7 +162,17 @@ final class SessionCell: UICollectionViewListCell {
             status.kind = .none
             status.isHidden = true
         }
-        accessibilityLabel = [vm.title, vm.projectName, corner?.word, prBadge.isHidden ? nil : prBadge.accessibilityLabel].compactMap { $0 }.joined(separator: ", ")
+        let running = vm.runningSubagents + vm.workingSideChats
+        agents.isHidden = running == 0
+        agents.font = Fonts.ui(.sansMedium, TypeScale.size(11.5))
+        agents.text = "● \(running)"
+        // One number on screen, but VoiceOver says what it is made of.
+        let runningParts = [
+            vm.runningSubagents == 0 ? nil : vm.runningSubagents == 1 ? "1 subagent" : "\(vm.runningSubagents) subagents",
+            vm.workingSideChats == 0 ? nil : vm.workingSideChats == 1 ? "1 side chat" : "\(vm.workingSideChats) side chats",
+        ].compactMap { $0 }
+        let agentsLabel = runningParts.isEmpty ? nil : runningParts.joined(separator: " and ") + " running"
+        accessibilityLabel = [vm.title, vm.projectName, corner?.word, agentsLabel, prBadge.isHidden ? nil : prBadge.accessibilityLabel].compactMap { $0 }.joined(separator: ", ")
         accessibilityIdentifier = "session-\(vm.id)"
         setNeedsLayout()
     }
@@ -178,6 +201,13 @@ final class SessionCell: UICollectionViewListCell {
         if !status.isHidden {
             status.frame = CGRect(x: time.frame.minX - 5 - 12, y: titleY + titleH / 2 - 6, width: 12, height: 12)
             trailing = status.frame.minX - 10
+        }
+        if !agents.isHidden {
+            let h = (18 * k).rounded()
+            let w = ceil(agents.sizeThatFits(CGSize(width: 80, height: h)).width) + 12
+            agents.frame = CGRect(x: trailing + 4 - w, y: titleY + (titleH - h) / 2, width: w, height: h)
+            agents.layer.cornerRadius = h / 2
+            trailing = agents.frame.minX - 8
         }
         title.frame = CGRect(x: textX, y: titleY, width: max(0, trailing - textX), height: titleH)
         let x = textX
