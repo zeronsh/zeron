@@ -272,6 +272,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: None,
             manual_command: "Update the configured Antigravity ACP server",
         },
+        HarnessId::Muse => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Manual,
+            update_args: None,
+            manual_command: "Update Muse with its original installer",
+        },
         HarnessId::Mock => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Manual,

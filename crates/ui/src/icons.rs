@@ -228,6 +228,7 @@ icon_assets![
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    (MUSE_MARK, "muse-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
@@ -253,6 +254,11 @@ impl AssetSource for Assets {
 /// monochrome surface.
 pub fn claude_brand() -> Hsla {
     gpui::rgb(0xD97757).into()
+}
+
+/// The Meta mark's brand blue (`#0064E0`), same treatment as Claude's.
+pub fn meta_brand() -> Hsla {
+    gpui::rgb(0x0064E0).into()
 }
 
 /// An icon element for an embedded asset path. Size and colour are set by the

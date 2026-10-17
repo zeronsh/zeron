@@ -756,6 +756,31 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
     );
+    // Muse over its native MSP session-host protocol (`muse serve`),
+    // same lazy pattern: the static descriptor mirrors MuseHarness exactly.
+    // Step-boundary steering via `turn/steer`; the effort ladder maps onto
+    // MSP `reasoningEffort` tiers.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Muse,
+            name: "Muse".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+                ReasoningLevel::Ultra,
+            ],
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::MuseHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::MuseHarness::new()) as Arc<dyn Harness>)),
+    );
     registry
 }
 
@@ -838,7 +863,8 @@ mod tests {
                 HarnessId::Hermes,
                 HarnessId::Pi,
                 HarnessId::Opencode,
-                HarnessId::Antigravity
+                HarnessId::Antigravity,
+                HarnessId::Muse
             ]
         );
         assert!(registry.resolve(HarnessId::Mock).is_ok());
@@ -901,6 +927,21 @@ mod tests {
         assert_eq!(pi.display_name(), "Pi");
         assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
         assert!(pi.reasoning_levels().is_empty());
+        let muse = registry.resolve(HarnessId::Muse).unwrap();
+        assert_eq!(muse.id(), HarnessId::Muse);
+        assert_eq!(muse.display_name(), "Muse");
+        assert_eq!(muse.steering_mode(), SteeringMode::StepBoundary);
+        assert_eq!(
+            muse.reasoning_levels(),
+            &[
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+                ReasoningLevel::Ultra,
+            ]
+        );
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
