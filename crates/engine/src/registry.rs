@@ -109,6 +109,85 @@ pub struct TitleSettings {
     pub model: Option<String>,
 }
 
+/// Last successful discovery per harness and workspace. A provider probe can
+/// take seconds (Pi loads every extension), so a hit answers at once and one
+/// background probe refreshes the entry for the next open.
+struct DiscoveryCache<T>(Arc<Mutex<HashMap<DiscoveryKey, Discovered<T>>>>);
+
+type DiscoveryKey = (HarnessId, PathBuf);
+
+struct Discovered<T> {
+    value: T,
+    refreshing: bool,
+}
+
+impl<T> Default for DiscoveryCache<T> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<T: Clone + Send + 'static> DiscoveryCache<T> {
+    async fn get<F, Fut>(
+        &self,
+        registry: &Arc<HarnessRegistry>,
+        id: HarnessId,
+        cwd: &Path,
+        discover: F,
+    ) -> Result<T, HarnessError>
+    where
+        F: FnOnce(Arc<dyn Harness>, PathBuf) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, HarnessError>> + Send,
+    {
+        let harness = registry.resolve(id)?;
+        let key = (id, cwd.to_owned());
+        let cached = {
+            let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            entries.get_mut(&key).map(|entry| {
+                let needs_refresh = !std::mem::replace(&mut entry.refreshing, true);
+                (entry.value.clone(), needs_refresh)
+            })
+        };
+        if let Some((value, false)) = cached {
+            return Ok(value);
+        }
+        let entries = self.0.clone();
+        let registry = registry.clone();
+        // Spawned so the lease outlives a cancelled caller through the
+        // adapter's deadline and cleanup.
+        let refresh = tokio::spawn(async move {
+            let lease = registry.execution_lease(id).await;
+            let result = discover(harness, key.1.clone()).await;
+            drop(lease);
+            let mut entries = entries.lock().unwrap_or_else(PoisonError::into_inner);
+            match &result {
+                Ok(value) => {
+                    entries.insert(
+                        key,
+                        Discovered {
+                            value: value.clone(),
+                            refreshing: false,
+                        },
+                    );
+                }
+                Err(error) => {
+                    if let Some(entry) = entries.get_mut(&key) {
+                        entry.refreshing = false;
+                        tracing::warn!(harness = ?id, %error, "discovery refresh failed; keeping the previous catalog");
+                    }
+                }
+            }
+            result
+        });
+        if let Some((value, _)) = cached {
+            return Ok(value);
+        }
+        refresh
+            .await
+            .map_err(|error| HarnessError::Protocol(format!("discovery task failed: {error}")))?
+    }
+}
+
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
 type InstalledProbe = Box<dyn Fn() -> bool + Send + Sync>;
 
@@ -138,6 +217,8 @@ pub struct HarnessRegistry {
     gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::RwLock<()>>>>,
     pending_updates: Mutex<std::collections::HashSet<HarnessId>>,
     update_generation: tokio::sync::watch::Sender<u64>,
+    commands: DiscoveryCache<Vec<zeron_proto::SlashCommand>>,
+    skills: DiscoveryCache<Option<Vec<zeron_proto::invocation::Skill>>>,
 }
 
 impl Default for HarnessRegistry {
@@ -174,39 +255,27 @@ impl HarnessRegistry {
     }
 
     pub async fn discover_commands(
-        &self,
+        self: &Arc<Self>,
         id: HarnessId,
         cwd: &Path,
     ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
-        let cwd = cwd.to_owned();
-        let lease = self.execution_lease(id).await;
-        let harness = self.resolve(id)?;
-        tokio::spawn(async move {
-            let _lease = lease;
-            harness.commands_for(&cwd).await
-        })
-        .await
-        .map_err(|error| {
-            HarnessError::Protocol(format!("command discovery task failed: {error}"))
-        })?
+        self.commands
+            .get(self, id, cwd, |harness, cwd| async move {
+                harness.commands_for(&cwd).await
+            })
+            .await
     }
 
     pub async fn discover_skills(
-        &self,
+        self: &Arc<Self>,
         id: HarnessId,
         cwd: &Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
-        let cwd = cwd.to_owned();
-        let lease = self.execution_lease(id).await;
-        let harness = self.resolve(id)?;
-        tokio::spawn(async move {
-            // Retain the read lease through the adapter's deadline and cleanup,
-            // even when the requesting RPC is dropped.
-            let _lease = lease;
-            harness.skills(&cwd).await
-        })
-        .await
-        .map_err(|error| HarnessError::Protocol(format!("skill discovery task failed: {error}")))?
+        self.skills
+            .get(self, id, cwd, |harness, cwd| async move {
+                harness.skills(&cwd).await
+            })
+            .await
     }
 
     pub fn new() -> Self {
@@ -220,6 +289,8 @@ impl HarnessRegistry {
             gates: Mutex::new(HashMap::new()),
             pending_updates: Mutex::new(std::collections::HashSet::new()),
             update_generation,
+            commands: Default::default(),
+            skills: Default::default(),
         }
     }
 
