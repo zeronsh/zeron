@@ -94,6 +94,7 @@ icon_assets![
     (FOLDER, "folder"),
     (FORK, "fork"),
     (GIT_BRANCH, "git-branch"),
+    (GIT_COMMIT, "git-commit"),
     (PULL_REQUEST, "pull-request"),
     (WORKTREE, "worktree"),
     (PLUS, "plus"),
@@ -370,6 +371,7 @@ mod tests {
             COLLAPSE_ARROWS,
             CHAT_ROUND_LINE,
             GIT_BRANCH,
+            GIT_COMMIT,
             CLOSE_CIRCLE,
             FOLDER_TREE,
         ] {

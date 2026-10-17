@@ -214,6 +214,7 @@ impl PullRequestDetailPage {
                                 fetched: page.fetched.unwrap_or_else(Instant::now),
                                 diff: page.diff.clone(),
                                 diff_refresh_owed: page.diff_refresh_owed,
+                                commits: page.commits.clone(),
                             },
                         );
                     }
@@ -737,6 +738,7 @@ mod tests {
                     fetched: Instant::now(),
                     diff: None,
                     diff_refresh_owed: false,
+                    commits: None,
                 },
             );
             let open = |cx: &mut gpui::TestAppContext| {
@@ -826,6 +828,7 @@ mod tests {
                     fetched: Instant::now(),
                     diff: None,
                     diff_refresh_owed: false,
+                    commits: None,
                 },
             );
             cx.add_window(|window, cx| {

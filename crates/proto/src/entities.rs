@@ -1066,6 +1066,15 @@ pub struct ChangeRequestDetail {
     pub viewer_login: Option<String>,
 }
 
+/// A pull request's commits, newest first, in the history graph's row shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestCommits {
+    pub commits: Vec<GitHistoryCommit>,
+    /// The provider stopped listing before the pull request's last commit.
+    pub truncated: bool,
+}
+
 impl ChangeRequestDetail {
     pub fn activity_comments(&self) -> impl Iterator<Item = &ChangeRequestComment> {
         self.comments.iter().chain(&self.reviews).chain(

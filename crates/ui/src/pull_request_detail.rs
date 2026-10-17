@@ -18,7 +18,7 @@ use gpui::{
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 use zeron_proto::change_request_assessment::{CiState, Facts, check_failed, check_status};
-use zeron_proto::{ChangeRequestDetail, ChangeRequestListItem};
+use zeron_proto::{ChangeRequestCommits, ChangeRequestDetail, ChangeRequestListItem};
 use zeron_rpc::methods;
 
 #[derive(Clone, PartialEq, Action)]
@@ -46,6 +46,18 @@ pub struct StartPullRequestSession {
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
 pub struct AddPullRequestProject(pub String);
+
+/// What the page asks of the pane hosting it. Each host subscribes, so the
+/// request is answered beside the page that made it.
+pub enum PullRequestDetailEvent {
+    /// A commit row was clicked: open its diff as its own tab. The pull
+    /// request and device locate the commit on GitHub, without a checkout.
+    OpenCommit {
+        url: String,
+        device: Option<String>,
+        commit: zeron_proto::GitHistoryCommit,
+    },
+}
 
 /// What went wrong and what to do, in words. Error codes and transport
 /// details never reach the reader.
@@ -311,6 +323,7 @@ struct DetailSnapshot {
     diff: Option<Arc<ParsedDiff>>,
     /// Keep the engine-cache invalidation alive across closing/reopening.
     diff_refresh_owed: bool,
+    commits: Option<ChangeRequestCommits>,
 }
 
 /// Window/profile scoped, bounded cache. Device remains part of the identity.
@@ -427,6 +440,12 @@ pub struct PullRequestDetailPage {
     /// Refresh invalidated the patch. Keep bypassing the engine cache until
     /// a diff load succeeds, including across errors and reopening.
     diff_refresh_owed: bool,
+    /// The pull request's commits, newest first, once listed for its head.
+    commits: Option<ChangeRequestCommits>,
+    commits_task: Option<Task<()>>,
+    commits_error: Option<String>,
+    /// Refresh invalidated the listing; bypass the engine cache until it lands.
+    commits_refresh_owed: bool,
     tab: Tab,
     checks_expanded: bool,
     tab_slide: crate::motion::IndicatorSlide,
@@ -469,6 +488,8 @@ pub struct PullRequestDetailPage {
     image_failed: Option<String>,
 }
 
+impl gpui::EventEmitter<PullRequestDetailEvent> for PullRequestDetailPage {}
+
 impl PullRequestDetailPage {
     pub(crate) fn new(
         state: Entity<AppState>,
@@ -505,6 +526,10 @@ impl PullRequestDetailPage {
             },
             diff_error: None,
             diff_refresh_owed: false,
+            commits: None,
+            commits_task: None,
+            commits_error: None,
+            commits_refresh_owed: false,
             tab: Tab::Summary,
             checks_expanded: false,
             tab_slide: crate::motion::IndicatorSlide::at(tab_slot(Tab::Summary), Instant::now()),
@@ -614,6 +639,7 @@ impl PullRequestDetailPage {
             if let Some(diff) = snapshot.diff {
                 page.install_diff(diff, cx);
             }
+            page.commits = snapshot.commits;
         }
         let draft = page
             .cache
@@ -817,10 +843,13 @@ impl PullRequestDetailPage {
         self.diff = None;
         crate::markdown::render::clear_selection_surface(&self.selection_prefix);
         self.diff_refresh_owed = true;
+        self.drop_commits();
+        self.commits_refresh_owed = true;
         let cached = self.cache.borrow_mut().get(&self.target, &self.url);
         if let Some(mut snapshot) = cached {
             snapshot.diff = None;
             snapshot.diff_refresh_owed = true;
+            snapshot.commits = None;
             snapshot.fetched = Instant::now();
             self.cache
                 .borrow_mut()
@@ -886,6 +915,7 @@ impl PullRequestDetailPage {
                     activity: detail.activity_comments()
                         .map(|comment| super::pull_request_media::parse_description(&comment.body)).collect(),
                     detail, fetched: Instant::now(), diff: None, diff_refresh_owed: false,
+                    commits: None,
                 })
             }).await;
             let _ = this.update(cx, |page, cx| {
@@ -908,9 +938,13 @@ impl PullRequestDetailPage {
                             page.diff = None;
                             page.diff_refresh_owed = true;
                         }
+                        if page.commits_head() != Some(snapshot.detail.head_ref_oid.as_str()) {
+                            page.drop_commits();
+                        }
                         page.fetched = Some(snapshot.fetched);
                         snapshot.diff = page.diff.clone();
                         snapshot.diff_refresh_owed = page.diff_refresh_owed;
+                        snapshot.commits = page.commits.clone();
                         page.body = Some(snapshot.body.clone());
                         page.activity_bodies = snapshot.activity.clone();
                         page.detail = Some(snapshot.detail.clone());
@@ -918,12 +952,13 @@ impl PullRequestDetailPage {
                     }
                     Err(error) => page.error = Some(error),
                 }
-                if !page.refresh_from_board(cx)
-                    && loaded
-                    && page.tab == Tab::Code
-                    && page.diff.is_none()
-                {
-                    page.load_diff(false, cx);
+                if !page.refresh_from_board(cx) && loaded {
+                    if page.tab == Tab::Code && page.diff.is_none() {
+                        page.load_diff(false, cx);
+                    }
+                    if page.tab == Tab::Activity && page.commits.is_none() {
+                        page.load_commits(false, cx);
+                    }
                 }
                 cx.notify();
             });
@@ -1010,6 +1045,81 @@ impl PullRequestDetailPage {
         self.review.collapsed.clear();
         self.review.jumped = None;
         self.rebuild_stream(cx);
+    }
+
+    /// The head the shown commit listing belongs to: its newest commit.
+    fn commits_head(&self) -> Option<&str> {
+        self.commits
+            .as_ref()
+            .and_then(|commits| commits.commits.first())
+            .map(|commit| commit.sha.as_str())
+    }
+
+    /// Forget the listing; it belongs to an older head or a refresh.
+    fn drop_commits(&mut self) {
+        self.commits_task = None;
+        self.commits_error = None;
+        self.commits = None;
+    }
+
+    fn load_commits(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        // Wait for the detail's head so the listing is keyed by it.
+        if self.loading || self.detail.is_none() {
+            return;
+        }
+        // Without a connection the detail itself says so; the thread stays
+        // the conversation alone.
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.commits_error = None;
+        let mut params = self.params(refresh || self.commits_refresh_owed);
+        params.as_object_mut().unwrap().remove("baseRefOid");
+        let head = self.detail.as_ref().unwrap().head_ref_oid.clone();
+        self.commits_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_CHANGE_REQUEST_COMMITS, params)
+                .await
+                .map_err(|error| format!("Couldn’t load the commits. {}", failure_reason(&error)))
+                .and_then(|value| {
+                    serde_json::from_value::<ChangeRequestCommits>(value)
+                        .map_err(|_| "The device returned an invalid commit list.".to_owned())
+                });
+            let _ = this.update(cx, |page, cx| {
+                // The listing must belong to the head currently being shown.
+                if page.loading
+                    || !page
+                        .detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.head_ref_oid == head)
+                {
+                    return;
+                }
+                page.commits_task = None;
+                match result {
+                    Ok(commits) => {
+                        page.commits_refresh_owed = false;
+                        let cached = page.cache.borrow_mut().get(&page.target, &page.url);
+                        if let Some(mut snapshot) = cached
+                            && snapshot.detail.head_ref_oid == head
+                        {
+                            snapshot.commits = Some(commits.clone());
+                            page.cache.borrow_mut().put(
+                                page.target.clone(),
+                                page.url.clone(),
+                                snapshot,
+                            );
+                        }
+                        page.commits = Some(commits);
+                    }
+                    Err(error) => {
+                        page.commits_error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     /// Floating pill nav. One raised thumb glides between equal-width segments
@@ -1203,6 +1313,10 @@ impl PullRequestDetailPage {
         if tab == Tab::Code && self.diff.is_none() && self.diff_task.is_none() {
             self.load_diff(false, cx);
         }
+        // The commits share the Activity thread with the conversation.
+        if tab == Tab::Activity && self.commits.is_none() && self.commits_task.is_none() {
+            self.load_commits(false, cx);
+        }
         cx.notify();
     }
 }
@@ -1212,6 +1326,22 @@ impl PullRequestDetailPage {
     /// 0 Summary, 1 Code, 2 Activity.
     pub fn fixture_select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         self.select_tab(TABS[index.min(TABS.len() - 1)].0, cx);
+    }
+
+    /// Open the newest listed commit, as a click on its row does.
+    pub fn fixture_open_commit(&mut self, cx: &mut Context<Self>) {
+        let newest = self
+            .commits
+            .as_ref()
+            .and_then(|commits| commits.commits.first())
+            .cloned();
+        if let Some(commit) = newest {
+            cx.emit(PullRequestDetailEvent::OpenCommit {
+                url: self.url.clone(),
+                device: self.target.clone(),
+                commit,
+            });
+        }
     }
 
     pub fn fixture_select_file(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1276,6 +1406,186 @@ fn inline_thread(
         index -= thread.comments.len();
     }
     None
+}
+
+/// When a comment or review happened, as GitHub reports it.
+fn comment_time(comment: &zeron_proto::ChangeRequestComment) -> &str {
+    if comment.created_at.is_empty() {
+        &comment.submitted_at
+    } else {
+        &comment.created_at
+    }
+}
+
+/// One entry of the Activity thread: a comment or review, or the commits
+/// that landed between two of them.
+enum TimelineItem<'a> {
+    Comment(usize, &'a zeron_proto::ChangeRequestComment),
+    Commits(Vec<&'a zeron_proto::GitHistoryCommit>),
+}
+
+/// Comments (in time order) and commits (oldest first) merged by time.
+/// Consecutive commits fold into one run, as a push reads on GitHub.
+fn activity_timeline<'a>(
+    comments: Vec<(usize, &'a zeron_proto::ChangeRequestComment)>,
+    commits: impl IntoIterator<Item = &'a zeron_proto::GitHistoryCommit>,
+) -> Vec<TimelineItem<'a>> {
+    let instant = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw).ok();
+    let mut commits = commits.into_iter().peekable();
+    let mut items = Vec::new();
+    let push = |items: &mut Vec<TimelineItem<'a>>, commit| match items.last_mut() {
+        Some(TimelineItem::Commits(run)) => run.push(commit),
+        _ => items.push(TimelineItem::Commits(vec![commit])),
+    };
+    for (index, comment) in comments {
+        let at = instant(comment_time(comment));
+        while let Some(commit) = commits.next_if(|commit| {
+            at.is_some_and(|at| instant(&commit.authored_at).is_some_and(|time| time <= at))
+        }) {
+            push(&mut items, commit);
+        }
+        items.push(TimelineItem::Comment(index, comment));
+    }
+    for commit in commits {
+        push(&mut items, commit);
+    }
+    items
+}
+
+/// A run of commits in the Activity thread: who added them and when, then
+/// one row per commit that opens its diff beside the pull request.
+fn commit_run(
+    run: &[&zeron_proto::GitHistoryCommit],
+    theme: &Theme,
+    cx: &mut Context<PullRequestDetailPage>,
+) -> AnyElement {
+    let Some(last) = run.last() else {
+        return gpui::Empty.into_any_element();
+    };
+    let author = run
+        .iter()
+        .all(|commit| commit.author_name == last.author_name)
+        .then_some(last.author_name.as_str())
+        .filter(|name| !name.is_empty());
+    let count = format!(
+        "{} {}",
+        run.len(),
+        if run.len() == 1 { "commit" } else { "commits" }
+    );
+    let header = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .size(px(24.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(theme.glass_hover())
+                .child(
+                    crate::icons::icon(crate::icons::GIT_COMMIT)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                ),
+        )
+        // One line of text at one size: a smaller time never sits on the
+        // same line as the name in every UI font.
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_baseline()
+                .gap(px(4.0))
+                .text_size(crate::typography::ui_rems(12.5))
+                .line_height(crate::typography::ui_rems(16.0))
+                .when_some(author, |el, author| {
+                    el.child(
+                        div()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(author.to_owned()),
+                    )
+                })
+                .child(div().text_color(theme.text_muted).child(match author {
+                    Some(_) => format!("added {count}"),
+                    None => format!("Added {count}"),
+                }))
+                .child(
+                    div()
+                        .ml(px(4.0))
+                        .text_color(theme.text_muted)
+                        .child(activity_time(&last.authored_at)),
+                ),
+        );
+    let rows = run.iter().map(|commit| {
+        let short: String = commit.sha.chars().take(7).collect();
+        let subject = commit.subject.clone();
+        let open = (*commit).clone();
+        div()
+            .id(SharedString::from(format!("pr-commit-{}", commit.sha)))
+            .debug_selector({
+                let short = short.clone();
+                move || format!("pr-commit-{short}")
+            })
+            .role(gpui::Role::Button)
+            .aria_label(format!("Open commit {short}: {subject}"))
+            .tab_index(0)
+            .h(px(28.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(7.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.ink(0.05)))
+            .tooltip(widgets::text_tooltip(subject.clone()))
+            .child(
+                div()
+                    .size(px(6.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(theme.text_muted.opacity(0.6)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.5))
+                    .child(subject),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .child(short),
+            )
+            .on_click(cx.listener(move |page, _, _, cx| {
+                cx.emit(PullRequestDetailEvent::OpenCommit {
+                    url: page.url.clone(),
+                    device: page.target.clone(),
+                    commit: open.clone(),
+                });
+            }))
+    });
+    div()
+        .id(SharedString::from(format!("pr-commit-run-{}", last.sha)))
+        .w(gpui::relative(0.9))
+        .min_w_0()
+        .mb(px(24.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(header)
+        // Rows line up with the header's text, past the glyph.
+        .child(div().pl(px(24.0)).flex().flex_col().children(rows))
+        .into_any_element()
 }
 
 fn activity_time(raw: &str) -> String {
@@ -1990,13 +2300,20 @@ impl Render for PullRequestDetailPage {
                     }
                     Tab::Activity => {
                         let mut activity: Vec<_> = detail.activity_comments().enumerate().collect();
-                        activity.sort_by_key(|(_, comment)| {
-                            if comment.created_at.is_empty() {
-                                &comment.submitted_at
-                            } else {
-                                &comment.created_at
-                            }
-                        });
+                        activity.sort_by_key(|(_, comment)| comment_time(comment));
+                        let commits_pending = self.commits.is_none() && self.commits_task.is_some();
+                        let truncated = self
+                            .commits
+                            .as_ref()
+                            .is_some_and(|commits| commits.truncated);
+                        // GitHub lists commits newest first; the thread reads
+                        // oldest first.
+                        let timeline = activity_timeline(
+                            activity,
+                            self.commits
+                                .iter()
+                                .flat_map(|commits| commits.commits.iter().rev()),
+                        );
                         // The thread keeps the same 24px under the header as the
                         // Summary's first card.
                         let mut thread = div()
@@ -2008,10 +2325,17 @@ impl Render for PullRequestDetailPage {
                             .pl(px(8.0))
                             .flex()
                             .flex_col()
-                            .when(detail.review_threads.is_none() && !activity.is_empty(), |thread| thread.child(
+                            .when(detail.review_threads.is_none() && !timeline.is_empty(), |thread| thread.child(
                                 div().mb(px(16.0)).text_color(theme.text_muted)
                                     .child("Inline review threads are unavailable. Refresh or open this pull request on GitHub to read them.")));
-                        if activity.is_empty() {
+                        if truncated {
+                            thread = thread.child(
+                                div().mb(px(16.0)).text_color(theme.text_muted).child(
+                                    "GitHub lists only this pull request’s first 250 commits.",
+                                ),
+                            );
+                        }
+                        if timeline.is_empty() && !commits_pending {
                             thread = thread
                                 .pl_0()
                                 .flex_1()
@@ -2061,7 +2385,14 @@ impl Render for PullRequestDetailPage {
                                 })
                                 .map(|comment| comment.author.login.as_str())
                         });
-                        for (index, comment) in activity {
+                        for item in timeline {
+                            let (index, comment) = match item {
+                                TimelineItem::Comment(index, comment) => (index, comment),
+                                TimelineItem::Commits(run) => {
+                                    thread = thread.child(commit_run(&run, &theme, cx));
+                                    continue;
+                                }
+                            };
                             let own = comment.viewer_did_author
                                 || viewer_login.is_some_and(|login| {
                                     login.eq_ignore_ascii_case(&comment.author.login)
@@ -2241,6 +2572,33 @@ impl Render for PullRequestDetailPage {
                                     ),
                             );
                         }
+                        if commits_pending {
+                            thread = thread.child(
+                                div()
+                                    .id("pr-commits-loading")
+                                    .debug_selector(|| "pr-commits-loading".into())
+                                    .mb(px(24.0))
+                                    .text_color(theme.text_muted)
+                                    .child("Loading commits…"),
+                            );
+                        }
+                        if let Some(error) = &self.commits_error {
+                            thread = thread.child(
+                                div()
+                                    .mb(px(24.0))
+                                    .flex()
+                                    .flex_col()
+                                    .items_start()
+                                    .gap(px(8.0))
+                                    .child(widgets::error_strip(&theme, error.clone()))
+                                    .child(
+                                        action("pr-retry-commits", "Retry commits", &theme)
+                                            .on_click(cx.listener(|page, _, _, cx| {
+                                                page.load_commits(true, cx)
+                                            })),
+                                    ),
+                            );
+                        }
                         column = column.child(thread);
                     }
                 }
@@ -2290,6 +2648,8 @@ impl Render for PullRequestDetailPage {
                 ));
             }
             let scroll = self.scroll.scroll.clone();
+            // Code virtualizes its own list.
+            let scrolls = self.tab != Tab::Code;
             let rail = crate::popover::rail(self, "pr-detail-scrollbar", &theme, cx);
             div()
                 .id("pr-detail-scroll-host")
@@ -2330,14 +2690,14 @@ impl Render for PullRequestDetailPage {
                             .id("pr-detail-scroll")
                             .debug_selector(|| "pr-detail-scroll".into())
                             .size_full()
-                            .when(self.tab != Tab::Code, |el| el.overflow_y_scroll())
-                            .when(self.tab == Tab::Code, |el| el.overflow_hidden())
+                            .when(scrolls, |el| el.overflow_y_scroll())
+                            .when(!scrolls, |el| el.overflow_hidden())
                             .track_scroll(&scroll)
                             .child(column),
                     )
                     .fade_overflow_y(&scroll),
                 )
-                .when(self.tab != Tab::Code, |el| el.children(rail))
+                .when(scrolls, |el| el.children(rail))
                 .into_any_element()
         };
         let navigation = self.navigation(&theme, cx);
@@ -2460,6 +2820,7 @@ mod tests {
             fetched: Instant::now(),
             diff: None,
             diff_refresh_owed: false,
+            commits: None,
         }
     }
 
@@ -2752,6 +3113,189 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rpc.completed(), 2);
+    }
+
+    fn pr_commit(sha: String) -> zeron_proto::GitHistoryCommit {
+        zeron_proto::GitHistoryCommit {
+            subject: format!("Commit {}", &sha[..7]),
+            sha,
+            parent_shas: Vec::new(),
+            author_name: "Ada".into(),
+            author_email: "ada@example.com".into(),
+            authored_at: "2026-09-01T10:00:00Z".into(),
+            refs: Vec::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn pull_request_commits_load_once_per_head(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let listed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = ScriptedRpc::new({
+            let listed = listed.clone();
+            move |method, params| {
+                let listed = listed.clone();
+                async move {
+                    let head = params["headRefOid"]
+                        .as_str()
+                        .map_or_else(|| "a".repeat(40), str::to_owned);
+                    match method.as_str() {
+                        methods::GET_CHANGE_REQUEST => {
+                            zeron_rpc::RpcReply::value(&ChangeRequestDetail {
+                                head_ref_oid: head,
+                                base_ref_oid: "d".repeat(40),
+                                ..Default::default()
+                            })
+                        }
+                        methods::LIST_CHANGE_REQUEST_COMMITS => {
+                            // The listing is keyed by the head alone.
+                            assert!(params.get("baseRefOid").is_none());
+                            listed
+                                .lock()
+                                .unwrap()
+                                .push((head.clone(), params["refresh"] == true));
+                            zeron_rpc::RpcReply::value(&ChangeRequestCommits {
+                                commits: vec![pr_commit(head), pr_commit("c".repeat(40))],
+                                truncated: false,
+                            })
+                        }
+                        _ => panic!("unexpected RPC {method}"),
+                    }
+                }
+            }
+        });
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            PullRequestDetailPage::new(
+                fixture::state(cx, Some(rpc.client())),
+                "https://github.com/a/b/pull/1".into(),
+                None,
+                Rc::new(RefCell::new(PullRequestCache::default())),
+                None,
+                window,
+                cx,
+            )
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| page.detail.is_some())
+        });
+        page.update(cx, |page, cx| page.select_tab(Tab::Activity, cx));
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| page.commits.is_some())
+        });
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.commits_head(), Some("a".repeat(40).as_str()));
+        });
+        // The commits join the conversation, one row each.
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("pr-commit-aaaaaaa").is_some());
+        assert!(cx.debug_bounds("pr-commit-ccccccc").is_some());
+        assert!(cx.debug_bounds("pr-activity-empty").is_none());
+        // Coming back to the tab reuses the listing.
+        page.update(cx, |page, cx| {
+            page.select_tab(Tab::Summary, cx);
+            page.select_tab(Tab::Activity, cx);
+            assert!(page.commits_task.is_none());
+        });
+        // A push replaces it with the new head's, bypassing the engine cache.
+        page.update(cx, |page, cx| {
+            page.update_board_preview(board_preview(&"b".repeat(40)), cx);
+            assert!(page.commits.is_none());
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
+                page.commits_head() == Some("b".repeat(40).as_str())
+            })
+        });
+        assert_eq!(
+            *listed.lock().unwrap(),
+            [("a".repeat(40), false), ("b".repeat(40), true)]
+        );
+    }
+
+    #[test]
+    fn activity_timeline_folds_commits_between_comments() {
+        let comment = |at: &str| zeron_proto::ChangeRequestComment {
+            created_at: at.into(),
+            ..Default::default()
+        };
+        let commit = |sha: &str, at: &str| zeron_proto::GitHistoryCommit {
+            authored_at: at.into(),
+            ..pr_commit(sha.repeat(40))
+        };
+        let comments = [
+            comment("2026-09-02T10:00:00Z"),
+            comment("2026-09-04T10:00:00Z"),
+        ];
+        let commits = [
+            commit("a", "2026-09-01T10:00:00Z"),
+            commit("b", "2026-09-01T12:00:00+02:00"),
+            commit("c", "2026-09-03T10:00:00Z"),
+            commit("d", "2026-09-05T10:00:00Z"),
+        ];
+        let shape: Vec<_> = activity_timeline(comments.iter().enumerate().collect(), &commits)
+            .into_iter()
+            .map(|item| match item {
+                TimelineItem::Comment(index, _) => format!("comment {index}"),
+                TimelineItem::Commits(run) => run
+                    .iter()
+                    .map(|commit| &commit.sha[..1])
+                    .collect::<Vec<_>>()
+                    .join(""),
+            })
+            .collect();
+        assert_eq!(shape, ["ab", "comment 0", "c", "comment 1", "d"]);
+    }
+
+    #[gpui::test]
+    fn pull_request_commit_rows_ask_the_host_to_open_them(cx: &mut gpui::TestAppContext) {
+        fixture::init(cx);
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            let mut page = PullRequestDetailPage::new(
+                fixture::state(cx, None),
+                "https://github.com/a/b/pull/1".into(),
+                Some("remote-device".into()),
+                Rc::new(RefCell::new(PullRequestCache::default())),
+                None,
+                window,
+                cx,
+            );
+            page.error = None;
+            page.detail = Some(ChangeRequestDetail::default());
+            page.commits = Some(ChangeRequestCommits {
+                commits: vec![pr_commit("c".repeat(40))],
+                truncated: false,
+            });
+            page.tab = Tab::Activity;
+            page
+        });
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|_, cx| {
+            let opened = opened.clone();
+            cx.subscribe(&page, move |_, event: &PullRequestDetailEvent, _| {
+                let PullRequestDetailEvent::OpenCommit {
+                    url,
+                    device,
+                    commit,
+                } = event;
+                opened
+                    .borrow_mut()
+                    .push((url.clone(), device.clone(), commit.sha.clone()));
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx.debug_bounds("pr-commit-ccccccc").unwrap();
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            *opened.borrow(),
+            [(
+                "https://github.com/a/b/pull/1".to_owned(),
+                Some("remote-device".to_owned()),
+                "c".repeat(40)
+            )]
+        );
     }
 
     fn board_preview(head: &str) -> ChangeRequestListItem {

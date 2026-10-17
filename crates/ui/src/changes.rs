@@ -827,6 +827,33 @@ pub fn line_anchor(line: &DiffLine) -> Option<(CommentSide, u32)> {
 
 /// The diff shown for a chat: `checkout_id` match first, then device+cwd,
 /// then cwd alone (§1.11).
+/// A pull request commit's patch in the checkout-capture shape the pane
+/// renders. The SHA stands in for the checksum: the patch never changes.
+fn change_request_commit_diff(
+    checkout_id: String,
+    device_id: String,
+    sha: String,
+    patch: String,
+) -> CheckoutDiff {
+    let (additions, deletions) = parse_patch(&patch)
+        .iter()
+        .fold((0, 0), |(additions, deletions), file| {
+            (additions + file.additions, deletions + file.deletions)
+        });
+    CheckoutDiff {
+        checkout_id,
+        device_id,
+        cwd: String::new(),
+        patch,
+        files: Vec::new(),
+        additions,
+        deletions,
+        truncated: false,
+        checksum: sha,
+        updated_at: chrono::Utc::now(),
+    }
+}
+
 pub fn resolve_diff<'a>(diffs: &'a [CheckoutDiff], chat: &Chat) -> Option<&'a CheckoutDiff> {
     if let Some(checkout_id) = chat.checkout_id.as_deref()
         && let Some(diff) = diffs.iter().find(|d| d.checkout_id == checkout_id)
@@ -1695,7 +1722,18 @@ pub struct Changes {
     /// Pinned commit for a [`DiffScope::Commit`] pane (sha + subject drive
     /// the fetch and the surface-tab title).
     commit: Option<GitHistoryCommit>,
+    /// Set when the pinned commit belongs to a pull request and is read from
+    /// GitHub rather than from the selected chat's checkout.
+    change_request: Option<ChangeRequestCommitSource>,
     _observe: Subscription,
+}
+
+/// Where a pull request's commit is read: the pull request, through the
+/// device whose `gh` fetches it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChangeRequestCommitSource {
+    url: String,
+    device: Option<String>,
 }
 
 /// Events the host (the right pane's surface strip) listens for.
@@ -1786,6 +1824,7 @@ impl Changes {
             history_view_button: None,
             history_events: None,
             commit: None,
+            change_request: None,
             _observe: observe,
         }
     }
@@ -1801,6 +1840,33 @@ impl Changes {
         changes.scope = DiffScope::Commit;
         changes.commit = Some(commit);
         changes
+    }
+
+    /// A pane pinned to one of a pull request's commits. The patch comes from
+    /// GitHub through `device`, so it needs neither a chat nor a checkout;
+    /// without one there is nothing to comment on or open locally.
+    pub fn for_change_request_commit(
+        state: Entity<AppState>,
+        url: String,
+        device: Option<String>,
+        commit: GitHistoryCommit,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut changes = Self::for_commit(state, commit, cx);
+        changes.change_request = Some(ChangeRequestCommitSource { url, device });
+        changes
+    }
+
+    /// The pull request commit this pane shows, as `(url, sha)`.
+    pub fn change_request_commit(&self) -> Option<(&str, &str)> {
+        let source = self.change_request.as_ref()?;
+        let commit = self.commit.as_ref()?;
+        Some((source.url.as_str(), commit.sha.as_str()))
+    }
+
+    /// The pinned commit's patch is still on its way.
+    pub fn is_loading(&self) -> bool {
+        self.scoped_inflight.is_some()
     }
 
     /// A dedicated History surface. It shares the commit-opening event path
@@ -1834,6 +1900,9 @@ impl Changes {
     /// Without this the local stream simply never carries the remote checkout
     /// and the pane sits on "Preparing diff…" forever (user report).
     fn desired_target(&self, cx: &App) -> Option<String> {
+        if let Some(source) = &self.change_request {
+            return source.device.clone();
+        }
         let state = self.state.read(cx);
         let device = state.selected_chat_row()?.device_id.clone();
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
@@ -1843,6 +1912,10 @@ impl Changes {
     /// Retries with a flat 2 s delay if the stream fails or ends; the last
     /// content stays visible under an error banner meanwhile.
     pub fn ensure_watch(&mut self, cx: &mut Context<Self>) {
+        // A pull request commit never changes; there is no checkout to watch.
+        if self.change_request.is_some() {
+            return;
+        }
         let target = self.desired_target(cx);
         if self.started && self.watch_target == target {
             return;
@@ -2066,6 +2139,10 @@ impl Changes {
             self.scoped_task = None;
             return;
         }
+        if let Some(source) = self.change_request.clone() {
+            self.ensure_change_request_diff(source, cx);
+            return;
+        }
         let Some(chat_id) = self
             .state
             .read(cx)
@@ -2154,6 +2231,86 @@ impl Changes {
                     Ok(diff) => {
                         changes.scoped = Some(diff);
                         changes.scoped_error = None;
+                    }
+                    Err(err) => {
+                        changes.scoped = None;
+                        changes.scoped_error = Some(err.to_string().into());
+                    }
+                }
+                changes.scoped_for = Some(key);
+                changes.sync(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// GitHub's patch for a pull request commit, fetched once (the SHA pins
+    /// it) and shaped like a checkout capture so the pane renders it as one.
+    fn ensure_change_request_diff(
+        &mut self,
+        source: ChangeRequestCommitSource,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sha) = self.commit.as_ref().map(|commit| commit.sha.clone()) else {
+            return;
+        };
+        let key = format!(
+            "{}|{}|{sha}",
+            source.device.as_deref().unwrap_or("local"),
+            source.url
+        );
+        if self.scoped_for.as_deref() == Some(key.as_str())
+            || self.scoped_inflight.as_deref() == Some(key.as_str())
+        {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.scoped_inflight = Some(key.clone());
+        self.scoped_task = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::json!({ "url": source.url, "sha": sha });
+            if let Some(device) = &source.device {
+                params["targetDeviceId"] = device.clone().into();
+            }
+            let result = engine
+                .client()
+                .call(methods::GET_CHANGE_REQUEST_COMMIT_DIFF, params)
+                .await
+                .and_then(|value| {
+                    serde_json::from_value::<String>(value)
+                        .map_err(|e| zeron_rpc::RpcError::Failed(e.to_string()))
+                });
+            let result = match result {
+                Ok(patch) => {
+                    let checkout_id = format!("{}#{sha}", source.url);
+                    let device_id = source.device.clone().unwrap_or_default();
+                    Ok(cx
+                        .background_executor()
+                        .spawn(async move {
+                            change_request_commit_diff(checkout_id, device_id, sha, patch)
+                        })
+                        .await)
+                }
+                Err(err) => Err(err),
+            };
+            this.update(cx, |changes, cx| {
+                if changes.scoped_inflight.as_deref() != Some(key.as_str()) {
+                    return; // superseded
+                }
+                changes.scoped_inflight = None;
+                match result {
+                    Ok(diff) => {
+                        changes.scoped = Some(diff);
+                        changes.scoped_error = None;
+                    }
+                    Err(zeron_rpc::RpcError::UnknownMethod(_)) => {
+                        changes.scoped = None;
+                        changes.scoped_error = Some(
+                            "The pull request's device is running an older Zeron — update it to view this commit"
+                                .into(),
+                        );
                     }
                     Err(err) => {
                         changes.scoped = None;
@@ -2706,6 +2863,11 @@ impl Changes {
 
     /// Cloned because rendering borrows `self` mutably a moment later.
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
+        // Notes stage onto a chat's composer about its checkout; a pull
+        // request commit has neither.
+        if self.change_request.is_some() {
+            return Vec::new();
+        }
         let state = self.state.read(cx);
         state
             .review_comments(&state.composer_key())
@@ -2819,6 +2981,7 @@ impl Changes {
         anchor: Option<(CommentSide, u32)>,
         cx: &mut Context<Self>,
     ) {
+        let anchor = anchor.filter(|_| self.change_request.is_none());
         let next = anchor.map(|(side, line)| HoverRow {
             path: path.to_string(),
             side,
@@ -3111,7 +3274,13 @@ impl Changes {
         });
 
         let active = self.active_diff(cx);
-        let engine = self.state.read(cx).engine().cloned();
+        // A pull request commit has no checkout to read whole files from;
+        // its hunks highlight from the excerpt alone.
+        let engine = self
+            .change_request
+            .is_none()
+            .then(|| self.state.read(cx).engine().cloned())
+            .flatten();
         let target = self.desired_target(cx);
         let chat_id = self
             .state
@@ -3614,32 +3783,37 @@ impl Changes {
                         .child(SharedString::from(format!("−{dels}"))),
                 )
             })
-            .child(
-                div()
-                    .id(("diff-open-file", ix))
-                    .flex_none()
-                    .size(px(crate::surface_chrome::CONTROL_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-                    .hover(|s| s.bg(theme.ink(0.08)))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(ChangesEvent::OpenFile(path.clone()));
-                    }))
-                    .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Open in file browser")).into())
-                    .tooltip_show_delay(Duration::from_millis(350))
-                    .child(
-                        crate::icons::icon(crate::icons::DOCUMENT)
-                            .size(px(crate::surface_chrome::ICON_SIZE))
-                            .text_color(theme.text_muted),
-                    ),
-            )
+            // A pull request commit's files may not exist on this device.
+            .when(self.change_request.is_none(), |el| {
+                el.child(
+                    div()
+                        .id(("diff-open-file", ix))
+                        .flex_none()
+                        .size(px(crate::surface_chrome::CONTROL_SIZE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+                        .hover(|s| s.bg(theme.ink(0.08)))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(ChangesEvent::OpenFile(path.clone()));
+                        }))
+                        .tooltip(|_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Open in file browser")).into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(350))
+                        .child(
+                            crate::icons::icon(crate::icons::DOCUMENT)
+                                .size(px(crate::surface_chrome::ICON_SIZE))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -5062,7 +5236,8 @@ impl Render for Changes {
         let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let no_chat =
+            self.change_request.is_none() && self.state.read(cx).selected_chat_row().is_none();
         let phase = if no_chat {
             DiffPhase::Clean
         } else {
@@ -5216,6 +5391,76 @@ impl Render for Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[gpui::test]
+    fn pull_request_commit_diff_loads_from_github_without_a_chat(cx: &mut gpui::TestAppContext) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, Default::default());
+        let url = "https://github.com/a/b/pull/1";
+        let sha = "c".repeat(40);
+        let rpc = ScriptedRpc::new({
+            let sha = sha.clone();
+            move |method, params| {
+                let sha = sha.clone();
+                async move {
+                    assert_eq!(method, methods::GET_CHANGE_REQUEST_COMMIT_DIFF);
+                    assert_eq!(params["url"], url);
+                    assert_eq!(params["sha"], sha);
+                    assert_eq!(params["targetDeviceId"], "remote-device");
+                    zeron_rpc::RpcReply::value(
+                        &"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1,2 @@\n-old\n+new\n+more\n",
+                    )
+                }
+            }
+        });
+        let commit = GitHistoryCommit {
+            sha: sha.clone(),
+            parent_shas: Vec::new(),
+            subject: "Teach the pane GitHub".into(),
+            author_name: "Ada".into(),
+            author_email: "ada@example.com".into(),
+            authored_at: "2026-09-01T10:00:00Z".into(),
+            refs: Vec::new(),
+        };
+        let changes = cx.update(|cx| {
+            let state = fixture::state(cx, Some(rpc.client()));
+            cx.new(|cx| {
+                Changes::for_change_request_commit(
+                    state,
+                    url.into(),
+                    Some("remote-device".into()),
+                    commit,
+                    cx,
+                )
+            })
+        });
+        changes.update(cx, |changes, cx| {
+            changes.ensure_content(cx);
+            assert!(changes.is_loading());
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            changes.read_with(cx, |changes, _| changes.parsed.is_some())
+        });
+        changes.update(cx, |changes, cx| {
+            let parsed = changes.parsed.as_ref().unwrap();
+            assert_eq!(
+                (parsed.additions, parsed.deletions, parsed.file_count),
+                (2, 1, 1)
+            );
+            assert_eq!(changes.tab_title(), "Teach the pane GitHub");
+            assert_eq!(changes.change_request_commit(), Some((url, sha.as_str())));
+            assert!(!changes.is_loading());
+            // Nothing to stage notes onto, and the SHA pins the patch.
+            assert!(changes.staged_comments(cx).is_empty());
+            changes.set_hover("a.rs", Some((CommentSide::New, 1)), cx);
+            assert!(changes.hover.is_none());
+            changes.ensure_content(cx);
+            assert!(!changes.is_loading());
+        });
+        assert_eq!(rpc.completed(), 1);
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(
