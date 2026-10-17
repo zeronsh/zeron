@@ -23,10 +23,10 @@ pub(crate) enum FileLinkResolution {
 /// The first root in `roots` that owns `target`. Roots are tried in order —
 /// the linking chat's own checkout first — so the search only widens for a
 /// target the own root cannot own: an absolute path inside the parent
-/// chat's checkout, say. An absolute path every root declines is still a file
-/// link: the linking chat reads it read-only as a host file
-/// ([`FileLinkResolution::Outside`]). A relative target stays
-/// inside-or-unresolved, as before.
+/// chat's checkout, say. A POSIX-absolute path every root declines is still a
+/// file link: the linking chat reads it read-only as a host file
+/// ([`FileLinkResolution::Outside`]). A relative target or a drive path stays
+/// inside-or-unresolved.
 pub(crate) fn first_root_owning<'a>(
     target: &str,
     roots: impl IntoIterator<Item = &'a str>,
@@ -61,10 +61,12 @@ pub(crate) fn first_root_owning<'a>(
                     });
                 }
             }
-            Some(FileLinkResolution::Outside(WorkspaceFileLink {
-                outside: true,
-                ..classified.link
-            }))
+            (!is_drive_path(&classified.link.path)).then(|| {
+                FileLinkResolution::Outside(WorkspaceFileLink {
+                    outside: true,
+                    ..classified.link
+                })
+            })
         }
     }
 }
@@ -97,6 +99,11 @@ impl FileLinkRoot {
     /// The on-disk path `link` names under this root — never built from the
     /// raw link text, always from the resolved root join.
     pub(crate) fn absolute(&self, link: &WorkspaceFileLink) -> PathBuf {
+        // A drive root keeps its own separator on any viewer.
+        if is_drive_path(&self.root) {
+            let root = self.root.trim_end_matches(['\\', '/']);
+            return PathBuf::from(format!("{root}\\{}", link.path.replace('/', "\\")));
+        }
         Path::new(&self.root).join(&link.path)
     }
 }
@@ -174,9 +181,13 @@ pub(crate) fn resolve_inline_code_path(
     } else {
         Cow::Borrowed(raw)
     };
+    // A drive path (Windows) is checked and probed in its `/` spelling; a
+    // bare drive root is not a path the text names.
+    let drive = (cfg!(windows) && is_drive_path(&decoded) && decoded.len() > 3)
+        .then(|| decoded.replace('\\', "/"));
     // The trailing slash of a directory the text introduces ("all under
     // `dir/`:") is presentation, not part of the path.
-    let decoded = decoded.trim_end_matches('/');
+    let decoded = drive.as_deref().unwrap_or(&decoded).trim_end_matches('/');
     if decoded.is_empty() || !clean_path(decoded) {
         return None;
     }
@@ -190,13 +201,21 @@ pub(crate) fn resolve_inline_code_path(
         None => String::new(),
     };
     let file = |path: &Path| {
-        // File links are POSIX-only: a drive path (Windows) would become a
-        // target the link grammar rejects, turning the span into a dead link,
-        // so it keeps its inline-code look instead.
+        // A POSIX path is the URL path as-is; a drive path takes the
+        // `file:///C:/…` form. Anything else would be a dead link, so it
+        // keeps its inline-code look instead.
         let path = path.to_string_lossy();
-        path.starts_with('/').then(|| {
-            InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path)))
-        })
+        let url_path = if path.starts_with('/') {
+            path.into_owned()
+        } else if is_drive_path(&path) {
+            format!("/{}", path.replace('\\', "/"))
+        } else {
+            return None;
+        };
+        Some(InlineCodePath::File(format!(
+            "file://{}{anchor}",
+            percent_encode_path(&url_path)
+        )))
     };
     if let Some(rest) = decoded.strip_prefix("~/") {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
@@ -206,6 +225,14 @@ pub(crate) fn resolve_inline_code_path(
         return None;
     }
     if Path::new(decoded).has_root() {
+        // A drive path links only inside a root (see `ClassifiedKind::Absolute`).
+        if drive.is_some()
+            && !roots
+                .iter()
+                .any(|root| root.local && resolve_decoded_path(decoded, &root.root).is_some())
+        {
+            return None;
+        }
         return probe_path(Path::new(decoded), probes, file);
     }
     if has_url_scheme(decoded) {
@@ -265,8 +292,9 @@ enum ClassifiedKind {
     Mention,
     /// Root-relative path.
     Relative,
-    /// POSIX-absolute path — inside a root when one owns it, a host file
-    /// read-only otherwise.
+    /// Absolute path (POSIX, or a drive path in `/` spelling) — inside a
+    /// root when one owns it, else a host file read-only. Host files open by
+    /// POSIX path only, so a drive path outside every root is not a link.
     Absolute,
 }
 
@@ -298,6 +326,7 @@ pub(crate) fn resolve_workspace_file_link(
                     path,
                     ..classified.link
                 },
+                None if is_drive_path(&classified.link.path) => return None,
                 None => WorkspaceFileLink {
                     outside: true,
                     ..classified.link
@@ -368,11 +397,19 @@ fn classify_file_link(target: &str) -> Option<ClassifiedLink> {
     } else {
         Cow::Borrowed(raw)
     };
+    // `file:///C:/x` carries its drive behind the URL path's leading slash.
+    let unslashed = decoded.strip_prefix('/').filter(|_| file_url);
+    let drive = is_drive_path(unslashed.unwrap_or(&decoded));
+    let decoded: Cow<str> = if drive {
+        Cow::Owned(unslashed.unwrap_or(&decoded).replace('\\', "/"))
+    } else {
+        decoded
+    };
     if decoded.is_empty() || !clean_path(&decoded) {
         return None;
     }
-    let kind = if decoded.starts_with('/') {
-        // Absolute POSIX path: one leading slash, not the root itself, and
+    let kind = if drive || decoded.starts_with('/') {
+        // Absolute path (`/x` or `C:/x`): no `//`, not the root itself, and
         // no trailing slash. A plain absolute path also wants a `.` in its
         // file name (`/usr/bin/ls` stays plain text); `file://` is exempt.
         if decoded.len() == 1
@@ -553,6 +590,20 @@ fn parse_line_column(value: &str) -> Option<(u32, Option<u32>)> {
 /// only its workspace-relative remainder, anything else must already be a
 /// clean relative path. Returns `None` when the path escapes the root.
 fn resolve_decoded_path(target: &str, root: &str) -> Option<String> {
+    // A drive path compares by shape, case-insensitively: a Windows host's
+    // paths reach viewers whose `Path` has no notion of drives.
+    if is_drive_path(target) {
+        if !is_drive_path(root) {
+            return None;
+        }
+        let root = root.replace('\\', "/");
+        let root = root.trim_end_matches('/');
+        let rest = target.get(root.len()..)?.strip_prefix('/')?;
+        return target[..root.len()]
+            .eq_ignore_ascii_case(root)
+            .then(|| safe_relative_path(Path::new(rest)))
+            .flatten();
+    }
     let root = Path::new(root);
     // A remote engine may supply POSIX paths to a Windows viewport. A leading
     // slash has a root on Windows, but is_absolute() also requires a drive;
@@ -589,6 +640,15 @@ fn clean_path(path: &str) -> bool {
             .split('/')
             .enumerate()
             .all(|(index, part)| !(part.is_empty() && index != 0) && !matches!(part, "." | ".."))
+}
+
+/// Drive-rooted (`C:\x`, `C:/x`) by shape, whatever the viewer's OS.
+pub(crate) fn is_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 fn file_name(path: &str) -> &str {
@@ -931,6 +991,86 @@ mod tests {
             first_root_owning("file:///elsewhere/notes.md", roots),
             Some(FileLinkResolution::Outside(link)) if link.path == "/elsewhere/notes.md"
         ));
+    }
+
+    #[test]
+    fn drive_paths_link_only_inside_a_root() {
+        let roots = ["/elsewhere", "C:\\Users\\dev\\repo"];
+        for target in [
+            "C:\\Users\\dev\\repo\\src\\main.rs:12",
+            "C:/Users/dev/repo/src/main.rs#L12",
+            "c:/users/DEV/repo/src/main.rs:12",
+            "file:///C:/Users/dev/repo/src/main.rs:12",
+            "file:///C%3A/Users/dev/repo/src/main.rs#L12",
+        ] {
+            assert!(
+                resolution_eq(
+                    first_root_owning(target, roots),
+                    owned(1, link("src/main.rs", Some(12), None))
+                ),
+                "{target}"
+            );
+        }
+        // Outside every root (a sibling sharing the root's prefix included),
+        // drive roots, folders and traversal are not links.
+        for target in [
+            "C:\\Users\\dev\\notes.md",
+            "C:/Users/dev/repo-old/a.rs",
+            "C:\\",
+            "C:/",
+            "C:/Users/dev/repo/src",
+            "C:/Users/dev/repo/../x.rs",
+        ] {
+            assert!(first_root_owning(target, roots).is_none(), "{target}");
+        }
+        // Joined back onto the root without mixing separators.
+        let root = FileLinkRoot {
+            chat: None,
+            root: "C:\\Users\\dev\\repo\\".into(),
+            local: true,
+        };
+        assert_eq!(
+            root.absolute(&link("src/main.rs", None, None)),
+            PathBuf::from("C:\\Users\\dev\\repo\\src\\main.rs")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inline_code_drive_paths_link_inside_a_local_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("checkout");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src\\main.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("notes.md"), "x").unwrap();
+        let root = root.to_string_lossy().into_owned();
+        let local = vec![FileLinkRoot {
+            chat: Some("chat".into()),
+            root: root.clone(),
+            local: true,
+        }];
+        let mut probes = PathProbes::default();
+        for span in [format!("{root}\\src\\main.rs:3"), "src/main.rs:3".into()] {
+            let Some(InlineCodePath::File(target)) =
+                resolve_inline_code_path(&span, &local, &[], &mut probes)
+            else {
+                panic!("{span} is not a file link");
+            };
+            assert!(
+                resolution_eq(
+                    first_root_owning(&target, [root.as_str()]),
+                    owned(0, link("src/main.rs", Some(3), None))
+                ),
+                "{span} -> {target}"
+            );
+        }
+        let outside = dir.path().join("notes.md").to_string_lossy().into_owned();
+        for span in [outside.as_str(), "C:\\", "C:/", "C:"] {
+            assert!(
+                resolve_inline_code_path(span, &local, &[], &mut probes).is_none(),
+                "{span}"
+            );
+        }
     }
 
     #[cfg(unix)]
