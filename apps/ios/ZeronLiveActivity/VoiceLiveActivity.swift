@@ -212,31 +212,6 @@ private struct ControlFace: View {
     }
 }
 
-// MARK: Style
-
-/// The app's faces (Geist), bundled with the extension.
-private enum Face {
-    static func sans(_ size: CGFloat) -> Font { .custom("Geist-Medium", size: size) }
-    static func mono(_ size: CGFloat) -> Font { .custom("GeistMono-Medium", size: size) }
-}
-
-/// Zeron Dark/Light accents (`Palette`), as the app paints them.
-private enum Tone {
-    static let accent = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: 0x8B7CF6) : UIColor(hex: 0x5B43E8) })
-    static let warning = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: 0xFACC15) : UIColor(hex: 0xA16207) })
-}
-
-private extension UIColor {
-    convenience init(hex: UInt32) {
-        self.init(
-            red: CGFloat(hex >> 16 & 0xFF) / 255,
-            green: CGFloat(hex >> 8 & 0xFF) / 255,
-            blue: CGFloat(hex & 0xFF) / 255,
-            alpha: 1
-        )
-    }
-}
-
 #if DEBUG
 #Preview("Island", as: .dynamicIsland(.expanded), using: VoiceActivityAttributes(host: "Fedora")) {
     VoiceLiveActivity()

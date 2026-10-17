@@ -160,9 +160,15 @@ jobs:
           # with the ones it finds: ad-hoc sign the app with Zeron.entitlements
           # (push) so the distribution signature keeps them (aps-environment
           # becomes production from the App Store profile).
+          # the widget extension is signed first: the app's signature seals it,
+          # and both need the app group the widgets read their data from.
           app="$RUNNER_TEMP/Zeron.xcarchive/Products/Applications/Zeron.app"
+          appex="$app/PlugIns/ZeronLiveActivity.appex"
+          codesign --force --sign - --entitlements apps/ios/ZeronLiveActivity.entitlements "$appex"
           codesign --force --sign - --entitlements apps/ios/Zeron.entitlements "$app"
           codesign -d --entitlements :- "$app" | grep -q aps-environment
+          codesign -d --entitlements :- "$app" | grep -q group.sh.zeron.ios
+          codesign -d --entitlements :- "$appex" | grep -q group.sh.zeron.ios
 
       - name: Upload to TestFlight
         run: |

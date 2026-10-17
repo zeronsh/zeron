@@ -440,6 +440,19 @@ impl CoreClient {
             .collect())
     }
 
+    /// the logins of every agent CLI on `device_id` with their usage windows.
+    pub async fn list_agent_accounts(
+        &self,
+        device_id: String,
+        force_usage: bool,
+    ) -> CoreResult<Vec<AgentAccount>> {
+        let client = self.client.clone();
+        let snapshot =
+            on_runtime(async move { client.list_agent_accounts(&device_id, force_usage).await })
+                .await?;
+        Ok(snapshot.accounts.into_iter().map(Into::into).collect())
+    }
+
     /// Browse folders on a device (`None` = its home folder).
     pub async fn list_folders(
         &self,

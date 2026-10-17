@@ -42,6 +42,8 @@ final class AppModel {
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
     private(set) var connectivity: Connectivity?
+    /// the registry has applied server state at least once this launch.
+    private(set) var synced = false
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
     private var rows: [String: SessionRow] = [:]
@@ -51,6 +53,8 @@ final class AppModel {
     private var observers: [UUID: () -> Void] = [:]
     private var sessionObservers: [String: [UUID: () -> Void]] = [:]
     private lazy var bridge = ListenerBridge(app: self)
+    private let widgets = WidgetPublisher()
+    private let usage = UsagePoller()
     private var refreshScheduled = false
     private var clock: Timer?
     private let path = NWPathMonitor()
@@ -170,6 +174,12 @@ final class AppModel {
             // Only real accounts persist; dev bearers come from launch args
             // (and would be rejected by the production edge next launch).
             if case .workOs = credentials { Credentials.store(credentials) }
+            // before the first refresh, so its publish carries the usage
+            // restored from the last launch.
+            if let client, !credentials.isDemo {
+                usage.onChange = { [weak self] in self?.scheduleRefresh() }
+                usage.start(client)
+            }
             refreshWorkspace()
             client?.preloadSessions()
             backfillProfile()
@@ -236,6 +246,8 @@ final class AppModel {
         client = nil
         Credentials.clearStored()
         AccountProfile.clear()
+        widgets.clear()
+        usage.stop()
         clock?.invalidate()
         if forgetOnSignOut { try? FileManager.default.removeItem(at: Self.coreDir) }
         forgetOnSignOut = false
@@ -246,6 +258,7 @@ final class AppModel {
         rawProjects = []
         lastHosts = []
         connectivity = nil
+        synced = false
         live = LiveCounts()
         workspaceRevision = 0
         lastDraft = NewSessionDraft()
@@ -346,6 +359,7 @@ final class AppModel {
             sessionObservers[chatId]?.values.forEach { $0() }
         case let .connectivityChanged(c):
             connectivity = c
+            scheduleRefresh()
             observers.values.forEach { $0() }
         case let .authRefreshed(tokens):
             Credentials.updateTokens(tokens)
@@ -368,6 +382,14 @@ final class AppModel {
         guard let client else { return }
         let ws = client.workspace()
         workspaceRevision = ws.revision
+        synced = ws.synced
+        // demo sessions only exist while the demo runs: a widget tap later
+        // would open a chat the next launch can't find.
+        if !isDemo {
+            // hosts come online with the registry, which may land after start.
+            usage.pollIfDue()
+            widgets.publish(ws, usage: usage.accounts, connected: client.connectivity().state == .connected)
+        }
         var all: [String: SessionRow] = [:]
         func vm(_ r: SessionRow) -> SessionRowVM {
             all[r.id] = r

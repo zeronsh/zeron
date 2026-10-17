@@ -7,6 +7,7 @@ protocol AppRouter: AnyObject {
     func presentNewSession(prompt: String?)
     func showSettings()
     func showSearch()
+    func showSessions()
 }
 
 /// iPad shell: Zeron mobile with a sidebar. The sidebar is the phone's
@@ -91,6 +92,8 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
 
     func presentNewSession(prompt: String?) {
         guard !isCollapsed else { return tabs.presentNewSession(prompt: prompt) }
+        // the draft opens in the main column, under whatever sheet is up.
+        if presentedViewController != nil { dismiss(animated: true) }
         showDraft(prompt: prompt, focus: true)
     }
 
@@ -136,6 +139,13 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         guard !isCollapsed else { return tabs.showSearch() }
         if displayMode == .secondaryOnly { show(.primary) }
         sidebar.focusSearch()
+    }
+
+    func showSessions() {
+        guard !isCollapsed else { return tabs.showSessions() }
+        if presentedViewController != nil { dismiss(animated: true) }
+        sidebar.showSessions()
+        show(.primary)
     }
 
     /// A session came on screen in either shell (sidebar, tabs, search):
