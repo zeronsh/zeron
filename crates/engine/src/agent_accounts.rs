@@ -3613,7 +3613,10 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
 }
 
 /// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
-/// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
+/// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`, then any
+/// per-model weekly cap from `limits` (`weekly_scoped`, e.g. Fable), labelled
+/// by the model's display name. A model cap can bind well before the overall
+/// week does, so leaving it out shows headroom the account doesn't have.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let mut windows = Vec::new();
     for (key, label) in [("five_hour", "Session"), ("seven_day", "Week")] {
@@ -3624,6 +3627,28 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
                 label: label.to_string(),
                 used_fraction: (utilization / 100.0) as f32,
                 resets_at: parse_when(w.get("resets_at")),
+            });
+        }
+    }
+    for limit in body
+        .get("limits")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        if limit.get("kind").and_then(|v| v.as_str()) != Some("weekly_scoped") {
+            continue;
+        }
+        if let Some(model) = limit
+            .pointer("/scope/model/display_name")
+            .and_then(|v| v.as_str())
+            .filter(|name| !name.is_empty())
+            && let Some(percent) = limit.get("percent").and_then(|v| v.as_f64())
+        {
+            windows.push(AgentUsageWindow {
+                label: model.to_string(),
+                used_fraction: (percent / 100.0) as f32,
+                resets_at: parse_when(limit.get("resets_at")),
             });
         }
     }
@@ -4214,6 +4239,40 @@ mod tests {
             snapshot.windows[1].resets_at,
             Some(
                 "2026-04-14T16:59:59Z"
+                    .parse::<chrono::DateTime<Utc>>()
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn claude_usage_windows_add_per_model_weekly_limits() {
+        // Observed shape: the per-model cap only appears in `limits`; the
+        // legacy `seven_day_opus`/`seven_day_sonnet` keys stay null.
+        let body = serde_json::json!({
+            "five_hour": { "utilization": 21.0, "resets_at": "2026-10-05T15:00:00Z" },
+            "seven_day": { "utilization": 70.0, "resets_at": "2026-10-07T04:00:00Z" },
+            "seven_day_opus": null,
+            "limits": [
+                { "kind": "session", "group": "session", "percent": 21, "scope": null },
+                { "kind": "weekly_all", "group": "weekly", "percent": 70, "scope": null },
+                {
+                    "kind": "weekly_scoped", "group": "weekly", "percent": 85,
+                    "resets_at": "2026-10-07T04:00:00Z",
+                    "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null },
+                },
+                // A scope without a model has no label to show — skipped.
+                { "kind": "weekly_scoped", "percent": 10, "scope": { "model": null, "surface": "x" } },
+            ],
+        });
+        let snapshot = claude_usage_windows(&body).expect("windows");
+        let labels: Vec<_> = snapshot.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Week", "Fable"]);
+        assert!((snapshot.windows[2].used_fraction - 0.85).abs() < 1e-6);
+        assert_eq!(
+            snapshot.windows[2].resets_at,
+            Some(
+                "2026-10-07T04:00:00Z"
                     .parse::<chrono::DateTime<Utc>>()
                     .unwrap()
             )
