@@ -13701,6 +13701,7 @@ name = "zeron-markdown"
 version = "0.2.113"
 dependencies = [
  "pulldown-cmark",
+ "serde_json",
 ]
 
 [[package]]

@@ -9,3 +9,4 @@ publish.workspace = true
 # desktop transcript and the mobile layout core, so it stays UI-free.
 [dependencies]
 pulldown-cmark.workspace = true
+serde_json.workspace = true
