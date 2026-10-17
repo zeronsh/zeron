@@ -83,6 +83,10 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
 mod pull_request_pane;
+mod right_layout;
+mod right_panes;
+#[cfg(test)]
+mod right_panes_tests;
 mod session_hover_card;
 mod session_info;
 mod session_lanes;
@@ -718,6 +722,7 @@ pub enum RightSurface {
     File(u64),
     Browser(u64),
     Diff(u64),
+    /// Keys [`Shell::right_terminals`].
     Terminal(u64),
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
     /// keys [`Shell::subagent_tabs`].
@@ -726,6 +731,9 @@ pub enum RightSurface {
     /// A pull request opened from the chat — keys [`Shell::chat_pull_requests`].
     PullRequest(u64),
 }
+
+/// One surface tab as its strip draws it: `(surface, title, unsaved, detail)`.
+type RightRow = (RightSurface, SharedString, bool, Option<SharedString>);
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
     if tabs.contains(&surface) {
@@ -775,6 +783,9 @@ pub struct SessionPanels {
     map: std::collections::HashMap<String, ChatPanels>,
     /// Unique surface visits, oldest first, independent of the strip order.
     right_tab_history: std::collections::HashMap<String, Vec<RightSurface>>,
+    /// Split surface hosts. A chat has an entry only while its host holds
+    /// two or more panes; `right_active` is then the focused pane's tab.
+    right_layouts: std::collections::HashMap<String, right_layout::SplitLayout<RightSurface>>,
 }
 
 impl SessionPanels {
@@ -806,7 +817,16 @@ impl SessionPanels {
             let history = self.right_tab_history.entry(key.to_string()).or_default();
             history.retain(|visited| *visited != surface);
             history.push(surface);
+            // Showing a tab focuses its pane; a tab just opened joins the
+            // focused one.
+            if let Some(layout) = self.right_layouts.get_mut(key) {
+                layout.activate(surface);
+            }
         }
+    }
+
+    fn right_layout(&self, key: &str) -> Option<&right_layout::SplitLayout<RightSurface>> {
+        self.right_layouts.get(key)
     }
 
     fn forget_right_surface(&mut self, key: &str, surface: RightSurface) {
@@ -1135,10 +1155,20 @@ fn sidebar_drag_sample(
     )
 }
 
+/// One right-pane Terminal surface: its own embedded panel and the key of
+/// the panel's single tab.
+struct RightTerminal {
+    panel: Entity<TerminalPanel>,
+    key: u64,
+}
+
 /// The dragged surface-tab payload (strip reorder).
 struct RightTabDrag {
     panel_key: String,
+    /// The strip it left: a split pane, or `None` for the unsplit host.
+    pane: Option<right_layout::PaneId>,
     from: usize,
+    surface: RightSurface,
     title: SharedString,
     workspace_path: Option<WorkspacePathDrag>,
 }
@@ -1147,6 +1177,10 @@ struct RightTabDrag {
 /// [`crate::terminal::panel`] DragState, ported: `epoch` keys the 150ms
 /// slide-animation restarts as the hovered slot changes.
 struct RightTabDragState {
+    /// The strip the tab left, and the strip it is over now: tabs slide
+    /// only while it hovers its own strip.
+    pane: Option<right_layout::PaneId>,
+    over_pane: Option<right_layout::PaneId>,
     from: usize,
     over: usize,
     epoch: usize,
@@ -2025,10 +2059,12 @@ pub struct Shell {
     terminal: Option<Entity<TerminalPanel>>,
     /// Last resolved layout, for drag anchors and matching transcript clearance.
     terminal_geometry: crate::terminal::dock::SharedGeometry,
-    /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
-    /// entity from the bottom drawer's (own PTYs, own grid geometry; one
-    /// panel can only size one visible grid at a time).
-    right_terminal: Option<Entity<TerminalPanel>>,
+    /// Right-pane Terminal surfaces, one embedded panel each — SEPARATE
+    /// entities from the bottom drawer's (own PTYs, own grid geometry). A
+    /// panel sizes one visible grid at a time, so split panes can show
+    /// several terminals side by side only with a panel per tab.
+    right_terminals: std::collections::HashMap<u64, RightTerminal>,
+    right_terminal_seq: u64,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     /// Host-owned project Actions cached per (device, space).
@@ -2077,6 +2113,12 @@ pub struct Shell {
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
     right_tab_scroll: gpui::ScrollHandle,
+    /// Each split pane's own strip scroll.
+    right_pane_scrolls: std::collections::HashMap<right_layout::PaneId, gpui::ScrollHandle>,
+    /// The split pane whose `+` opened [`Self::right_plus`].
+    right_plus_pane: Option<right_layout::PaneId>,
+    /// The pane zone a dragged surface tab would land in.
+    right_pane_drop: Option<right_panes::RightPaneDrop>,
     /// Chat outlet, pull request dashboard, or settings pages.
     route: Route,
     settings_focus: FocusHandle,
@@ -2574,7 +2616,8 @@ impl Shell {
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
-            right_terminal: None,
+            right_terminals: Default::default(),
+            right_terminal_seq: 0,
             right_plus: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
@@ -2604,6 +2647,9 @@ impl Shell {
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
+            right_pane_scrolls: Default::default(),
+            right_plus_pane: None,
+            right_pane_drop: None,
             route,
             settings_focus: cx.focus_handle(),
             settings_end_focus: cx.focus_handle(),
@@ -3440,33 +3486,41 @@ impl Shell {
         cx.notify();
     }
 
-    fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
-        if let Some(terminal) = &self.right_terminal {
-            return terminal.clone();
-        }
-        let terminal = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), cx));
-        self.right_terminal = Some(terminal.clone());
-        terminal
+    fn right_terminal_panel(&self, id: u64) -> Option<Entity<TerminalPanel>> {
+        self.right_terminals
+            .get(&id)
+            .map(|terminal| terminal.panel.clone())
     }
 
     /// The right pane's surface tabs in the STORED (drag-reorderable) order —
     /// `(surface, title)`; entries whose backing tab/entity is gone are
     /// skipped.
-    fn right_surface_rows(
-        &self,
-        cx: &App,
-    ) -> Vec<(RightSurface, SharedString, bool, Option<SharedString>)> {
+    fn right_surface_rows(&self, cx: &App) -> Vec<RightRow> {
         let key = self.panel_key(cx);
         let stored: &[RightSurface] = self
             .right_tabs
             .get(&key)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
-        let terminals: Vec<(u64, SharedString, bool)> = self
-            .right_terminal
-            .as_ref()
-            .map(|t| t.read(cx).tab_summaries(cx))
-            .unwrap_or_default();
+        match self.panels.right_layout(&key) {
+            // Split: panes in layout order, each in its strip order.
+            Some(layout) => {
+                let mut ordered = layout.tabs();
+                let unfiled: Vec<RightSurface> = stored
+                    .iter()
+                    .filter(|tab| !ordered.contains(tab))
+                    .copied()
+                    .collect();
+                ordered.extend(unfiled);
+                self.right_rows_for(&ordered, cx)
+            }
+            None => self.right_rows_for(stored, cx),
+        }
+    }
+
+    /// Rows for `stored` surfaces; entries whose backing tab/entity is gone
+    /// are skipped.
+    fn right_rows_for(&self, stored: &[RightSurface], cx: &App) -> Vec<RightRow> {
         stored
             .iter()
             .filter_map(|surface| match surface {
@@ -3488,10 +3542,14 @@ impl Shell {
                     // Contextual title (user request): the pane's scope
                     // label, or the pinned commit's subject.
                     .map(|changes| (*surface, changes.read(cx).tab_title(), false, None)),
-                RightSurface::Terminal(tab) => terminals
-                    .iter()
-                    .find(|(k, _, _)| k == tab)
-                    .map(|(_, title, _)| (*surface, title.clone(), false, None)),
+                RightSurface::Terminal(id) => self.right_terminals.get(id).and_then(|terminal| {
+                    let panel = terminal.panel.read(cx);
+                    panel
+                        .tab_summaries(cx)
+                        .into_iter()
+                        .find(|(key, _, _)| *key == terminal.key)
+                        .map(|(_, title, _)| (*surface, title, false, None))
+                }),
                 RightSurface::SideChat(id) => self.side_chats.get(id).map(|tab| {
                     let title = tab
                         .state
@@ -3601,8 +3659,24 @@ impl Shell {
 
     /// Track the hovered drop slot mid-drag (the terminal drawer's
     /// `update_drag_over`, ported: epoch bumps restart the slide tween).
-    fn update_right_tab_drag_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
+    /// `pane` is the strip the tab left, `over_pane` the strip under it.
+    fn update_right_tab_drag_over(
+        &mut self,
+        pane: Option<right_layout::PaneId>,
+        from: usize,
+        over_pane: Option<right_layout::PaneId>,
+        over: usize,
+        cx: &mut Context<Self>,
+    ) {
         match &mut self.right_tab_drag {
+            Some(drag) if drag.over_pane != over_pane => {
+                // Entering another strip: no slide from the last slot.
+                drag.over_pane = over_pane;
+                drag.prev_over = over;
+                drag.over = over;
+                drag.epoch += 1;
+                cx.notify();
+            }
             Some(drag) if drag.over != over => {
                 drag.prev_over = drag.over;
                 drag.over = over;
@@ -3612,6 +3686,8 @@ impl Shell {
             Some(_) => {}
             None => {
                 self.right_tab_drag = Some(RightTabDragState {
+                    pane,
+                    over_pane,
                     from,
                     over,
                     epoch: 0,
@@ -3622,12 +3698,53 @@ impl Shell {
         }
     }
 
+    /// Drop a dragged tab on `pane`'s strip at the hovered slot: a reorder
+    /// within its own strip, a move into another pane's.
+    fn drop_right_tab_on_strip(
+        &mut self,
+        payload: &RightTabDrag,
+        pane: Option<right_layout::PaneId>,
+        cx: &mut Context<Self>,
+    ) {
+        let over = self
+            .right_tab_drag
+            .take()
+            .filter(|drag| drag.over_pane == pane)
+            .map(|drag| drag.over);
+        cx.notify();
+        if payload.panel_key != self.panel_key(cx) {
+            return;
+        }
+        match pane {
+            _ if payload.pane == pane => {
+                let to = over.unwrap_or(payload.from);
+                match pane {
+                    Some(pane) => {
+                        let key = self.panel_key(cx);
+                        if let Some(layout) = self.panels.right_layouts.get_mut(&key) {
+                            layout.reorder(pane, payload.from, to);
+                        }
+                    }
+                    None => self.reorder_right_tabs(payload.from, to, cx),
+                }
+            }
+            Some(target) => {
+                self.move_right_tab(payload.surface, target, over, cx);
+            }
+            None => {}
+        }
+    }
+
     /// The surface that actually renders: the stored pick when it still
     /// exists, else the most recently visited live tab, else the picker.
     /// Terminal keys go stale when their tab closes/exits — never render a dead surface.
     fn resolved_right_active(&self, cx: &App) -> RightSurface {
         let picked = self.panels.get(&self.panel_key(cx)).right_active;
-        let rows = self.right_surface_rows(cx);
+        // Split: the focused pane's tab, resolved among that pane's own.
+        let rows = match self.right_split(cx) {
+            Some(layout) => self.right_pane_rows(Some(layout.focused()), cx),
+            None => self.right_surface_rows(cx),
+        };
         let exists = match picked {
             RightSurface::Picker => true,
             surface => rows.iter().any(|(s, _, _, _)| *s == surface),
@@ -3672,9 +3789,7 @@ impl Shell {
             self.state
                 .update(cx, |state, cx| state.focus_subagent_sync(&doc_id, cx));
         }
-        if self.resolved_right_active(cx) != surface {
-            self.suspend_file_images(cx);
-        }
+        self.suspend_replaced_file_images(surface, cx);
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.right_active = surface);
         match surface {
@@ -3687,14 +3802,12 @@ impl Shell {
                     }
                 }
             }
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal_panel(cx);
-                self.composer
-                    .update(cx, |composer, _| composer.focus_pending = false);
-                panel.update(cx, |panel, cx| {
-                    panel.select_tab_by_key(tab, cx);
-                    panel.request_focus(cx);
-                });
+            RightSurface::Terminal(id) => {
+                if let Some(panel) = self.right_terminal_panel(id) {
+                    self.composer
+                        .update(cx, |composer, _| composer.focus_pending = false);
+                    panel.update(cx, |panel, cx| panel.request_focus(cx));
+                }
             }
             RightSurface::Diff(id) => {
                 if let Some(changes) = self.diffs.get(&id).cloned() {
@@ -3964,9 +4077,17 @@ impl Shell {
                 crate::browser::BrowserEvent::Changed => cx.notify(),
                 crate::browser::BrowserEvent::NewTab(url) => {
                     // A background page cannot open a tab in the wrong session.
+                    // A page on screen opens it beside itself, in its pane.
+                    let surface = RightSurface::Browser(id);
                     if this.panel_key(cx) == owner
-                        && this.resolved_right_active(cx) == RightSurface::Browser(id)
+                        && this
+                            .right_shown_surfaces(cx)
+                            .iter()
+                            .any(|(shown, _)| *shown == surface)
                     {
+                        if this.right_split(cx).is_some() {
+                            this.set_right_active(surface, cx);
+                        }
                         this.add_browser_surface(url.clone(), window, cx);
                     }
                 }
@@ -4312,19 +4433,32 @@ impl Shell {
     /// The picker's Terminal card / the `+` menu's Terminal row: every click
     /// opens a fresh embedded terminal tab.
     fn add_terminal_surface(&mut self, cx: &mut Context<Self>) {
-        let panel = self.right_terminal_panel(cx);
+        let panel = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), cx));
         let opened = panel.update(cx, |panel, cx| {
             panel.set_open(true, cx);
             panel.open_tab_for_selected(cx)
         });
-        if let Some(tab) = opened {
-            let key = self.panel_key(cx);
-            self.right_tabs
-                .entry(key)
-                .or_default()
-                .push(RightSurface::Terminal(tab));
-            self.set_right_active(RightSurface::Terminal(tab), cx);
+        if let Some(key) = opened {
+            self.insert_terminal_surface(panel, key, cx);
         }
+    }
+
+    /// File an embedded panel's tab `key` as a new Terminal surface tab.
+    fn insert_terminal_surface(
+        &mut self,
+        panel: Entity<TerminalPanel>,
+        key: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.right_terminal_seq += 1;
+        let id = self.right_terminal_seq;
+        self.right_terminals
+            .insert(id, RightTerminal { panel, key });
+        self.right_tabs
+            .entry(self.panel_key(cx))
+            .or_default()
+            .push(RightSurface::Terminal(id));
+        self.set_right_active(RightSurface::Terminal(id), cx);
     }
 
     /// Spawn-chip events from the primary transcript AND from subagent-tab
@@ -4507,7 +4641,7 @@ impl Shell {
         cx: &App,
     ) -> Vec<RightSurface> {
         let tabs: Vec<_> = self
-            .right_surface_rows(cx)
+            .right_pane_rows(self.right_pane_of(surface, cx), cx)
             .into_iter()
             .map(|(tab, _, _, _)| tab)
             .collect();
@@ -4561,6 +4695,7 @@ impl Shell {
         if let Some(tabs) = self.right_tabs.get_mut(&key) {
             tabs.retain(|s| *s != surface);
         }
+        self.sync_right_layout(&key, cx);
         match surface {
             RightSurface::File(_) => {}
             RightSurface::Browser(id) => {
@@ -4579,9 +4714,13 @@ impl Shell {
                 // `PullRequestCache::submissions`.
                 self.chat_pull_requests.remove(&id);
             }
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal_panel(cx);
-                panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
+            RightSurface::Terminal(id) => {
+                if let Some(terminal) = self.right_terminals.remove(&id) {
+                    let key = terminal.key;
+                    terminal
+                        .panel
+                        .update(cx, |panel, cx| panel.close_tab_by_key(key, window, cx));
+                }
             }
             RightSurface::SideChat(id) => {
                 // An unsent draft outlives the tab: the side chat stays
@@ -4754,6 +4893,7 @@ impl Shell {
         if let Some(tabs) = self.right_tabs.get_mut(panel_key) {
             tabs.retain(|candidate| *candidate != surface);
         }
+        self.sync_right_layout(panel_key, cx);
         match surface {
             RightSurface::File(id) => {
                 self.file_surfaces.remove(&id);
@@ -10878,6 +11018,22 @@ impl Shell {
                         cx,
                     ));
                 }
+                // Split hosts only: close every tab of this pane, and the
+                // pane with them.
+                if self.right_pane_of(surface, cx).is_some() {
+                    let row = popover::menu_row(&theme, false, "Close pane")
+                        .id("chat-menu-close-pane")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_chat_menu(cx);
+                            if this.panel_key(cx) == key {
+                                this.close_right_pane(surface, window, cx);
+                            }
+                        }))
+                        .child("Close pane");
+                    menu = menu.child(popover::menu_separator()).child(
+                        self.chat_menu_hover_row(CHAT_MENU_ROW_TAB + 4, row, cx),
+                    );
+                }
             }
             let menu = menu.into_any_element();
             overlays.push(popover::menu_at(
@@ -11860,107 +12016,35 @@ impl Shell {
         }
         let theme = Theme::of(cx).clone();
         let showing = self.right_pane_open(cx) || self.tween_active(self.right_tween) || exiting;
-        let content: AnyElement = if showing {
-            match self.resolved_right_active(cx) {
-                RightSurface::File(id) => {
-                    if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                        // Keep the last file frame behind the closing mask. Loading
-                        // while closing would reactivate suspended image resources.
-                        if self.right_pane_open(cx) {
-                            file.update(cx, |file, cx| file.ensure_loaded(cx));
-                        }
-                        file.into_any_element()
-                    } else {
-                        self.render_surface_picker(cx)
-                    }
-                }
-                RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
-                    let changes = self.diffs.get(&id).cloned().expect("checked");
-                    // Idempotent — also covers a persisted-open pane on boot.
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                    // The diff options (scope dropdown, ref selector,
-                    // fold-all) moved DOWN from the titlebar band — the
-                    // surface tabs own that row now; the expand/close
-                    // buttons stayed up there (user request).
-                    let controls =
-                        changes.update(cx, |changes, cx| changes.render_header_controls(cx));
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .child(crate::surface_chrome::toolbar(&theme).child(controls))
-                        .child(div().flex_1().min_h_0().child(changes))
-                        .into_any_element()
-                }
-                RightSurface::Browser(id) => self
-                    .browsers
-                    .get(&id)
-                    .cloned()
-                    .map(|browser| browser.into_any_element())
-                    .unwrap_or_else(|| self.render_surface_picker(cx)),
-                RightSurface::Terminal(tab) => {
-                    let panel = self.right_terminal_panel(cx);
-                    // Keep the embedded panel's own active tab aligned with
-                    // the resolved surface (fallbacks can move it).
-                    let resize_suspended = self.tween_active(self.right_tween)
-                        || self.tween_active(self.files_tween)
-                        || self.tween_active(self.sidebar_tween);
-                    panel.update(cx, |panel, cx| {
-                        panel.set_resize_suspended(resize_suspended);
-                        panel.select_tab_by_key(tab, cx);
-                    });
-                    panel.into_any_element()
-                }
-                RightSurface::SideChat(id) => self.render_side_chat(id, cx),
-                RightSurface::PullRequest(id) => self
-                    .render_chat_pull_request(id, cx)
-                    .unwrap_or_else(|| self.render_surface_picker(cx)),
-                RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
-                    let transcript = self
-                        .subagent_tabs
-                        .get(&id)
-                        .expect("checked")
-                        .transcript
-                        .clone();
-                    // The pane hosts its own jump pill: the conversation
-                    // overlay's is bound to the PRIMARY transcript, and this
-                    // one anchors to the pane (no composer stack to clear).
-                    let pill = transcript.read(cx).jump_button_shown().then(|| {
-                        div()
-                            .absolute()
-                            .bottom(px(16.0))
-                            .left_0()
-                            .right_0()
-                            .flex()
-                            .justify_center()
-                            .child(self.jump_pill(
-                                "subagent-jump-to-bottom",
-                                "subagent-jump-pill",
-                                transcript.clone(),
-                                cx,
-                            ))
-                    });
-                    // Read-only surface: the transcript fills the pane — no
-                    // composer, no status strip.
-                    div()
-                        .size_full()
-                        .relative()
-                        .flex()
-                        .flex_col()
-                        .child(div().flex_1().min_h_0().child(transcript))
-                        .children(pill)
-                        .into_any_element()
-                }
-                _ => self.render_surface_picker(cx),
-            }
-        } else {
+        let key = self.panel_key(cx);
+        if showing {
+            // Prune tabs that died since the last frame (an exited shell).
+            self.sync_right_layout(&key, cx);
+        }
+        // A tab drag that ended anywhere else leaves no drop preview.
+        if self.right_pane_drop.is_some() && !cx.has_active_drag() {
+            self.right_pane_drop = None;
+        }
+        let split = self.right_split(cx).cloned();
+        let host_width = self.right_content_width(self.right_target(cx));
+        let content: AnyElement = if !showing {
             gpui::Empty.into_any_element()
+        } else if let Some(layout) = split {
+            self.render_right_split(&layout, host_width, cx)
+        } else {
+            let surface = self.resolved_right_active(cx);
+            let content = self.render_right_surface(surface, host_width, cx);
+            self.right_pane_drop_target(None, content, cx)
         };
         // Flush panel (user request — the inset card is gone): full window
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
         let panel_bg = theme.panel_bg();
+        // Split panes clear the titlebar band themselves (see
+        // `render_right_split_pane`), so their dividers run through it.
+        let clears_titlebar = self.right_split(cx).is_none()
+            && !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_));
         let panel = div()
             .id("right-pane-focus")
             .debug_selector(|| "right-pane".into())
@@ -11994,11 +12078,9 @@ impl Shell {
             .overflow_hidden()
             // The titlebar is a glass overlay over the full-height content
             // row; the panel's own chrome starts below it.
-            .when(
-                !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_)),
-                |el| el.pt(px(Theme::TITLEBAR_HEIGHT)),
-            )
-            .child(content);
+            .when(clears_titlebar, |el| el.pt(px(Theme::TITLEBAR_HEIGHT)))
+            .child(content)
+            .children(self.right_pane_drop_listener(cx));
         let target = self.right_target(cx);
         let edge_offset = self.eval_resize_edge_bounce(
             self.right_edge_bounce,
@@ -12010,6 +12092,108 @@ impl Shell {
             edge_offset,
             div().h_full().relative().child(panel).into_any_element(),
         )
+    }
+
+    /// One surface's content, laid out `width` wide (the side chat's
+    /// composer sizes itself from it).
+    fn render_right_surface(
+        &mut self,
+        surface: RightSurface,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        match surface {
+            RightSurface::File(id) => {
+                if let Some(file) = self.file_surfaces.get(&id).cloned() {
+                    // Keep the last file frame behind the closing mask. Loading
+                    // while closing would reactivate suspended image resources.
+                    if self.right_pane_open(cx) {
+                        file.update(cx, |file, cx| file.ensure_loaded(cx));
+                    }
+                    file.into_any_element()
+                } else {
+                    self.render_surface_picker(cx)
+                }
+            }
+            RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
+                let changes = self.diffs.get(&id).cloned().expect("checked");
+                // Idempotent — also covers a persisted-open pane on boot.
+                changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                // The diff options (scope dropdown, ref selector,
+                // fold-all) moved DOWN from the titlebar band — the
+                // surface tabs own that row now; the expand/close
+                // buttons stayed up there (user request).
+                let controls =
+                    changes.update(cx, |changes, cx| changes.render_header_controls(cx));
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(crate::surface_chrome::toolbar(&theme).child(controls))
+                    .child(div().flex_1().min_h_0().child(changes))
+                    .into_any_element()
+            }
+            RightSurface::Browser(id) => self
+                .browsers
+                .get(&id)
+                .cloned()
+                .map(|browser| browser.into_any_element())
+                .unwrap_or_else(|| self.render_surface_picker(cx)),
+            RightSurface::Terminal(id) if self.right_terminals.contains_key(&id) => {
+                let terminal = self.right_terminals.get(&id).expect("checked");
+                let (panel, key) = (terminal.panel.clone(), terminal.key);
+                let resize_suspended = self.tween_active(self.right_tween)
+                    || self.tween_active(self.files_tween)
+                    || self.tween_active(self.sidebar_tween);
+                panel.update(cx, |panel, cx| {
+                    panel.set_resize_suspended(resize_suspended);
+                    panel.select_tab_by_key(key, cx);
+                });
+                panel.into_any_element()
+            }
+            RightSurface::SideChat(id) => self.render_side_chat(id, width, cx),
+            RightSurface::PullRequest(id) => self
+                .render_chat_pull_request(id, cx)
+                .unwrap_or_else(|| self.render_surface_picker(cx)),
+            RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
+                let transcript = self
+                    .subagent_tabs
+                    .get(&id)
+                    .expect("checked")
+                    .transcript
+                    .clone();
+                // The pane hosts its own jump pill: the conversation
+                // overlay's is bound to the PRIMARY transcript, and this
+                // one anchors to the pane (no composer stack to clear).
+                let pill = transcript.read(cx).jump_button_shown().then(|| {
+                    div()
+                        .absolute()
+                        .bottom(px(16.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(self.jump_pill(
+                            "subagent-jump-to-bottom",
+                            "subagent-jump-pill",
+                            transcript.clone(),
+                            cx,
+                        ))
+                });
+                // Read-only surface: the transcript fills the pane — no
+                // composer, no status strip.
+                div()
+                    .size_full()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h_0().child(transcript))
+                    .children(pill)
+                    .into_any_element()
+            }
+            _ => self.render_surface_picker(cx),
+        }
     }
 
     /// The right pane's empty state: a compact vertical list of surface rows
@@ -12186,7 +12370,12 @@ impl Shell {
     /// The titlebar strip over the right pane: one chip per surface tab
     /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
     /// living in the top row; the diff options moved into the pane below.
-    pub(crate) fn render_right_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// `pane` picks one split pane's strip; `None` is the unsplit host's.
+    pub(crate) fn render_right_tab_strip(
+        &mut self,
+        pane: Option<right_layout::PaneId>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         use crate::surface_chrome::{
             TAB_CHIP_HEIGHT as CHIP_H, TAB_CHIP_SLOT as CHIP_SLOT, TAB_CHIP_WIDTH as CHIP_W,
         };
@@ -12196,23 +12385,54 @@ impl Shell {
         if self.right_tab_drag.is_some() && !cx.has_active_drag() {
             self.right_tab_drag = None;
         }
-        let rows = self.right_surface_rows(cx);
+        let rows = self.right_pane_rows(pane, cx);
         let count = rows.len();
-        let active = self.resolved_right_active(cx);
+        let focused_strip = match (pane, self.right_split(cx)) {
+            (Some(pane), Some(layout)) => layout.focused() == pane,
+            _ => true,
+        };
+        let active = match pane {
+            Some(pane) => self.resolved_pane_active(pane, cx),
+            None => self.resolved_right_active(cx),
+        };
+        // Tabs slide only in the strip the dragged tab left, and only while
+        // it is over that strip; elsewhere they hold still.
         let drag = self
             .right_tab_drag
             .as_ref()
-            .map(|d| (d.from, d.over, d.epoch, d.prev_over));
+            .filter(|d| d.pane == pane)
+            .map(|d| {
+                let over = if d.over_pane == pane { d.over } else { d.from };
+                let prev_over = if d.over_pane == pane {
+                    d.prev_over
+                } else {
+                    d.from
+                };
+                (d.from, over, d.epoch, prev_over)
+            });
+        let scroll = match pane {
+            Some(pane) => self.right_pane_scrolls.entry(pane).or_default().clone(),
+            None => self.right_tab_scroll.clone(),
+        };
+        let strip_id: gpui::ElementId = match pane {
+            Some(pane) => ("right-surface-strip", pane as usize).into(),
+            None => "right-surface-strip".into(),
+        };
 
         // The old session-tab strip's proven scroll shape: the flex row IS
         // the scroller (id + overflow_x_scroll + track_scroll), wrapped in a
         // relative min_w_0 region below; drop math runs in CONTENT
         // coordinates (viewport-relative x plus the scrolled-off width).
-        let scroll_for_drag = self.right_tab_scroll.clone();
+        let scroll_for_drag = scroll.clone();
         let mut strip = div()
-            .id("right-surface-strip")
-            .track_focus(&self.navigation_focus.tabs)
-            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+            .id(strip_id)
+            .when(focused_strip, |strip| {
+                strip.track_focus(&self.navigation_focus.tabs)
+            })
+            .capture_any_mouse_down(cx.listener(move |this, _, window, cx| {
+                if let Some(pane) = pane {
+                    this.focus_right_pane(pane, cx);
+                }
                 this.capture_navigation_focus(true, true, window, cx);
             }))
             .flex()
@@ -12221,7 +12441,7 @@ impl Shell {
             .gap(px(4.0))
             .min_w_0()
             .overflow_x_scroll()
-            .track_scroll(&self.right_tab_scroll)
+            .track_scroll(&scroll)
             // Windows caption hit-testing includes the scroll-only hitboxes
             // behind each chip. Stop at the scroller so the titlebar cannot
             // claim tab clicks, while wheel events still reach this scroller.
@@ -12232,27 +12452,23 @@ impl Shell {
                     if payload.panel_key != this.panel_key(cx) {
                         return;
                     }
-                    let from = payload.from;
+                    // Split hosts draw several strips; every one hears the
+                    // move, only the one under the pointer takes it.
+                    if pane.is_some() && !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    let (origin, from) = (payload.pane, payload.from);
                     let rel_x = f32::from(event.event.position.x)
                         - f32::from(event.bounds.left())
                         - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
-                    this.update_right_tab_drag_over(from, over, cx);
+                    // Another pane's strip gains a slot for the newcomer.
+                    let slots = if origin == pane { count } else { count + 1 };
+                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, slots);
+                    this.update_right_tab_drag_over(origin, from, pane, over, cx);
                 },
             ))
             .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
-                if payload.panel_key != this.panel_key(cx) {
-                    this.right_tab_drag = None;
-                    cx.notify();
-                    return;
-                }
-                let to = this
-                    .right_tab_drag
-                    .as_ref()
-                    .map(|d| d.over)
-                    .unwrap_or(payload.from);
-                this.right_tab_drag = None;
-                this.reorder_right_tabs(payload.from, to, cx);
+                this.drop_right_tab_on_strip(payload, pane, cx);
             }));
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
@@ -12416,7 +12632,9 @@ impl Shell {
             .on_drag(
                 RightTabDrag {
                     panel_key: self.panel_key(cx),
+                    pane,
                     from: ix,
+                    surface,
                     title: ghost_title,
                     workspace_path,
                 },
@@ -12435,18 +12653,7 @@ impl Shell {
             // handler consumes the drag, so the two never double-apply.
             .on_drop::<RightTabDrag>(cx.listener(
                 move |this, payload: &RightTabDrag, _, cx| {
-                    if payload.panel_key != this.panel_key(cx) {
-                        this.right_tab_drag = None;
-                        cx.notify();
-                        return;
-                    }
-                    let to = this
-                        .right_tab_drag
-                        .as_ref()
-                        .map(|d| d.over)
-                        .unwrap_or(payload.from);
-                    this.right_tab_drag = None;
-                    this.reorder_right_tabs(payload.from, to, cx);
+                    this.drop_right_tab_on_strip(payload, pane, cx);
                 },
             ));
 
@@ -12479,8 +12686,11 @@ impl Shell {
         }
         // The `+` — a small menu offering the available surfaces (t3 "Add panel
         // surface"); mirrors the picker cards.
-        let plus_open = self.right_plus.get().is_some();
-        let plus_fade = "right-surface-add-fade";
+        let plus_open = self.right_plus.get().is_some() && self.right_plus_pane == pane;
+        let plus_fade: SharedString = match pane {
+            Some(pane) => format!("right-surface-add-fade-{pane}").into(),
+            None => "right-surface-add-fade".into(),
+        };
         let mut plus = div()
             .id("right-surface-add")
             .size(px(24.0))
@@ -12491,7 +12701,7 @@ impl Shell {
             .rounded(px(6.0))
             .cursor_pointer()
             .bg(motion::hover_blend(
-                plus_fade,
+                &plus_fade,
                 crate::theme::wash(0.0),
                 crate::theme::wash(0.11),
             ))
@@ -12504,11 +12714,16 @@ impl Shell {
                     this.right_plus.note_trigger_press();
                 }),
             )
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 if this.right_plus.take_press_was_open() {
                     this.close_right_plus(cx);
                 } else {
+                    // A split pane's `+` opens the new tab in that pane.
+                    if let Some(pane) = pane {
+                        this.focus_right_pane(pane, cx);
+                    }
+                    this.right_plus_pane = pane;
                     this.right_plus.open(());
                     cx.notify();
                 }
@@ -12613,7 +12828,7 @@ impl Shell {
         // The empty-state picker already offers every surface. Show a single
         // Chrome-style add-tab affordance only after at least one tab exists.
         strip = strip.when(count > 0, |strip| strip.child(plus));
-        crate::surface_chrome::tab_strip_region(strip, &self.right_tab_scroll, &theme)
+        crate::surface_chrome::tab_strip_region(strip, &scroll, &theme)
     }
 
     /// Toggle the changes-panel takeover (the header's expand button, t3code
@@ -13485,15 +13700,26 @@ impl Render for Shell {
         } else {
             0.0
         });
-        let selected_surface = self.resolved_right_active(cx);
+        // Every pane of a split host shows its own page.
+        let shown = self.right_shown_surfaces(cx);
         for (id, browser) in &self.browsers {
+            let placement = shown
+                .iter()
+                .find(|(surface, _)| *surface == RightSurface::Browser(*id));
             let presentation = crate::browser::model::presentation(
-                browser_active && selected_surface == RightSurface::Browser(*id),
+                browser_active && placement.is_some(),
                 browser_dragging,
             );
+            // Only a page on the host's left seam meets the outer resize
+            // target; one past a split divider clears that divider's grab.
+            #[cfg(target_os = "macos")]
+            let inset = match placement {
+                Some((_, false)) => px(right_panes::DIVIDER_HITBOX / 2.0 - 1.0),
+                _ => browser_resize_inset,
+            };
             browser.update(cx, |browser, cx| {
                 #[cfg(target_os = "macos")]
-                browser.set_resize_inset(browser_resize_inset, cx);
+                browser.set_resize_inset(inset, cx);
                 #[cfg(any(target_os = "macos", windows))]
                 browser.set_right_occlusion(browser_overlay_width, cx);
                 browser.set_shortcuts(&self.settings.keymap);
@@ -17099,8 +17325,11 @@ mod exit_regressions {
                     shell.open_chat("terminal-session".into(), cx);
                     shell.active_chat = "terminal-session".into();
                     let panel = if embedded {
-                        shell.add_terminal_surface(cx);
-                        shell.right_terminal.clone().unwrap()
+                        let panel =
+                            cx.new(|cx| TerminalPanel::new_embedded(shell.state.clone(), cx));
+                        panel.update(cx, |panel, cx| panel.set_open(true, cx));
+                        shell.insert_terminal_surface(panel.clone(), 1, cx);
+                        panel
                     } else {
                         shell.toggle_terminal(window, cx);
                         shell.terminal.clone().unwrap()
@@ -18190,6 +18419,7 @@ impl Shell {
     }
     pub fn fixture_browser_menu(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
+            self.right_plus_pane = None;
             self.right_plus.open(());
             cx.notify();
         } else {
@@ -18236,7 +18466,7 @@ mod right_tab_mouse_regressions {
     impl Render for TabHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.shell.update(cx, |shell, cx| {
-                let tabs = shell.render_right_tab_strip(cx);
+                let tabs = shell.render_right_tab_strip(None, cx);
                 shell.titlebar_drag_region(
                     "right-tab-test-titlebar",
                     div().w(px(400.)).h(px(40.)).child(tabs),
