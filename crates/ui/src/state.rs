@@ -34,7 +34,10 @@ use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
     EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
+use zeron_rpc::{
+    RpcClient, RpcError, RpcReply, RpcService, connect_ws, connect_ws_redialing, memory_client,
+    methods,
+};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
@@ -463,7 +466,10 @@ impl EngineHandle {
             return None;
         }
         tracing::info!(%url, "engine daemon detected; connecting");
-        match connect_ws(&url).await {
+        // Redialing: the daemon restarts underneath this window (self-update,
+        // `systemctl restart`). A plain socket stayed closed forever and every
+        // call failed with "connection closed" until the app was relaunched.
+        match connect_ws_redialing(&url).await {
             Ok(client) => match query_engine_info(&client).await {
                 Ok(engine_info) => {
                     let client = Arc::new(client);
