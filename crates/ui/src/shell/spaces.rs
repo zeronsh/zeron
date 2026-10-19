@@ -16,9 +16,10 @@ use crate::pickers::{
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
 use zeron_proto::{
-    ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
+    ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, GitHubRepo, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
 };
+use zeron_rpc::{RpcError, capability_errors};
 
 /// Promote the user's ordered pins above the untouched activity projection.
 /// Every unpinned id keeps exactly the relative order supplied by recency.
@@ -2312,6 +2313,49 @@ enum ProjectStep {
     Devices,
     Locations,
     Folders,
+    GitHub,
+}
+
+#[derive(Clone, PartialEq)]
+enum LocationRow {
+    Folder(String, Option<String>),
+    GitHub,
+}
+
+const GITHUB_UPDATE_REQUIRED: &str = "github.update_required";
+const GITHUB_FAILED: &str = "github.failed";
+
+fn github_error_code(error: &RpcError) -> String {
+    match error {
+        RpcError::Capability(code) => code.clone(),
+        RpcError::UnknownMethod(_) => GITHUB_UPDATE_REQUIRED.into(),
+        _ => GITHUB_FAILED.into(),
+    }
+}
+
+fn github_error_copy(code: &str, device: &str) -> (String, String) {
+    match code {
+        capability_errors::PULL_REQUESTS_CLI_UNAVAILABLE => (
+            format!("GitHub CLI isn’t available on {device}"),
+            "Install gh and sign in to clone repositories.".into(),
+        ),
+        capability_errors::PULL_REQUESTS_AUTHENTICATION => (
+            format!("Sign in to GitHub on {device}"),
+            "Run gh auth login, then try again.".into(),
+        ),
+        capability_errors::PULL_REQUESTS_RATE_LIMITED => (
+            "GitHub’s rate limit was reached".into(),
+            "Try again in a few minutes.".into(),
+        ),
+        GITHUB_UPDATE_REQUIRED => (
+            format!("Update Zeron on {device}"),
+            "This device doesn’t clone from GitHub yet.".into(),
+        ),
+        _ => (
+            "Couldn’t reach GitHub".into(),
+            "Check your connection, then try again.".into(),
+        ),
+    }
 }
 
 pub(super) struct AddSpaceFlow {
@@ -2357,6 +2401,8 @@ pub(super) struct AddSpaceFlow {
     /// Folders matching the query anywhere under the device's home (Home
     /// location only).
     home_search: HomeFolderSearch,
+    github: Loadable<Vec<GitHubRepo>>,
+    github_task: Option<Task<()>>,
     _search_events: Subscription,
 }
 
@@ -2587,6 +2633,49 @@ fn home_folder_row(
         )
 }
 
+fn github_repo_row(
+    row: gpui::Stateful<gpui::Div>,
+    repo: &GitHubRepo,
+    query: &str,
+    theme: &Theme,
+    cx: &Context<Shell>,
+) -> gpui::Stateful<gpui::Div> {
+    let (owner, name) = repo
+        .name_with_owner
+        .split_once('/')
+        .unwrap_or(("", repo.name_with_owner.as_str()));
+    let repository = repo.name_with_owner.clone();
+    row.aria_label(SharedString::from(repo.name_with_owner.clone()))
+        .child(
+            icon(icons::GIT_BRANCH)
+                .size(px(16.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .overflow_hidden()
+                .child(div().flex_none().child(popover::search_highlight(
+                    SharedString::from(name.to_owned()),
+                    Some(query),
+                    theme,
+                )))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(owner.to_owned())),
+                ),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.clone_github_repo(repository.clone(), cx)))
+}
+
 /// Folder crumbs shown before the middle folds into `…`, and how many of the
 /// deepest stay visible once it does.
 const CRUMB_FOLDERS_MAX: usize = 3;
@@ -2615,6 +2704,7 @@ enum CrumbTarget {
     Locations,
     Location(String, Option<String>),
     Folder(String),
+    GitHub,
     /// The `…` fold; opens [`Shell::render_project_crumb_menu`].
     More,
 }
@@ -6092,6 +6182,8 @@ impl Shell {
             drives_task: None,
             submit_task: None,
             home_search: HomeFolderSearch::default(),
+            github: Loadable::Idle,
+            github_task: None,
             _search_events: search_events,
         });
         cx.notify();
@@ -6213,12 +6305,139 @@ impl Shell {
         flow.browser_repo = false;
         flow.active = 0;
         flow.error = None;
+        flow.github = Loadable::Idle;
         let search = flow.search.clone();
         search.update(cx, |input, cx| {
             input.set_placeholder("Search locations…", cx);
             input.set_text("", cx);
         });
         self.load_space_drives(cx);
+        self.load_github_repos(cx);
+        cx.notify();
+    }
+
+    fn add_space_goto_github(&mut self, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        flow.focus_pending = true;
+        flow.step = ProjectStep::GitHub;
+        flow.location = None;
+        flow.active = 0;
+        flow.error = None;
+        flow.list_scroll.set_offset(gpui::Point::default());
+        let search = flow.search.clone();
+        search.update(cx, |input, cx| {
+            input.set_placeholder("Search repositories…", cx);
+            input.set_text("", cx);
+        });
+        if !matches!(flow.github, Loadable::Loading | Loadable::Ready(_)) {
+            self.load_github_repos(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_github_repos(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        let device_id = flow.device.as_ref().map(|d| d.id.clone());
+        flow.github = Loadable::Loading;
+        flow.github_task = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::Map::new();
+            add_space_target(&mut params, device_id.as_deref(), local.as_deref());
+            let result = engine
+                .client()
+                .call(
+                    methods::LIST_GITHUB_REPOS,
+                    serde_json::Value::Object(params),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                if let Some(flow) = shell.add_space.as_mut() {
+                    flow.github = match result {
+                        Ok(value) => match serde_json::from_value::<Vec<GitHubRepo>>(value) {
+                            Ok(repos) => Loadable::Ready(repos),
+                            Err(_) => Loadable::Error(GITHUB_FAILED.into()),
+                        },
+                        Err(error) => Loadable::Error(github_error_code(&error)),
+                    };
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn add_space_github_rows(&self, cx: &App) -> Vec<GitHubRepo> {
+        let Some(flow) = self.add_space.as_ref() else {
+            return Vec::new();
+        };
+        let Some(repos) = flow.github.ready() else {
+            return Vec::new();
+        };
+        let names: Vec<&str> = repos.iter().map(|r| r.name_with_owner.as_str()).collect();
+        popover::fuzzy_indices(flow.search.read(cx).text(), &names)
+            .into_iter()
+            .map(|ix| repos[ix].clone())
+            .collect()
+    }
+
+    fn clone_github_repo(&mut self, repository: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        if flow.submit_busy {
+            return;
+        }
+        let Some(device) = flow.device.clone() else {
+            return;
+        };
+        flow.submit_busy = true;
+        flow.error = None;
+        let mut params = serde_json::Map::new();
+        params.insert("repository".into(), serde_json::Value::String(repository));
+        add_space_target(&mut params, Some(&device.id), local.as_deref());
+        flow.submit_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::CLONE_GITHUB_REPO,
+                    serde_json::Value::Object(params),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                match result.map(serde_json::from_value::<zeron_proto::Repo>) {
+                    Ok(Ok(repo)) => shell.add_space_for_path(device, repo.path, true, cx),
+                    Ok(Err(error)) => shell.fail_add_space(error.to_string(), cx),
+                    Err(error) => {
+                        let message = match &error {
+                            RpcError::Failed(message) => message.clone(),
+                            _ => github_error_copy(&github_error_code(&error), &device.name).0,
+                        };
+                        shell.fail_add_space(message, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn fail_add_space(&mut self, message: String, cx: &mut Context<Self>) {
+        if let Some(flow) = self.add_space.as_mut() {
+            flow.submit_busy = false;
+            flow.error = Some(message.into());
+        }
         cx.notify();
     }
 
@@ -6268,6 +6487,8 @@ impl Shell {
             flow.device = None;
             flow.drives = Loadable::Idle;
             flow.home = None;
+            flow.github = Loadable::Idle;
+            flow.github_task = None;
         }
         let search = flow.search.clone();
         search.update(cx, |input, cx| {
@@ -6296,20 +6517,27 @@ impl Shell {
             .collect()
     }
 
-    fn add_space_locations(&self, cx: &App) -> Vec<(String, Option<String>)> {
+    fn add_space_locations(&self, cx: &App) -> Vec<LocationRow> {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let locations: Vec<_> = std::iter::once(("Home".to_string(), None))
+        let locations: Vec<_> = std::iter::once(LocationRow::Folder("Home".to_string(), None))
             .chain(
                 flow.drives
                     .ready()
                     .into_iter()
                     .flatten()
-                    .map(|d| (d.name.clone(), Some(d.path.clone()))),
+                    .map(|d| LocationRow::Folder(d.name.clone(), Some(d.path.clone()))),
             )
+            .chain(std::iter::once(LocationRow::GitHub))
             .collect();
-        let names: Vec<_> = locations.iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<&str> = locations
+            .iter()
+            .map(|row| match row {
+                LocationRow::Folder(name, _) => name.as_str(),
+                LocationRow::GitHub => "GitHub",
+            })
+            .collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()
             .map(|ix| locations[ix].clone())
@@ -6432,8 +6660,18 @@ impl Shell {
                 return;
             }
             ProjectStep::Locations => {
-                if let Some((name, path)) = self.add_space_locations(cx).get(flow.active).cloned() {
-                    self.add_space_goto_location(name, path, cx);
+                match self.add_space_locations(cx).get(flow.active).cloned() {
+                    Some(LocationRow::Folder(name, path)) => {
+                        self.add_space_goto_location(name, path, cx)
+                    }
+                    Some(LocationRow::GitHub) => self.add_space_goto_github(cx),
+                    None => {}
+                }
+                return;
+            }
+            ProjectStep::GitHub => {
+                if let Some(repo) = self.add_space_github_rows(cx).get(flow.active).cloned() {
+                    self.clone_github_repo(repo.name_with_owner, cx);
                 }
                 return;
             }
@@ -6648,9 +6886,6 @@ impl Shell {
 
     /// Create the space for the browser's current folder.
     fn submit_add_space(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
         let Some(flow) = self.add_space.as_ref() else {
             return;
         };
@@ -6665,6 +6900,19 @@ impl Shell {
         };
         let path = listing.path.clone();
         let git_detected = flow.browser_repo;
+        self.add_space_for_path(device, path, git_detected, cx);
+    }
+
+    fn add_space_for_path(
+        &mut self,
+        device: Device,
+        path: String,
+        git_detected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
         // Same (device, folder) already has a space → just switch to it. The
         // engine dedupes this case too (a createSpace for a duplicate pair
         // no-ops), so creating would leave the minted id dangling.
@@ -6751,6 +6999,7 @@ impl Shell {
         match flow.step {
             ProjectStep::Devices => return,
             ProjectStep::Locations => self.add_space_back_to(ProjectStep::Devices, cx),
+            ProjectStep::GitHub => self.add_space_back_to(ProjectStep::Locations, cx),
             ProjectStep::Folders => {
                 let listing = flow.browser.ready();
                 let root = flow
@@ -6810,6 +7059,7 @@ impl Shell {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
                     Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
+                    Some(ProjectStep::GitHub) => self.add_space_github_rows(cx).len(),
                     _ => self.add_space_folder_rows(cx).len(),
                 };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
@@ -6921,6 +7171,11 @@ impl Shell {
         let loading = matches!(flow.browser, Loadable::Idle | Loadable::Loading);
         let drives_loading = matches!(flow.drives, Loadable::Loading);
         let home_loading = flow.home_search.loading;
+        let github_loading = flow.github.is_loading();
+        let github_error = flow.github.error().map(str::to_string);
+        let device_name = device
+            .as_ref()
+            .map_or("this device".to_string(), |d| d.name.clone());
         let home_status = if flow.home_search.indexing {
             Some("Indexing…")
         } else if home_loading {
@@ -6996,21 +7251,33 @@ impl Shell {
                 }
             }
             ProjectStep::Locations => {
-                for (ix, (name, path)) in self.add_space_locations(cx).into_iter().enumerate() {
-                    let glyph = if path.is_none() {
-                        icons::HOME
-                    } else {
-                        icons::HARD_DRIVE
+                for (ix, location) in self.add_space_locations(cx).into_iter().enumerate() {
+                    let el = match location {
+                        LocationRow::Folder(name, path) => {
+                            let glyph = if path.is_none() {
+                                icons::HOME
+                            } else {
+                                icons::HARD_DRIVE
+                            };
+                            row(ix)
+                                .child(glyph_el(glyph))
+                                .child(label_el(name.clone()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.add_space_goto_location(name.clone(), path.clone(), cx)
+                                }))
+                        }
+                        LocationRow::GitHub => row(ix)
+                            .child(glyph_el(icons::GITHUB_MARK))
+                            .child(label_el("GitHub".into()))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_space_goto_github(cx))),
                     };
-                    let label = name.clone();
+                    rows.push(el.into_any_element());
+                }
+            }
+            ProjectStep::GitHub => {
+                for (ix, repo) in self.add_space_github_rows(cx).into_iter().enumerate() {
                     rows.push(
-                        row(ix)
-                            .child(glyph_el(glyph))
-                            .child(label_el(label))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_space_goto_location(name.clone(), path.clone(), cx)
-                            }))
-                            .into_any_element(),
+                        github_repo_row(row(ix), &repo, &query, &theme, cx).into_any_element(),
                     );
                 }
             }
@@ -7084,7 +7351,9 @@ impl Shell {
             .flex_col()
             .gap(px(SIDEBAR_LIST_GAP))
             .children(rows);
-        if step == ProjectStep::Folders && loading {
+        if (step == ProjectStep::Folders && loading)
+            || (step == ProjectStep::GitHub && github_loading)
+        {
             results = results.child(div().p(px(8.0)).child(popover::skeleton_rows(
                 "project-loading",
                 &theme,
@@ -7092,6 +7361,16 @@ impl Shell {
                 cx.entity_id(),
                 cx,
             )));
+        } else if let Some(code) = github_error.filter(|_| step == ProjectStep::GitHub) {
+            let (title, hint) = github_error_copy(&code, &device_name);
+            results = results.child(
+                command_palette::palette_empty(&theme, title, hint).child(
+                    popover::btn_ghost(&theme, "Retry", "github-retry")
+                        .id("github-retry")
+                        .mt(px(6.0))
+                        .on_click(cx.listener(|this, _, _, cx| this.load_github_repos(cx))),
+                ),
+            );
         } else if let Some(message) = load_error.filter(|_| step == ProjectStep::Folders) {
             results = results.child(
                 popover::error_row(&theme, &message).p(px(16.0)).child(
@@ -7128,6 +7407,11 @@ impl Shell {
                     "No folders match",
                     "Type a path like ~/code or /mnt to jump there.".to_string(),
                 ),
+                ProjectStep::GitHub if query.is_empty() => (
+                    "No repositories",
+                    "Your GitHub account has none yet.".to_string(),
+                ),
+                ProjectStep::GitHub => ("No repositories match", "Try another name.".to_string()),
             };
             results = results.child(command_palette::palette_empty(&theme, title, hint));
         }
@@ -7160,6 +7444,15 @@ impl Shell {
                 glyph: Some(device_glyph(&device.platform)),
                 current: step == ProjectStep::Locations,
                 target: CrumbTarget::Locations,
+            });
+        }
+        if step == ProjectStep::GitHub {
+            crumb_key.push_str("github");
+            specs.push(Crumb {
+                name: "GitHub".into(),
+                glyph: Some(icons::GITHUB_MARK),
+                current: true,
+                target: CrumbTarget::GitHub,
             });
         }
         let mut hidden: Vec<(String, String)> = Vec::new();
@@ -7291,6 +7584,9 @@ impl Shell {
                     CrumbTarget::Folder(full) => el.on_click(cx.listener(move |this, _, _, cx| {
                         this.add_space_descend(full.clone(), false, cx)
                     })),
+                    CrumbTarget::GitHub => {
+                        el.on_click(cx.listener(|this, _, _, cx| this.add_space_goto_github(cx)))
+                    }
                     CrumbTarget::More => el
                         .on_mouse_down(
                             gpui::MouseButton::Left,
@@ -7401,16 +7697,25 @@ impl Shell {
             .child(command_palette::command_key_hint(
                 &theme,
                 "↵",
-                if step == ProjectStep::Folders {
-                    "Open"
-                } else {
-                    "Select"
+                match step {
+                    ProjectStep::Folders => "Open",
+                    ProjectStep::GitHub => "Add",
+                    _ => "Select",
                 },
             ))
             .when(step != ProjectStep::Devices, |el| {
                 el.child(command_palette::command_key_hint(&theme, "←", "Back"))
             })
             .child(command_palette::command_key_hint(&theme, "Esc", "Close"))
+            .when(step == ProjectStep::GitHub && busy, |el| {
+                el.child(div().flex_1()).child(
+                    div()
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child("Cloning…"),
+                )
+            })
             .when(step == ProjectStep::Folders, |el| {
                 el.child(div().flex_1()).child(
                     div()
@@ -7791,6 +8096,23 @@ impl Shell {
                     {"name":"System", "path":"/"}
                 ]))
                 .unwrap(),
+            );
+            cx.notify();
+        }
+        if flow.device.is_some() && !matches!(flow.github, Loadable::Ready(_)) {
+            flow.github = Loadable::Ready(
+                [
+                    "alex/fieldnotes",
+                    "alex/mobile-app",
+                    "alex/website",
+                    "acme/design-system",
+                    "acme/api",
+                    "alex/dotfiles",
+                ]
+                .map(|name| GitHubRepo {
+                    name_with_owner: name.into(),
+                })
+                .to_vec(),
             );
             cx.notify();
         }

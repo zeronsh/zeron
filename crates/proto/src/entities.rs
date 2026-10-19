@@ -331,6 +331,12 @@ pub struct Repo {
     pub default_branch: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRepo {
+    pub name_with_owner: String,
+}
+
 /// One row of `ListRefs`: a branch plus its checkout state — whether it is
 /// the repo's current (main-checkout) branch and whether it is materialized
 /// as a linked worktree. Drives the composer's ref picker (`current` /

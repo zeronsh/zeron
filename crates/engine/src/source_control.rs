@@ -35,6 +35,11 @@ const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
 const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
 
+const GITHUB_VIEWER_REPOS_QUERY: &str = "query($after: String) { viewer { repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], isArchived: false, orderBy: {field: PUSHED_AT, direction: DESC}) { pageInfo { hasNextPage endCursor } nodes { nameWithOwner } } } }";
+const GITHUB_REPOS_MAX_PAGES: usize = 5;
+const GITHUB_REPOS_TTL: Duration = Duration::from_secs(5 * 60);
+const GITHUB_CLONE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 const GITHUB_PR_METADATA_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { viewer { login } repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";
 
 fn remove_nulls(value: &mut serde_json::Value) {
@@ -357,6 +362,7 @@ pub struct GitHubCli {
     store: Option<crate::change_request_store::ChangeRequestStore>,
     /// The active `gh` account and when it was read, keying the store.
     account: Arc<tokio::sync::Mutex<Option<(Instant, Option<String>)>>>,
+    repos: Arc<tokio::sync::Mutex<Option<(Instant, Vec<zeron_proto::GitHubRepo>)>>>,
 }
 
 impl GitHubCli {
@@ -772,6 +778,86 @@ impl GitHubCli {
             pr_cache: Default::default(),
             store: None,
             account: Default::default(),
+            repos: Default::default(),
+        }
+    }
+
+    pub async fn list_repositories(
+        &self,
+    ) -> Result<Vec<zeron_proto::GitHubRepo>, ChangeRequestError> {
+        let mut cache = self.repos.lock().await;
+        if let Some((fetched_at, repos)) = cache.as_ref()
+            && fetched_at.elapsed() < GITHUB_REPOS_TTL
+        {
+            return Ok(repos.clone());
+        }
+        let mut repos = Vec::new();
+        let mut after: Option<String> = None;
+        for _ in 0..GITHUB_REPOS_MAX_PAGES {
+            let request = ProcessRequest {
+                args: vec![
+                    "api".into(),
+                    "graphql".into(),
+                    "-f".into(),
+                    format!("query={GITHUB_VIEWER_REPOS_QUERY}"),
+                ]
+                .into_iter()
+                .chain(
+                    after
+                        .iter()
+                        .flat_map(|cursor| ["-f".into(), format!("after={cursor}")]),
+                )
+                .collect(),
+                stdin: None,
+                ..github_request()
+            };
+            let output = self.runner.run(request).await.map_err(classify_run_error)?;
+            if !output.success {
+                return Err(classify_github_failure(&output.stderr));
+            }
+            if output.stdout_truncated {
+                return Err(ChangeRequestError::Decode);
+            }
+            let response: GhViewerReposResponse =
+                serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+            let connection = response.data.viewer.repositories;
+            repos.extend(connection.nodes.into_iter().flatten().filter_map(|node| {
+                valid_pr_repository(&node.name_with_owner).then_some(zeron_proto::GitHubRepo {
+                    name_with_owner: node.name_with_owner,
+                })
+            }));
+            after = connection
+                .page_info
+                .filter(|info| info.has_next_page)
+                .and_then(|info| info.end_cursor)
+                .filter(|cursor| valid_page_cursor(cursor));
+            if after.is_none() {
+                break;
+            }
+        }
+        *cache = Some((Instant::now(), repos.clone()));
+        Ok(repos)
+    }
+
+    pub async fn clone_repository(
+        &self,
+        repository: &str,
+        target: &Path,
+    ) -> Result<(), ChangeRequestError> {
+        let mut request = github_request();
+        request.args = vec![
+            "repo".into(),
+            "clone".into(),
+            repository.into(),
+            target.to_string_lossy().into_owned(),
+        ];
+        request.env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+        request.timeout = GITHUB_CLONE_TIMEOUT;
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if output.success {
+            Ok(())
+        } else {
+            Err(classify_github_failure(&output.stderr))
         }
     }
 
@@ -1752,6 +1838,35 @@ struct GhSearchConnection {
 struct GhPageInfo {
     has_next_page: bool,
     end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhViewerReposResponse {
+    data: GhViewerReposData,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhViewerReposData {
+    viewer: GhViewer,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhViewer {
+    repositories: GhRepoConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRepoConnection {
+    nodes: Vec<Option<GhRepoNode>>,
+    #[serde(default)]
+    page_info: Option<GhPageInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRepoNode {
+    name_with_owner: String,
 }
 
 #[derive(Debug, Deserialize)]

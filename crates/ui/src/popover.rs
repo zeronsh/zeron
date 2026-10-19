@@ -265,6 +265,36 @@ pub fn filter_indices<S: AsRef<str>>(query: &str, labels: &[S]) -> Vec<usize> {
     ranked.into_iter().map(|(_, ix)| ix).collect()
 }
 
+pub fn fuzzy_indices<S: AsRef<str>>(query: &str, labels: &[S]) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    let mut ranked: Vec<((usize, usize), usize)> = labels
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, label)| fuzzy_rank(&query, label.as_ref()).map(|rank| (rank, ix)))
+        .collect();
+    ranked.sort_by_key(|&(rank, ix)| (rank, ix));
+    ranked.into_iter().map(|(_, ix)| ix).collect()
+}
+
+fn fuzzy_rank(query: &str, label: &str) -> Option<(usize, usize)> {
+    if query.is_empty() {
+        return Some((0, 0));
+    }
+    let label = label.to_lowercase();
+    if let Some(at) = label.find(query) {
+        let boundary = at == 0 || !label.as_bytes()[at - 1].is_ascii_alphanumeric();
+        return Some((usize::from(!boundary), at));
+    }
+    let mut at = 0;
+    let mut gaps = 0;
+    for needle in query.chars() {
+        let found = label[at..].find(needle)? + at;
+        gaps += found - at;
+        at = found + needle.len_utf8();
+    }
+    Some((2, gaps))
+}
+
 /// Keys the pickers care about, classified from a raw keystroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuKey {

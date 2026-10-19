@@ -653,6 +653,43 @@ impl Repos {
         self.to_repo(&target).await
     }
 
+    pub async fn github_clone_target(
+        &self,
+        repository: &str,
+    ) -> Result<(PathBuf, bool), EngineError> {
+        let (owner, name) = repository
+            .split_once('/')
+            .ok_or_else(|| EngineError::Other("Invalid repository name".into()))?;
+        let repos_dir = self.inner.data_dir.join("repos");
+        for folder in [name.to_owned(), format!("{owner}-{name}")] {
+            let target = repos_dir.join(folder);
+            if !Self::path_exists(&target).await {
+                return Ok((target, false));
+            }
+            if self.is_repo(&target).await
+                && self
+                    .origin_slug(&target)
+                    .await
+                    .is_some_and(|slug| slug.eq_ignore_ascii_case(repository))
+            {
+                return Ok((target, true));
+            }
+        }
+        Err(EngineError::Other(format!(
+            "Already exists: {}",
+            repos_dir.join(name).display()
+        )))
+    }
+
+    async fn origin_slug(&self, path: &Path) -> Option<String> {
+        let url = self
+            .git(&["remote", "get-url", "origin"], Some(path))
+            .await
+            .ok()?;
+        let remote = crate::source_control::parse_git_remote(url.trim())?;
+        Some(format!("{}/{}", remote.owner, remote.repository))
+    }
+
     /// `git init -b main` a fresh repository under `{data_dir}/repos`.
     pub async fn create(&self, name: &str) -> Result<Repo, EngineError> {
         let clean: String = name
