@@ -3012,7 +3012,7 @@ impl Shell {
                             crate::sound::Sound::Request => "Waiting on your input",
                             crate::sound::Sound::Attention => "Run failed",
                         };
-                        crate::notify::post(&title, body, Some(&chat_id));
+                        crate::notify::post(&title, body, Some(&chat_id), cx);
                     }
                 }
             }
@@ -3035,7 +3035,7 @@ impl Shell {
                         zeron_proto::ConnectivityState::Offline => "Your device is offline",
                         _ => "Zeron is trying to reconnect",
                     };
-                    crate::notify::post("Connection unavailable", body, None);
+                    crate::notify::post("Connection unavailable", body, None, cx);
                 }
             }
         }
@@ -3102,6 +3102,7 @@ impl Shell {
                             ),
                             body,
                             Some(crate::notify::AGENT_UPDATES_TARGET),
+                            cx,
                         );
                     }
                 })
