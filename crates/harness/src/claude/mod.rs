@@ -65,7 +65,7 @@ use zeron_proto::{
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use crate::{Harness, HarnessError, RunControls, Signal, kill_child_now, send_signal};
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
 use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
@@ -336,7 +336,7 @@ impl ClaudeHarness {
             }
         })?;
         let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            shutdown_child(&mut child, self.kill_grace).await;
+            kill_child_now(&mut child).await;
             return Err(HarnessError::Protocol("claude child has no stdio".into()));
         };
         const PROBE_ID: &str = "zeron-command-probe";
@@ -377,7 +377,7 @@ impl ClaudeHarness {
             ))
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        kill_child_now(&mut child).await;
         match result {
             Ok(inner) => inner,
             Err(_) => Err(HarnessError::Protocol("Claude initialize timed out".into())),
