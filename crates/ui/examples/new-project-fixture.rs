@@ -19,6 +19,13 @@ fn main() -> anyhow::Result<()> {
                 adjustment: settings::NewThreadBackgroundAdjustment::default(),
             });
         }
+        if let Ok(path) = std::env::var("ZERON_FIXTURE_GENERATIVE") {
+            settings.new_thread_generative_art = Some(std::fs::read_to_string(path).unwrap());
+            settings.new_thread_background_source = settings::NewThreadBackgroundSource::Generative;
+        }
+        if let Ok(path) = std::env::var("ZERON_FIXTURE_HOME_VISUAL") {
+            settings.new_thread_visual = Some(std::fs::read_to_string(path).unwrap());
+        }
         if let Some(folder) = std::env::var_os("ZERON_FIXTURE_WALLPAPER_FOLDER") {
             settings.wallpaper_folder = Some(folder.into());
         }
@@ -47,7 +54,7 @@ fn main() -> anyhow::Result<()> {
                 {"id":"remote","name":"Build server","platform":"linux","lastSeenAt":null},
                 {"id":"laptop","name":"Travel laptop","platform":"macos","lastSeenAt":null}
             ])).unwrap();
-            s.selected_chat = if std::env::var_os("ZERON_FIXTURE_BACKGROUND").is_some() { None } else { Some("browser-fixture".into()) }; s.selected_space = Some("project".into());
+            s.selected_chat = if std::env::var_os("ZERON_FIXTURE_BACKGROUND").is_some() || std::env::var_os("ZERON_FIXTURE_HOME_VISUAL").is_some() || std::env::var_os("ZERON_FIXTURE_GENERATIVE").is_some() { None } else { Some("browser-fixture".into()) }; s.selected_space = Some("project".into());
             s.auto_selected = true; s.chats_synced = true; s.spaces_synced = true;
             s.spaces = vec![serde_json::from_value(serde_json::json!({"id":"project","deviceId":"local","path":"/tmp/fieldnotes","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
             s.chats = vec![serde_json::from_value(serde_json::json!({"id":"browser-fixture","deviceId":"local","spaceId":"project","title":"Build the Fieldnotes workspace","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"claude-sonnet-4-6","reasoning":null,"sandbox":"workspace-write"}})).unwrap()];

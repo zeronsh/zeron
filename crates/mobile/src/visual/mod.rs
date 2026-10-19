@@ -1273,6 +1273,7 @@ impl Worker {
                 blend: node.blend,
                 bloom: node.bloom,
                 textures: &textures,
+                fade_edges: true,
             },
             &uniforms,
             size.0,

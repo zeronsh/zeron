@@ -333,6 +333,9 @@ pub struct AppearancePage {
     review_entry: Option<String>,
     library_error: Option<SharedString>,
     background_error: Option<SharedString>,
+    background_source_select: widgets::SelectState,
+    home_visual: Entity<crate::settings::script_card::ScriptCard>,
+    generative_art: Entity<crate::settings::script_card::ScriptCard>,
 }
 
 impl AppearancePage {
@@ -715,6 +718,19 @@ impl AppearancePage {
             review_entry: None,
             library_error: None,
             background_error: None,
+            background_source_select: widgets::SelectState::default(),
+            home_visual: cx.new(|cx| {
+                crate::settings::script_card::ScriptCard::new(
+                    &crate::settings::home_visual::SPEC,
+                    cx,
+                )
+            }),
+            generative_art: cx.new(|cx| {
+                crate::settings::script_card::ScriptCard::new(
+                    &crate::settings::generative_art::SPEC,
+                    cx,
+                )
+            }),
         }
     }
 
@@ -3689,6 +3705,61 @@ impl Render for AppearancePage {
                 .child(surface_control)
                 .into_any_element(),
         );
+        let current_background_source = ui_settings.new_thread_background_source;
+        let generative = matches!(
+            current_background_source,
+            crate::settings::NewThreadBackgroundSource::Generative
+        );
+        {
+            use crate::settings::NewThreadBackgroundSource;
+            let source_control = widgets::select(
+                "new-thread-background-source",
+                "Background source",
+                &theme,
+                |page: &mut Self| &mut page.background_source_select,
+            )
+            .options(
+                NewThreadBackgroundSource::ALL
+                    .into_iter()
+                    .map(|source| widgets::SelectOption::new(source.label())),
+                NewThreadBackgroundSource::ALL
+                    .into_iter()
+                    .position(|source| source == current_background_source)
+                    .unwrap_or_default(),
+            )
+            .width(128.0)
+            .on_select(|_, ix, _, cx| {
+                crate::settings::set_new_thread_background_source(
+                    NewThreadBackgroundSource::ALL[ix],
+                    cx,
+                );
+                cx.notify();
+            })
+            .render(&self.background_source_select, cx);
+            settings_rows.push(
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(widgets::row_title(&theme, "Background source"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![
+                                    div()
+                                        .child(if generative {
+                                            "Generative art from a Luau shader, set below."
+                                        } else {
+                                            "The image below, with its framing and effect."
+                                        })
+                                        .into_any_element(),
+                                ],
+                            )),
+                    )
+                    .child(source_control)
+                    .into_any_element(),
+            );
+        }
         let background_available = current_background
             .as_ref()
             .is_some_and(|background| Path::new(&background.path).is_file());
@@ -3868,7 +3939,8 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
-        if background_available {
+        // Effects treat the image; the generative art shows as its script draws it.
+        if background_available && !generative {
             use crate::settings::NewThreadBackgroundEffect;
             let effect_control = widgets::select(
                 "new-thread-background-effect",
@@ -4172,6 +4244,18 @@ impl Render for AppearancePage {
                                     &theme,
                                     "Material and background",
                                     widgets::section_card(&theme).mt_0().children(settings_rows),
+                                ))
+                                .when(generative, |page| {
+                                    page.child(widgets::section(
+                                        &theme,
+                                        "Generative background",
+                                        self.generative_art.clone(),
+                                    ))
+                                })
+                                .child(widgets::section(
+                                    &theme,
+                                    "Home visual",
+                                    self.home_visual.clone(),
                                 ))
                                 .child(widgets::section(
                                     &theme,

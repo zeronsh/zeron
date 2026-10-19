@@ -1530,6 +1530,8 @@ enum EditKind {
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
 pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
+/// Code fields: Enter breaks the line; nothing submits.
+pub(crate) const CODE_INPUT_CONTEXT: &str = "CodeInput";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageEnterBindingAction {
@@ -1776,6 +1778,9 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
     }
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);
+    let mut code_bindings = input_bindings(CODE_INPUT_CONTEXT);
+    code_bindings.push(KeyBinding::new("enter", Newline, Some(CODE_INPUT_CONTEXT)));
+    cx.bind_keys(code_bindings);
     cx.bind_keys(message_bindings);
 }
 
@@ -1979,6 +1984,8 @@ pub struct ComposerInput {
     text_size: f32,
     configured_line_height: f32,
     single_line: bool,
+    /// Set in the monospace face (code fields).
+    monospace: bool,
     scroll_left: f32,
     // -- measured state (written during layout/paint) --
     last_lines: Vec<WrappedLine>,
@@ -2097,6 +2104,7 @@ impl ComposerInput {
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
             single_line: false,
+            monospace: false,
             scroll_left: 0.0,
             last_lines: Vec::new(),
             line_starts: vec![0],
@@ -2158,6 +2166,12 @@ impl ComposerInput {
 
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    /// Set the text in the monospace face, for code.
+    pub(crate) fn with_monospace(mut self) -> Self {
+        self.monospace = true;
         self
     }
 
@@ -5311,7 +5325,11 @@ impl Render for ComposerInput {
             .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(crate::typography::ui_rems(self.configured_line_height))
             .text_color(text_color)
-            .font_family(theme.font_sans.clone())
+            .font_family(if self.monospace {
+                theme.font_mono.clone()
+            } else {
+                theme.font_sans.clone()
+            })
             .child({
                 let input = cx.entity();
                 let ascent = self.max_ascent;

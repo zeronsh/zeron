@@ -35,6 +35,17 @@ fn crossfade_mix(start: Instant, now: Instant) -> f32 {
 }
 
 impl Readiness {
+    /// A live source (the generative background, keyed by `path`) replaces
+    /// its own frames in place, before [`Readiness::frame`] runs: only
+    /// switching to or from it crossfades, including mid-crossfade.
+    pub fn adopt_live_frame(&mut self, image: Option<&Arc<gpui::RenderImage>>, path: &Path) {
+        if let Some(image) = image
+            && self.current_path.as_deref() == Some(path)
+        {
+            self.current = Some(image.clone());
+        }
+    }
+
     pub fn frame(
         &mut self,
         image: Option<Arc<gpui::RenderImage>>,
@@ -467,6 +478,40 @@ mod tests {
         assert_eq!(frame.mix, 1.0);
         let removed = ready.frame(None, None, adjustment, false, true, done);
         assert!(removed.current.is_none() && removed.previous.is_none());
+    }
+
+    #[test]
+    fn live_frames_replace_in_place_and_only_switching_sources_crossfades() {
+        let image = artwork();
+        let (first, second, third) = (artwork(), artwork(), artwork());
+        let mut ready = Readiness::default();
+        let now = Instant::now();
+        let adjustment = NewThreadBackgroundAdjustment::default();
+        let image_path = Path::new("background.png");
+        let live = Path::new("generative:1");
+        ready.frame(Some(image.clone()), Some(image_path), adjustment, true, true, now);
+        // Switching to the live source crossfades from the image.
+        ready.adopt_live_frame(Some(&first), live);
+        let start = ready.frame(Some(first.clone()), Some(live), adjustment, true, false, now);
+        assert_eq!(start.previous.unwrap().id, image.id);
+        assert_eq!(start.current.unwrap().id, first.id);
+        // Its next frame lands mid-crossfade: shown at once, still fading in.
+        ready.adopt_live_frame(Some(&second), live);
+        let mid = ready.frame(Some(second.clone()), Some(live), adjustment, true, false, now);
+        assert_eq!(mid.current.unwrap().id, second.id);
+        assert_eq!(mid.previous.unwrap().id, image.id);
+        assert!(mid.active);
+        // After it, frames replace each other without starting another.
+        let done = now + std::time::Duration::from_secs(1);
+        ready.frame(Some(second), Some(live), adjustment, true, false, done);
+        ready.adopt_live_frame(Some(&third), live);
+        let later = ready.frame(Some(third.clone()), Some(live), adjustment, true, false, done);
+        assert_eq!(later.current.unwrap().id, third.id);
+        assert!(later.previous.is_none() && !later.active);
+        // A frame of another live key doesn't hijack the current source.
+        ready.adopt_live_frame(Some(&image), Path::new("generative:2"));
+        let held = ready.frame(None, Some(live), adjustment, true, false, done);
+        assert_eq!(held.current.unwrap().id, third.id);
     }
 
     #[test]
