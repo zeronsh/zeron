@@ -125,6 +125,14 @@ Concurrent placements converge by field clock; renaming and collapsing a section
 update separate fields. Deletion marks the section deleted without deleting chats.
 Archived chats retain membership. Section IDs are never reused or revived.
 
+Sections and their members keep a placed order through `orderKey` fields, minted
+between the neighbours' keys as pins are. A section's key lives on its own
+`sidebarSections` row, so concurrent moves of one section converge by clock and
+moves of different sections both survive. Sections no move has keyed yet (all of
+them before the first reorder, and any an older app creates) follow the keyed
+ones by creation. Moving sections is desktop-only and needs an engine advertising
+`sidebar-section-order-v1`; apps that predate it keep showing creation order.
+
 The existing sidebar preferences watch includes sections. Pin and section intents
 share the UI's ordered optimistic queue; a rejected write reveals the latest
 confirmed state. Later pin toggles from older apps still take effect through their

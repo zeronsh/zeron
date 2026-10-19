@@ -256,6 +256,16 @@ impl CoreClient {
         Ok(self.client.pin_session(&chat_id)?)
     }
 
+    /// Pin between neighbours (`None` at either end).
+    pub fn pin_session_at(
+        &self,
+        chat_id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.pin_session_at(&chat_id, after, before)?)
+    }
+
     pub fn unpin_session(&self, chat_id: String) -> CoreResult<()> {
         Ok(self.client.unpin_session(&chat_id)?)
     }
@@ -290,6 +300,20 @@ impl CoreClient {
     /// Move a session into a section (`None` = back to recent).
     pub fn assign_section(&self, chat_id: String, section_id: Option<String>) -> CoreResult<()> {
         Ok(self.client.assign_section(&chat_id, section_id)?)
+    }
+
+    /// Move a session into a section between its members (`None` at either
+    /// end), as a drop into the section does.
+    pub fn place_session(
+        &self,
+        chat_id: String,
+        section_id: Option<String>,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self
+            .client
+            .place_session(&chat_id, section_id, after, before)?)
     }
 
     /// Create (or find) the project for `path` on `device_id`. Returns its id.

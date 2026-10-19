@@ -1315,6 +1315,83 @@ fn sidebar_sections_keep_placed_order_across_devices() {
 }
 
 #[test]
+fn sidebar_sections_reorder_and_converge_across_devices() {
+    use zeron_proto::SidebarSectionChange::*;
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let create = |doc: &mut RegistryDoc, id: &str| {
+        section_change(
+            doc,
+            Create {
+                id: id.into(),
+                name: id.into(),
+            },
+        )
+    };
+    let moved = |doc: &mut RegistryDoc, id: &str, after: Option<&str>, before: Option<&str>| {
+        section_change(
+            doc,
+            Move {
+                id: id.into(),
+                after: after.map(Into::into),
+                before: before.map(Into::into),
+            },
+        )
+    };
+    let order = |doc: &RegistryDoc| {
+        doc.sidebar_preferences()
+            .unwrap()
+            .sections
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>()
+    };
+    for id in ["one", "two", "three"] {
+        create(&mut a, id);
+    }
+    // Unmoved sections keep creation order.
+    assert_eq!(order(&a), ["one", "two", "three"]);
+    moved(&mut a, "three", None, Some("one"));
+    assert_eq!(order(&a), ["three", "one", "two"]);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(order(&b), ["three", "one", "two"]);
+    // A section created later, keyless as an older engine writes it, appends.
+    create(&mut b, "four");
+    assert_eq!(order(&b), ["three", "one", "two", "four"]);
+    // Concurrent moves of different sections both survive.
+    moved(&mut a, "one", Some("two"), None);
+    moved(&mut b, "four", None, Some("three"));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(order(&a), order(&b));
+    assert_eq!(order(&a), ["four", "three", "two", "one"]);
+    // Concurrent moves of the same section: the later one wins everywhere.
+    moved(&mut a, "two", None, Some("four"));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    moved(&mut b, "two", Some("one"), None);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(order(&a), order(&b));
+    assert_eq!(order(&a), ["four", "three", "one", "two"]);
+    // Moving a deleted section is a no-op, and its anchors may be gone.
+    section_change(&mut a, Delete { id: "three".into() });
+    moved(&mut a, "three", None, Some("four"));
+    moved(&mut a, "one", Some("three"), None);
+    assert_eq!(order(&a), ["four", "two", "one"]);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    // Keying a new section leaves the keyed ones alone, so a concurrent
+    // move on another device survives a later move that keys it.
+    moved(&mut a, "one", None, Some("four"));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    create(&mut b, "five");
+    moved(&mut b, "two", Some("five"), None);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(order(&a), order(&b));
+    assert_eq!(order(&a), ["one", "four", "five", "two"]);
+}
+
+#[test]
 fn sidebar_sections_sync_metadata_membership_and_delete_without_deleting_sessions() {
     use zeron_proto::SidebarSectionChange::*;
     let mut a = RegistryDoc::new("a");

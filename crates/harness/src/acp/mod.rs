@@ -1923,7 +1923,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         .map(|a| a.as_slice())
         .unwrap_or_default();
 
-    let ladder: Vec<ReasoningLevel> = config_options
+    let mut ladder: Vec<ReasoningLevel> = config_options
         .iter()
         .find(|o| o.get("category").and_then(Value::as_str) == Some("thought_level"))
         .and_then(|o| o.get("options").and_then(Value::as_array))
@@ -1934,6 +1934,8 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 .collect()
         })
         .unwrap_or_default();
+    ladder.sort_unstable();
+    ladder.dedup();
     let wire_options: Vec<ModelOption> = config_options
         .iter()
         .filter_map(trait_from_config_option)
@@ -5840,6 +5842,68 @@ mod tests {
             vec!["fast-mode"]
         );
         assert_eq!(models[0].options[0].default_choice, "off");
+    }
+
+    #[test]
+    fn grok_thought_levels_order_from_lowest_to_highest() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "grok-4.7",
+                    "options": [
+                        { "value": "grok-4.7", "name": "Grok 4.7" },
+                        { "value": "grok-4.7-build-fast", "name": "Grok 4.7 Fast" },
+                        { "value": "grok-4.6", "name": "Grok 4.6" },
+                        { "value": "grok-4.5", "name": "Grok 4.5" },
+                    ],
+                },
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning Effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "xhigh",
+                    "options": [
+                        { "value": "xhigh", "name": "Extra High" },
+                        { "value": "high", "name": "High" },
+                        { "value": "medium", "name": "Medium" },
+                        { "value": "low", "name": "Low" },
+                    ],
+                },
+            ],
+        });
+        let models = models_from_session(&response, &(grok_spec().models)());
+        let ladders = models
+            .iter()
+            .map(|m| (m.id.as_str(), m.reasoning_levels.clone()))
+            .collect::<Vec<_>>();
+        let ascending = vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+        ];
+        assert_eq!(
+            ladders,
+            vec![
+                ("grok-4.7", ascending.clone()),
+                ("grok-4.7-build-fast", ascending.clone()),
+                ("grok-4.6", ascending),
+                (
+                    "grok-4.5",
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High,
+                    ],
+                ),
+            ]
+        );
     }
 
     #[test]

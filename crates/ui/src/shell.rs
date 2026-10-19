@@ -83,7 +83,9 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
 mod pull_request_pane;
+mod session_hover_card;
 mod session_info;
+mod session_lanes;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -1244,6 +1246,35 @@ struct PinnedSessionDragState {
     autoscroll_active: bool,
 }
 
+/// Drag payload for reordering custom sections by their header.
+#[derive(Clone)]
+struct SidebarSectionDrag {
+    section_id: String,
+    profile_key: String,
+    /// The section order the drag started from.
+    ids: std::sync::Arc<Vec<String>>,
+}
+
+/// Live reorder of the custom sections. The lifted section rides under the
+/// pointer while its siblings slide between slots, as pinned rows do.
+struct SidebarSectionDragState {
+    payload: SidebarSectionDrag,
+    from: usize,
+    over: usize,
+    /// Natural slot heights at lift, shared by hit testing and displacement.
+    heights: Vec<f32>,
+    /// The first slot's top in the list's content coordinates.
+    top: f32,
+    /// The slots' left edge within the list, and their width.
+    left: f32,
+    width: f32,
+    /// The pointer's offset below the lifted section's top.
+    grab_y: f32,
+    pointer: Point<Pixels>,
+    siblings: std::collections::HashMap<String, SidebarSessionSlide>,
+    generation: u64,
+}
+
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
@@ -1459,11 +1490,11 @@ enum SplashPhase {
 const CHAT_RENAME_REVEAL_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Which list draws a chat's inline title editor: the sidebar's session row,
-/// or the side-chat row in the explorer's Chats footer.
+/// or the side-chat branch in the session card's lanes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatRenameSurface {
     Sidebar,
-    Explorer,
+    SessionCard,
 }
 
 /// A chat title edited in place on its row (double-click, or Rename in the
@@ -2132,6 +2163,8 @@ pub struct Shell {
     /// under a still pointer would otherwise never show its archive pill;
     /// while set, rows adopt the hover from a paint-time hit test instead.
     chat_hover_resync: bool,
+    /// The sidebar row whose hover card shows (or waits out its dwell).
+    session_hover_card: session_hover_card::SessionHoverCard,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// In-flight reorder for the pinned section only.
@@ -2139,6 +2172,9 @@ pub struct Shell {
     pinned_session_drag_generation: u64,
     sidebar_session_transfer: Option<SidebarSessionTransfer>,
     sidebar_session_return: Option<SidebarSessionReturn>,
+    sidebar_section_drag: Option<SidebarSectionDragState>,
+    /// Each custom section's painted bounds, measured every frame.
+    sidebar_section_bounds: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<Pixels>>>>,
     /// Pending pin intents are scoped to the active profile and engine attachment.
     sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
     sidebar_pin_write_generation: u64,
@@ -2231,6 +2267,10 @@ pub struct Shell {
     /// The room the transcript last held free for the docked card, eased
     /// back from as the card hides because the column stopped fitting it.
     session_info_last_reserve: f32,
+    /// The lanes card's folds and pages.
+    session_lanes: session_lanes::LaneState,
+    /// The working-tree diffs behind the card's branch-row totals.
+    session_diffs: session_info::SessionDiffs,
     files_content_tween: Option<WidthTween>,
     /// The last tracked frame: its chat, the window fit, and for each of
     /// `[sidebar, surface host, Files]` the width painted and the width its
@@ -2623,11 +2663,14 @@ impl Shell {
             project_icons: Default::default(),
             chat_status_hover: None,
             chat_hover_resync: false,
+            session_hover_card: Default::default(),
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
             sidebar_session_return: None,
+            sidebar_section_drag: None,
+            sidebar_section_bounds: Default::default(),
             sidebar_pin_write: None,
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
@@ -2679,6 +2722,8 @@ impl Shell {
             session_info_pressed_open: None,
             session_info_docked: false,
             session_info_last_reserve: 0.0,
+            session_lanes: session_lanes::LaneState::default(),
+            session_diffs: session_info::SessionDiffs::default(),
             files_content_tween: None,
             painted_columns: None,
             fit_exits: [None; 3],
@@ -3291,6 +3336,7 @@ impl Shell {
         }
         let from = self.sidebar_now();
         let before = self.painted_panels(cx);
+        self.session_hover_card.dismiss();
         self.sidebar_edge_bounce = None;
         self.sidebar_resize_edge = None;
         self.pane_resize_active = None;
@@ -4091,14 +4137,6 @@ impl Shell {
                     FilesEvent::CloseReady => {
                         this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
                     }
-                    // Footer rows exist on the explorer only; an editor
-                    // surface never emits them.
-                    FilesEvent::OpenSubagent { .. }
-                    | FilesEvent::OpenChildChat(_)
-                    | FilesEvent::RenameChildChat(_)
-                    | FilesEvent::ChildChatContextMenu { .. }
-                    | FilesEvent::NewChildChat
-                    | FilesEvent::ForkChat => {}
                     FilesEvent::CloseCancelled => {
                         this.cancel_file_close(RightSurface::File(id), cx)
                     }
@@ -5818,7 +5856,7 @@ impl Shell {
     }
 
     /// Start editing `chat_id`'s title in place on its row: the sidebar's
-    /// session row, or — for a side chat — its row under the file tree.
+    /// session row, or — for a side chat — its branch in the session card.
     fn open_rename_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
         if self.chat_rename.is_some() {
@@ -5840,28 +5878,27 @@ impl Shell {
         else {
             return;
         };
-        // The sidebar lists only top-level chats; side chats live in the
-        // explorer's Chats footer. Either way the row must be on screen
-        // first: a field on a hidden row would take keystrokes unseen.
+        // The sidebar lists only top-level chats; side chats ride the
+        // session card's lanes. Either way the row must be on screen first:
+        // a field on a hidden row would take keystrokes unseen.
         let surface = if parent.is_some() {
-            ChatRenameSurface::Explorer
+            ChatRenameSurface::SessionCard
         } else {
             ChatRenameSurface::Sidebar
         };
         let revealed = match surface {
             ChatRenameSurface::Sidebar => self.reveal_sidebar_chat(&chat_id, cx),
-            // The footer lists the open chat's live side chats; it reveals
-            // the row itself once handed the rename.
-            ChatRenameSurface::Explorer => {
+            // The lanes list the open chat's live side chats: show the card
+            // and page its lane to the branch.
+            ChatRenameSurface::SessionCard => {
                 !archived
                     && parent.as_deref() == Some(self.active_chat.as_str())
-                    && self.files_panel_open(cx)
-                    && self.files.contains_key(&self.panel_key(cx))
+                    && self.reveal_session_lane_chat(&chat_id, cx)
             }
         };
         if !revealed {
             // The sidebar explains its own refusals.
-            if surface == ChatRenameSurface::Explorer {
+            if surface == ChatRenameSurface::SessionCard {
                 self.show_notice(crate::toast::ToastKind::Error, "Open this side chat's parent to rename it", cx);
             }
             cx.notify();
@@ -5901,7 +5938,6 @@ impl Shell {
             _events: events,
             _blur: None,
         });
-        self.sync_explorer_chat_rename(cx);
         cx.notify();
     }
 
@@ -5926,7 +5962,6 @@ impl Shell {
         let Some(rename) = self.chat_rename.take() else {
             return;
         };
-        self.sync_explorer_chat_rename(cx);
         let title = rename.input.read(cx).text().trim().to_string();
         let unchanged = self
             .state
@@ -5942,18 +5977,6 @@ impl Shell {
             );
         }
         cx.notify();
-    }
-
-    /// Hand the explorer footers the side-chat rename to draw (or clear it).
-    fn sync_explorer_chat_rename(&mut self, cx: &mut Context<Self>) {
-        let rename = self
-            .chat_rename
-            .as_ref()
-            .filter(|rename| rename.surface == ChatRenameSurface::Explorer)
-            .map(|rename| (rename.chat_id.clone(), rename.input.clone()));
-        for files in self.files.values() {
-            files.update(cx, |files, cx| files.set_chat_rename(rename.clone(), cx));
-        }
     }
 
     /// Scroll the sidebar so the renamed row (painted at `row`) clears the
@@ -8057,6 +8080,11 @@ impl Shell {
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
         let compact = search_query.is_none() && self.settings.sidebar_compact;
+        let pr_surface = if search_query.is_some() {
+            crate::change_requests::ChangeRequestBadgeSurface::Sidebar
+        } else {
+            crate::change_requests::ChangeRequestBadgeSurface::SessionRow
+        };
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let remote = self
             .state
@@ -8333,18 +8361,24 @@ impl Shell {
                 .items_center()
                 .when(!preview, |el| el.cursor_pointer())
                 .when(corner_hovered, |el| {
-                    el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                    el.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.dismiss_session_card(cx);
                             cx.stop_propagation();
-                            this.chat_hover_resync = true;
-                            this.set_chat_archived(archive_id.clone(), !archived, cx);
-                        }))
-                        // Above the pill: below it the chip would cover the next row.
-                        .tooltip(crate::settings::widgets::text_tooltip_above(if archived {
-                            "Unarchive session"
-                        } else {
-                            ShortcutId::ArchiveSession.label()
-                        }))
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.chat_hover_resync = true;
+                        this.set_chat_archived(archive_id.clone(), !archived, cx);
+                    }))
+                    // Above the pill: below it the chip would cover the next row.
+                    .tooltip(crate::settings::widgets::text_tooltip_above(if archived {
+                        "Unarchive session"
+                    } else {
+                        ShortcutId::ArchiveSession.label()
+                    }))
                 })
                 .child(corner_body)
                 .into_any_element()
@@ -8363,6 +8397,21 @@ impl Shell {
         let rename_input = (search_query_none && !preview)
             .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
             .flatten();
+        // Sidebar rows only: the palette's copy already spells out its row,
+        // and a row being renamed keeps the pointer's attention on the field.
+        let hover_card = (search_query_none
+            && !preview
+            && rename_input.is_none()
+            && self.session_hover_card.shown() == Some(id.as_str()))
+        .then(|| {
+            self.render_session_hover_card(
+                &id,
+                time_ago.clone(),
+                cx,
+            )
+        })
+        .flatten();
+        let card_id = id.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
         // the wash and the title brighten ride the same 150ms blend.
         let fade_key = format!("{row_id}-hover");
@@ -8420,6 +8469,9 @@ impl Shell {
                     cx.listener(move |this, hovered: &bool, window, cx| {
                         fade_hover(hovered, window, cx);
                         this.chat_hover_resync = false;
+                        if search_query_none {
+                            this.hover_session_card(&card_id, *hovered, cx);
+                        }
                         if *hovered {
                             if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
                                 this.chat_status_hover = Some(hover_id.clone());
@@ -8432,6 +8484,13 @@ impl Shell {
                     })
                 })
                 .cursor_pointer()
+                // Pressing, scrolling or opening the menu puts the hover card
+                // away: the row has the pointer's intent now.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.dismiss_session_card(cx)),
+                )
+                .on_scroll_wheel(cx.listener(|this, _, _, cx| this.dismiss_session_card(cx)))
                 .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                     // The palette's copy of the row only opens; the sidebar's
                     // double-click edits the title in place.
@@ -8444,6 +8503,7 @@ impl Shell {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.dismiss_session_card(cx);
                         this.chat_menu.open(ChatMenuState {
                             tab: None,
                             chat_id: menu_id.clone(),
@@ -8517,6 +8577,41 @@ impl Shell {
                     .inset_0(),
                 )
             })
+            // Check both shown and pending cards after layout/occlusion
+            // changes under a stationary pointer. Unmounted rows are handled
+            // by the container's reconciliation.
+            .when(
+                !preview
+                    && search_query_none
+                    && rename_input.is_none()
+                    && self.session_hover_card.target() == Some(id.as_str()),
+                |el| {
+                    let shell = cx.weak_entity();
+                    let chat_id = id.clone();
+                    el.child(
+                        gpui::canvas(
+                            |bounds, window, _| {
+                                window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+                            },
+                            move |_, hitbox, window, cx| {
+                                if hitbox.is_hovered(window) {
+                                    return;
+                                }
+                                window.defer(cx, move |_, cx| {
+                                    shell
+                                        .update(cx, |this, cx| {
+                                            this.hover_session_card(&chat_id, false, cx)
+                                        })
+                                        .ok();
+                                });
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                },
+            )
+            .children(hover_card)
             // Line 1: "project @ device", status word / time-ago right.
             .when(!compact && show_label, |el| {
                 el.child(
@@ -8631,14 +8726,14 @@ impl Shell {
                                 crate::change_requests::pull_request_badge_preview(
                                     format!("{row_id}-compact-pr").into(),
                                     summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    pr_surface,
                                     theme,
                                 )
                             } else {
                                 crate::change_requests::pull_request_badge(
                                     format!("{row_id}-compact-pr").into(),
                                     summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    pr_surface,
                                     pr_device.clone(),
                                     theme,
                                 )
@@ -8670,9 +8765,13 @@ impl Shell {
                                 })
                                 .when(show_archive, |el| {
                                     el.cursor_pointer()
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.dismiss_session_card(cx);
+                                                cx.stop_propagation();
+                                            }),
+                                        )
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
                                             this.chat_hover_resync = true;
@@ -8749,14 +8848,14 @@ impl Shell {
                                 crate::change_requests::pull_request_badge_preview(
                                     format!("{row_id}-pr").into(),
                                     summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    pr_surface,
                                     theme,
                                 )
                             } else {
                                 crate::change_requests::pull_request_badge_with_query(
                                     format!("{row_id}-pr").into(),
                                     summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    pr_surface,
                                     search_query,
                                     pr_device.clone(),
                                     theme,
@@ -8937,6 +9036,7 @@ impl Shell {
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        self.reconcile_session_hover_card(cx);
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -8949,6 +9049,11 @@ impl Shell {
         {
             self.cancel_pinned_session_drag(cx);
         }
+        if self.sidebar_section_drag.is_some()
+            && (!cx.has_active_drag() || !self.sidebar_section_drag_is_valid(cx))
+        {
+            self.cancel_sidebar_section_drag(cx);
+        }
 
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
@@ -8960,7 +9065,7 @@ impl Shell {
         let pinned_count = session_rows.pinned_count;
         let custom_count = session_rows.custom_count;
         let regular_start = pinned_count + custom_count;
-        let keyed = session_rows.rows;
+        let mut keyed = session_rows.rows;
         let regular_count = session_rows.regular_count;
         let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
@@ -9034,6 +9139,7 @@ impl Shell {
         }
         if self.pinned_session_drag.is_none()
             && self.sidebar_session_transfer.is_none()
+            && self.sidebar_section_drag.is_none()
             && self.sidebar_prev_order != order
         {
             let key_order_changed = sidebar_key_order_changed(&self.sidebar_prev_order, &order);
@@ -9075,10 +9181,32 @@ impl Shell {
                     .is_none_or(|drag| drag.preview.as_ref().is_none_or(|gap| gap.pinned))
             })
             .map(|drag| (drag.from, drag.over, drag.prev_over, drag.epoch));
+        // A lifted custom section leaves an empty slot behind and paints in
+        // the list's movement layer; its siblings slide around the gap.
+        let section_offsets = self
+            .sidebar_section_drag_offsets()
+            .filter(|(_, offsets)| offsets.len() == custom_count);
+        let lifted_section = section_offsets.as_ref().and_then(|(from, _)| {
+            let height = self.sidebar_section_drag.as_ref()?.heights[*from];
+            let (_, _, slot) = keyed.get_mut(pinned_count + from)?;
+            let placeholder = div().flex_none().h(px(height)).into_any_element();
+            let section = std::mem::replace(slot, placeholder);
+            self.render_lifted_sidebar_section(section, theme)
+        });
         let list_items: Vec<AnyElement> = keyed
             .into_iter()
             .enumerate()
             .map(|(ix, (key, _, element))| {
+                if let Some((_, offsets)) = &section_offsets
+                    && let Some(offset) =
+                        ix.checked_sub(pinned_count).and_then(|ix| offsets.get(ix))
+                {
+                    return div()
+                        .relative()
+                        .top(px(*offset))
+                        .child(element)
+                        .into_any_element();
+                }
                 if ix < pinned_count
                     && let Some((from, over, prev_over, drag_epoch)) = pinned_drag
                 {
@@ -9152,6 +9280,7 @@ impl Shell {
             let regular_empty = regular_items.is_empty();
             let pinned_group = show_pinned_section
                 .then(|| self.render_pinned_section(pinned_items, pinned_body_height, theme, cx));
+            let section_bounds = self.sidebar_section_bounds.clone();
             div()
                 .id("sidebar-active-sessions")
                 .flex()
@@ -9159,7 +9288,20 @@ impl Shell {
                 .gap(px(SIDEBAR_LIST_GAP))
                 .pb(px(Theme::SPACE_SM))
                 .when_some(pinned_group, |el, group| el.child(group))
-                .children(custom_items)
+                // Each section's painted slot measures the reorder's hit
+                // testing and displacement.
+                .when(!custom_items.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(SIDEBAR_LIST_GAP))
+                            .on_children_prepainted(move |bounds, _, _| {
+                                *section_bounds.borrow_mut() = bounds;
+                            })
+                            .children(custom_items),
+                    )
+                })
                 .when(
                     !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
                     |el| {
@@ -9296,6 +9438,17 @@ impl Shell {
                             this.cancel_sidebar_session_transfer(cx);
                         },
                     ))
+                    // A section reorder lands wherever it is released in the list.
+                    .on_drag_move::<SidebarSectionDrag>(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<SidebarSectionDrag>, _, cx| {
+                            this.track_sidebar_section_drag(event.event.position, cx);
+                        },
+                    ))
+                    .on_drop::<SidebarSectionDrag>(cx.listener(
+                        |this, payload: &SidebarSectionDrag, _, cx| {
+                            this.finish_sidebar_section_drag(payload, cx);
+                        },
+                    ))
                     .px(px(Theme::SPACE_SM))
                     .flex()
                     .flex_col()
@@ -9304,7 +9457,8 @@ impl Shell {
                     .pt(px(SIDEBAR_LIST_PAD_TOP))
                     .child(active_list)
                     .children(archived_section)
-                    .children(moving_row),
+                    .children(moving_row)
+                    .children(lifted_section),
             )),
         )
         .fade_overflow_y(&self.sidebar_scroll);
@@ -10636,13 +10790,8 @@ impl Shell {
             } else {
                 let rename = popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                     .id("chat-menu-rename")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // A side chat's title is edited on its row under the
-                        // file tree: dock the explorer when the menu came
-                        // from its tab.
-                        if is_side_chat && !this.files_panel_open(cx) {
-                            this.add_files_surface(window, cx);
-                        }
+                    .debug_selector(|| "chat-menu-rename".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_rename_chat(rename_id.clone(), cx)
                     }))
                     .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
@@ -13301,6 +13450,14 @@ impl Render for Shell {
         self.reduced_motion = motion::reduced_motion(cx);
         self.motion_active.set(false);
         self.track_horizontal_fit(cx);
+        // The sidebar's render reconciles the card against its rows.
+        if !matches!(gate, GatePhase::Ready)
+            || restart_required
+            || matches!(self.route, Route::Settings(_))
+            || self.sidebar_target() <= 0.0
+        {
+            self.dismiss_session_card(cx);
+        }
         self.suspend_hidden_right_images(cx);
         // After the fit tracking, which starts a fit exit this frame.
         let browser_active = matches!(gate, GatePhase::Ready)

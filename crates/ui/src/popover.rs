@@ -2004,6 +2004,86 @@ pub fn rail<V: ScrollRailHost>(
     )
 }
 
+/// One handle-backed rail on a view that hosts several: where its state
+/// lives and which scroller feeds it. [`ScrollRailHost`] spells this out for
+/// a view's only rail; a view can implement that trait once, so its other
+/// rails go through [`rail_for`] instead.
+pub struct RailAccess<V> {
+    pub bar: fn(&mut V) -> &mut MenuScrollbarState,
+    pub scroll: fn(&V) -> ScrollHandle,
+}
+
+impl<V> Clone for RailAccess<V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V> Copy for RailAccess<V> {}
+
+/// [`rail`] for a rail named by `access`: the same activity note, hide
+/// scheduling, visuals, and six pointer listeners, off its scroll handle.
+pub fn rail_for<V: 'static>(
+    host: &mut V,
+    access: RailAccess<V>,
+    id: &'static str,
+    theme: &Theme,
+    cx: &mut Context<V>,
+) -> Option<AnyElement> {
+    let scroll = (access.scroll)(host);
+    let bar = (access.bar)(host);
+    bar.note_scroll(&scroll);
+    let metrics = bar.metrics(&scroll)?;
+    schedule_scrollbar_hide(bar, cx);
+    let strip = (access.bar)(host).render_rail(theme, metrics)?;
+    Some(
+        strip
+            .id(id)
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if (access.bar)(this).set_bar_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    let scroll = (access.scroll)(this);
+                    if (access.bar)(this).begin_press(&scroll, event.position.y) {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drag(MenuScrollbarDrag, |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| MenuScrollbarDragGhost)
+            })
+            .on_drag_move(cx.listener(
+                move |this, event: &gpui::DragMoveEvent<MenuScrollbarDrag>, _, cx| {
+                    let scroll = (access.scroll)(this);
+                    if (access.bar)(this).drag_to(&scroll, event.event.position.y) {
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    (access.bar)(this).end_press();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    (access.bar)(this).end_press();
+                    cx.notify();
+                }),
+            )
+            .into_any_element(),
+    )
+}
+
 /// Rewind a handle-owned menu list to its top and drop its rail activity
 /// baseline in one step — the pair every "reopen this menu fresh" site must
 /// make. Skipping the offset half strands the list mid-scroll; skipping the

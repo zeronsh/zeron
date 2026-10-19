@@ -54,6 +54,23 @@ impl Default for PrepareOptions {
     }
 }
 
+/// An inline box (an inline formula, an image): a fixed advance plus the extents it needs above
+/// and below the baseline, in points.
+///
+/// A span carrying one ([`Span::with_inline_box`]) breaks like an atomic span and advances by
+/// `width` (plus the span's padding) without being shaped. Its `ascent`/`descent` don't affect
+/// line breaking; they make the lines holding the box taller ([`Prepared::height`],
+/// [`line_growth`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct InlineBox {
+    /// Horizontal advance.
+    pub width: f32,
+    /// Extent above the baseline.
+    pub ascent: f32,
+    /// Extent below the baseline.
+    pub descent: f32,
+}
+
 /// A styled run of the input. Spans must cover the text contiguously and in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {
@@ -69,6 +86,10 @@ pub struct Span {
     /// Lay the whole span out as one unbreakable unit (a mention chip): line breaking treats it
     /// like a CSS atomic inline (U+FFFC).
     pub atomic: bool,
+    /// Lay the span out as this box (implies `atomic`); its text is a placeholder
+    /// (conventionally one U+FFFC) that is never shaped. The placeholder must not be
+    /// whitespace, which `white-space` processing could collapse away.
+    pub inline_box: Option<InlineBox>,
 }
 
 impl Span {
@@ -80,6 +101,7 @@ impl Span {
             pad_start: 0.0,
             pad_end: 0.0,
             atomic: false,
+            inline_box: None,
         }
     }
 
@@ -94,6 +116,26 @@ impl Span {
     pub fn with_atomic(mut self, atomic: bool) -> Self {
         self.atomic = atomic;
         self
+    }
+
+    /// Lays the span out as inline box `b` (sets `inline_box` and `atomic`).
+    pub fn with_inline_box(mut self, b: InlineBox) -> Self {
+        self.inline_box = Some(b);
+        self.atomic = true;
+        self
+    }
+}
+
+/// How much a line must grow `(above, below)` its `lh`-tall box — baseline `base` below the
+/// line top — to fit inline boxes of `extents` (`(ascent, descent)`, as from
+/// [`Prepared::line_box_extents`]). Zero when the boxes fit (or there are none); consumers add
+/// `above` before the line's baseline and `below` after it, so measured
+/// ([`Prepared::height`]) and painted heights agree.
+#[inline]
+pub fn line_growth(extents: Option<(f32, f32)>, lh: f32, base: f32) -> (f32, f32) {
+    match extents {
+        Some((ascent, descent)) => ((ascent - base).max(0.0), (descent - (lh - base)).max(0.0)),
+        None => (0.0, 0.0),
     }
 }
 
@@ -200,6 +242,8 @@ pub struct Prepared {
     pub(crate) tab_size: u8,
     pub(crate) ascii: bool,
     pub(crate) rtl: bool,
+    /// Some non-empty span is an inline box.
+    pub(crate) boxes: bool,
     pub(crate) options: PrepareOptions,
 }
 
@@ -218,6 +262,7 @@ impl Prepared {
                 && opts.overflow_wrap == OverflowWrap::Anywhere,
             tab_size: opts.tab_size,
             rtl: false,
+            boxes: false,
             options: *opts,
         }
     }
@@ -243,6 +288,12 @@ impl Prepared {
     /// line at a time by a bidi-aware renderer.
     pub fn has_rtl(&self) -> bool {
         self.rtl
+    }
+
+    /// Whether any span is an inline box (false keeps every height query on the
+    /// allocation-free fast path). Boxes whose placeholder normalized away don't count.
+    pub fn has_inline_boxes(&self) -> bool {
+        self.boxes
     }
 
     /// True when there is nothing to lay out (zero lines at any width).
@@ -417,7 +468,19 @@ pub fn prepare(
         repaired.is_none(),
         "prepare: spans must cover the text contiguously in order on char boundaries"
     );
-    let spans = repaired.as_deref().unwrap_or(spans);
+    let mut owned = repaired;
+    // An inline box is atomic even when built as a literal without `atomic: true`.
+    if owned
+        .as_deref()
+        .unwrap_or(spans)
+        .iter()
+        .any(|s| s.inline_box.is_some() && !s.atomic)
+    {
+        for s in owned.get_or_insert_with(|| spans.to_vec()) {
+            s.atomic |= s.inline_box.is_some();
+        }
+    }
+    let spans = owned.as_deref().unwrap_or(spans);
 
     let (ntext, nspans) = analysis::normalize(text, spans, opts.white_space);
     if ntext.is_empty() {
@@ -517,6 +580,9 @@ pub fn prepare(
     b.cache.scratch = scratch;
     let ascii = ntext.is_ascii();
     let rtl = !ascii && ntext.chars().any(is_strong_rtl);
+    let boxes = nspans
+        .iter()
+        .any(|s| s.inline_box.is_some() && !s.range.is_empty());
     Prepared {
         text: ntext,
         spans: nspans,
@@ -529,6 +595,7 @@ pub fn prepare(
         tab_size: opts.tab_size,
         ascii,
         rtl,
+        boxes,
         options: *opts,
     }
 }
@@ -939,7 +1006,11 @@ impl Builder<'_> {
             } else {
                 0.0
             };
-            let (base, n_units) = if !content && q - p == 1 && bytes[p] == b' ' {
+            let (base, n_units) = if let Some(bx) = span.inline_box {
+                // An inline box advances by its own width (once, should its placeholder ever
+                // span pieces); the placeholder is never shaped.
+                (if p == span.range.start { bx.width } else { 0.0 }, 0)
+            } else if !content && q - p == 1 && bytes[p] == b' ' {
                 (self.cache.space_width(self.book, span.style), 0)
             } else if !atomic && self.ctx.overlaps(p as u32, q as u32) {
                 let units_at = self.units.len();

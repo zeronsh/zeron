@@ -70,18 +70,41 @@ impl RegistryDoc {
         );
     }
 
-    pub(super) fn sidebar_sections(&self) -> Vec<SidebarSection> {
-        let mut rows = self.overlay_rows(SECTIONS);
-        rows.retain(|row| row.fields.get("deleted").and_then(Value::as_bool) != Some(true));
-        rows.sort_by(|a, b| {
-            a.fields
-                .get("createdAt")
-                .and_then(Value::as_str)
-                .cmp(&b.fields.get("createdAt").and_then(Value::as_str))
-                .then(a.id.cmp(&b.id))
+    /// Live sections in their placed order, each with its order key. Sections
+    /// no reorder has keyed yet (every section before the first move, and any
+    /// an engine that predates ordering creates) follow the keyed ones by
+    /// creation, where an append would have put them.
+    fn ordered_sidebar_sections(&self) -> Vec<(RegistryRow, Option<String>)> {
+        let mut rows: Vec<_> = self
+            .overlay_rows(SECTIONS)
+            .into_iter()
+            .filter(|row| row.fields.get("deleted").and_then(Value::as_bool) != Some(true))
+            .map(|row| {
+                let key = row
+                    .fields
+                    .get("orderKey")
+                    .and_then(Value::as_str)
+                    .filter(|key| valid_pin_order_key(key))
+                    .map(str::to_owned);
+                (row, key)
+            })
+            .collect();
+        fn created(row: &RegistryRow) -> Option<&str> {
+            row.fields.get("createdAt").and_then(Value::as_str)
+        }
+        rows.sort_by(|(a, x), (b, y)| match (x, y) {
+            (Some(x), Some(y)) => x.cmp(y).then(a.id.cmp(&b.id)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => created(a).cmp(&created(b)).then(a.id.cmp(&b.id)),
         });
-        rows.into_iter()
-            .filter_map(|row| {
+        rows
+    }
+
+    pub(super) fn sidebar_sections(&self) -> Vec<SidebarSection> {
+        self.ordered_sidebar_sections()
+            .into_iter()
+            .filter_map(|(row, _)| {
                 let session_ids = self
                     .sidebar_section_members(&row.id)
                     .into_iter()
@@ -135,8 +158,7 @@ impl RegistryDoc {
     }
 
     /// Place `session` into `section` between its anchors: the order key and
-    /// the clock to write it with. Keyless members are keyed first, in their
-    /// current order, so every placement has real neighbours to sit between.
+    /// the clock to write it with.
     fn place_in_sidebar_section(
         &mut self,
         section: &str,
@@ -144,16 +166,42 @@ impl RegistryDoc {
         after: &Option<String>,
         before: &Option<String>,
     ) -> Result<(String, String), DocError> {
-        let mut members = self.sidebar_section_members(section);
-        members.retain(|(id, _)| id != session);
+        let members = self.sidebar_section_members(section);
+        self.place_among(LOCATIONS, members, session, after, before)
+    }
+
+    /// Place `moving` among `kind` rows already in their placed order, between
+    /// its anchors: the order key and the clock to write it with. Keyless rows
+    /// are keyed first, in their current order, so every placement has real
+    /// neighbours to sit between.
+    fn place_among(
+        &mut self,
+        kind: &str,
+        mut members: Vec<(String, Option<String>)>,
+        moving: &str,
+        after: &Option<String>,
+        before: &Option<String>,
+    ) -> Result<(String, String), DocError> {
+        members.retain(|(id, _)| id != moving);
         if members.iter().any(|(_, key)| key.is_none()) {
-            let mut lower: Option<String> = None;
+            // Keyless rows already sort after the keyed ones, so key just them
+            // past the last key: rewriting keyed rows would clobber a move
+            // another device made meanwhile. Only when no key fits past the
+            // last one (a key at its length cap) does everything restart.
+            let last = members.iter().rev().find_map(|(_, key)| key.clone());
+            // The nonce is fixed-width, so any one tells whether a key fits.
+            let fits = pin_order_key_between(last.as_deref(), None, "probe").is_ok();
+            let mut lower = if fits { last } else { None };
             for (id, key) in &mut members {
+                if fits && key.is_some() {
+                    continue;
+                }
+                self.observe_sidebar_row(kind, id);
                 let hlc = self.next_hlc();
                 let next = pin_order_key_between(lower.as_deref(), None, &hlc)
                     .map_err(|e| DocError::Schema(e.into()))?;
                 self.enqueue_ops(vec![RowOp {
-                    kind: LOCATIONS.into(),
+                    kind: kind.into(),
                     id: id.clone(),
                     op: OpKind::Upsert,
                     set: Some(fields([("orderKey", json!(next))])),
@@ -244,6 +292,15 @@ impl RegistryDoc {
                     .any(|anchor| !valid_id(anchor)) =>
             {
                 return Err(DocError::Schema("Invalid section membership".into()));
+            }
+            Move { id, after, before }
+                if !valid_section_id(id)
+                    || [after, before]
+                        .into_iter()
+                        .flatten()
+                        .any(|anchor| !valid_section_id(anchor)) =>
+            {
+                return Err(DocError::Schema("Invalid section move".into()));
             }
             Import { sections }
                 if sections.iter().any(|s| {
@@ -364,6 +421,26 @@ impl RegistryDoc {
                         id: section.id.clone(),
                         collapsed: section.collapsed,
                     })?;
+                }
+            }
+            Move { id, after, before } => {
+                // A section deleted meanwhile has nowhere left to go.
+                if self.live_sidebar_section(id) {
+                    self.observe_sidebar_row(SECTIONS, id);
+                    let sections = self
+                        .ordered_sidebar_sections()
+                        .into_iter()
+                        .map(|(row, key)| (row.id, key))
+                        .collect();
+                    let (key, hlc) = self.place_among(SECTIONS, sections, id, after, before)?;
+                    self.enqueue_ops(vec![RowOp {
+                        kind: SECTIONS.into(),
+                        id: id.clone(),
+                        op: OpKind::Upsert,
+                        set: Some(fields([("orderKey", json!(key))])),
+                        hlc,
+                        clocks: None,
+                    }]);
                 }
             }
         }

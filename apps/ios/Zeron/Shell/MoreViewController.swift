@@ -148,6 +148,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             app.groupByProject = on
             return
         }
+        if id == "math:render" {
+            MathSettings.render = on
+            return reload()
+        }
         let push = PushNotifications.shared
         if id == "notify:enabled" {
             guard on else {
@@ -209,6 +213,14 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             wall.append(Row(id: "wallpaper:remove", title: "Remove Wallpaper", symbol: "trash", accessory: .none, destructive: true))
         }
         s.appendItems(wall)
+        s.appendSections(["Math"])
+        var math = [Row(id: "math:render", title: "Render Math", subtitle: "Off shows LaTeX as its source", symbol: "function", accessory: .toggle(MathSettings.render))]
+        if MathSettings.render {
+            let face = MathSettings.face
+            math.append(Row(id: "math:font", title: "Math Font", subtitle: "\(MathSettings.label(face)) — \(MathSettings.detail(face))", symbol: "textformat"))
+            math.append(Row(id: "math:size", title: "Math Size", subtitle: "\(MathSettings.size)% of the text around it", symbol: "textformat.size"))
+        }
+        s.appendItems(math)
         s.appendSections(["Sessions"])
         s.appendItems([
             Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
@@ -236,6 +248,32 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             for e in WallpaperStore.allEffects {
                 let action = UIAlertAction(title: WallpaperStore.label(e), style: .default) { _ in WallpaperStore.effect = e }
                 action.setValue(e == WallpaperStore.effect, forKey: "checked")
+                sheet.addAction(action)
+            }
+            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            sheet.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)
+            present(sheet, animated: true)
+        case "math:font":
+            let sheet = UIAlertController(title: "Math Font", message: nil, preferredStyle: .actionSheet)
+            for f in MathSettings.allFaces {
+                let action = UIAlertAction(title: MathSettings.label(f), style: .default) { [weak self] _ in
+                    MathSettings.face = f
+                    self?.reload()
+                }
+                action.setValue(f == MathSettings.face, forKey: "checked")
+                sheet.addAction(action)
+            }
+            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            sheet.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)
+            present(sheet, animated: true)
+        case "math:size":
+            let sheet = UIAlertController(title: "Math Size", message: nil, preferredStyle: .actionSheet)
+            for size in MathSettings.allSizes {
+                let action = UIAlertAction(title: "\(size)%", style: .default) { [weak self] _ in
+                    MathSettings.size = size
+                    self?.reload()
+                }
+                action.setValue(size == MathSettings.size, forKey: "checked")
                 sheet.addAction(action)
             }
             sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))

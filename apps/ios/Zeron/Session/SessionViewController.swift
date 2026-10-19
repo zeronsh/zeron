@@ -14,6 +14,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let queue = QueuePanel()
     private let pill = StatusPill()
     private let bottom = UIStackView()
+    private var bottomRest: NSLayoutConstraint?
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
     private let titleView = SessionTitleView()
     private var shown = SessionChrome()
@@ -191,10 +192,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 fill.priority = .defaultHigh
                 return fill
             }(),
-            bottom.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
             jump.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             jump.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -12),
         ])
+        bottomRest = pinAboveKeyboard(bottom)
 
         source.onChange = { [weak self] in self?.render(animated: true) }
         source.attach(engine)
@@ -402,6 +403,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     }
 
     private let bottomFade = EdgeFadeOverlay()
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        bottomRest?.constant = -composerRestGap
+    }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -660,6 +666,30 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 },
             ])
         }])
+    }
+}
+
+extension UIViewController {
+    /// Pins a composer 8pt above the keyboard; at rest it sits on the safe
+    /// area, `composerRestGap` up. Returns the rest constraint.
+    func pinAboveKeyboard(_ bar: UIView) -> NSLayoutConstraint {
+        view.keyboardLayoutGuide.usesBottomSafeArea = false
+        let rest = bar.bottomAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -composerRestGap)
+        let down = bar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        down.priority = .defaultLow
+        NSLayoutConstraint.activate([
+            bar.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
+            rest,
+            down,
+        ])
+        return rest
+    }
+
+    /// Beside the sidebar the composer rests on the safe area, level with
+    /// the sidebar's bottom toolbar; on its own (tab shell, sheet) 8pt up.
+    var composerRestGap: CGFloat {
+        guard tabBarController == nil, let split = splitViewController, !split.isCollapsed else { return 8 }
+        return 0
     }
 }
 

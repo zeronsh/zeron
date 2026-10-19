@@ -7,9 +7,9 @@ emit() { printf '%s\n' "$1"; }
 
 # Models mode (argv, no stdin protocol): one catalog frame, real 1.0.28
 # shapes — parameterized Auto + its bare `default` alias twin (skipped by the
-# harness) + a plain model.
+# harness) + a plain model + one whose default variant is Max Mode.
 if [ "$1" = "models" ]; then
-  emit '{"ev":"models","items":[{"id":"auto-smart","displayName":"Auto","parameters":[{"id":"optimize_for","displayName":"Optimize For","values":[{"value":"intelligence","displayName":"Intelligence"},{"value":"balanced","displayName":"Balance"},{"value":"cost","displayName":"Cost"}]}],"variants":[{"params":[{"id":"optimize_for","value":"balanced"}],"displayName":"Auto","isDefault":true}]},{"id":"default","displayName":"Auto","aliases":["auto"]},{"id":"claude-fable-5","displayName":"Claude Fable 5","description":"Anthropic frontier","parameters":[{"id":"thinking","values":[{"value":"enabled"},{"value":"disabled"}]}]}]}'
+  emit '{"ev":"models","items":[{"id":"auto-smart","displayName":"Auto","parameters":[{"id":"optimize_for","displayName":"Optimize For","values":[{"value":"intelligence","displayName":"Intelligence"},{"value":"balanced","displayName":"Balance"},{"value":"cost","displayName":"Cost"}]}],"variants":[{"params":[{"id":"optimize_for","value":"balanced"}],"displayName":"Auto","isDefault":true}]},{"id":"default","displayName":"Auto","aliases":["auto"]},{"id":"claude-fable-5","displayName":"Claude Fable 5","description":"Anthropic frontier","parameters":[{"id":"thinking","values":[{"value":"enabled"},{"value":"disabled"}]}]},{"id":"grok-4.7","displayName":"Grok 4.7","parameters":[{"id":"context","values":[{"value":"256k"},{"value":"500k"}]}],"variants":[{"params":[{"id":"context","value":"500k"}],"displayName":"Grok 4.7","isDefault":true,"isMaxMode":true}]}]}'
   exit 0
 fi
 
@@ -20,6 +20,59 @@ case "$first" in
 esac
 
 case "$first" in
+
+*scenario:model-default*)
+  case "$first" in
+    *'"modelOptions":{"optimize_for":"balanced"}'*) ;;
+    *) emit '{"ev":"fatal","message":"missing catalog default"}'; exit 1 ;;
+  esac
+  emit '{"ev":"ready","agentId":"agent-options","model":"auto-smart"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
+
+*scenario:model-legacy*)
+  case "$first" in
+    *'"modelOptions":{"optimizeFor":"speed"}'*) ;;
+    *) emit '{"ev":"fatal","message":"legacy option conflicts with catalog default"}'; exit 1 ;;
+  esac
+  emit '{"ev":"ready","agentId":"agent-options","model":"auto-smart"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
+
+*scenario:model-switch*)
+  emit '{"ev":"ready","agentId":"agent-options","model":"auto-smart"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  case "$next" in
+    *'"modelOptions":{"thinking":"enabled"}'*) ;;
+    *) emit '{"ev":"turn","status":"error","error":"switch missing catalog default"}'; exit 0 ;;
+  esac
+  emit '{"ev":"steered"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
+
+*scenario:model-maxmode*)
+  case "$first" in
+    *'"modelOptions":{}'*) ;;
+    *) emit '{"ev":"fatal","message":"max mode default was sent"}'; exit 1 ;;
+  esac
+  emit '{"ev":"ready","agentId":"agent-options","model":"grok-4.7"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
+
+*scenario:model-override*)
+  case "$first" in
+    *'"modelOptions":{"optimize_for":"intelligence"}'*) ;;
+    *) emit '{"ev":"fatal","message":"explicit option was overwritten"}'; exit 1 ;;
+  esac
+  emit '{"ev":"ready","agentId":"agent-options","model":"auto-smart"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  ;;
 
 *scenario:mcp*)
   case "$first" in

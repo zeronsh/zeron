@@ -4892,6 +4892,42 @@ impl Shell {
         visible
     }
 
+    /// Hover targets include the paged Archived shelf, unlike jump shortcuts.
+    pub(super) fn sidebar_hover_card_row_visible(&self, chat_id: &str, cx: &Context<Self>) -> bool {
+        if self
+            .sidebar_visible_order(cx)
+            .iter()
+            .any(|id| id == chat_id)
+        {
+            let in_own_section = self.active_sidebar_pins(cx).iter().any(|id| id == chat_id)
+                || self
+                    .active_sidebar_sections(cx)
+                    .iter()
+                    .any(|section| section.session_ids.iter().any(|id| id == chat_id));
+            if in_own_section {
+                return true;
+            }
+            let state = self.state.read(cx);
+            return state
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .is_some_and(|chat| {
+                    self.sidebar_group_key(state, chat).is_none_or(|group| {
+                        !self
+                            .sidebar_collapsed_groups
+                            .contains(&self.sidebar_group_collapse_key(&group))
+                    })
+                });
+        }
+        self.archived_open
+            && self
+                .archived_sidebar_chats(cx)
+                .iter()
+                .take(self.archived_shown.max(ARCHIVED_INITIAL_ROWS))
+                .any(|chat| chat.id == chat_id)
+    }
+
     /// The group a chat's row sits under when the sidebar groups by device or
     /// by project; `None` in one list.
     fn sidebar_group_key(&self, state: &AppState, chat: &zeron_proto::Chat) -> Option<String> {
@@ -5139,6 +5175,15 @@ impl Shell {
 
         let custom_sections = self.active_sidebar_sections(cx);
         let custom_count = custom_sections.len();
+        let section_order =
+            (custom_count > 1 && self.sidebar_sections_reorderable(cx)).then(|| {
+                std::sync::Arc::new(
+                    custom_sections
+                        .iter()
+                        .map(|section| section.id.clone())
+                        .collect::<Vec<_>>(),
+                )
+            });
         let mut custom_groups: Vec<_> = custom_sections
             .iter()
             .map(|section| {
@@ -5493,10 +5538,20 @@ impl Shell {
             };
             if let Some(id) = key.strip_prefix("section:") {
                 if let Some(section) = custom_sections.iter().find(|section| section.id == id) {
+                    let drag =
+                        section_order
+                            .clone()
+                            .zip(profile_key.clone())
+                            .map(|(ids, profile_key)| SidebarSectionDrag {
+                                section_id: section.id.clone(),
+                                profile_key,
+                                ids,
+                            });
                     rendered.push(self.render_custom_sidebar_section(
                         section.clone(),
                         rendered_rows,
                         drag_group,
+                        drag,
                         theme,
                         cx,
                     ));

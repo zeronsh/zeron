@@ -484,6 +484,8 @@ impl RowBuilder {
                 .map(|(_, core)| core.clone());
             let core = reuse.unwrap_or_else(|| {
                 let id = format!("{pkey}.{bi}");
+                // Each block is its own row: its formulas share one budget.
+                ctx.math_area = 0.0;
                 let content = prepare_block(ctx, &block.block, 0, false);
                 Arc::new(RowCore {
                     key: row_key(&id),
@@ -661,6 +663,7 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
             pad_start: pad.0,
             pad_end: pad.1,
             atomic,
+            inline_box: None,
         });
         paints.push(super::markdown::SpanPaint {
             color: ColorRole::Text,
@@ -701,6 +704,7 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
         links,
         chip: ((lh - chip_h) / 2.0, chip_h),
         badges,
+        math: Vec::new(),
     }
 }
 
@@ -899,16 +903,24 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
 
 /// Heap held by a row's prepared text (diagnostics; blocks recurse).
 pub(crate) fn content_heap_bytes(content: &Content) -> usize {
+    fn formula_bytes(f: &zatex::Formula) -> usize {
+        f.items.capacity() * std::mem::size_of::<zatex::Item>()
+    }
+    // The side table itself, then each formula's items.
+    fn math_bytes(t: &PText) -> usize {
+        t.math.capacity() * std::mem::size_of::<(usize, zatex::Formula)>() + t.math.iter().map(|(_, f)| formula_bytes(f)).sum::<usize>()
+    }
     fn block(b: &PBlock) -> usize {
         match b {
-            PBlock::Text(t) | PBlock::Heading(t) => t.p.heap_bytes(),
+            PBlock::Text(t) | PBlock::Heading(t) => t.p.heap_bytes() + math_bytes(t),
             PBlock::Code(c) => c.body.p.heap_bytes() + c.source.len() + c.label.as_ref().map_or(0, |l| l.p.heap_bytes()),
+            PBlock::Math(m) => formula_bytes(&m.formula),
             PBlock::Quote(children) => children.iter().map(block).sum(),
             PBlock::List { items, .. } => items
                 .iter()
                 .map(|i| i.children.iter().map(block).sum::<usize>() + i.marker.as_ref().map_or(0, |m| m.p.heap_bytes()))
                 .sum(),
-            PBlock::Table(t) => t.cells.iter().flatten().map(|c| c.p.heap_bytes()).sum(),
+            PBlock::Table(t) => t.cells.iter().flatten().map(|c| c.p.heap_bytes() + math_bytes(c)).sum(),
             PBlock::Rule => 0,
         }
     }

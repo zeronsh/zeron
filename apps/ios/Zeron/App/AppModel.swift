@@ -536,6 +536,14 @@ final class AppModel {
     func movePin(_ id: String, after: String?, before: String?) {
         attempt("move pin") { try client?.movePin(chatId: id, after: after, before: before) }
     }
+    /// Pin between neighbours (`nil` at either end), as a drop into Pinned does.
+    func pin(_ id: String, after: String?, before: String?) {
+        attempt("pin") { try client?.pinSessionAt(chatId: id, after: after, before: before) }
+    }
+    /// Move into a section between its members (`nil` at either end).
+    func place(_ id: String, inSection section: String, after: String?, before: String?) {
+        attempt("assign") { try client?.placeSession(chatId: id, sectionId: section, after: after, before: before) }
+    }
     func renameSection(_ id: String, _ name: String) { attempt("rename section") { try client?.renameSection(sectionId: id, name: name) } }
     func deleteSection(_ id: String) { attempt("delete section") { try client?.deleteSection(sectionId: id) } }
     func createSection(_ name: String) { attempt("section") { _ = try client?.createSection(name: name) } }

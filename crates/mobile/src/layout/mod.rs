@@ -26,8 +26,8 @@ use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_text::WidthCache;
 
-use display::{DisplayBuilder, RowDisplay};
-use markdown::{Ctx, Px};
+use display::{DisplayBuilder, MathFace, RowDisplay};
+use markdown::{Ctx, MathFailures, MathSettings, Px};
 pub use rows::{PendingUser, RowKind, TranscriptInput};
 use rows::{Gap, Placed, RowBuilder, RowCore, place_row};
 pub use style::{FaceRole, StyleDesc};
@@ -236,6 +236,7 @@ impl LayoutFrame {
             height: r.height,
             text: out.text,
             runs: out.runs,
+            glyphs: out.glyphs,
             boxes: out.boxes,
             links: out.links,
             scrollers: out.scrollers,
@@ -351,6 +352,7 @@ pub struct DebugEntry {
 enum Msg {
     Input(TranscriptInput),
     Viewport { width: f32, scale: f32 },
+    Math(MathSettings),
     Toggle(u64),
     ToggleDetail { row: u64, detail: u64, open: bool },
     /// A visual row's height changed (its key), or visuals got a source.
@@ -391,6 +393,9 @@ impl TranscriptView {
         let worker_visuals = visuals.clone();
         thread::Builder::new()
             .name("zeron-layout".into())
+            // Math layout recurses per nesting level; a debug build needs
+            // about 1.5 MB at zatex's depth limit (see `Options::max_depth`).
+            .stack_size(8 << 20)
             .spawn(move || Worker::new(&text, worker_shared, listener, Some(worker_visuals)).run(rx))
             .expect("spawn layout thread");
         Arc::new(Self {
@@ -449,6 +454,12 @@ impl TranscriptView {
             width,
             scale: text_scale,
         });
+    }
+
+    /// Render formulas (in `face`, at `size_percent` of the text around
+    /// them, clamped to 75–200), or show them as their TeX source.
+    pub fn set_math(&self, enabled: bool, face: MathFace, size_percent: u16) {
+        self.send(Msg::Math(MathSettings::new(enabled, face.into(), size_percent)));
     }
 
     /// Expand/collapse a disclosure (tool group, long user message).
@@ -537,6 +548,9 @@ pub(crate) struct Worker {
     heights: HashMap<u64, HeightMemo>,
     input: TranscriptInput,
     width: f32,
+    math: MathSettings,
+    /// Formulas zatex rejected (bounded; see `MathFailures`).
+    math_failures: MathFailures,
     revision: u64,
     shared: Arc<Shared>,
     listener: Option<Arc<dyn LayoutListener>>,
@@ -557,6 +571,8 @@ impl Worker {
             heights: HashMap::new(),
             input: TranscriptInput::default(),
             width: 0.0,
+            math: MathSettings::default(),
+            math_failures: MathFailures::default(),
             revision: 0,
             shared,
             listener: Some(listener),
@@ -578,19 +594,14 @@ impl Worker {
                     Msg::Viewport { width, scale } => {
                         if (scale - self.typo.scale).abs() > f32::EPSILON {
                             self.typo.scale = scale;
-                            // New sizes: every prepared paragraph is stale —
-                            // but what the user opened or folded stays so.
-                            let old = std::mem::take(&mut self.builder);
-                            self.builder.expanded = old.expanded;
-                            self.builder.collapsed = old.collapsed;
-                            self.builder.detail_open = old.detail_open;
-                            self.builder.visual_slots = old.visual_slots;
-                            self.heights.clear();
+                            // New sizes: every prepared paragraph is stale.
+                            self.rebuild();
                             self.cache = WidthCache::new();
                         }
                         self.width = width;
                         dirty = true;
                     }
+                    Msg::Math(math) => dirty |= self.set_math(math),
                     Msg::ToggleDetail { row, detail, open } => {
                         self.builder.detail_open.insert(detail, !open);
                         self.builder.invalidate(row);
@@ -630,6 +641,29 @@ impl Worker {
         }
     }
 
+    /// Lay formulas out per `math` from now on; true if that changed.
+    fn set_math(&mut self, math: MathSettings) -> bool {
+        if math == self.math {
+            return false;
+        }
+        self.math = math;
+        // Formulas lay out anew (or as source); widths of the text around
+        // them still hold, so the width cache stays.
+        self.rebuild();
+        true
+    }
+
+    /// Drop every prepared row so the next pass rebuilds them all (with new
+    /// versions) — but what the user opened or folded stays so.
+    fn rebuild(&mut self) {
+        let old = std::mem::take(&mut self.builder);
+        self.builder.expanded = old.expanded;
+        self.builder.collapsed = old.collapsed;
+        self.builder.detail_open = old.detail_open;
+        self.builder.visual_slots = old.visual_slots;
+        self.heights.clear();
+    }
+
     fn is_open(&self, key: u64) -> bool {
         let frame = self.shared.frame.lock().unwrap().clone();
         frame
@@ -648,6 +682,10 @@ impl Worker {
             let mut ctx = Ctx {
                 typo: &mut self.typo,
                 cache: &mut self.cache,
+                math: self.math,
+                math_failures: &mut self.math_failures,
+                in_table: false,
+                math_area: 0.0,
             };
             self.builder.build(&mut ctx, &self.input)
         };
