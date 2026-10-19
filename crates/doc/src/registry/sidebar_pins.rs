@@ -64,7 +64,7 @@ impl RegistryDoc {
             return Err(DocError::Schema("Session no longer exists".into()));
         }
         self.initialize_sidebar_pins();
-        self.observe_sidebar_row("sidebarLocations", id);
+        self.observe_row("sidebarLocations", id);
         // Observe this pin's field clocks before a causally subsequent edit,
         // including clocks from a device whose wall clock runs ahead of ours.
         if let Some(row) = self.overlay_row(KIND_SIDEBAR_PINS, id) {

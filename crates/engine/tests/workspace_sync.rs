@@ -347,6 +347,177 @@ async fn two_engines_share_a_workspace() {
 }
 
 #[tokio::test]
+async fn unread_intent_converges_from_non_host_and_survives_offline_restart() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let a = assemble(dir_a.path(), "dev-a");
+    let b = assemble(dir_b.path(), "dev-b");
+    let link = bridge(&a, &b).await;
+    let client_a = zeron_rpc::memory_client(a.rpc_service());
+    let client_b = zeron_rpc::memory_client(b.rpc_service());
+
+    client_a
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-unread", "deviceId": "dev-a",
+                "path": "/tmp/unread"
+            }),
+        )
+        .await
+        .expect("create host space");
+    client_a
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-unread", "spaceId": "space-unread"
+            }),
+        )
+        .await
+        .expect("create host chat");
+    queue_run(&a, "chat-unread", "cmd-unread-1", "msg-unread-1");
+    for core in [&a, &b] {
+        wait_for(
+            || {
+                core.workspace
+                    .chat("chat-unread")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|chat| chat.last_message_at.is_some())
+            },
+            "message activity on both engines",
+        )
+        .await;
+    }
+
+    client_a
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "markChatSeen", "chatId": "chat-unread" }),
+        )
+        .await
+        .expect("host marks seen");
+    for core in [&a, &b] {
+        wait_for(
+            || {
+                core.workspace
+                    .chat("chat-unread")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|chat| !chat.unseen())
+            },
+            "seen state on both engines",
+        )
+        .await;
+    }
+
+    // B is only a viewer: registry intents are deliberately not routed to the
+    // chat's execution host (dev-a).
+    client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "markChatUnread", "chatId": "chat-unread" }),
+        )
+        .await
+        .expect("non-host marks unread");
+    for core in [&a, &b] {
+        wait_for(
+            || {
+                core.workspace
+                    .chat("chat-unread")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|chat| chat.unseen())
+            },
+            "unread state on both engines",
+        )
+        .await;
+    }
+
+    client_a
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "markChatSeen", "chatId": "chat-unread" }),
+        )
+        .await
+        .expect("host marks seen again");
+    wait_for(
+        || {
+            [&a, &b].iter().all(|core| {
+                core.workspace
+                    .chat("chat-unread")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|chat| !chat.unseen())
+            })
+        },
+        "second seen state on both engines",
+    )
+    .await;
+
+    // Stop B, reopen its persisted replica without a room, and enqueue Unread.
+    // A second offline restart proves both the overlay and pending outbox were
+    // saved before the RPC acknowledged the mutation.
+    b.shutdown().await;
+    drop(b);
+    let b = assemble(dir_b.path(), "dev-b");
+    let client_b = zeron_rpc::memory_client(b.rpc_service());
+    client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "markChatUnread", "chatId": "chat-unread" }),
+        )
+        .await
+        .expect("offline viewer marks unread");
+    assert!(b.workspace.chat("chat-unread").unwrap().unwrap().unseen());
+    b.shutdown().await;
+    drop(b);
+
+    let b = assemble(dir_b.path(), "dev-b");
+    assert!(
+        b.workspace.chat("chat-unread").unwrap().unwrap().unseen(),
+        "offline unread projection survives restart"
+    );
+    b.workspace.connect_registry_url(&link.url());
+    wait_for(
+        || {
+            a.workspace
+                .chat("chat-unread")
+                .ok()
+                .flatten()
+                .is_some_and(|chat| chat.unseen())
+        },
+        "offline unread outbox reaches the host after reconnect",
+    )
+    .await;
+
+    client_a
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "markChatSeen", "chatId": "chat-unread" }),
+        )
+        .await
+        .expect("later seen wins");
+    wait_for(
+        || {
+            [&a, &b].iter().all(|core| {
+                core.workspace
+                    .chat("chat-unread")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|chat| !chat.unseen())
+            })
+        },
+        "later seen converges after offline unread",
+    )
+    .await;
+
+    drop(link);
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+#[tokio::test]
 async fn claim_on_first_command_creates_the_chat_row() {
     let dir_a = tempfile::tempdir().unwrap();
     let dir_b = tempfile::tempdir().unwrap();

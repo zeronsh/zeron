@@ -235,6 +235,10 @@ impl CoreClient {
         self.client.mark_seen(&chat_id);
     }
 
+    pub fn mark_unread(&self, chat_id: String) -> CoreResult<()> {
+        Ok(self.client.mark_unread(&chat_id)?)
+    }
+
     pub fn set_session_config(&self, chat_id: String, config: ChatConfig) -> CoreResult<()> {
         let config: zc::ChatConfig = config.try_into()?;
         Ok(self.client.set_session_config(&chat_id, &config)?)

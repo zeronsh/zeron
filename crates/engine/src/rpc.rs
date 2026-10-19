@@ -11,7 +11,7 @@
 //! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
 //!   remote devices' workspace session rows
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, markChatSeen)
+//!   setChatArchived, deleteChat, renameDevice, markChatSeen, markChatUnread)
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
@@ -676,6 +676,9 @@ enum MutateParams {
         #[serde(default)]
         at: Option<i64>,
     },
+    /// Synced unread intent: clears `lastSeenAt` with a newer registry clock.
+    #[serde(rename_all = "camelCase")]
+    MarkChatUnread { chat_id: String },
 }
 
 #[derive(Clone)]
@@ -1342,6 +1345,11 @@ impl EngineRpc {
                     .map_err(failed)
                     .map(drop)
             }
+            MutateParams::MarkChatUnread { chat_id } => self
+                .workspace
+                .mark_chat_unread(&chat_id)
+                .map_err(failed)
+                .map(drop),
         }
     }
 }
@@ -4340,6 +4348,19 @@ mod tests {
             p,
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
+        ));
+    }
+
+    #[test]
+    fn chat_unread_mutation_accepts_desktop_wire_shape() {
+        let p: MutateParams = parse_params(serde_json::json!({
+            "op": "markChatUnread",
+            "chatId": "chat-1",
+        }))
+        .expect("chat unread params");
+        assert!(matches!(
+            p,
+            MutateParams::MarkChatUnread { chat_id } if chat_id == "chat-1"
         ));
     }
 

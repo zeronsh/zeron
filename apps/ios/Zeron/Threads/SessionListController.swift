@@ -288,8 +288,13 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                     UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
                 ])
             }
-            return UIMenu(children: [
+            var actions: [UIMenuElement] = [
                 UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
+            ]
+            if !vm.unseen {
+                actions.append(UIAction(title: "Mark as Unread", image: UIImage(systemName: "eye.slash")) { _ in self.app.markUnread(id) })
+            }
+            return UIMenu(children: actions + [
                 self.moveMenu(id),
                 UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in self.app.archive(id) },

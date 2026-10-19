@@ -35,7 +35,7 @@ not built yet).
 | Agent-account RPCs | done | Full login/activate/forget/poll surface, forwardable. |
 | LocalDevice | done | `{deviceId}`; IPC-only (never forwarded). |
 | DataRpc watches + QueueCommand | done | — |
-| Mutate ops | partial | createChat/renameChat/setChatArchived/deleteChat/renameDevice done; markChatSeen accepted as a no-op (unseen markers UI-local); `SetChatConfig` exists on the doc layer but is not yet exposed as a Mutate op. |
+| Mutate ops | partial | createChat/renameChat/setChatArchived/deleteChat/renameDevice/markChatSeen/markChatUnread done; read/unread are synced LWW intents over `lastSeenAt`; `SetChatConfig` exists on the doc layer but is not yet exposed as a Mutate op. |
 | AuthRpc | done | AuthStatus emits the canonical proto shape (`{"state": "signedIn", …}`); SignIn/SignInHeadless/CompleteSignIn/SignOut/ListOrgs/CreateOrg/SelectOrg. |
 | Wire types | done | `zeron-proto`: AgentEvent, ToolCall kinds, models/options, entities, AuthState. |
 
