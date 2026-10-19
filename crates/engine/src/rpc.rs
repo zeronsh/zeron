@@ -452,6 +452,8 @@ struct AgentAccountParams {
 #[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
+    #[serde(default)]
+    account_name: Option<String>,
     /// Stamped by the requesting engine when it forwards the start: the
     /// device whose browser finishes the sign-in. The login's callback port
     /// is served over P2P to that device alone.
@@ -3690,7 +3692,12 @@ impl RpcService for EngineRpc {
                     .filter(|requester| !requester.is_empty() && *requester != own_id);
                 let start = self
                     .agent_accounts
-                    .start_login_with(p.harness, p.provider.as_deref(), requester)
+                    .start_login_named(
+                        p.harness,
+                        p.provider.as_deref(),
+                        requester,
+                        p.account_name.as_deref(),
+                    )
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)

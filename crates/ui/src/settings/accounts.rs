@@ -211,16 +211,10 @@ pub fn reports_usage(harness: HarnessId) -> bool {
     harness != HarnessId::Antigravity
 }
 
-/// Providers whose agent holds exactly ONE login (Antigravity): once it is
-/// connected there is nothing to add — signing in again only re-confirms it.
-pub fn keeps_one_login(harness: HarnessId) -> bool {
-    harness == HarnessId::Antigravity
-}
-
 /// Whether zeron switches this agent's logins. Hermes rotates through its
-/// own credential pool (listed, never reordered); Antigravity keeps one.
+/// own credential pool (listed, never reordered).
 pub fn switches_accounts(harness: HarnessId) -> bool {
-    !matches!(harness, HarnessId::Hermes | HarnessId::Antigravity)
+    harness != HarnessId::Hermes
 }
 
 /// A standing note under a provider's Accounts label, for an agent whose
@@ -229,6 +223,10 @@ pub fn switches_accounts(harness: HarnessId) -> bool {
 /// its entries. Pure.
 pub fn provider_note(harness: HarnessId) -> Option<&'static str> {
     match harness {
+        HarnessId::Antigravity => Some(
+            "Switching selects the account for new chats. Existing chats keep their account. \
+             Profile removal is not available here.",
+        ),
         HarnessId::Hermes => Some(
             "Hermes manages its own credential pool and rotates through it. Accounts added \
              here go through `hermes auth add`; remove one with `hermes auth remove`.",
@@ -306,8 +304,8 @@ fn login_copy(harness: HarnessId, provider: Option<&str>) -> &'static str {
              you can revoke any time from Cursor's dashboard."
         }
         (HarnessId::Antigravity, _) => {
-            "Finish signing in to Google in your browser. Antigravity keeps one login on \
-             this device; if it is already signed in, this just confirms it."
+            "Finish signing in to Google in your browser. The new account is saved in its \
+             own profile. Switch accounts to use it for new chats."
         }
         (HarnessId::Grok, _) => {
             "Finish signing in to Grok in your browser — approve the code shown below. The \
@@ -445,15 +443,20 @@ struct LoginFlow {
 
 #[derive(Debug, Clone, PartialEq)]
 enum LoginStep {
+    Name,
     /// Starting, then waiting for the browser to reach the loopback callback.
-    Browser { message: Option<SharedString> },
+    Browser {
+        message: Option<SharedString>,
+    },
     /// Claude's fallback when no loopback port could be bound.
     PasteCode {
         submitting: bool,
         error: Option<SharedString>,
     },
     /// The start, a poll, or the provider failed — shown with Retry.
-    Failed { message: SharedString },
+    Failed {
+        message: SharedString,
+    },
 }
 
 impl LoginFlow {
@@ -515,11 +518,13 @@ pub struct AccountsPage {
     login_attempts: u64,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
+    name_input: Entity<ComposerInput>,
     load_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
     _observe: Subscription,
     _code_events: Subscription,
+    _name_events: Subscription,
 }
 
 impl AccountsPage {
@@ -545,9 +550,21 @@ impl AccountsPage {
     ) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         let code_input = cx.new(|cx| ComposerInput::new("Paste the authorization code", cx));
+        let name_input =
+            cx.new(|cx| ComposerInput::new("Account name (for example, Personal or Work)", cx));
         let code_events = cx.subscribe(&code_input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 this.submit_code(cx);
+            }
+        });
+        let name_events = cx.subscribe(&name_input, |this: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted)
+                && this
+                    .login
+                    .as_ref()
+                    .is_some_and(|login| matches!(login.step, LoginStep::Name))
+            {
+                this.begin_login(HarnessId::Antigravity, None, cx);
             }
         });
         let mut page = Self {
@@ -565,11 +582,13 @@ impl AccountsPage {
             login_attempts: 0,
             error: None,
             code_input,
+            name_input,
             load_task: None,
             action_task: None,
             poll_task: None,
             _observe: observe,
             _code_events: code_events,
+            _name_events: name_events,
         };
         // Paint from the last list (this session) or the engine's persisted
         // usage, then force one probe to update in place — the skeleton only
@@ -843,6 +862,30 @@ impl AccountsPage {
         provider: Option<&'static str>,
         cx: &mut Context<Self>,
     ) {
+        if harness == HarnessId::Antigravity {
+            self.login_attempts += 1;
+            self.name_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            self.login = Some(LoginFlow {
+                harness,
+                provider,
+                attempt: self.login_attempts,
+                login_id: None,
+                url: None,
+                step: LoginStep::Name,
+            });
+            cx.notify();
+            return;
+        }
+        self.begin_login(harness, provider, cx);
+    }
+
+    fn begin_login(
+        &mut self,
+        harness: HarnessId,
+        provider: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -859,6 +902,9 @@ impl AccountsPage {
         self.poll_task = None;
         self.error = None;
         let mut params = serde_json::json!({ "harness": harness });
+        if harness == HarnessId::Antigravity {
+            params["accountName"] = serde_json::json!(self.name_input.read(cx).text().trim());
+        }
         if let (Some(provider), Some(object)) = (provider, params.as_object_mut()) {
             object.insert("provider".into(), serde_json::json!(provider));
         }
@@ -1096,7 +1142,7 @@ impl AccountsPage {
 
     fn retry_login(&mut self, cx: &mut Context<Self>) {
         if let Some((harness, provider)) = self.login.as_ref().map(|f| (f.harness, f.provider)) {
-            self.start_login(harness, provider, cx);
+            self.begin_login(harness, provider, cx);
         }
     }
 
@@ -1175,6 +1221,7 @@ impl AccountsPage {
             .unwrap_or_else(|| "Unknown account".into())
             .into();
         let can_switch = !account.active && account.switchable;
+        let can_remove = account.switchable && account.harness != HarnessId::Antigravity;
         let switch_account = account.clone();
 
         // Personal Claude orgs are named "<email>'s Organization" — noise
@@ -1325,7 +1372,7 @@ impl AccountsPage {
                             .child(SharedString::from("Switch to this account")),
                     )
                 })
-                .when(account.switchable, |menu| {
+                .when(can_remove, |menu| {
                     menu.child(
                         popover::menu_row(&popup, false, format!("account-menu-remove-{ix}"))
                             .id(("account-menu-remove", ix))
@@ -1348,9 +1395,7 @@ impl AccountsPage {
                 self.row_menu.closing_since(),
             ));
         }
-        // Accounts with nothing to offer (an unreadable live login,
-        // Antigravity's single login) keep the slot for alignment only.
-        let has_actions = account.switchable;
+        let has_actions = can_switch || can_remove;
 
         let body = div()
             .id(("account-row", ix))
@@ -1493,6 +1538,9 @@ impl AccountsPage {
                 .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
         };
         let copy = match login.step {
+            LoginStep::Name => {
+                "Choose a name to recognize this Google account in Zeron, then sign in."
+            }
             LoginStep::PasteCode { .. } => {
                 "Your browser opened Claude's sign-in page. Approve access, then paste the \
                  code Anthropic shows you below. Your current login is untouched until you \
@@ -1524,6 +1572,12 @@ impl AccountsPage {
                 .child(message)
         };
         let middle: AnyElement = match &login.step {
+            LoginStep::Name => div()
+                .mt(px(12.0))
+                .child(popover::dialog_field(
+                    self.name_input.clone().into_any_element(),
+                ))
+                .into_any_element(),
             LoginStep::Browser { .. } => div()
                 .mt(px(16.0))
                 .flex()
@@ -1568,6 +1622,21 @@ impl AccountsPage {
             .justify_end()
             .gap(px(8.0));
         let buttons = match &login.step {
+            LoginStep::Name => buttons
+                .child(
+                    action("login-cancel", widgets::ActionTone::Quiet, "Cancel")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_login(cx))),
+                )
+                .child(
+                    action(
+                        "login-google",
+                        widgets::ActionTone::Solid,
+                        "Sign in to Google",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.begin_login(HarnessId::Antigravity, None, cx)
+                    })),
+                ),
             LoginStep::Browser { .. } => buttons.child(
                 action("login-cancel", widgets::ActionTone::Quiet, "Cancel")
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_login(cx))),
@@ -1759,9 +1828,8 @@ impl AccountsPage {
                         .collect();
                     let empty = rows.is_empty();
                     // Adding is the list's last row, not a header button —
-                    // it sits where the next account will appear. A
-                    // one-login agent that is connected has nothing to add.
-                    let add_row = (empty || !keeps_one_login(harness)).then(|| {
+                    // it sits where the next account will appear.
+                    let add_row = {
                         div()
                             .py(px(8.0))
                             .flex()
@@ -1792,12 +1860,12 @@ impl AccountsPage {
                                         .child(SharedString::from(label))
                                 },
                             ))
-                    });
+                    };
                     div()
                         .flex()
                         .flex_col()
                         .children(rows)
-                        .children(add_row)
+                        .child(add_row)
                         .into_any_element()
                 }
             };
@@ -2021,7 +2089,6 @@ impl Render for AccountsPage {
                             .collect();
                         let add_id: SharedString = format!("add-account-{name}").into();
                         let empty = rows.is_empty();
-                        let can_add = empty || !keeps_one_login(harness);
                         let card = widgets::section_card(&theme).mt(px(8.0));
                         let empty_copy = match harness {
                             // Cursor's app login is SEPARATE from `cursor-agent
@@ -2073,42 +2140,29 @@ impl Render for AccountsPage {
                                             .child(SharedString::from(name)),
                                     )
                                     .child(div().flex_1())
-                                    .when(can_add, |header| {
-                                        header.children(
-                                            login_options(harness).into_iter().enumerate().map(
-                                                |(ix, option)| {
-                                                    let label =
-                                                        add_option_label(harness, option, empty);
-                                                    widgets::ghost_action(&theme)
-                                                        .id((add_id.clone(), ix))
-                                                        .tab_index(0)
-                                                        .role(gpui::Role::Button)
-                                                        .focus_visible(|s| {
-                                                            s.border_2()
-                                                                .border_color(theme.accent)
-                                                                .opacity(1.0)
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.start_login(
-                                                                    harness,
-                                                                    option.provider,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            crate::icons::icon(
-                                                                crate::icons::ADD_CIRCLE,
-                                                            )
-                                                            .size(px(16.0))
-                                                            .text_color(theme.text_muted),
-                                                        )
-                                                        .child(SharedString::from(label))
-                                                },
-                                            ),
-                                        )
-                                    }),
+                                    .children(login_options(harness).into_iter().enumerate().map(
+                                        |(ix, option)| {
+                                            let label = add_option_label(harness, option, empty);
+                                            widgets::ghost_action(&theme)
+                                                .id((add_id.clone(), ix))
+                                                .tab_index(0)
+                                                .role(gpui::Role::Button)
+                                                .focus_visible(|s| {
+                                                    s.border_2()
+                                                        .border_color(theme.accent)
+                                                        .opacity(1.0)
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.start_login(harness, option.provider, cx);
+                                                }))
+                                                .child(
+                                                    crate::icons::icon(crate::icons::ADD_CIRCLE)
+                                                        .size(px(16.0))
+                                                        .text_color(theme.text_muted),
+                                                )
+                                                .child(SharedString::from(label))
+                                        },
+                                    )),
                             )
                             .children(
                                 warnings
@@ -2346,9 +2400,9 @@ mod tests {
             }
         }
         assert!(!signs_in(HarnessId::Mock));
-        // Antigravity has no quota to show and keeps a single login.
+        // Antigravity has no quota view, but supports isolated accounts.
         assert!(!reports_usage(HarnessId::Antigravity) && reports_usage(HarnessId::Codex));
-        assert!(keeps_one_login(HarnessId::Antigravity) && !keeps_one_login(HarnessId::Cursor));
+        assert!(switches_accounts(HarnessId::Antigravity));
         // Hermes rotates its own pool; zeron never switches it, and says so.
         assert!(!switches_accounts(HarnessId::Hermes) && switches_accounts(HarnessId::Grok));
         assert!(provider_note(HarnessId::Hermes).is_some_and(|n| n.contains("hermes auth add")));
@@ -2442,6 +2496,20 @@ mod tests {
             url: None,
             step: LoginStep::Browser { message: None },
         }
+    }
+
+    #[gpui::test]
+    fn adding_antigravity_starts_with_an_account_name(cx: &mut gpui::TestAppContext) {
+        let window = page(cx);
+        window
+            .update(cx, |page, _, cx| {
+                page.start_login(HarnessId::Antigravity, None, cx);
+                assert!(matches!(page.login.as_ref().unwrap().step, LoginStep::Name));
+                assert!(page.name_input.read(cx).text().is_empty());
+                page.cancel_login(cx);
+                assert!(page.login.is_none());
+            })
+            .unwrap();
     }
 
     fn poll(status: AgentLoginStatus, message: Option<&str>, url: Option<&str>) -> AgentLoginPoll {

@@ -34,8 +34,10 @@
 //! - **Antigravity** — its ACP server keeps one Google login per
 //!   `GEMINI_HOME`: a token blob in the macOS Keychain (service `gemini`) or
 //!   `antigravity-acp/acp_token.json`, plus the method in `settings.json`.
-//!   The blob carries no identity and is never read — the login is listed
-//!   from the method and the token's PRESENCE only, active and unswitchable.
+//!   Zeron creates a separate home per added account and forces profile-local
+//!   file storage. Names, the active profile and durable chat bindings live
+//!   in `antigravity-profiles.json`; token blobs are never copied or read.
+//!   The existing shared home remains available as the default profile.
 //!
 //! Claude-swap mechanics:
 //!
@@ -94,6 +96,7 @@ use zeron_proto::{
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
+mod antigravity;
 mod oauth;
 #[cfg(test)]
 mod provider_tests;
@@ -719,6 +722,8 @@ struct Inner {
     /// credentials over a freshly signed-in slot, or a switch can race a
     /// removal and cause the wrong live account to be signed out.
     ops: tokio::sync::Mutex<()>,
+    antigravity_ops: Mutex<()>,
+    antigravity_harnesses: Mutex<HashMap<String, Arc<zeron_harness::AcpHarness>>>,
     flows: Mutex<HashMap<String, LoginFlow>>,
     /// `"{harness}:{accountKey}"` → usage state; mirrored to disk.
     usage: Mutex<HashMap<String, UsageEntry>>,
@@ -821,6 +826,8 @@ impl AgentAccounts {
                 http,
                 endpoints,
                 ops: tokio::sync::Mutex::new(()),
+                antigravity_ops: Mutex::new(()),
+                antigravity_harnesses: Mutex::new(HashMap::new()),
                 flows: Mutex::new(HashMap::new()),
                 usage: Mutex::new(usage),
                 inflight_probes: Mutex::new(std::collections::HashSet::new()),
@@ -838,6 +845,9 @@ impl AgentAccounts {
     #[doc(hidden)]
     pub fn override_cli(&self, harness: HarnessId, path: impl Into<PathBuf>) {
         lock(&self.inner.cli_overrides).insert(harness, path.into());
+        if harness == HarnessId::Antigravity {
+            lock(&self.inner.antigravity_harnesses).clear();
+        }
     }
 
     /// The ACP harness for `harness`'s CLI, honouring [`Self::override_cli`].
@@ -940,7 +950,16 @@ impl AgentAccounts {
                 message,
             });
         }
-        let antigravity = self.detect_antigravity().await;
+        let antigravity = match self.antigravity_accounts().await {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                warnings.push(AgentAccountWarning {
+                    harness: HarnessId::Antigravity,
+                    message: error.to_string(),
+                });
+                Vec::new()
+            }
+        };
 
         // Stable presentation order: provider, then slot creation order (never
         // active-first — switching must not reshuffle the cards). Hermes'
@@ -1051,11 +1070,7 @@ impl AgentAccounts {
                 });
             }
         }
-        // Antigravity keeps exactly one login whose token zeron never reads:
-        // one active, unswitchable row, and no usage (it has no quota view).
-        if let Some(login) = antigravity {
-            accounts.push(login.account());
-        }
+        accounts.extend(antigravity);
         Ok(AgentAccountsSnapshot { accounts, warnings })
     }
 
@@ -1082,6 +1097,10 @@ impl AgentAccounts {
             ));
         }
         let _ops = self.inner.ops.lock().await;
+        if harness == HarnessId::Antigravity {
+            self.activate_antigravity(account_id)?;
+            return self.list_locked(false).await;
+        }
         // The pre-swap snapshot must hold the CURRENT tokens (the CLI may have
         // rotated its refresh token seconds ago) — never a cached read.
         *lock(&self.inner.claude_credentials) = None;
@@ -1333,6 +1352,12 @@ impl AgentAccounts {
         harness: HarnessId,
         account_id: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
+        if harness == HarnessId::Antigravity {
+            return Err(EngineError::Other(
+                "Antigravity profiles cannot be removed here: existing chats keep their account."
+                    .into(),
+            ));
+        }
         // Reject anything that isn't a slot id (16 lowercase hex) BEFORE touching
         // the filesystem: `account_id` is a raw RPC string that becomes a path,
         // so a crafted id (`../../…`) must never reach `remove_file`.
@@ -1415,6 +1440,18 @@ impl AgentAccounts {
         provider: Option<&str>,
         requester: Option<&str>,
     ) -> Result<AgentLoginStart, EngineError> {
+        self.start_login_named(harness, provider, requester, None)
+            .await
+    }
+
+    /// Start a login with an optional user label for an isolated Antigravity profile.
+    pub async fn start_login_named(
+        &self,
+        harness: HarnessId,
+        provider: Option<&str>,
+        requester: Option<&str>,
+        account_name: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
         let provider = provider.filter(|p| !p.is_empty());
         let mut start = match harness {
@@ -1426,7 +1463,10 @@ impl AgentAccounts {
             }
             HarnessId::Codex => self.start_codex_login(requester).await?,
             HarnessId::Cursor => self.start_cursor_login().await?,
-            HarnessId::Antigravity => self.start_antigravity_login(requester),
+            HarnessId::Antigravity => {
+                self.start_antigravity_login(requester, account_name)
+                    .await?
+            }
             HarnessId::Grok => self.start_grok_login(requester).await?,
             HarnessId::Devin => self.start_devin_login(requester)?,
             HarnessId::Opencode => match provider.unwrap_or("openai") {
@@ -1768,14 +1808,30 @@ impl AgentAccounts {
         .await
     }
 
-    /// Antigravity: its ACP server's own Google sign-in. The start replies at
-    /// once — a first sign-in may download a large server — and polls carry
-    /// the browser url once the server prints it. A server that already holds
-    /// a valid token answers `authenticate` without any browser at all, which
-    /// is success: the poll reports done and the list shows the login.
-    fn start_antigravity_login(&self, requester: Option<&str>) -> AgentLoginStart {
+    /// Antigravity's own Google sign-in, in a fresh profile for every attempt.
+    async fn start_antigravity_login(
+        &self,
+        requester: Option<&str>,
+        account_name: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Antigravity);
+        let rows = self.antigravity_accounts().await?;
+        let name = account_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Google account {}", rows.len() + 1));
+        if name.chars().count() > 100 || name.chars().any(char::is_control) {
+            return Err(EngineError::Other(
+                "Use an account name of at most 100 characters without control characters.".into(),
+            ));
+        }
         let login_id = new_id();
+        let profile_id = slot_id_for(HarnessId::Antigravity, &login_id);
+        self.inner.config.private_root()?;
+        let home = self.antigravity_profile_home(&profile_id)?;
+        private_dir(home.parent().expect("profile parent"))?;
+        private_dir(&home)?;
         let state = Arc::new(Mutex::new(TaskLoginState {
             requester: requester.map(str::to_string),
             ..Default::default()
@@ -1790,12 +1846,16 @@ impl AgentAccounts {
         };
         #[cfg(not(unix))]
         let browser = None;
-        let home = self.inner.config.antigravity_home.clone();
-        let keychain = self.inner.config.antigravity_keychain;
+        let acp = self
+            .acp_harness(HarnessId::Antigravity)
+            .expect("Antigravity harness")
+            .with_antigravity_profile(home.clone(), true);
+        let task_home = home.clone();
+        let accounts = self.clone();
         let task_state = state.clone();
         let handle = tokio::spawn(async move {
             let progress_state = task_state.clone();
-            let mut outcome = zeron_harness::AcpHarness::antigravity()
+            let mut outcome = acp
                 .sign_in(browser, move |progress| match progress {
                     zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
                         lock(&progress_state).url = Some(url);
@@ -1805,16 +1865,21 @@ impl AgentAccounts {
                 .map_err(|e| e.to_string());
             // A success the list can't show would drop the user back at
             // "Connect" with no word why — say where the login went missing.
-            if outcome.is_ok()
-                && let Some(home) = &home
-                && detect_antigravity_login(home, keychain).await.is_none()
-            {
+            if outcome.is_ok() && detect_antigravity_login(&task_home, false).await.is_none() {
                 outcome = Err(format!(
                     "Antigravity reported a successful sign-in, but no login was saved in {}.",
-                    home.join("antigravity-acp").display()
+                    task_home.join("antigravity-acp").display()
                 ));
             }
-            lock(&task_state).outcome = Some(outcome);
+            let mut completion = lock(&task_state);
+            if completion.outcome.is_none() {
+                if outcome.is_ok() {
+                    outcome = accounts
+                        .save_antigravity_login(&profile_id, name)
+                        .map_err(|error| error.to_string());
+                }
+                completion.outcome = Some(outcome);
+            }
         });
         lock(&self.inner.flows).insert(
             login_id.clone(),
@@ -1823,16 +1888,16 @@ impl AgentAccounts {
                 started_at: Instant::now(),
                 state,
                 handle,
-                home: None,
+                home: Some(home),
                 port: None,
             },
         );
-        AgentLoginStart {
+        Ok(AgentLoginStart {
             login_id,
             url: String::new(),
             mode: AgentLoginMode::Browser,
             callback_port: None,
-        }
+        })
     }
 
     /// Cursor: the SDK's own PKCE browser flow, driven through the zeron shim
@@ -2229,7 +2294,7 @@ impl AgentAccounts {
                 },
             }
         };
-        self.remove_flow(login_id);
+        self.cancel_login(login_id);
         Some(poll)
     }
 
@@ -2251,10 +2316,28 @@ impl AgentAccounts {
                 }
                 let _ = std::fs::remove_dir_all(&home);
             }
-            Some(LoginFlow::Task { handle, home, .. }) => {
+            Some(LoginFlow::Task {
+                harness,
+                state,
+                handle,
+                home,
+                ..
+            }) => {
+                if harness == HarnessId::Antigravity {
+                    let mut state = lock(&state);
+                    if state.outcome.is_none() {
+                        state.outcome = Some(Err("Sign-in cancelled.".into()));
+                    }
+                }
                 handle.abort();
                 if let Some(home) = home {
-                    let _ = std::fs::remove_dir_all(&home);
+                    if harness == HarnessId::Antigravity {
+                        if let Err(error) = self.cleanup_antigravity_login(&home) {
+                            tracing::warn!(%error, "could not clean up an Antigravity login");
+                        }
+                    } else {
+                        let _ = std::fs::remove_dir_all(&home);
+                    }
                 }
             }
             _ => {}
@@ -4813,7 +4896,7 @@ mod login_tests {
         );
         let rows = listed(&accounts.list(true).await.unwrap());
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].active && !rows[0].switchable);
+        assert!(rows[0].active && rows[0].switchable);
         // The live login can't be forgotten out from under the agent.
         assert!(
             accounts
