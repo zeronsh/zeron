@@ -47,6 +47,7 @@ pub mod catalog;
 mod discovery;
 mod normalize;
 mod wire;
+mod workflow_tail;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -881,6 +882,8 @@ async fn run_session(session: Session) {
     // [`crate::shutdown_agent`]).
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut torn_down: Vec<i32> = Vec::new();
+    // Workflow agents' own transcripts (see `workflow_tail`).
+    let (transcripts, transcript_reader) = workflow_tail::spawn(event_tx.clone());
 
     'main: loop {
         tokio::select! {
@@ -1034,6 +1037,15 @@ async fn run_session(session: Session) {
                             }
                             stop_settle_at = None;
                         }
+                        // A workflow (or workflow agent) settle queues behind
+                        // its transcripts so no line lands after it.
+                        if let AgentEvent::Subagent { parent_tool_use_id, event } = &ev
+                            && matches!(event.as_ref(), AgentEvent::Done { .. })
+                            && norm.is_workflow_parent(parent_tool_use_id)
+                        {
+                            let _ = transcripts.send(workflow_tail::TailCmd::Settle(ev));
+                            continue;
+                        }
                         if event_tx.send(Ok(ev)).await.is_err() {
                             break 'main; // consumer gone — reap below
                         }
@@ -1044,6 +1056,11 @@ async fn run_session(session: Session) {
                                 break 'main;
                             }
                         }
+                    }
+                    // After the frame's events: an agent's chip is out before
+                    // its transcript starts replaying.
+                    for (file, chip) in norm.take_workflow_transcripts() {
+                        let _ = transcripts.send(workflow_tail::TailCmd::Follow(file, chip));
                     }
                 }
                 Ok(None) => break 'main, // stdout EOF: the CLI exited
@@ -1187,6 +1204,17 @@ async fn run_session(session: Session) {
 
             _ = event_tx.closed() => break 'main,
         }
+    }
+
+    // Let the transcript reader finish what the agents already wrote (and
+    // forward its queued settles) before the run's own end.
+    drop(transcripts);
+    let mut transcript_reader = transcript_reader;
+    if tokio::time::timeout(Duration::from_secs(3), &mut transcript_reader)
+        .await
+        .is_err()
+    {
+        transcript_reader.abort();
     }
 
     // A turn end still held when the CLI exited is the run's real end.
