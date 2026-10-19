@@ -272,7 +272,8 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: None,
             manual_command: "Update the configured Antigravity ACP server",
         },
-        HarnessId::Mock => ProviderSpec {
+        // User-added ACP agents are pinned when added; nothing to poll.
+        HarnessId::Mock | HarnessId::Acp(_) => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Manual,
             update_args: None,
@@ -413,7 +414,7 @@ impl HarnessUpdateCoordinator {
         let order: Vec<_> = registry
             .descriptors()
             .into_iter()
-            .filter(|descriptor| descriptor.id != HarnessId::Mock)
+            .filter(|descriptor| descriptor.id != HarnessId::Mock && !descriptor.id.is_acp())
             .map(|descriptor| descriptor.id)
             .collect();
         let enabled = registry.enabled_set();

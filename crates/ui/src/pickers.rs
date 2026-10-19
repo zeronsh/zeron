@@ -1678,7 +1678,10 @@ impl Pickers {
                 pickers.catalog_rev += 1;
                 pickers.harnesses = match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
-                        Ok(list) => Loadable::Ready(list),
+                        Ok(list) => {
+                            crate::acp_icons::note_catalog(&list, cx);
+                            Loadable::Ready(list)
+                        }
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
@@ -6036,6 +6039,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
         HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
+        HarnessId::Acp(_) => (crate::acp_icons::mark(harness), None),
     }
 }
 
@@ -8556,6 +8560,7 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            acp: None,
             reasoning_levels: Vec::new(),
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
             supports_steering: false,
@@ -9799,6 +9804,7 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: None,
+            acp: None,
         };
         let mixed = vec![
             descriptor(HarnessId::Mock, "Mock"),
@@ -9826,6 +9832,7 @@ mod tests {
             installed: true,
             can_install: false,
             enabled,
+            acp: None,
         };
         let catalog = |claude: Option<bool>, codex: Option<bool>, grok: Option<bool>| {
             vec![
@@ -9879,6 +9886,7 @@ mod tests {
                 installed,
                 can_install: false,
                 enabled,
+                acp: None,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed
         // enabled one rides along. A live engine no longer stamps that

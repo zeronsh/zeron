@@ -102,6 +102,8 @@ fn agent_name(harness: HarnessId) -> &'static str {
         HarnessId::Opencode => "OpenCode",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Mock => "Mock",
+        // Never in the update stream (pinned when added).
+        HarnessId::Acp(_) => "Agent",
     }
 }
 

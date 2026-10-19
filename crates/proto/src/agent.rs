@@ -2,8 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// Wire form is a plain string: built-ins keep their kebab-case names
+/// (`claude-code`), user-added ACP agents carry their own id (`acp.gemini`).
+/// Any other well-formed id parses as [`HarnessId::Acp`] too, so a chat on a
+/// harness this build has never heard of still loads (it just can't run here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HarnessId {
     ClaudeCode,
     Codex,
@@ -25,6 +28,108 @@ pub enum HarnessId {
     Antigravity,
     /// Test harness; never shown in production pickers.
     Mock,
+    /// An ACP agent the user added on a device (from the ACP registry or a
+    /// custom command), keyed by its wire id. Interned, so the id stays `Copy`.
+    Acp(&'static str),
+}
+
+/// Longest accepted ACP agent id.
+pub const MAX_ACP_AGENT_ID_LEN: usize = 64;
+
+impl HarnessId {
+    /// The wire name (`claude-code`, `acp.gemini`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HarnessId::ClaudeCode => "claude-code",
+            HarnessId::Codex => "codex",
+            HarnessId::Cursor => "cursor",
+            HarnessId::Devin => "devin",
+            HarnessId::Grok => "grok",
+            HarnessId::Hermes => "hermes",
+            HarnessId::Pi => "pi",
+            HarnessId::Opencode => "opencode",
+            HarnessId::Antigravity => "antigravity",
+            HarnessId::Mock => "mock",
+            HarnessId::Acp(id) => id,
+        }
+    }
+
+    /// Parse a wire name. Unknown but well-formed ids become
+    /// [`HarnessId::Acp`]; `None` only for malformed input.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "claude-code" => HarnessId::ClaudeCode,
+            "codex" => HarnessId::Codex,
+            "cursor" => HarnessId::Cursor,
+            "devin" => HarnessId::Devin,
+            "grok" => HarnessId::Grok,
+            "hermes" => HarnessId::Hermes,
+            "pi" => HarnessId::Pi,
+            "opencode" => HarnessId::Opencode,
+            "antigravity" => HarnessId::Antigravity,
+            "mock" => HarnessId::Mock,
+            other if valid_acp_agent_id(other) => HarnessId::Acp(intern(other)),
+            _ => return None,
+        })
+    }
+
+    /// Whether this is a user-added ACP agent (no built-in driver).
+    pub fn is_acp(&self) -> bool {
+        matches!(self, Self::Acp(_))
+    }
+}
+
+/// Lowercase ASCII letters, digits and `.` `_` `-`, starting with a letter
+/// or digit, at most [`MAX_ACP_AGENT_ID_LEN`] bytes — safe as a path segment
+/// on every platform, since ids name per-agent directories.
+pub fn valid_acp_agent_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ACP_AGENT_ID_LEN
+        && id
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && id.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+}
+
+/// Leak each distinct string once. Harness ids are few (one per agent a
+/// user ever added), and leaking keeps [`HarnessId`] `Copy`.
+pub fn intern(value: &str) -> &'static str {
+    static INTERNED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<&'static str>>,
+    > = std::sync::OnceLock::new();
+    let mut set = INTERNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = set.get(value) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(value.to_owned().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
+
+impl std::fmt::Display for HarnessId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for HarnessId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HarnessId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        Self::parse(&name)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid harness id `{name}`")))
+    }
 }
 
 /// Durable user preference for one agent's independently-installed CLI.
@@ -704,6 +809,48 @@ pub enum AgentEvent {
 
 #[cfg(test)]
 mod tests {
+    use super::HarnessId;
+
+    #[test]
+    fn harness_ids_round_trip_as_plain_strings() {
+        for (id, wire) in [
+            (HarnessId::ClaudeCode, "claude-code"),
+            (HarnessId::Antigravity, "antigravity"),
+            (HarnessId::Mock, "mock"),
+            (HarnessId::Acp("acp.gemini"), "acp.gemini"),
+        ] {
+            assert_eq!(serde_json::to_value(id).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<HarnessId>(wire.into()).unwrap(),
+                id
+            );
+        }
+        // A harness this build doesn't know still loads (forward compat), so
+        // one chat on a newer agent can't fail a whole chat list.
+        assert_eq!(
+            serde_json::from_value::<HarnessId>("future-agent".into()).unwrap(),
+            HarnessId::Acp("future-agent")
+        );
+        for bad in ["", "Has Caps", "../escape", "a:b", &"x".repeat(65)] {
+            assert!(
+                serde_json::from_value::<HarnessId>(bad.into()).is_err(),
+                "{bad}"
+            );
+        }
+        // Map keys (harness-update prefs) use the same form.
+        let map: std::collections::HashMap<HarnessId, u8> =
+            serde_json::from_str(r#"{"codex": 1, "acp.goose": 2}"#).unwrap();
+        assert_eq!(map[&HarnessId::Acp("acp.goose")], 2);
+        assert_eq!(
+            serde_json::to_string(&std::collections::BTreeMap::from([(
+                "k",
+                HarnessId::Acp("acp.goose")
+            )]))
+            .unwrap(),
+            r#"{"k":"acp.goose"}"#
+        );
+    }
+
     use super::*;
 
     #[test]

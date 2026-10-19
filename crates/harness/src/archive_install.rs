@@ -1,6 +1,7 @@
-//! managed installs for acp agents distributed as prebuilt zip archives
-//! (the ACP registry's `binary` distribution), such as Google's Antigravity
-//! server.
+//! managed installs for acp agents distributed as prebuilt archives (the ACP
+//! registry's `binary` distribution), such as Google's Antigravity server and
+//! any registry agent a user adds. Zip, `.tar.gz`, `.tar.bz2` and bare
+//! executables are understood.
 //!
 //! same contract as the npm installs in [`crate::adapter_install`]: the pinned
 //! archive lands ONCE in `~/.zeron/adapters/<name>/<version>`, extraction runs
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use sha2::{Digest, Sha512};
+use sha2::{Digest as _, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
@@ -48,12 +49,36 @@ pub struct VerifiedRelease<'a> {
     pub marker: &'a str,
 }
 
+/// a release from the ACP registry's `binary` distribution, checked against
+/// the SHA-256 the registry publishes for it when it lists one.
+pub struct RegistryRelease<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub url: &'a str,
+    pub entry: &'a str,
+    pub sha256: Option<&'a str>,
+}
+
+impl RegistryRelease<'_> {
+    /// the digest when the registry lists one, else the url: a release the
+    /// registry later republishes under the same version reinstalls.
+    fn marker(&self) -> &str {
+        self.sha256.unwrap_or(self.url)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Checksum<'a> {
+    Sha512(&'a str),
+    Sha256(&'a str),
+}
+
 struct Source<'a> {
     name: &'a str,
     version: &'a str,
     url: &'a str,
     entry: &'a str,
-    sha512: Option<&'a str>,
+    checksum: Option<Checksum<'a>>,
     marker: &'a str,
 }
 
@@ -64,7 +89,7 @@ impl<'a> From<&'a ArchivePin> for Source<'a> {
             version: pin.version,
             url: pin.url,
             entry: pin.entry,
-            sha512: Some(pin.sha512),
+            checksum: Some(Checksum::Sha512(pin.sha512)),
             marker: pin.sha512,
         }
     }
@@ -77,8 +102,21 @@ impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
             version: release.version,
             url: release.url,
             entry: release.entry,
-            sha512: None,
+            checksum: None,
             marker: release.marker,
+        }
+    }
+}
+
+impl<'a> From<&'a RegistryRelease<'a>> for Source<'a> {
+    fn from(release: &'a RegistryRelease<'a>) -> Self {
+        Self {
+            name: release.name,
+            version: release.version,
+            url: release.url,
+            entry: release.entry,
+            checksum: release.sha256.map(Checksum::Sha256),
+            marker: release.marker(),
         }
     }
 }
@@ -124,6 +162,31 @@ pub(crate) fn installed_versions(name: &str) -> Vec<(String, String)> {
             Some((version, marker.trim().to_owned()))
         })
         .collect()
+}
+
+/// the entry of a completed registry install, `None` when absent.
+pub fn installed_registry_entry(release: &RegistryRelease<'_>) -> Option<PathBuf> {
+    installed_entry_with_marker(
+        release.name,
+        release.version,
+        release.entry,
+        release.marker(),
+    )
+}
+
+/// install a registry release (any archive kind it ships).
+pub async fn install_registry(
+    release: &RegistryRelease<'_>,
+    display_name: &str,
+) -> Result<PathBuf, HarnessError> {
+    install(Source::from(release), display_name, |_| async { Ok(()) }).await
+}
+
+/// delete every installed version of `name`.
+pub fn remove_installs(name: &str) {
+    if let Some(dir) = adapters_root().map(|root| root.join(name)) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 pub async fn ensure_installed(
@@ -217,11 +280,22 @@ async fn download_and_extract(
     dir: &Path,
     display_name: &str,
 ) -> Result<(), HarnessError> {
-    let archive = dir.join("download.zip");
-    download(source, &archive, display_name).await?;
-    extract_zip(&archive, dir).await?;
-    let _ = std::fs::remove_file(&archive);
+    let kind = ArchiveKind::of(source.url);
     let entry = dir.join(source.entry);
+    if kind == ArchiveKind::Executable {
+        if let Some(parent) = entry.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        download(source, &entry, display_name).await?;
+    } else {
+        let archive = dir.join(kind.download_name());
+        download(source, &archive, display_name).await?;
+        match kind {
+            ArchiveKind::Zip => extract_zip(&archive, dir).await?,
+            _ => extract_tar(&archive, dir, kind).await?,
+        }
+        let _ = std::fs::remove_file(&archive);
+    }
     if !entry.is_file() {
         return Err(HarnessError::Install(format!(
             "the {display_name} archive ({}) has no {}",
@@ -229,6 +303,118 @@ async fn download_and_extract(
         )));
     }
     mark_executables(dir)?;
+    mark_executable(&entry)?;
+    Ok(())
+}
+
+/// what a release url downloads, judged by its file name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    Zip,
+    TarGz,
+    TarBz2,
+    Tar,
+    /// a bare executable, saved as the entry itself.
+    Executable,
+}
+
+impl ArchiveKind {
+    fn of(url: &str) -> Self {
+        let name = url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(url)
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if name.ends_with(".zip") {
+            Self::Zip
+        } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+            Self::TarGz
+        } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
+            Self::TarBz2
+        } else if name.ends_with(".tar") {
+            Self::Tar
+        } else {
+            Self::Executable
+        }
+    }
+
+    fn download_name(self) -> &'static str {
+        match self {
+            Self::Zip => "download.zip",
+            Self::TarGz => "download.tar.gz",
+            Self::TarBz2 => "download.tar.bz2",
+            Self::Tar | Self::Executable => "download.tar",
+        }
+    }
+}
+
+async fn extract_tar(archive: &Path, dest: &Path, kind: ArchiveKind) -> Result<(), HarnessError> {
+    let archive = archive.to_owned();
+    let dest = dest.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::io::BufReader::new(std::fs::File::open(&archive)?);
+        let reader: Box<dyn std::io::Read> = match kind {
+            ArchiveKind::TarGz => Box::new(flate2::read::GzDecoder::new(file)),
+            ArchiveKind::TarBz2 => Box::new(bzip2::read::BzDecoder::new(file)),
+            _ => Box::new(file),
+        };
+        extract_tar_blocking(reader, &dest)
+    })
+    .await
+    .map_err(|error| HarnessError::Install(format!("archive extraction task failed: {error}")))?
+}
+
+fn extract_tar_blocking(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessError> {
+    let invalid =
+        |error: std::io::Error| HarnessError::Install(format!("invalid tar archive: {error}"));
+    let mut archive = tar::Archive::new(reader);
+    archive.set_preserve_permissions(true);
+    let mut extracted = 0_u64;
+    for (index, entry) in archive.entries().map_err(invalid)?.enumerate() {
+        if index >= MAX_ARCHIVE_ENTRIES {
+            return Err(HarnessError::Install(format!(
+                "archive exceeds the {MAX_ARCHIVE_ENTRIES} entry limit"
+            )));
+        }
+        let mut entry = entry.map_err(invalid)?;
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
+            return Err(HarnessError::Install(format!(
+                "archive entry {} is a hard link or special file",
+                entry.path().map_err(invalid)?.display()
+            )));
+        }
+        extracted = extracted.saturating_add(entry.size());
+        if extracted > MAX_EXTRACTED_BYTES {
+            return Err(HarnessError::Install(format!(
+                "archive expands beyond the {} MiB limit",
+                MAX_EXTRACTED_BYTES / (1024 * 1024)
+            )));
+        }
+        // `unpack_in` refuses paths that would land outside `dest` (absolute
+        // names, `..`, writes through an earlier symlink).
+        if !entry.unpack_in(dest).map_err(invalid)? {
+            return Err(HarnessError::Install(
+                "archive contains an unsafe entry path".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn mark_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(permissions.mode() | 0o755);
+    std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn mark_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -265,7 +451,8 @@ async fn download(
     let mut body = response.bytes_stream();
     let mut file = tokio::fs::File::create(dest).await?;
     let mut received = 0_u64;
-    let mut digest = Sha512::new();
+    let mut sha512 = Sha512::new();
+    let mut sha256 = Sha256::new();
     loop {
         let chunk = tokio::time::timeout(STALL_TIMEOUT, body.next())
             .await
@@ -284,7 +471,11 @@ async fn download(
                         MAX_ARCHIVE_BYTES / (1024 * 1024)
                     )));
                 }
-                digest.update(&bytes);
+                match source.checksum {
+                    Some(Checksum::Sha512(_)) => sha512.update(&bytes),
+                    Some(Checksum::Sha256(_)) => sha256.update(&bytes),
+                    None => {}
+                }
                 file.write_all(&bytes).await?;
             }
             Some(Err(e)) => return Err(failed(e.to_string())),
@@ -292,12 +483,18 @@ async fn download(
         }
     }
     file.flush().await?;
-    let actual = format!("{:x}", digest.finalize());
-    if let Some(expected) = source.sha512
-        && actual != expected
-    {
+    let (algorithm, expected, actual) = match source.checksum {
+        Some(Checksum::Sha512(expected)) => {
+            ("SHA-512", expected, format!("{:x}", sha512.finalize()))
+        }
+        Some(Checksum::Sha256(expected)) => {
+            ("SHA-256", expected, format!("{:x}", sha256.finalize()))
+        }
+        None => return Ok(()),
+    };
+    if !actual.eq_ignore_ascii_case(expected) {
         return Err(failed(format!(
-            "SHA-512 mismatch (expected {expected}, got {actual})"
+            "{algorithm} mismatch (expected {expected}, got {actual})"
         )));
     }
     Ok(())
@@ -583,5 +780,70 @@ mod tests {
             let expected = install_dir(pin.name, pin.version).unwrap().join(pin.entry);
             assert!(expected.ends_with("never-installed-acp/0.0.0-test/server"));
         }
+    }
+
+    fn tar_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            // Raw name bytes: `set_path` itself refuses `..`.
+            header.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, *data).unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn archive_kind_follows_the_file_name() {
+        for (url, kind) in [
+            ("https://x/a.zip", ArchiveKind::Zip),
+            ("https://x/a.tar.gz?sig=1", ArchiveKind::TarGz),
+            ("https://x/a.tgz", ArchiveKind::TarGz),
+            ("https://x/a.TAR.BZ2", ArchiveKind::TarBz2),
+            ("https://x/a.tar", ArchiveKind::Tar),
+            ("https://x/sigit-linux-amd64", ArchiveKind::Executable),
+            ("https://x/agent.exe", ArchiveKind::Executable),
+        ] {
+            assert_eq!(ArchiveKind::of(url), kind, "{url}");
+        }
+    }
+
+    #[test]
+    fn extracts_gzip_and_bzip2_tarballs() {
+        use std::io::Write as _;
+        let tarball = tar_with(&[("pkg/agent", b"#!/bin/sh\n")]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tarball).unwrap();
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(&tarball).unwrap();
+        for (bytes, kind) in [
+            (gz.finish().unwrap(), ArchiveKind::TarGz),
+            (bz.finish().unwrap(), ArchiveKind::TarBz2),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let reader: Box<dyn std::io::Read> = match kind {
+                ArchiveKind::TarGz => Box::new(flate2::read::GzDecoder::new(&bytes[..])),
+                _ => Box::new(bzip2::read::BzDecoder::new(&bytes[..])),
+            };
+            extract_tar_blocking(reader, dir.path()).unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("pkg/agent")).unwrap(),
+                b"#!/bin/sh\n"
+            );
+        }
+    }
+
+    #[test]
+    fn tar_entries_cannot_escape_the_install_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("install");
+        std::fs::create_dir(&dest).unwrap();
+        let tarball = tar_with(&[("../escaped", b"x")]);
+        assert!(extract_tar_blocking(&tarball[..], &dest).is_err());
+        assert!(!root.path().join("escaped").exists());
     }
 }
